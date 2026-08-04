@@ -33,9 +33,9 @@ fn refs(src: &str) -> (crate::Analysis, Vec<(TextRange, ResolvedRef)>) {
 
 #[test]
 fn shadowed_let_bindings_get_distinct_symbol_ids() {
-    // §19-M2 criterion 2: `let a = 4; let a = "Foo"` — each occurrence resolves
+    // §19-M2 criterion 2: `var a = 4; var a = "Foo"` — each occurrence resolves
     // to the correct symbol.
-    let src = "let a = 4\nlet a = \"Foo\"";
+    let src = "var a = 4\nvar a = \"Foo\"";
     let (analysis, refs) = refs(src);
     // Two references? No — there are no name *references* here (the RHSes are
     // literals). But there are two *declarations* named `a`, with distinct ids.
@@ -54,8 +54,8 @@ fn shadowed_let_bindings_get_distinct_symbol_ids() {
 
 #[test]
 fn shadowed_reference_resolves_to_latest_binding() {
-    // After `let a = 4; let a = "Foo"`, a use of `a` resolves to the second.
-    let src = "let a = 4\nlet a = \"Foo\"\nout(a)";
+    // After `var a = 4; var a = "Foo"`, a use of `a` resolves to the second.
+    let src = "var a = 4\nvar a = \"Foo\"\nout(a)";
     let (analysis, refs) = refs(src);
     // Two references: `out` (a builtin) and `a`. Find the `a` one.
     let a_ref = refs
@@ -78,8 +78,8 @@ fn shadowed_reference_resolves_to_latest_binding() {
 
 #[test]
 fn shadowing_initializer_resolves_to_previous_binding() {
-    // §19-M2 criterion 3: `let a = 4; let a = a + 1` — the RHS `a` is the FIRST.
-    let src = "let a = 4\nlet a = a + 1";
+    // §19-M2 criterion 3: `var a = 4; var a = a + 1` — the RHS `a` is the FIRST.
+    let src = "var a = 4\nvar a = a + 1";
     let (analysis, refs) = refs(src);
     assert_eq!(
         refs.len(),
@@ -165,8 +165,8 @@ fn out_and_panic_are_in_prelude_scope() {
 
 #[test]
 fn local_in_block_does_not_leak_outward() {
-    // A `let` inside a block is not visible after the block.
-    let src = "{ let inner = 1 }\nout(inner)";
+    // A `var` inside a block is not visible after the block.
+    let src = "{ var inner = 1 }\nout(inner)";
     let analysis = resolve_src(src);
     // `inner` reference is unresolved.
     assert!(analysis
@@ -178,7 +178,7 @@ fn local_in_block_does_not_leak_outward() {
 #[test]
 fn known_type_annotations_resolve_cleanly() {
     // `Int`, `Text`, `Bool`, `Unit`, `Never` are all known type names.
-    let src = "let x: Int = 1\nlet s: Text = \"a\"";
+    let src = "var x: Int = 1\nvar s: Text = \"a\"";
     let analysis = resolve_src(src);
     assert!(
         analysis.is_clean(),
@@ -191,7 +191,7 @@ fn known_type_annotations_resolve_cleanly() {
 fn unknown_type_annotation_emits_n002() {
     // `Byte` is reserved but not yet constructible (§4.3) → N002. (`Float` was
     // reserved too but is now wired end-to-end, so it no longer triggers this.)
-    let src = "let x: Byte = 1";
+    let src = "var x: Byte = 1";
     let analysis = resolve_src(src);
     assert!(analysis
         .diagnostics
@@ -203,7 +203,7 @@ fn unknown_type_annotation_emits_n002() {
 #[test]
 fn float_type_annotation_resolves() {
     // `Float` is wired end-to-end (§4.12); the annotation resolves cleanly.
-    let src = "let x: Float = 2.5";
+    let src = "var x: Float = 2.5";
     let analysis = resolve_src(src);
     assert!(
         analysis.is_clean(),
@@ -231,7 +231,7 @@ fn references_keyed_by_range_form_a_map() {
         symbol: crate::SymbolId(0),
         range: TextRange::new(0u32.into(), 1u32.into()),
     };
-    let src = "let a = 1\nout(a)";
+    let src = "var a = 1\nout(a)";
     let (analysis, refs) = refs(src);
     assert!(!refs.is_empty());
     let _: HashMap<TextRange, ResolvedRef> = analysis.refs.clone();

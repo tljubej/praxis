@@ -32,7 +32,7 @@ fn at(src: &str, needle: &str) -> u32 {
 /// answers that node's type, not the root's.
 #[test]
 fn an_inner_constructor_has_its_own_synthesized_type() {
-    let src = "let v = read sections(lines(`{a:int},{b:int}`))\n";
+    let src = "var v = read sections(lines(`{a:int},{b:int}`))\n";
     let analysis = analyze(src);
     assert!(
         analysis.diagnostics.is_empty(),
@@ -64,7 +64,7 @@ fn an_inner_constructor_has_its_own_synthesized_type() {
 /// template around it is the record.
 #[test]
 fn a_capture_type_and_its_template_have_distinct_types() {
-    let src = "let v = read lines(`{a:int},{b:int}`)\n";
+    let src = "var v = read lines(`{a:int},{b:int}`)\n";
     let analysis = analyze(src);
     let index = &analysis.parser_exprs[0];
 
@@ -86,12 +86,12 @@ fn a_capture_type_and_its_template_have_distinct_types() {
 /// §15.3's five-way question, answered from the spans the compiler computed.
 #[test]
 fn the_cursor_mode_narrows_from_expression_to_atomic_name() {
-    let src = "let v = read lines(`x {n:int}`)\n";
+    let src = "var v = read lines(`x {n:int}`)\n";
     let analysis = analyze(src);
     let index = &analysis.parser_exprs[0];
 
     // Before the parser expression starts.
-    assert_eq!(index.mode_at(at(src, "let")), ParserMode::Outside);
+    assert_eq!(index.mode_at(at(src, "var")), ParserMode::Outside);
     // On the constructor name.
     assert_eq!(index.mode_at(at(src, "lines")), ParserMode::Expression);
     // On the literal `x` inside the template.
@@ -107,7 +107,7 @@ fn the_cursor_mode_narrows_from_expression_to_atomic_name() {
 /// braces around it.
 #[test]
 fn a_capture_reports_its_name_and_parser_spans_separately() {
-    let src = "let v = read lines(`{name:word} {n:int}`)\n";
+    let src = "var v = read lines(`{name:word} {n:int}`)\n";
     let analysis = analyze(src);
     let index = &analysis.parser_exprs[0];
 
@@ -140,7 +140,7 @@ fn a_capture_reports_its_name_and_parser_spans_separately() {
 /// an empty span at the brace would put a "capture name" token on a `{`.
 #[test]
 fn an_anonymous_capture_has_no_name_span() {
-    let src = "let v = read lines(`{int}`)\n";
+    let src = "var v = read lines(`{int}`)\n";
     let analysis = analyze(src);
     let captures = analysis.parser_exprs[0].captures();
     assert_eq!(captures.len(), 1);
@@ -151,7 +151,7 @@ fn an_anonymous_capture_has_no_name_span() {
 /// the span has to name the same three-byte-shorter thing.
 #[test]
 fn a_padded_capture_name_spans_only_the_name() {
-    let src = "let v = read lines(`{ n :int}`)\n";
+    let src = "var v = read lines(`{ n :int}`)\n";
     let analysis = analyze(src);
     assert!(
         analysis.diagnostics.is_empty(),
@@ -171,7 +171,7 @@ fn a_padded_capture_name_spans_only_the_name() {
 /// text is not the same length as that source when an escape contributed.
 #[test]
 fn a_template_literal_run_spans_the_source_it_was_decoded_from() {
-    let src = "let v = read lines(`a\\`b{n:int}`)\n";
+    let src = "var v = read lines(`a\\`b{n:int}`)\n";
     let analysis = analyze(src);
     assert!(
         analysis.diagnostics.is_empty(),
@@ -193,7 +193,7 @@ fn a_template_literal_run_spans_the_source_it_was_decoded_from() {
 /// table the node was built from.
 #[test]
 fn a_constructor_reports_its_keyword_span() {
-    let src = "let v = read sections(lines(int))\n";
+    let src = "var v = read sections(lines(int))\n";
     let analysis = analyze(src);
     let ctors = analysis.parser_exprs[0].constructors();
     let named: Vec<(&str, &str)> = ctors
@@ -213,7 +213,7 @@ fn a_constructor_reports_its_keyword_span() {
 /// that does not exist.
 #[test]
 fn a_rejected_parser_expression_records_no_index_entry() {
-    let src = "let v = read frobnicate(int)\n";
+    let src = "var v = read frobnicate(int)\n";
     let analysis = analyze(src);
     assert!(
         !analysis.diagnostics.is_empty(),

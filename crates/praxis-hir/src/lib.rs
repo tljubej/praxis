@@ -5,7 +5,7 @@
 //! 1. **Name resolution** ([`resolve`]): walk the typed AST, build a lexical
 //!    scope tree, mint a [`SymbolId`] per declaration, resolve every name
 //!    reference, and emit `N0xx` diagnostics. Shadowing is handled here — each
-//!    `let`/`var` declaration gets a distinct id, and an initializer resolves
+//!    `var` declaration gets a distinct id, and an initializer resolves
 //!    names in the *preceding* environment (§4.2/§5.3).
 //! 2. **Type inference** (the `infer` module, Slice 5): consume the resolved
 //!    names and infer a [`Scheme`] for every expression and binding, emitting
@@ -116,7 +116,7 @@ pub struct Analysis {
     /// The inferred type for each name reference's range (filled by inference).
     pub ref_types: std::collections::HashMap<rowan::TextRange, Type>,
     /// Each *declaration* site, keyed by the name token's source range → the
-    /// [`SymbolId`] it mints. Survives shadowing (each `let`/`var`/fn`/param
+    /// [`SymbolId`] it mints. Survives shadowing (each `var`/fn`/param
     /// declaration is keyed by its own range). Consumed by M4 lowering.
     pub decls: std::collections::HashMap<rowan::TextRange, SymbolId>,
     /// Each *call site*, keyed by the callee name token's source range. Records

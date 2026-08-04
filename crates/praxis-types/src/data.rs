@@ -105,7 +105,7 @@ pub enum TypeData {
     Var(VarState),
 }
 
-/// A binding level (§5.3, ADR-008). Raised on entering a `let`/`fn` scope,
+/// A binding level (§5.3, ADR-008). Raised on entering a `var`/`fn` scope,
 /// restored on leaving it; a variable records the level it was created at, and
 /// generalization quantifies exactly the variables deeper than the binding site.
 ///
@@ -123,7 +123,7 @@ impl Level {
     /// The outermost (top-level) binding level.
     pub const OUTERMOST: Level = Level(0);
 
-    /// One level deeper — what entering a `let`/`fn` scope produces.
+    /// One level deeper — what entering a `var`/`fn` scope produces.
     #[inline]
     #[must_use]
     pub const fn deeper(self) -> Level {

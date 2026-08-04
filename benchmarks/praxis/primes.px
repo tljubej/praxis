@@ -20,7 +20,7 @@ fn is_prime(n: Int) -> Bool {
     true
 }
 
-let limit = read int
+var limit = read int
 
 var count = 0
 var total = 0

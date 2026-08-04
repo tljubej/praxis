@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn the_code_is_the_registered_one() {
-        let text = "let x = 1\n";
+        let text = "var x = 1\n";
         let lines = LineMap::new(text);
         let d = Diagnostic::new(
             Severity::Error,
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn a_note_becomes_related_information() {
-        let text = "let x = 1\nlet y = 2\n";
+        let text = "var x = 1\nvar y = 2\n";
         let lines = LineMap::new(text);
         let d = Diagnostic::new(
             Severity::Error,

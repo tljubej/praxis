@@ -81,7 +81,7 @@ pub const PRELUDE: &[PreludeEntry] = &[
 /// function of it, which is §6.5's own spelling:
 ///
 /// ```text
-/// let distance = bfs_distance(start, |s| neighbors(s), |s| s == goal)
+/// var distance = bfs_distance(start, |s| neighbors(s), |s| s == goal)
 /// ```
 ///
 /// Before this, all six names resolved (they are in [`PRELUDE`]) and then had
@@ -287,7 +287,7 @@ pub struct PreludeEntry {
     /// ordinary value. `Some` and `None` are `Option`'s two variants, declared
     /// by the prelude rather than by an `enum` item — and a consumer that has
     /// to tell a constructor from a binding cannot do it from the type
-    /// (`let A = None` has `Option`'s type too), so the declaration says
+    /// (`var A = None` has `Option`'s type too), so the declaration says
     /// (HIR-03).
     pub is_variant_ctor: bool,
 }

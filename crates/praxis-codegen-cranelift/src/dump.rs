@@ -30,7 +30,7 @@
 //! ```text
 //! var i = 0
 //! var acc = 0
-//! let limit = 10
+//! var limit = 10
 //! while i < limit {
 //!     acc = acc + i * 3
 //!     i = i + 1

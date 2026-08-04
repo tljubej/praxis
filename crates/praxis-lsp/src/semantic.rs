@@ -303,7 +303,7 @@ fn classify_token(token: &SyntaxToken, analysis: &praxis_hir::Analysis) -> Optio
             SymbolKind::Struct | SymbolKind::Enum | SymbolKind::BuiltinType => "type",
             SymbolKind::EnumVariant => "enumMember",
             SymbolKind::Param => "parameter",
-            SymbolKind::Let | SymbolKind::Var => "variable",
+            SymbolKind::Var => "variable",
         });
     }
 

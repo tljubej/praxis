@@ -4,8 +4,8 @@
 //!
 //! ```text
 //! SOURCE_FILE@0..11
-//!   LET_STMT@0..10
-//!     KW_LET "let "@0..4
+//!   VAR_STMT@0..10
+//!     KW_VAR "var "@0..4
 //!     IDENT "x"@4..5
 //!     ...
 //! ```
@@ -74,7 +74,7 @@ fn indent(depth: usize, out: &mut String) {
 /// The label for a kind in the dump. Node kinds and tokens print as their
 /// `SyntaxKind` name; this keeps the output stable and greppable.
 fn kind_label(kind: SyntaxKind) -> String {
-    // Use the Debug name (`KW_LET`, `LET_STMT`, …) without the enum path.
+    // Use the Debug name (`KW_VAR`, `VAR_STMT`, …) without the enum path.
     let name = format!("{kind:?}");
     name
 }
@@ -94,11 +94,11 @@ mod tests {
     /// Build a tiny tree by hand to verify the printer format without depending
     /// on the parser (which is the consumer of this helper, not a dependency).
     fn manual_tree() -> SyntaxNode {
-        // Emulates `let x= 1` as: SOURCE_FILE > LET_STMT > { KW_LET "let ", IDENT "x", EQ "=", WS " ", INT "1" }
+        // Emulates `var x= 1` as: SOURCE_FILE > VAR_STMT > { KW_VAR "var ", IDENT "x", EQ "=", WS " ", INT "1" }
         let mut b = GreenNodeBuilder::new();
         b.start_node(PraxisLanguage::kind_to_raw(SyntaxKind::SOURCE_FILE));
-        b.start_node(PraxisLanguage::kind_to_raw(SyntaxKind::LET_STMT));
-        b.token(PraxisLanguage::kind_to_raw(SyntaxKind::KW_LET), "let ");
+        b.start_node(PraxisLanguage::kind_to_raw(SyntaxKind::VAR_STMT));
+        b.token(PraxisLanguage::kind_to_raw(SyntaxKind::KW_VAR), "var ");
         b.token(PraxisLanguage::kind_to_raw(SyntaxKind::Ident), "x");
         b.token(PraxisLanguage::kind_to_raw(SyntaxKind::EQ), "=");
         b.token(PraxisLanguage::kind_to_raw(SyntaxKind::Whitespace), " ");
@@ -115,8 +115,8 @@ mod tests {
         let dump = format_syntax_tree(&tree);
         insta::assert_snapshot!(dump, @r#"
         SOURCE_FILE@0..8
-          LET_STMT@0..8
-            KW_LET "let "@0..4
+          VAR_STMT@0..8
+            KW_VAR "var "@0..4
             Ident "x"@4..5
             EQ "="@5..6
             Whitespace " "@6..7
@@ -128,7 +128,7 @@ mod tests {
     fn round_trip_text_matches_source() {
         // The lossless property: concatenating all token text reproduces source.
         let tree = manual_tree();
-        assert_eq!(tree.to_string(), "let x= 1");
+        assert_eq!(tree.to_string(), "var x= 1");
         // (The manually built tree's text is exactly what we put in.)
     }
 }

@@ -50,7 +50,7 @@ fn uri() -> Uri {
 #[test]
 fn an_edit_publishes_a_code_and_a_span_and_the_fix_retracts_it() {
     let mut server = Server::new(Encoding::Utf16);
-    server.open(uri(), "let x: Int = 1\n".to_string(), 1);
+    server.open(uri(), "var x: Int = 1\n".to_string(), 1);
 
     let clean = server.diagnostics_for(&uri()).expect("an open document");
     assert!(
@@ -60,7 +60,7 @@ fn an_edit_publishes_a_code_and_a_span_and_the_fix_retracts_it() {
     );
 
     // Break it: `Int = "t"`.
-    let text = "let x: Int = \"t\"\n";
+    let text = "var x: Int = \"t\"\n";
     server.documents_mut().open(uri(), text.to_string(), 2);
     let broken = server.diagnostics_for(&uri()).expect("an open document");
     assert_eq!(broken.diagnostics.len(), 1, "{:?}", broken.diagnostics);
@@ -78,7 +78,7 @@ fn an_edit_publishes_a_code_and_a_span_and_the_fix_retracts_it() {
     // Fix it.
     server
         .documents_mut()
-        .open(uri(), "let x: Int = 1\n".to_string(), 3);
+        .open(uri(), "var x: Int = 1\n".to_string(), 3);
     let fixed = server.diagnostics_for(&uri()).expect("an open document");
     assert!(
         fixed.diagnostics.is_empty(),
@@ -123,7 +123,7 @@ fn a_diagnostic_carries_its_notes_as_related_information() {
 /// every offset inside the body passed the first half.
 #[test]
 fn hover_shows_the_read_result_and_the_inner_constructors_own_type() {
-    let src = "let v = read sections(lines(`{a:int},{b:int}`))\n";
+    let src = "var v = read sections(lines(`{a:int},{b:int}`))\n";
     let s = snap(src);
 
     let root = praxis_lsp::hover::hover(&s, at(src, "sections"), Encoding::Utf16)
@@ -151,7 +151,7 @@ fn hover_shows_the_read_result_and_the_inner_constructors_own_type() {
 /// anonymous record with its fields.
 #[test]
 fn hover_renders_an_anonymous_record_with_its_fields() {
-    let src = "let segments = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)\n";
+    let src = "var segments = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)\n";
     let s = snap(src);
     assert!(
         s.diagnostics().is_empty(),
@@ -172,7 +172,7 @@ fn hover_renders_an_anonymous_record_with_its_fields() {
 /// Hovering a capture's parser answers the capture's type, not the template's.
 #[test]
 fn hover_on_a_capture_type_answers_that_capture() {
-    let src = "let v = read lines(`{name:word} {n:int}`)\n";
+    let src = "var v = read lines(`{name:word} {n:int}`)\n";
     let s = snap(src);
     let h = praxis_lsp::hover::hover(&s, at(src, "word"), Encoding::Utf16).expect("answers");
     assert!(hover_text(&h).contains("Text"), "{}", hover_text(&h));
@@ -192,7 +192,7 @@ fn hover_on_a_capture_type_answers_that_capture() {
 /// test that only checks a grid method is present.
 #[test]
 fn typing_grid_dot_offers_grid_methods_with_signatures_and_nothing_else() {
-    let src = "fn main() -> Unit {\n  let grid = read grid(char)\n  grid.\n}\n";
+    let src = "fn main() -> Unit {\n  var grid = read grid(char)\n  grid.\n}\n";
     let s = snap(src);
     let cursor = at(src, "grid.\n") + 5;
     let ctx = s.completion_context(cursor);
@@ -246,7 +246,7 @@ fn typing_grid_dot_offers_grid_methods_with_signatures_and_nothing_else() {
 /// without anybody editing this crate.
 #[test]
 fn completion_inside_a_read_offers_the_atomics_and_constructors() {
-    let src = "let v = read lines(int)\n";
+    let src = "var v = read lines(int)\n";
     let s = snap(src);
     let ctx = s.completion_context(at(src, "int)"));
     let items = praxis_lsp::completion::items(&s, &ctx);
@@ -273,7 +273,7 @@ fn completion_inside_a_read_offers_the_atomics_and_constructors() {
 /// `ragged`, and neither offers the other's.
 #[test]
 fn a_parser_named_argument_is_read_from_its_constructor() {
-    let chars_src = "let v = read chars(char, )\n";
+    let chars_src = "var v = read chars(char, )\n";
     let s = snap(chars_src);
     let labels = labels_at(&s, at(chars_src, ", )") + 2);
     assert!(labels.contains(&"skip:".to_string()), "{labels:?}");
@@ -282,7 +282,7 @@ fn a_parser_named_argument_is_read_from_its_constructor() {
         "`fill:` is `grid`'s, not `chars`'s: {labels:?}"
     );
 
-    let grid_src = "let v = read grid(char, )\n";
+    let grid_src = "var v = read grid(char, )\n";
     let s = snap(grid_src);
     let labels = labels_at(&s, at(grid_src, ", )") + 2);
     assert!(labels.contains(&"fill:".to_string()), "{labels:?}");
@@ -326,7 +326,7 @@ fn completion_in_a_match_pattern_offers_the_scrutinees_variants() {
 /// filters by what has been typed.
 #[test]
 fn lexical_completion_offers_declared_names_and_filters_by_prefix() {
-    let src = "fn helper() -> Int { 1 }\nfn main() -> Int { let total = 1\n  he\n}\n";
+    let src = "fn helper() -> Int { 1 }\nfn main() -> Int { var total = 1\n  he\n}\n";
     let s = snap(src);
     let labels = labels_at(&s, at(src, "he\n") + 2);
     assert!(
@@ -342,7 +342,7 @@ fn lexical_completion_offers_declared_names_and_filters_by_prefix() {
 /// A record literal's field names come from the record's own definition.
 #[test]
 fn completion_in_a_record_literal_offers_its_fields() {
-    let src = "struct P { x: Int, y: Int }\nfn main() -> Unit { let p = P { x: 1, y: 2 } }\n";
+    let src = "struct P { x: Int, y: Int }\nfn main() -> Unit { var p = P { x: 1, y: 2 } }\n";
     let s = snap(src);
     let labels = labels_at(&s, at(src, "x: 1"));
     assert!(labels.contains(&"x".to_string()), "{labels:?}");
@@ -378,7 +378,7 @@ fn the_active_parameter_advances_across_a_comma() {
 /// table, and `sections` has the two forms §15.2 spells out.
 #[test]
 fn signature_help_on_a_parser_constructor_offers_both_sections_forms() {
-    let src = "let v = read sections(lines(int))\n";
+    let src = "var v = read sections(lines(int))\n";
     let s = snap(src);
     let help = praxis_lsp::signature::signature_help(&s, at(src, "lines(int)"))
         .expect("in the constructor's arg list");
@@ -414,7 +414,7 @@ fn signature_help_on_a_method_names_the_receiver_and_result() {
 /// both declarations spell `a`, and only distinct `SymbolId`s tell them apart.
 #[test]
 fn definition_from_a_shadowed_use_lands_on_the_second_declaration() {
-    let src = "let a = 4\nlet a = \"Foo\"\nout(a)\n";
+    let src = "var a = 4\nvar a = \"Foo\"\nout(a)\n";
     let s = snap(src);
     let use_site = at(src, "out(a)") + 4;
     let location = praxis_lsp::navigation::goto_definition(&s, use_site, &uri(), Encoding::Utf16)
@@ -432,7 +432,7 @@ fn definition_from_a_shadowed_use_lands_on_the_second_declaration() {
 /// fields and an enum's variants nested under them.
 #[test]
 fn document_symbols_list_the_top_level_declarations() {
-    let src = "struct P { x: Int }\nenum E { A, B }\nfn f() -> Int { 1 }\nlet top = 1\n";
+    let src = "struct P { x: Int }\nenum E { A, B }\nfn f() -> Int { 1 }\nvar top = 1\n";
     let s = snap(src);
     let symbols = praxis_lsp::navigation::document_symbols(&s, Encoding::Utf16);
     let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
@@ -468,7 +468,7 @@ fn document_symbols_list_the_top_level_declarations() {
 /// types** — asserted as (text, type) pairs, not as "tokens were produced".
 #[test]
 fn the_four_parser_classes_land_on_four_distinct_ranges() {
-    let src = "let v = read lines(`{name:word} {n:int}`)\n";
+    let src = "var v = read lines(`{name:word} {n:int}`)\n";
     let s = snap(src);
     assert!(s.diagnostics().is_empty(), "the fixture is clean");
 
@@ -524,8 +524,8 @@ fn the_four_parser_classes_land_on_four_distinct_ranges() {
 /// client renders unpredictably without.
 #[test]
 fn semantic_tokens_are_sorted_and_disjoint() {
-    let src = "struct P { x: Int }\nfn main() -> Unit {\n  let v: Vec[Int] = Vec[Int]()\n  \
-               let g = read grid(char)\n  let s = read lines(`{a:int},{b:int}`)\n  out(v.len())\n}\n";
+    let src = "struct P { x: Int }\nfn main() -> Unit {\n  var v: Vec[Int] = Vec[Int]()\n  \
+               var g = read grid(char)\n  var s = read lines(`{a:int},{b:int}`)\n  out(v.len())\n}\n";
     let s = snap(src);
     let tokens = praxis_lsp::semantic::classify(&s);
     assert!(!tokens.is_empty());
@@ -543,7 +543,7 @@ fn semantic_tokens_are_sorted_and_disjoint() {
 /// whole reason semantic tokens exist beside a regex grammar.
 #[test]
 fn a_local_named_grid_is_a_variable_and_not_a_constructor() {
-    let src = "fn main() -> Unit {\n  let grid = read grid(char)\n  out(grid)\n}\n";
+    let src = "fn main() -> Unit {\n  var grid = read grid(char)\n  out(grid)\n}\n";
     let s = snap(src);
     let tokens = praxis_lsp::semantic::classify(&s);
     let find = |offset: u32| {
@@ -569,7 +569,7 @@ fn a_local_named_grid_is_a_variable_and_not_a_constructor() {
 /// spans.
 #[test]
 fn the_encoded_tokens_are_relative_to_their_predecessor() {
-    let src = "let x = 1\nlet y = 2\n";
+    let src = "var x = 1\nvar y = 2\n";
     let s = snap(src);
     let encoded = praxis_lsp::semantic::tokens(&s, Encoding::Utf16);
     assert!(encoded.data.len() >= 4, "{:?}", encoded.data);
@@ -577,8 +577,8 @@ fn the_encoded_tokens_are_relative_to_their_predecessor() {
         encoded.data[0].delta_line, 0,
         "the first token is on line 0"
     );
-    assert_eq!(encoded.data[0].delta_start, 0, "`let` starts the file");
-    // The `let` on line 1 is one line down from the `1` on line 0.
+    assert_eq!(encoded.data[0].delta_start, 0, "`var` starts the file");
+    // The `var` on line 1 is one line down from the `1` on line 0.
     let second_line = encoded
         .data
         .iter()
@@ -597,7 +597,7 @@ fn the_encoded_tokens_are_relative_to_their_predecessor() {
 /// element's type, at the literal's offset.
 #[test]
 fn a_list_literal_and_a_texts_loop_variable_hover_as_themselves() {
-    let src = "fn main() -> Unit {\n  let xs = [1, 2, 3]\n  for c in \"ab\" { out(c) }\n}\n";
+    let src = "fn main() -> Unit {\n  var xs = [1, 2, 3]\n  for c in \"ab\" { out(c) }\n}\n";
     let s = snap(src);
     assert!(
         s.diagnostics().is_empty(),

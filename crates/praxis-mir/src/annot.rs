@@ -88,7 +88,7 @@ impl RootSlots {
 /// **Separate from [`RootSlots`] on purpose** (ADR-021, ADR-035). This set is
 /// over-approximate: it holds every `Gc` local whose value has been produced on
 /// the path to this point, whether or not it is still live. A user who asks
-/// `locals` after `let a = 10` wants to see `a` even where the optimizer can
+/// `locals` after `var a = 10` wants to see `a` even where the optimizer can
 /// prove nothing reads it again.
 ///
 /// It is also what [`crate::ir::Inst::CheckFault`] carries, which is not a GC

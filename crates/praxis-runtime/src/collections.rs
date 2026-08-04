@@ -10,7 +10,7 @@
 //! `trace` forwards every element to the tracer.
 //!
 //! **M5 change:** `items` became growable (it was `Box<[GcRef]>` in M3) so
-//! `push` mutates the vector *in place* — matching §4.2's "a `let` binding may
+//! `push` mutates the vector *in place* — matching §4.2's "a `var` binding may
 //! still point to a mutable object" and §11.1's `push -> Unit` (the receiver is
 //! mutated, no new reference returned). The backing storage may reallocate
 //! internally, but the `VecPayload` object itself stays at the same GC address

@@ -22,7 +22,7 @@
 //   * the totals cross all four blocks, so a window that is right for the first
 //     monkey and wrong for a later one cannot hide.
 fn main() {
-    let monkeys = read sections(
+    var monkeys = read sections(
         block(
             `Monkey {id:int}:`,
             `  Starting items: {items:csv(int)}`,
@@ -33,10 +33,10 @@ fn main() {
         )
     )
 
-    let m0 = monkeys.get(0)
-    let m1 = monkeys.get(1)
-    let m2 = monkeys.get(2)
-    let m3 = monkeys.get(3)
+    var m0 = monkeys.get(0)
+    var m1 = monkeys.get(1)
+    var m2 = monkeys.get(2)
+    var m3 = monkeys.get(3)
 
     out(monkeys.len())
     out(m0.id)

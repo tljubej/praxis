@@ -58,7 +58,7 @@ pub fn hover(snapshot: &Snapshot, offset: u32, enc: Encoding) -> Option<Hover> {
         ));
     }
 
-    // A declaration site: `let x = 1`'s `x` is in `decls`, not in `refs`.
+    // A declaration site: `var x = 1`'s `x` is in `decls`, not in `refs`.
     if let Some(info) = analysis.hover_decl(range) {
         return Some(markdown(
             format!("```praxis\n{}: {}\n```", info.name, info.scheme),

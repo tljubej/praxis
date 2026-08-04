@@ -813,7 +813,7 @@ fn m10ws5_repl_bt_and_locals_and_quit() {
 
 #[test]
 fn m11_locals_split_users_and_temps_with_types() {
-    // A program with three `let` locals and a binop chain that overflows. The
+    // A program with three `var` locals and a binop chain that overflows. The
     // `locals` display must: (1) separate user bindings into a `locals:` section
     // with a type column, (2) list compiler temps in a `temps:` section with a
     // per-frame id and type, and (3) keep the user's variables visible rather
@@ -1304,13 +1304,13 @@ fn m10b_ws6_reload_on_malformed_source_keeps_session() {
 ///
 /// Nothing wrapped them. `TypedModule.items` held only `fn` declarations,
 /// `lower_module` emitted only those, and the host called `main` — so
-/// `out(1)\nlet x = 2\nout(x)` passed `praxis check` and printed **nothing**,
+/// `out(1)\nvar x = 2\nout(x)` passed `praxis check` and printed **nothing**,
 /// then exited 1 with "no `main` function to run". §3.3 and §4.2 are written
 /// entirely at top level, so the design doc's own programs are what that
 /// silenced.
 #[test]
 fn a_top_level_statement_runs_in_the_order_it_is_written() {
-    // Every top-level statement kind: a call, a `let` read by a later one, a
+    // Every top-level statement kind: a call, a `var` read by a later one, a
     // `var`, and an assignment to it. Order is the assertion — a set of
     // statements that ran in the wrong order prints the same three lines.
     assert_passes("top_level_statements.px", "1\n2\n3");
@@ -1366,7 +1366,7 @@ fn the_entry_points_name_is_not_one_a_program_can_spell() {
 
     // A fault in a top-level statement reaches the crash debugger, and the frame
     // it names is the generated one.
-    std::fs::write(&src_path, "let v = Vec()\nout(v.get(0))\n").unwrap();
+    std::fs::write(&src_path, "var v = Vec()\nout(v.get(0))\n").unwrap();
     let output = Command::new(bin_path())
         .arg("run")
         .arg(&src_path)

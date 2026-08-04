@@ -1,7 +1,7 @@
 //! Type schemes, generalization, and instantiation (ADR-008).
 //!
 //! A **scheme** is "a type with some quantified variables", written `forall a b.
-//! T`. Generalizing a `let`/`fn` binding turns its inferred monotype into a scheme
+//! T`. Generalizing a `var`/`fn` binding turns its inferred monotype into a scheme
 //! by quantifying over the type variables that are unbound *and* were created at a
 //! level deeper than the binding site. Instantiating a scheme at a use site copies
 //! the body with fresh variables in place of the quantified ones.

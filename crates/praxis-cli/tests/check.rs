@@ -66,7 +66,7 @@ fn bad_byte_file_exits_nonzero_with_diagnostic() {
         "missing location: {stderr}"
     );
     assert!(
-        stderr.contains("let first = @"),
+        stderr.contains("var first = @"),
         "missing source line: {stderr}"
     );
     assert!(stderr.contains("^"), "missing caret: {stderr}");

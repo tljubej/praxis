@@ -8,6 +8,16 @@ concerns.
 > **Status:** Milestone 11 complete — the **language server MVP**, the VS Code
 > extension, and its syntax highlighting.
 >
+> **Language change since M11:** `let` is gone. **`var` is the one binding
+> form**, and every binding is assignable — a parameter, a `for` variable and a
+> name a pattern introduces included, none of which ever had a mutable
+> counterpart to opt into. Rust-style shadowing is unchanged and is how a name
+> takes a new type (`var x = 5` then `var x = "s"`). The two things the keyword
+> was load-bearing for are now derived: a binding nothing reassigns is
+> generalized and captured by value, exactly as a `let` was, and one something
+> reassigns is neither. `Y009` is retired. See
+> [ADR-125](./docs/decisions/125-a-binding-is-a-binding-and-the-compiler-decides-its-storage.md).
+>
 > `praxis lsp` is a real JSON-RPC process over stdio (ADR-095: one synchronous
 > loop, no async runtime). It serves document synchronization with incremental
 > revisions, diagnostics, hover, completion including receiver methods,

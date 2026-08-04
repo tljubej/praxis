@@ -1,15 +1,15 @@
-let pairs = read lines(`{left:int} {right:int}`)
+var pairs = read lines(`{left:int} {right:int}`)
 
-let left = pairs.map(|p| p.left).sorted()
-let right = pairs.map(|p| p.right).sorted()
+var left = pairs.map(|p| p.left).sorted()
+var right = pairs.map(|p| p.right).sorted()
 
-let distance = left
+var distance = left
     .zip(right)
     .map(|(a, b)| abs(a - b))
     .sum()
 
-let counts = right.frequencies()
-let similarity = left
+var counts = right.frequencies()
+var similarity = left
     .map(|value| value * counts[value])
     .sum()
 

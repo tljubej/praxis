@@ -609,7 +609,7 @@ mod tests {
     #[test]
     fn a_generic_function_is_censused_as_its_monomorphic_clones() {
         let lowered = lower_src_to_mir(
-            "fn id(x) { x }\nfn main() -> Int {\n  let a = id(1)\n  let b = id(2.0)\n  a\n}",
+            "fn id(x) { x }\nfn main() -> Int {\n  var a = id(1)\n  var b = id(2.0)\n  a\n}",
         );
         let ids: Vec<&String> = lowered
             .funcs
@@ -633,14 +633,14 @@ mod tests {
     /// to be `a + b < b`, whose `a + b` box is an interior node the forwarding
     /// deletes and whose `Bool` box is a terminator operand it also deletes —
     /// leaving nothing for a census to tell apart. `f(a + b)` boxes the sum
-    /// because a call argument is a `Gc` operand, and `let c = a < b` boxes the
+    /// because a call argument is a `Gc` operand, and `var c = a < b` boxes the
     /// comparison because its consumer is a binding rather than a branch. Both
     /// are shapes the language really emits.
     #[test]
     fn a_census_tells_a_float_materialize_from_a_bool_one() {
         let lowered = lower_src_to_mir(
             "fn g(x: Float) -> Float { x }\n\
-             fn f(a: Float, b: Float) -> Bool {\n  let c = a < b\n  g(a + b)\n  c\n}",
+             fn f(a: Float, b: Float) -> Bool {\n  var c = a < b\n  g(a + b)\n  c\n}",
         );
         let census = Census::of_function(lowered.function("f"));
         assert_eq!(

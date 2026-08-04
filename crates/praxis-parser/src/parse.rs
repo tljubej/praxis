@@ -8,7 +8,7 @@
 //! token in a [`SyntaxKind::PARSE_ERROR`] node, advances to a synchronization
 //! point, and keeps going — that is the LSP-grade recovery required by §15.2.
 //!
-//! The M1 grammar (§19) covers: literals, `let`/`var` bindings, blocks, calls
+//! The M1 grammar (§19) covers: literals, `var` bindings, blocks, calls
 //! (including `out(...)`), `fn` items, arithmetic, `if`/`else`, and `while`.
 //! Other constructs are not parsed; they recover with a diagnostic.
 
@@ -358,7 +358,7 @@ impl<'t> Parser<'t> {
     /// ```
     ///
     /// and the whole arm list stopped there, silently: the second arm and every arm
-    /// after it left the tree. ADR-049 saw the shape (`let x = 1\n(a, b)` parsing as
+    /// after it left the tree. ADR-049 saw the shape (`var x = 1\n(a, b)` parsing as
     /// a call) and left it open because the workaround was to bind the tuple to a
     /// name. A match arm has no such workaround — a tuple pattern *is* how the arm
     /// is written — so this is the revisit that consequence invited.
@@ -387,7 +387,7 @@ impl<'t> Parser<'t> {
     /// same two characters:
     ///
     /// ```text
-    /// let n = total
+    /// var n = total
     /// [1, 2, 3]           // ← would be read as `total[1, 2, 3]`
     /// ```
     ///
@@ -603,7 +603,7 @@ impl<'t> Parser<'t> {
     /// [`parse_atom`](Self::parse_atom) ate trivia first — it had a comment
     /// saying why — and everything else opened the node and then let
     /// [`bump`](Self::bump)'s own sweep pull the whitespace *inside* it. So a
-    /// `PATH_EXPR` for `a` in `let c = a + b` spanned `" a"`, and the caret in
+    /// `PATH_EXPR` for `a` in `var c = a + b` spanned `" a"`, and the caret in
     /// every diagnostic that underlines an expression started one column early
     /// and ran one column wide — reading as if it pointed at the `=`.
     ///
@@ -658,8 +658,7 @@ impl<'t> Parser<'t> {
     /// Parse one statement. Returns `false` if recovery was needed.
     fn parse_stmt(&mut self) -> bool {
         match self.peek() {
-            SyntaxKind::KW_LET => self.parse_let_or_var(SyntaxKind::LET_STMT),
-            SyntaxKind::KW_VAR => self.parse_let_or_var(SyntaxKind::VAR_STMT),
+            SyntaxKind::KW_VAR => self.parse_var(),
             SyntaxKind::KW_FN => self.parse_fn_item(),
             SyntaxKind::KW_STRUCT => self.parse_struct_item(),
             SyntaxKind::KW_ENUM => self.parse_enum_item(),
@@ -669,10 +668,10 @@ impl<'t> Parser<'t> {
         }
     }
 
-    /// `let`/`var name [: Type] = expr` — `kind` is the node kind (LET_STMT / VAR_STMT).
-    fn parse_let_or_var(&mut self, kind: SyntaxKind) -> bool {
-        self.start_node(kind);
-        self.bump(); // `let`/`var`
+    /// `var name [: Type] = expr` — the language's one binding form (§4.2).
+    fn parse_var(&mut self) -> bool {
+        self.start_node(SyntaxKind::VAR_STMT);
+        self.bump(); // `var`
         self.expect_binder("binding name");
         // Optional type annotation `: Type` (M2: real type grammar — scalar,
         // tuple, or function type).
@@ -920,7 +919,7 @@ impl<'t> Parser<'t> {
                 break;
             }
             let before = self.meaningful_index();
-            // Every item is a statement (let/var/fn/assignment) or a bare
+            // Every item is a statement (var/fn/assignment) or a bare
             // expression statement (which may be the trailing expression). The
             // dispatch in parse_stmt covers all of these.
             self.parse_stmt();
@@ -1008,7 +1007,7 @@ impl<'t> Parser<'t> {
             // The comment that used to sit here said the lexer's max-munch keeps
             // `||` as logical-or "so the two never conflict". It is the max-munch
             // that *creates* the conflict: REP-07 made `||` one token (`PIPE2`),
-            // and §4.2's own shadowing example — `let show_old = || out(a)` — was
+            // and §4.2's own shadowing example — `var show_old = || out(a)` — was
             // `P001: expected an expression` at it.
             //
             // The tie is broken by **position**, which is the rule REP-21 used for
@@ -1992,7 +1991,7 @@ impl<'t> Parser<'t> {
     /// Expect a **binding position**: a name, or `_` for one the program is
     /// deliberately not naming (D7, ADR-049).
     ///
-    /// `let _ = f()`, `fn g(_)` and `|_| 0` are legal and introduce nothing —
+    /// `var _ = f()`, `fn g(_)` and `|_| 0` are legal and introduce nothing —
     /// the AST's name accessors look for an `Ident`, so a wildcard binder is an
     /// absent name all the way down rather than a symbol called `_`.
     fn expect_binder(&mut self, what: &str) -> bool {
@@ -2043,8 +2042,7 @@ impl<'t> Parser<'t> {
             && !self.at(SyntaxKind::R_BRACE)
             && !matches!(
                 self.peek(),
-                SyntaxKind::KW_LET
-                    | SyntaxKind::KW_VAR
+                SyntaxKind::KW_VAR
                     | SyntaxKind::KW_FN
                     | SyntaxKind::KW_IF
                     | SyntaxKind::KW_WHILE
@@ -2088,13 +2086,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_let_binding() {
-        let out = parse_text("let x = 1");
+    fn parses_var_binding() {
+        let out = parse_text("var x = 1");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
-        insta::assert_snapshot!(dump("let x = 1"), @r#"
+        insta::assert_snapshot!(dump("var x = 1"), @r#"
         SOURCE_FILE@0..9
-          LET_STMT@0..9
-            KW_LET "let"@0..3
+          VAR_STMT@0..9
+            KW_VAR "var"@0..3
             Whitespace " "@3..4
             Ident "x"@4..5
             Whitespace " "@5..6
@@ -2155,11 +2153,11 @@ mod tests {
 
     #[test]
     fn parses_block_expression() {
-        let out = parse_text("{ let a = 1\n a }");
+        let out = parse_text("{ var a = 1\n a }");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert!(kinds.contains(&SyntaxKind::BLOCK_EXPR));
-        assert!(kinds.contains(&SyntaxKind::LET_STMT));
+        assert!(kinds.contains(&SyntaxKind::VAR_STMT));
         assert!(kinds.contains(&SyntaxKind::EXPR_STMT));
     }
 
@@ -2175,7 +2173,7 @@ mod tests {
 
     #[test]
     fn regression_same_line_statements_require_a_semicolon() {
-        let out = parse_text("let a = 1 let b = 2");
+        let out = parse_text("var a = 1 var b = 2");
         assert!(
             !out.diagnostics.is_empty(),
             "two statements on one line must not parse as if a separator existed"
@@ -2184,12 +2182,12 @@ mod tests {
 
     #[test]
     fn regression_semicolons_separate_top_level_statements() {
-        let out = parse_text("let a = 1; let b = 2");
+        let out = parse_text("var a = 1; var b = 2");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert_eq!(
             construct_names(&out.tree)
                 .iter()
-                .filter(|kind| **kind == SyntaxKind::LET_STMT)
+                .filter(|kind| **kind == SyntaxKind::VAR_STMT)
                 .count(),
             2
         );
@@ -2238,13 +2236,13 @@ mod tests {
     /// optional-value decision — never inside the Pratt loop.
     #[test]
     fn an_operator_continues_across_a_line_break() {
-        let out = parse_text("let a = 1 +\n2");
+        let out = parse_text("var a = 1 +\n2");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert_eq!(
             kinds
                 .iter()
-                .filter(|kind| **kind == SyntaxKind::LET_STMT)
+                .filter(|kind| **kind == SyntaxKind::VAR_STMT)
                 .count(),
             1,
             "`1 +` and `2` are one addition, not two statements"
@@ -2274,19 +2272,19 @@ mod tests {
     #[test]
     fn a_node_never_begins_with_trivia() {
         for src in [
-            "let c = a + b",
-            "  let c = ( a ) + 1  ",
-            "// a leading comment\nlet t = true && false",
-            "fn f(x) -> Int {\n    let y = -x\n    y * 2\n}",
-            "let v = read lines( `{a:int},{b:int}` )",
-            "let m = match t {\n    A => 1\n    _ => 2\n}",
+            "var c = a + b",
+            "  var c = ( a ) + 1  ",
+            "// a leading comment\nvar t = true && false",
+            "fn f(x) -> Int {\n    var y = -x\n    y * 2\n}",
+            "var v = read lines( `{a:int},{b:int}` )",
+            "var m = match t {\n    A => 1\n    _ => 2\n}",
             "for i in 0..n {\n    out( i )\n}",
-            "let p = Point { x: 1, y: 2 }",
-            "let f = |a, b| a + b\nlet g = f ( 1 , 2 )",
+            "var p = Point { x: 1, y: 2 }",
+            "var f = |a, b| a + b\nvar g = f ( 1 , 2 )",
             "var s = 0\ns += grid [ 1 , 2 ]",
             // Recovery paths open nodes too, and `PARSE_ERROR` is a node.
-            "let @ = 1\nlet ok = 2",
-            "let x = (",
+            "var @ = 1\nvar ok = 2",
+            "var x = (",
         ] {
             let tree = parse_text(src).tree;
             for node in tree.descendants() {
@@ -2313,8 +2311,8 @@ mod tests {
     /// point at.
     #[test]
     fn an_operands_range_is_the_operand_and_not_the_space_before_it() {
-        // `let c = a + b` — `a` at 8..9, `b` at 12..13.
-        let tree = parse_text("let c = a + b").tree;
+        // `var c = a + b` — `a` at 8..9, `b` at 12..13.
+        let tree = parse_text("var c = a + b").tree;
         let bin = tree
             .descendants()
             .find(|n| n.kind() == SyntaxKind::BIN_EXPR)
@@ -2343,10 +2341,10 @@ mod tests {
     fn a_range_binds_looser_than_the_arithmetic_in_its_bounds() {
         // The bound is the whole subtraction, so the RANGE_EXPR contains a
         // BIN_EXPR rather than the other way round.
-        insta::assert_snapshot!(dump("let r = 0..n - 1"), @r#"
+        insta::assert_snapshot!(dump("var r = 0..n - 1"), @r#"
         SOURCE_FILE@0..16
-          LET_STMT@0..16
-            KW_LET "let"@0..3
+          VAR_STMT@0..16
+            KW_VAR "var"@0..3
             Whitespace " "@3..4
             Ident "r"@4..5
             Whitespace " "@5..6
@@ -2366,7 +2364,7 @@ mod tests {
                   IntLit "1"@15..16
         "#);
         // …and looser than comparison too, so `a..b == c..d` compares two ranges.
-        let out = parse_text("let b = 1..2 == 3..4");
+        let out = parse_text("var b = 1..2 == 3..4");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert_eq!(
@@ -2388,7 +2386,7 @@ mod tests {
     /// `RangeExpr::is_inclusive` reads it from.
     #[test]
     fn an_inclusive_range_is_the_same_node_with_a_different_operator() {
-        let out = parse_text("let r = 0..=9");
+        let out = parse_text("var r = 0..=9");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert!(kinds.contains(&SyntaxKind::RANGE_EXPR));
@@ -2404,11 +2402,11 @@ mod tests {
         for src in [
             "for i in 0..n { out(i) }",
             "for i in 0..=n { out(i) }",
-            "let r = (0 - 1)..(n + 1)",
+            "var r = (0 - 1)..(n + 1)",
             "out(0..3)",
             // The bound may itself be a call or a method call.
-            "let r = 0..v.len()",
-            "let r = abs(0 - 3)..max(1, 2)",
+            "var r = 0..v.len()",
+            "var r = abs(0 - 3)..max(1, 2)",
         ] {
             let out = parse_text(src);
             assert!(out.diagnostics.is_empty(), "{src:?}: {:?}", out.diagnostics);
@@ -2430,13 +2428,13 @@ mod tests {
     /// exception (FE-04).
     #[test]
     fn a_range_continues_across_a_line_break() {
-        let out = parse_text("let r = 1 ..\n5");
+        let out = parse_text("var r = 1 ..\n5");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert_eq!(
             kinds
                 .iter()
-                .filter(|kind| **kind == SyntaxKind::LET_STMT)
+                .filter(|kind| **kind == SyntaxKind::VAR_STMT)
                 .count(),
             1,
             "`1 ..` and `5` are one range, not two statements"
@@ -2448,7 +2446,7 @@ mod tests {
     /// expression, so it terminates nothing.
     #[test]
     fn a_method_chain_continues_across_a_line_break() {
-        let out = parse_text("let n = v\n  .len()");
+        let out = parse_text("var n = v\n  .len()");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert!(construct_names(&out.tree).contains(&SyntaxKind::METHOD_CALL_EXPR));
     }
@@ -2470,22 +2468,22 @@ mod tests {
     /// consumed — the change is that it is no longer the only thing that can be.
     #[test]
     fn a_semicolon_separates_two_statements_on_one_line_in_a_block() {
-        let out = parse_text("fn f() { let a = 1; let b = 2 }");
+        let out = parse_text("fn f() { var a = 1; var b = 2 }");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert_eq!(
             construct_names(&out.tree)
                 .iter()
-                .filter(|kind| **kind == SyntaxKind::LET_STMT)
+                .filter(|kind| **kind == SyntaxKind::VAR_STMT)
                 .count(),
             2
         );
     }
 
     /// A run-on is reported where it happens and parsing continues: three
-    /// statements, two missing separators, three `LET_STMT`s and no cascade.
+    /// statements, two missing separators, three `VAR_STMT`s and no cascade.
     #[test]
     fn each_missing_separator_is_reported_once_and_parsing_continues() {
-        let out = parse_text("let a = 1 let b = 2 let c = 3");
+        let out = parse_text("var a = 1 var b = 2 var c = 3");
         let separator_errors = out
             .diagnostics
             .iter()
@@ -2495,7 +2493,7 @@ mod tests {
         assert_eq!(
             construct_names(&out.tree)
                 .iter()
-                .filter(|kind| **kind == SyntaxKind::LET_STMT)
+                .filter(|kind| **kind == SyntaxKind::VAR_STMT)
                 .count(),
             3
         );
@@ -2505,10 +2503,10 @@ mod tests {
     /// own right — a trailing expression needs nothing after it.
     #[test]
     fn a_block_demands_a_separator_but_its_closing_brace_is_one() {
-        let clean = parse_text("fn f() { let a = 1\n a }");
+        let clean = parse_text("fn f() { var a = 1\n a }");
         assert!(clean.diagnostics.is_empty(), "{:?}", clean.diagnostics);
 
-        let run_on = parse_text("fn f() { let a = 1 a }");
+        let run_on = parse_text("fn f() { var a = 1 a }");
         assert!(
             run_on
                 .diagnostics
@@ -2574,7 +2572,7 @@ mod tests {
         for src in [
             "if f(Point { x: 1 }) { 0 }",
             "if (Point { x: 1 }, 2) == t { 0 }",
-            "if { let p = Point { x: 1 }\n p.ok } { 0 }",
+            "if { var p = Point { x: 1 }\n p.ok } { 0 }",
             "while v.has(Point { x: 1 }) { 0 }",
             "for q in near(Origin { x: 0 }) { 0 }",
             "match f(Point { x: 1 }) { A => 1 }",
@@ -2690,7 +2688,7 @@ mod tests {
         // A file with several distinct problems: missing `=` in a let, a stray
         // `)`, and a second broken statement. Recovery must keep going and emit
         // at least two P0xx diagnostics.
-        let src = "let x 1\n )\nlet = \n";
+        let src = "var x 1\n )\nvar = \n";
         let out = parse_text(src);
         let parse_diags: Vec<_> = out
             .diagnostics
@@ -2726,7 +2724,7 @@ mod tests {
 
     #[test]
     fn parses_let_with_tuple_type_annotation() {
-        let src = "let p: (Int, Int) = (1, 2)";
+        let src = "var p: (Int, Int) = (1, 2)";
         let out = parse_text(src);
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
@@ -2758,7 +2756,7 @@ mod tests {
 
     #[test]
     fn parses_scalar_type_annotation() {
-        let src = "let x: Int = 1";
+        let src = "var x: Int = 1";
         let out = parse_text(src);
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
@@ -2798,7 +2796,7 @@ mod tests {
     fn function_type_right_associative() {
         // `A -> B -> C` parses as `A -> (B -> C)`: the outer FN_TYPE's result is
         // itself an FN_TYPE.
-        let src = "let f: Int -> Text -> Bool = panic";
+        let src = "var f: Int -> Text -> Bool = panic";
         let out = parse_text(src);
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
@@ -2811,7 +2809,7 @@ mod tests {
 
     #[test]
     fn parses_read_atomic() {
-        let out = parse_text("let v = read int");
+        let out = parse_text("var v = read int");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert!(kinds.contains(&SyntaxKind::READ_EXPR));
@@ -2821,7 +2819,7 @@ mod tests {
 
     #[test]
     fn parses_read_lines_of_int() {
-        let out = parse_text("let v = read lines(int)");
+        let out = parse_text("var v = read lines(int)");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert!(kinds.contains(&SyntaxKind::READ_EXPR));
@@ -2835,7 +2833,7 @@ mod tests {
     fn parses_read_nested_constructors() {
         // sections(lines(csv(int))) — whitespace outside backticks is
         // insignificant (§7.1 acceptance criterion 5).
-        let out = parse_text("let v = read sections( lines( csv( int ) ) )");
+        let out = parse_text("var v = read sections( lines( csv( int ) ) )");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         // Three nested PARSER_CALL nodes (sections, lines, csv).
@@ -2848,7 +2846,7 @@ mod tests {
 
     #[test]
     fn parses_read_template() {
-        let out = parse_text("let v = read lines(`{x:int},{y:int}`)");
+        let out = parse_text("var v = read lines(`{x:int},{y:int}`)");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert!(kinds.contains(&SyntaxKind::READ_EXPR));
@@ -2868,7 +2866,7 @@ mod tests {
 
     #[test]
     fn parses_read_sep_with_string_literal() {
-        let out = parse_text(r#"let v = read sep(" -> ", word)"#);
+        let out = parse_text(r#"var v = read sep(" -> ", word)"#);
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert!(kinds.contains(&SyntaxKind::READ_EXPR));
@@ -2882,7 +2880,7 @@ mod tests {
     #[test]
     fn parses_named_args_in_sections() {
         // heterogeneous `sections(rules: ..., updates: ...)` — two named args.
-        let out = parse_text("let v = read sections(rules: lines(int), updates: lines(int))");
+        let out = parse_text("var v = read sections(rules: lines(int), updates: lines(int))");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert!(kinds.contains(&SyntaxKind::PARSER_NAMED_ARG));
@@ -2898,7 +2896,7 @@ mod tests {
     fn parses_repeated_tail_in_sections() {
         // The `repeated(...)` tail marker of named sections.
         let out =
-            parse_text("let v = read sections(draws: csv(int), boards: repeated(matrix(int)))");
+            parse_text("var v = read sections(draws: csv(int), boards: repeated(matrix(int)))");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert!(kinds.contains(&SyntaxKind::PARSER_NAMED_ARG));
@@ -2908,7 +2906,7 @@ mod tests {
     fn parses_keyword_arg_in_chars() {
         // `chars(one_of(...), skip: whitespace)` — a positional arg followed by
         // a named keyword arg.
-        let out = parse_text("let v = read chars(one_of(\"LR\"), skip: whitespace)");
+        let out = parse_text("var v = read chars(one_of(\"LR\"), skip: whitespace)");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert!(kinds.contains(&SyntaxKind::PARSER_NAMED_ARG));
@@ -2918,7 +2916,7 @@ mod tests {
     fn named_arg_does_not_shadow_constructor_call() {
         // A constructor call argument (`lines(int)`) has `(` at position 1, so
         // it is NOT mistaken for a named arg. Only `ident:` is.
-        let out = parse_text("let v = read sections(lines(int))");
+        let out = parse_text("var v = read sections(lines(int))");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert!(
@@ -2929,7 +2927,7 @@ mod tests {
 
     #[test]
     fn parses_parse_call() {
-        let out = parse_text("let v = parse(sample, lines(int))");
+        let out = parse_text("var v = parse(sample, lines(int))");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert!(kinds.contains(&SyntaxKind::PARSE_EXPR));
@@ -2960,7 +2958,7 @@ mod tests {
     #[test]
     fn logical_and_binds_tighter_than_or_and_looser_than_comparison() {
         // One token, not two `AMP`s — max-munch, as for `||`.
-        let out = parse_text("let b = x && y");
+        let out = parse_text("var b = x && y");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert!(kinds.contains(&SyntaxKind::AMP2));
@@ -2968,34 +2966,34 @@ mod tests {
 
         // `a || b && c` is `a || (b && c)`: the outer BIN_EXPR is the `||`.
         assert_eq!(
-            shape("let r = a || b && c"),
-            shape("let r = a || (b && c)"),
+            shape("var r = a || b && c"),
+            shape("var r = a || (b && c)"),
             "&& binds tighter than ||"
         );
-        assert_ne!(shape("let r = a || b && c"), shape("let r = (a || b) && c"));
+        assert_ne!(shape("var r = a || b && c"), shape("var r = (a || b) && c"));
 
         // `a == b && c == d` is `(a == b) && (c == d)` — §3.3's own shape, and
         // the reason `&&` must be looser than comparison.
         assert_eq!(
-            shape("let r = a == b && c == d"),
-            shape("let r = (a == b) && (c == d)")
+            shape("var r = a == b && c == d"),
+            shape("var r = (a == b) && (c == d)")
         );
 
         // `!x && y` is `(!x) && y`: prefix stays above every infix operator,
         // which the renumbering had to preserve. §3.3 writes `!diagonals && …`.
-        assert_eq!(shape("let r = !x && y"), shape("let r = (!x) && y"));
-        assert_ne!(shape("let r = !x && y"), shape("let r = !(x && y)"));
+        assert_eq!(shape("var r = !x && y"), shape("var r = (!x) && y"));
+        assert_ne!(shape("var r = !x && y"), shape("var r = !(x && y)"));
 
         // The rest of the table, re-asserted because every number in it moved:
         // arithmetic still binds tighter than comparison, `*` than `+`, and unary
         // minus than `*`.
-        assert_eq!(shape("let r = a + b < c"), shape("let r = (a + b) < c"));
-        assert_eq!(shape("let r = a + b * c"), shape("let r = a + (b * c)"));
-        assert_eq!(shape("let r = -a * b"), shape("let r = (-a) * b"));
+        assert_eq!(shape("var r = a + b < c"), shape("var r = (a + b) < c"));
+        assert_eq!(shape("var r = a + b * c"), shape("var r = a + (b * c)"));
+        assert_eq!(shape("var r = -a * b"), shape("var r = (-a) * b"));
         // …and `..` still binds looser than the arithmetic in its bounds, which
         // is ADR-059's rule and the one row that kept its number.
-        assert_eq!(shape("let r = 0..n - 1"), shape("let r = 0..(n - 1)"));
-        assert_ne!(shape("let r = 0..n - 1"), shape("let r = (0..n) - 1"));
+        assert_eq!(shape("var r = 0..n - 1"), shape("var r = 0..(n - 1)"));
+        assert_ne!(shape("var r = 0..n - 1"), shape("var r = (0..n) - 1"));
     }
 
     /// **REP-17.** A trailing comma closes a list; it does not open another
@@ -3018,16 +3016,16 @@ mod tests {
         for (with, without) in [
             // Call arguments — the finding's own case, in §3.3's own layout.
             (
-                "let d = max(\n  abs(a),\n  abs(b),\n)",
-                "let d = max(abs(a), abs(b))",
+                "var d = max(\n  abs(a),\n  abs(b),\n)",
+                "var d = max(abs(a), abs(b))",
             ),
-            ("let x = f(1,)", "let x = f(1)"),
+            ("var x = f(1,)", "var x = f(1)"),
             // Tuple literal, collection type arguments.
-            ("let t = (1, 2,)", "let t = (1, 2)"),
-            ("let v: Vec[Int,] = Vec()", "let v: Vec[Int] = Vec()"),
+            ("var t = (1, 2,)", "var t = (1, 2)"),
+            ("var v: Vec[Int,] = Vec()", "var v: Vec[Int] = Vec()"),
             (
-                "let m: Map[Text, Int,] = Map()",
-                "let m: Map[Text, Int] = Map()",
+                "var m: Map[Text, Int,] = Map()",
+                "var m: Map[Text, Int] = Map()",
             ),
             // Declarations: struct fields, enum variants, an enum payload.
             (
@@ -3041,18 +3039,18 @@ mod tests {
                 "fn add(a: Int, b: Int,) -> Int { a + b }",
                 "fn add(a: Int, b: Int) -> Int { a + b }",
             ),
-            ("let f = |a, b,| a + b", "let f = |a, b| a + b"),
+            ("var f = |a, b,| a + b", "var f = |a, b| a + b"),
             // Record literal fields, and match arms.
             (
-                "struct P { x: Int }\nlet p = P { x: 1, }",
-                "struct P { x: Int }\nlet p = P { x: 1 }",
+                "struct P { x: Int }\nvar p = P { x: 1, }",
+                "struct P { x: Int }\nvar p = P { x: 1 }",
             ),
             (
-                "let r = match n { 1 => 1, _ => 0, }",
-                "let r = match n { 1 => 1, _ => 0 }",
+                "var r = match n { 1 => 1, _ => 0, }",
+                "var r = match n { 1 => 1, _ => 0 }",
             ),
             // Subscript indices (REP-16), which are the thirteenth list.
-            ("let c = grid[x, y,]", "let c = grid[x, y]"),
+            ("var c = grid[x, y,]", "var c = grid[x, y]"),
         ] {
             let out = parse_text(with);
             assert!(out.diagnostics.is_empty(), "{with}: {:?}", out.diagnostics);
@@ -3067,7 +3065,7 @@ mod tests {
 
         // …and a *leading* or doubled comma is still a mistake: the rule is that
         // a comma may precede the closer, not that commas are optional.
-        for bad in ["let x = f(1,,2)", "let x = f(,1)", "let t = (1,,2)"] {
+        for bad in ["var x = f(1,,2)", "var x = f(,1)", "var t = (1,,2)"] {
             let out = parse_text(bad);
             assert!(!out.diagnostics.is_empty(), "{bad} must still report");
         }
@@ -3084,14 +3082,14 @@ mod tests {
         // Reads, at both arities, and chained with the other postfix forms in
         // every order — which is what one loop over all three buys.
         for src in [
-            "let v = m[key]",
-            "let c = grid[x, y]",
-            "let n = m[a][b]",
-            "let n = f(x)[0]",
-            "let n = grid[x, y].len()",
-            "let n = v[0].0",
-            "let n = rows[i].len() + 1",
-            "let n = m[k](7)",
+            "var v = m[key]",
+            "var c = grid[x, y]",
+            "var n = m[a][b]",
+            "var n = f(x)[0]",
+            "var n = grid[x, y].len()",
+            "var n = v[0].0",
+            "var n = rows[i].len() + 1",
+            "var n = m[k](7)",
         ] {
             let out = parse_text(src);
             assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
@@ -3099,7 +3097,7 @@ mod tests {
 
         // A subscript wraps the *whole* preceding expression, so `f(x)[0]` is one
         // statement and not two.
-        let out = parse_text("let n = f(x)[0]");
+        let out = parse_text("var n = f(x)[0]");
         assert_eq!(
             construct_names(&out.tree)
                 .iter()
@@ -3162,7 +3160,7 @@ mod tests {
         // literal existed, and the comment it carried gave the reason — "no
         // statement can begin with `[`" — that stopped being true.
         let out = parse_text(
-            "let n = m
+            "var n = m
 [key]",
         );
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
@@ -3173,12 +3171,12 @@ mod tests {
         );
         // …and a `[` on the same line still subscripts, which is every subscript
         // any program writes.
-        let out = parse_text("let n = m[key]");
+        let out = parse_text("var n = m[key]");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert_eq!(out.tree.children().count(), 1);
 
         // An unclosed subscript is reported rather than swallowing the rest.
-        for bad in ["let v = m[key", "let v = m[]", "m[key] ="] {
+        for bad in ["var v = m[key", "var v = m[]", "m[key] ="] {
             let out = parse_text(bad);
             assert!(!out.diagnostics.is_empty(), "{bad} must report");
         }
@@ -3204,12 +3202,12 @@ mod tests {
 
         // §3.3's own spelling, and the shapes around it.
         for src in [
-            "let c = Counter[(Int, Int)]()",
-            "let v = Vec[Int]()",
-            "let m = Map[Text, Int]()",
-            "let g = Grid[Vec[Int]]()",
+            "var c = Counter[(Int, Int)]()",
+            "var v = Vec[Int]()",
+            "var m = Map[Text, Int]()",
+            "var g = Grid[Vec[Int]]()",
             // A trailing comma closes this list too (REP-17).
-            "let m = Map[Text, Int,]()",
+            "var m = Map[Text, Int,]()",
         ] {
             assert_eq!(count(src, SyntaxKind::TYPE_ARG_LIST), 1, "{src}");
             assert_eq!(count(src, SyntaxKind::INDEX_EXPR), 0, "{src}");
@@ -3220,10 +3218,10 @@ mod tests {
         // subscript **followed by a call**, which is what a "brackets before `(`
         // are type arguments" rule would have broken.
         for src in [
-            "let v = m[key]",
-            "let v = m[key](7)",
-            "let v = counter[key]",
-            "let v = grid[x, y]",
+            "var v = m[key]",
+            "var v = m[key](7)",
+            "var v = counter[key]",
+            "var v = grid[x, y]",
         ] {
             assert_eq!(count(src, SyntaxKind::INDEX_EXPR), 1, "{src}");
             assert_eq!(count(src, SyntaxKind::TYPE_ARG_LIST), 0, "{src}");
@@ -3233,10 +3231,10 @@ mod tests {
         // than parsing as a type in value position. An empty one reports too: a
         // constructor with no arguments is spelled `Counter()`.
         for bad in [
-            "let c = Counter[Int]",
-            "let c = Counter[]()",
-            "let c = Counter[Int",
-            "let c = Vec[Int] + 1",
+            "var c = Counter[Int]",
+            "var c = Counter[]()",
+            "var c = Counter[Int",
+            "var c = Vec[Int] + 1",
         ] {
             let out = parse_text(bad);
             assert!(!out.diagnostics.is_empty(), "{bad} must report");
@@ -3264,11 +3262,11 @@ mod tests {
         // Every position an expression can begin in: a binding, an argument, a
         // `for` iterable, a return value, an element of another list.
         for src in [
-            "let v = [1, 2, 3]",
-            "let v = []",
-            "let v = [1]",
+            "var v = [1, 2, 3]",
+            "var v = []",
+            "var v = [1]",
             // A trailing comma closes this list too (REP-17).
-            "let v = [1, 2,]",
+            "var v = [1, 2,]",
             "out([1, 2])",
             "for x in [1, 2] { out(x) }",
             "fn f() { return [1] }",
@@ -3280,10 +3278,10 @@ mod tests {
         // One node kind at every arity, including zero: nothing about a list
         // changes at two the way a paren becomes a tuple there.
         for (src, want) in [
-            ("let v = []", 1),
-            ("let v = [1]", 1),
-            ("let v = [1, 2]", 1),
-            ("let v = [[1], [2, 3]]", 3),
+            ("var v = []", 1),
+            ("var v = [1]", 1),
+            ("var v = [1, 2]", 1),
+            ("var v = [[1], [2, 3]]", 3),
         ] {
             assert_eq!(count(src, SyntaxKind::LIST_EXPR), want, "{src}");
         }
@@ -3291,21 +3289,21 @@ mod tests {
         // …and a `[` that continues an expression is the subscript it has always
         // been, including one that a list literal *indexes*.
         for (src, want) in [
-            ("let v = m[key]", 1),
-            ("let v = grid[x, y]", 1),
+            ("var v = m[key]", 1),
+            ("var v = grid[x, y]", 1),
             // Chained: each link continues the whole expression before it.
-            ("let v = m[k][j]", 2),
+            ("var v = m[k][j]", 2),
             // A list literal is itself something a subscript can continue.
-            ("let v = [1, 2][0]", 1),
-            ("let v = f()[0]", 1),
+            ("var v = [1, 2][0]", 1),
+            ("var v = f()[0]", 1),
         ] {
             assert_eq!(count(src, SyntaxKind::INDEX_EXPR), want, "{src}");
         }
-        assert_eq!(count("let v = [1, 2][0]", SyntaxKind::LIST_EXPR), 1);
+        assert_eq!(count("var v = [1, 2][0]", SyntaxKind::LIST_EXPR), 1);
 
         // The empty subscript is still the error it was: a subscript selects
         // *something*, where a list may hold nothing.
-        for bad in ["let v = m[]", "let v = [1, 2", "let v = [1 2]"] {
+        for bad in ["var v = m[]", "var v = [1, 2", "var v = [1 2]"] {
             let out = parse_text(bad);
             assert!(!out.diagnostics.is_empty(), "{bad} must report");
         }
@@ -3399,13 +3397,13 @@ mod tests {
         // `min` and `max` are ordinary names everywhere else — the whole reason
         // the rule is contextual.
         for src in [
-            "let d = min(3, 4)",
-            "let d = max(abs(a), abs(b))",
-            "let m = min",
+            "var d = min(3, 4)",
+            "var d = max(abs(a), abs(b))",
+            "var m = min",
             "out(min(1, 2) + max(3, 4))",
             // …including as the receiver of a subscript, where the identifier is
             // followed by `[` and not by `=`.
-            "let v = min[0]",
+            "var v = min[0]",
         ] {
             let out = parse_text(src);
             assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
@@ -3414,7 +3412,7 @@ mod tests {
 
         // `==` is one token by max-munch, so a comparison can never be read as an
         // update, and no other identifier gets the rule.
-        for src in ["let r = d[k] == v", "let r = m[k] == 3"] {
+        for src in ["var r = d[k] == v", "var r = m[k] == 3"] {
             assert_eq!(count(src, SyntaxKind::UPDATE_OP), 0, "{src}");
         }
         let out = parse_text("d[k] mid= 3");
@@ -3543,12 +3541,12 @@ mod tests {
         // unambiguous here where a record *literal*'s is not (FE-06): a pattern
         // is followed by `=>`, never by a block.
         for (src, fields) in [
-            ("let a = match p { P { x } => x }", 1),
-            ("let a = match p { P { x, y } => x }", 2),
-            ("let a = match p { P { x: 1, y } => y }", 2),
-            ("let a = match p { P { x: q, y: r } => q }", 2),
+            ("var a = match p { P { x } => x }", 1),
+            ("var a = match p { P { x, y } => x }", 2),
+            ("var a = match p { P { x: 1, y } => y }", 2),
+            ("var a = match p { P { x: q, y: r } => q }", 2),
             // A trailing comma closes this list too (REP-17).
-            ("let a = match p { P { x, y, } => x }", 2),
+            ("var a = match p { P { x, y, } => x }", 2),
         ] {
             assert_eq!(count(src, SyntaxKind::PATTERN_FIELD), fields, "{src}");
         }
@@ -3556,12 +3554,12 @@ mod tests {
         // A tuple pattern's elements are sub-patterns, at every arity and nested.
         // The counts include the arm's own outer pattern.
         for (src, patterns) in [
-            ("let a = match t { (x, y) => x }", 3),
-            ("let a = match t { (x, y, z) => x }", 4),
-            ("let a = match t { (x, (y, z)) => x }", 5),
-            ("let a = match t { (1, _) => 0, _ => 1 }", 4),
+            ("var a = match t { (x, y) => x }", 3),
+            ("var a = match t { (x, y, z) => x }", 4),
+            ("var a = match t { (x, (y, z)) => x }", 5),
+            ("var a = match t { (1, _) => 0, _ => 1 }", 4),
             // …and a trailing comma, which is the fifteenth list (REP-17).
-            ("let a = match t { (x, y,) => x }", 3),
+            ("var a = match t { (x, y,) => x }", 3),
         ] {
             assert_eq!(count(src, SyntaxKind::PATTERN), patterns, "{src}");
         }
@@ -3569,10 +3567,10 @@ mod tests {
         // The two compose: a record field holding a tuple, a tuple element
         // holding a record, and a variant payload holding either.
         for src in [
-            "let a = match p { P { at: (x, y) } => x }",
-            "let a = match t { (P { x }, n) => x }",
-            "let a = match o { Some(P { x, y }) => x, None => 0 }",
-            "let a = match o { Some((x, y)) => x, None => 0 }",
+            "var a = match p { P { at: (x, y) } => x }",
+            "var a = match t { (P { x }, n) => x }",
+            "var a = match o { Some(P { x, y }) => x, None => 0 }",
+            "var a = match o { Some((x, y)) => x, None => 0 }",
         ] {
             let out = parse_text(src);
             assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
@@ -3581,11 +3579,11 @@ mod tests {
         // A tuple pattern must be able to *start* an arm, or the arm list stops
         // at it and every arm after it silently leaves the tree — which is what
         // `is_pattern_start` decides.
-        let out = parse_text("let a = match t { (x, y) => x\n _ => 0 }");
+        let out = parse_text("var a = match t { (x, y) => x\n _ => 0 }");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         assert_eq!(
             count(
-                "let a = match t { (x, y) => x\n _ => 0 }",
+                "var a = match t { (x, y) => x\n _ => 0 }",
                 SyntaxKind::MATCH_ARM
             ),
             2,
@@ -3596,11 +3594,11 @@ mod tests {
         // not a tuple — and a field with a `:` and nothing after it is a pattern
         // the program did not finish writing.
         for bad in [
-            "let a = match u { () => 0 }",
-            "let a = match p { P { x: } => 0 }",
-            "let a = match p { P { , x } => 0 }",
-            "let a = match p { P { x => 0 }",
-            "let a = match t { (x, => 0 }",
+            "var a = match u { () => 0 }",
+            "var a = match p { P { x: } => 0 }",
+            "var a = match p { P { , x } => 0 }",
+            "var a = match p { P { x => 0 }",
+            "var a = match t { (x, => 0 }",
         ] {
             let out = parse_text(bad);
             assert!(!out.diagnostics.is_empty(), "{bad} must report");
@@ -3615,7 +3613,7 @@ mod tests {
     /// optional, which is why it costs one arm and no new token.
     ///
     /// **Observed red with the `L_BRACE` arm removed from `parse_pattern`**:
-    /// `let a = match p { {x} => x }` reports six diagnostics — "expected a
+    /// `var a = match p { {x} => x }` reports six diagnostics — "expected a
     /// pattern" at the `{`, then "expected `=>` in match arm, found unexpected
     /// token", then four more as the statement list picks up the wreckage.
     /// **Observed red with `L_BRACE` removed from `is_pattern_start` only**: the
@@ -3637,11 +3635,11 @@ mod tests {
         // The fields are the headed form's, unchanged — punned, explicit, mixed,
         // and with REP-17's trailing comma.
         for (src, fields) in [
-            ("let a = match p { {x} => x }", 1),
-            ("let a = match p { {x, y} => x }", 2),
-            ("let a = match p { {x: 1, y} => y }", 2),
-            ("let a = match p { {x: q, y: r} => q }", 2),
-            ("let a = match p { {x, y,} => x }", 2),
+            ("var a = match p { {x} => x }", 1),
+            ("var a = match p { {x, y} => x }", 2),
+            ("var a = match p { {x: 1, y} => y }", 2),
+            ("var a = match p { {x: q, y: r} => q }", 2),
+            ("var a = match p { {x, y,} => x }", 2),
         ] {
             assert_eq!(count(src, SyntaxKind::PATTERN_FIELD), fields, "{src}");
         }
@@ -3651,11 +3649,11 @@ mod tests {
         // needs), in a tuple, in a `for` header (REP-25), and as a closure
         // parameter.
         for src in [
-            "let a = match m { Mul({x, y}) => x, Do(_) => 0 }",
-            "let a = match t { ({x}, n) => x }",
-            "let a = match p { {at: (x, y)} => x }",
+            "var a = match m { Mul({x, y}) => x, Do(_) => 0 }",
+            "var a = match t { ({x}, n) => x }",
+            "var a = match p { {at: (x, y)} => x }",
             "for {x, y} in ps { out(x) }",
-            "let f = |{x, y}| x + y",
+            "var f = |{x, y}| x + y",
         ] {
             let out = parse_text(src);
             assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
@@ -3668,7 +3666,7 @@ mod tests {
         // `is_pattern_start`.
         assert_eq!(
             count(
-                "let a = match p { _ => 0\n {x, y} => x }",
+                "var a = match p { _ => 0\n {x, y} => x }",
                 SyntaxKind::MATCH_ARM
             ),
             2,
@@ -3679,7 +3677,7 @@ mod tests {
         // Decision 3): it binds nothing and names no record, so it is an
         // irrefutable arm written by accident. The pattern that matches
         // everything is spelled `_`.
-        let out = parse_text("let a = match p { {} => 0 }");
+        let out = parse_text("var a = match p { {} => 0 }");
         assert!(
             out.diagnostics
                 .iter()
@@ -3690,7 +3688,7 @@ mod tests {
 
         // …but a *headed* `P {}` is kept: it names the record it tests for, so it
         // is refutable — `Some` beside `Some(_)`.
-        let out = parse_text("let a = match p { P {} => 0 }");
+        let out = parse_text("var a = match p { P {} => 0 }");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
     }
 
@@ -3715,14 +3713,14 @@ mod tests {
 
         // The reproduction: three arms, and all three are in the tree. A `10(a,
         // b)` call would leave one arm and one `CALL_EXPR`.
-        let arms = "let r = match p {\n    (0, 0) => 10\n    (a, b) => a + b\n    _ => 0\n}";
+        let arms = "var r = match p {\n    (0, 0) => 10\n    (a, b) => a + b\n    _ => 0\n}";
         assert_eq!(count(arms, SyntaxKind::MATCH_ARM), 3);
         assert_eq!(count(arms, SyntaxKind::CALL_EXPR), 0);
 
         // The same shape after every kind of arm body a `(` could attach itself
         // to — a name, a call, a subscript, a field read, a block.
         for body in ["n", "f(1)", "m[k]", "p.x", "{ 0 }"] {
-            let src = format!("let r = match p {{\n    _ => {body}\n    (a, b) => 1\n}}");
+            let src = format!("var r = match p {{\n    _ => {body}\n    (a, b) => 1\n}}");
             assert_eq!(count(&src, SyntaxKind::MATCH_ARM), 2, "{src}");
         }
 
@@ -3730,36 +3728,36 @@ mod tests {
         // `(` still opens an argument list, through every callee shape — a name,
         // a call's result, a subscript's, a paren, a closure.
         for src in [
-            "let a = f(1)",
-            "let a = f(1)(2)",
-            "let a = m[k](7)",
-            "let a = (g)(3)",
-            "let a = (|x| x * 3)(14)",
-            "let a = fs.get(0)(100)",
+            "var a = f(1)",
+            "var a = f(1)(2)",
+            "var a = m[k](7)",
+            "var a = (g)(3)",
+            "var a = (|x| x * 3)(14)",
+            "var a = fs.get(0)(100)",
         ] {
             assert!(count(src, SyntaxKind::CALL_EXPR) >= 1, "{src}");
         }
 
         // A `[` is subject to the same rule, and it was not until a list literal
         // began with one. `m\n[k]` is a binding and a list now, not a subscript.
-        let sub = "let a = m\n[k]";
+        let sub = "var a = m\n[k]";
         assert_eq!(count(sub, SyntaxKind::INDEX_EXPR), 0);
         assert_eq!(count(sub, SyntaxKind::LIST_EXPR), 1);
-        assert_eq!(count(sub, SyntaxKind::LET_STMT), 1);
+        assert_eq!(count(sub, SyntaxKind::VAR_STMT), 1);
         // On one line it is the subscript it has always been.
-        assert_eq!(count("let a = m[k]", SyntaxKind::INDEX_EXPR), 1);
-        assert_eq!(count("let a = m[k]", SyntaxKind::LIST_EXPR), 0);
+        assert_eq!(count("var a = m[k]", SyntaxKind::INDEX_EXPR), 1);
+        assert_eq!(count("var a = m[k]", SyntaxKind::LIST_EXPR), 0);
 
         // Nor is the Pratt loop (ADR-049 D8): an operator that ends a line still
         // continues across it, and so does a `.method()` chain.
-        assert_eq!(count("let a = 1 +\n2", SyntaxKind::BIN_EXPR), 1);
+        assert_eq!(count("var a = 1 +\n2", SyntaxKind::BIN_EXPR), 1);
         assert_eq!(
-            count("let a = v\n  .len()", SyntaxKind::METHOD_CALL_EXPR),
+            count("var a = v\n  .len()", SyntaxKind::METHOD_CALL_EXPR),
             1
         );
         assert_eq!(
             count(
-                "let a = v\n  .map(f)\n  .sum()",
+                "var a = v\n  .map(f)\n  .sum()",
                 SyntaxKind::METHOD_CALL_EXPR
             ),
             2
@@ -3767,21 +3765,21 @@ mod tests {
 
         // A `(` that *opens* an expression is untouched wherever it appears —
         // only a `(` asked to continue one is.
-        assert_eq!(count("let a = 1\n(b, c)", SyntaxKind::TUPLE_EXPR), 1);
-        assert_eq!(count("let a = 1\n(b, c)", SyntaxKind::LET_STMT), 1);
-        assert_eq!(count("let a = 1\n(b + c) * 2", SyntaxKind::PAREN_EXPR), 1);
+        assert_eq!(count("var a = 1\n(b, c)", SyntaxKind::TUPLE_EXPR), 1);
+        assert_eq!(count("var a = 1\n(b, c)", SyntaxKind::VAR_STMT), 1);
+        assert_eq!(count("var a = 1\n(b + c) * 2", SyntaxKind::PAREN_EXPR), 1);
 
         // …and a `for` binding is the second place REP-10's tuple pattern made a
         // line-leading `(` reachable (REP-25).
         assert_eq!(
-            count("let a = 1\nfor (k, v) in m { }", SyntaxKind::FOR_EXPR),
+            count("var a = 1\nfor (k, v) in m { }", SyntaxKind::FOR_EXPR),
             1
         );
 
         // The cost, stated as a test rather than left to be discovered: a callee
         // that ends a line and an argument list that begins the next are two
         // expressions, so this is two statements and not one call.
-        let split = "let a = f\n(1)";
+        let split = "var a = f\n(1)";
         assert_eq!(count(split, SyntaxKind::CALL_EXPR), 0);
         assert_eq!(count(split, SyntaxKind::PAREN_EXPR), 1);
     }
@@ -3789,7 +3787,7 @@ mod tests {
     /// **REP-30.** `||` is an empty parameter list where an expression must begin,
     /// and logical-or everywhere else.
     ///
-    /// §4.2's shadowing example is `let show_old = || out(a)`, and it was
+    /// §4.2's shadowing example is `var show_old = || out(a)`, and it was
     /// `P001: expected an expression` at the `||` plus a cascading `P002`: REP-07
     /// made `||` one token, and only a bare `PIPE` reached `parse_closure`.
     #[test]
@@ -3807,14 +3805,14 @@ mod tests {
         // expression begins: a binding, an argument, a block tail, a `return`, an
         // operand of the very operator it is spelled like, and its own body.
         for src in [
-            "let show_old = || out(a)",
-            "let f = || 5",
+            "var show_old = || out(a)",
+            "var f = || 5",
             "out(|| 5)",
             "fn g() { || 5 }",
             "fn g() { return || 5 }",
-            "let f = a || || 5",
-            "let f = || || 7",
-            "let f = if p { || 1 } else { || 2 }",
+            "var f = a || || 5",
+            "var f = || || 7",
+            "var f = if p { || 1 } else { || 2 }",
         ] {
             assert!(count(src, SyntaxKind::CLOSURE_EXPR) >= 1, "{src}");
             assert_eq!(count(src, SyntaxKind::PARAM), 0, "{src}");
@@ -3822,32 +3820,32 @@ mod tests {
 
         // `| |` with a space is the same closure — the two spellings differ only
         // in how the lexer munched them.
-        assert_eq!(count("let f = | | 5", SyntaxKind::CLOSURE_EXPR), 1);
+        assert_eq!(count("var f = | | 5", SyntaxKind::CLOSURE_EXPR), 1);
 
         // The other direction: between two operands `||` is still logical-or, and
         // nothing about its precedence moved (REP-07 put it at the bottom, below
         // `..` and `&&`).
-        assert_eq!(count("let a = p || q", SyntaxKind::BIN_EXPR), 1);
-        assert_eq!(count("let a = p || q", SyntaxKind::CLOSURE_EXPR), 0);
+        assert_eq!(count("var a = p || q", SyntaxKind::BIN_EXPR), 1);
+        assert_eq!(count("var a = p || q", SyntaxKind::CLOSURE_EXPR), 0);
         assert_eq!(
-            shape("let a = p || q && r"),
-            shape("let a = p || (q && r)"),
+            shape("var a = p || q && r"),
+            shape("var a = p || (q && r)"),
             "`&&` still binds tighter than `||`"
         );
         assert_eq!(
-            shape("let a = p == q || r == s"),
-            shape("let a = (p == q) || (r == s)"),
+            shape("var a = p == q || r == s"),
+            shape("var a = (p == q) || (r == s)"),
             "comparison still binds tighter than `||`"
         );
         assert_eq!(
-            shape("let a = p || q || r"),
-            shape("let a = (p || q) || r"),
+            shape("var a = p || q || r"),
+            shape("var a = (p || q) || r"),
             "`||` is still left-associative"
         );
 
         // A one-parameter closure is untouched, which is what says the new arm
         // only fires on the two-pipe token.
-        assert_eq!(count("let f = |x| x", SyntaxKind::PARAM), 1);
+        assert_eq!(count("var f = |x| x", SyntaxKind::PARAM), 1);
     }
 
     /// **REP-29.** A closure parameter is a pattern, not a bare name.
@@ -3870,7 +3868,7 @@ mod tests {
         // Appendix D's own line.
         assert_eq!(
             count(
-                "let d = left.zip(right).map(|(a, b)| abs(a - b)).sum()",
+                "var d = left.zip(right).map(|(a, b)| abs(a - b)).sum()",
                 SyntaxKind::CLOSURE_EXPR
             ),
             1
@@ -3879,15 +3877,15 @@ mod tests {
         // The shapes, and the pattern count each holds: the parameter's own, plus
         // one per element or nested field.
         for (src, params, patterns) in [
-            ("let f = |x| x", 1, 1),
-            ("let f = |_| 0", 1, 1),
-            ("let f = |(a, b)| a", 1, 3),
-            ("let f = |(a, (b, c))| a", 1, 5),
-            ("let f = |P { x, y }| x", 1, 1),
-            ("let f = |P { at: (x, y) }| x", 1, 4),
-            ("let f = |(a, b), c| a", 2, 4),
-            ("let f = |a, (b, c)| a", 2, 4),
-            ("let f = | | 0", 0, 0),
+            ("var f = |x| x", 1, 1),
+            ("var f = |_| 0", 1, 1),
+            ("var f = |(a, b)| a", 1, 3),
+            ("var f = |(a, (b, c))| a", 1, 5),
+            ("var f = |P { x, y }| x", 1, 1),
+            ("var f = |P { at: (x, y) }| x", 1, 4),
+            ("var f = |(a, b), c| a", 2, 4),
+            ("var f = |a, (b, c)| a", 2, 4),
+            ("var f = | | 0", 0, 0),
         ] {
             assert_eq!(count(src, SyntaxKind::PARAM), params, "{src}");
             assert_eq!(count(src, SyntaxKind::PATTERN), patterns, "{src}");
@@ -3897,24 +3895,24 @@ mod tests {
         // A pattern parameter still takes an annotation, and the annotation is the
         // whole argument's — the `:` is what ends the pattern.
         assert_eq!(
-            count("let f = |(a, b): (Int, Int)| a", SyntaxKind::TUPLE_TYPE),
+            count("var f = |(a, b): (Int, Int)| a", SyntaxKind::TUPLE_TYPE),
             1
         );
-        assert_eq!(count("let f = |x: Int| x", SyntaxKind::TYPE_REF), 1);
+        assert_eq!(count("var f = |x: Int| x", SyntaxKind::TYPE_REF), 1);
 
         // A trailing comma still closes the list (REP-17), and a record pattern's
         // brace is not read as anything else: a parameter is followed by `,`, `:`
         // or `|`, never by an expression.
-        for src in ["let f = |(a, b),| a", "let f = |P { x }| P { x: x }"] {
+        for src in ["var f = |(a, b),| a", "var f = |P { x }| P { x: x }"] {
             assert_eq!(count(src, SyntaxKind::CLOSURE_EXPR), 1, "{src}");
         }
 
         // The malformed shapes still report.
         for bad in [
-            "let f = |(a, | a",
-            "let f = |(| a",
-            "let f = |+| a",
-            "let f = |a, | ",
+            "var f = |(a, | a",
+            "var f = |(| a",
+            "var f = |+| a",
+            "var f = |a, | ",
         ] {
             let out = parse_text(bad);
             assert!(!out.diagnostics.is_empty(), "{bad} must report");

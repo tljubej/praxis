@@ -97,9 +97,9 @@
 //!
 //! What blocks the rule now is not a lowering gap at all — it is that `Opaque`
 //! is a **legal answer**. A type that is still an inference variable has no
-//! descriptor and never will: `let m = Map()` generalizes at the `let`, so a
+//! descriptor and never will: `var m = Map()` generalizes at the `var`, so a
 //! `for kv in m` whose body never opens the pair leaves K and V unresolved, and
-//! `let v = Vec()` with no push leaves a chain over it the same way. ADR-066
+//! `var v = Vec()` with no push leaves a chain over it the same way. ADR-066
 //! decision 5 answers that with a **null schema slot** and a runtime read of the
 //! value's own header, which is never the wrong descriptor. A rule that refused
 //! `Opaque` outright would reject those programs.
@@ -949,7 +949,7 @@ mod tests {
 
     /// **MIR has no def-dominates-use rule, and that is deliberate** (ADR-015:
     /// MIR is slot-based, not SSA). An `Alloc` in one block whose result is read
-    /// in another verifies — which is exactly what every `let` already produces,
+    /// in another verifies — which is exactly what every `var` already produces,
     /// and what a future loop-invariant hoisting pass would need.
     ///
     /// Written down as a test rather than left as an absence, because "the
@@ -1257,7 +1257,7 @@ mod tests {
         assert_eq!(verify(&f), Ok(()));
     }
 
-    /// The proof survives the copy a `let` or an `Assign` lowers to, which is
+    /// The proof survives the copy a `var` or an `Assign` lowers to, which is
     /// what makes the rule reach a *user variable* at all: `TypedExpr::Path`
     /// hands back the binding's slot, so every read of one is an
     /// `ExtractScalar` whose `src` is `MoveGc`-defined (handover 27 §5).

@@ -58,18 +58,18 @@ fn every_runtime_symbol_mir_emits_is_registered() {
         "struct P { x: Int, y: Int }\n",
         "enum E { A, B(Int) }\n",
         "fn main() -> Int {\n",
-        "  let v = Vec()\n  v.push(1)\n  v.push(2)\n",
-        "  let m = Map()\n  m.insert(\"k\", 1)\n",
-        "  let s = Set()\n  s.insert(3)\n",
-        "  let d = Deque()\n  d.push_back(4)\n",
-        "  let c = Counter()\n  c.inc(5)\n",
-        "  let t = (1, 2)\n",
-        "  let p = P { x: 1, y: 2 }\n",
-        "  let e = B(7)\n",
-        "  let f = |z| z + 1\n",
-        "  let b = BitSet()\n  b.insert(6)\n",
-        "  let mh = MinHeap()\n  mh.push(7)\n",
-        "  let xh = MaxHeap()\n  xh.push(8)\n",
+        "  var v = Vec()\n  v.push(1)\n  v.push(2)\n",
+        "  var m = Map()\n  m.insert(\"k\", 1)\n",
+        "  var s = Set()\n  s.insert(3)\n",
+        "  var d = Deque()\n  d.push_back(4)\n",
+        "  var c = Counter()\n  c.inc(5)\n",
+        "  var t = (1, 2)\n",
+        "  var p = P { x: 1, y: 2 }\n",
+        "  var e = B(7)\n",
+        "  var f = |z| z + 1\n",
+        "  var b = BitSet()\n  b.insert(6)\n",
+        "  var mh = MinHeap()\n  mh.push(7)\n",
+        "  var xh = MaxHeap()\n  xh.push(8)\n",
         "  var acc = 0\n",
         "  for x in v { acc = acc + f(x) }\n",
         // Every snapshot symbol REP-15's `IterPlan` can select — a `for` is the
@@ -80,7 +80,7 @@ fn every_runtime_symbol_mir_emits_is_registered() {
         "  for x in xh { acc = acc + x }\n",
         "  for kv in m { acc = acc + kv.1 }\n",
         "  for kv in c { acc = acc + kv.1 }\n",
-        "  let txt = \"hi\"\n",
+        "  var txt = \"hi\"\n",
         "  out(txt.len())\n",
         // A `Text` is the eleventh iterable, and the only one that is not a
         // collection: its plan names `praxis_text_len`/`praxis_text_get`.
@@ -88,7 +88,7 @@ fn every_runtime_symbol_mir_emits_is_registered() {
         // A list literal, which emits a `Vec` allocation plus one
         // `praxis_vec_push` per element.
         "  for x in [1, 2] { acc = acc + x }\n",
-        "  let fl = 1.5\n  out(fl.sqrt())\n",
+        "  var fl = 1.5\n  out(fl.sqrt())\n",
         "  acc + p.x + m.len() + s.len() + d.len() + c.len()\n",
         "}\n"
     );
@@ -234,11 +234,11 @@ fn a_digit_separator_does_not_change_the_number() {
         ),
         // Pattern position: the arm matches the value the expression wrote.
         (
-            "fn main() -> Int { let n = 1_000\n match n { 1_000 => 7, _ => 0 } }",
+            "fn main() -> Int { var n = 1_000\n match n { 1_000 => 7, _ => 0 } }",
             7,
         ),
         (
-            "fn main() -> Int { let n = 1000\n match n { 1_0_0 => 1, 1_000 => 7, _ => 0 } }",
+            "fn main() -> Int { var n = 1000\n match n { 1_0_0 => 1, 1_000 => 7, _ => 0 } }",
             7,
         ),
     ] {
@@ -278,7 +278,7 @@ fn runs_float_arithmetic_precedence() {
 fn runs_float_chained_multiplication_of_variables() {
     // `(a * b) * c` where all are float variables — the lowering must read the
     // operands' resolved TypeData (not compare Type indices) to keep this Float.
-    let src = "fn main() -> Float { let a = 1.5; let b = 2.0; let c = 3.0; a * b * c }";
+    let src = "fn main() -> Float { var a = 1.5; var b = 2.0; var c = 3.0; a * b * c }";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault());
     assert!((result.as_float() - 9.0).abs() < 1e-12);
@@ -316,7 +316,7 @@ fn float_zero_div_zero_is_nan_not_fault() {
 #[test]
 fn float_nan_is_not_equal_to_itself() {
     // IEEE-754: NaN != NaN. The comparison uses FloatCC, giving this for free.
-    let (rt, result) = run_main("fn main() -> Bool { let x = 0.0/0.0; x == x }");
+    let (rt, result) = run_main("fn main() -> Bool { var x = 0.0/0.0; x == x }");
     assert!(!rt.has_pending_fault());
     assert!(!result.as_bool());
 }
@@ -515,14 +515,14 @@ fn adv_int_min_mod_neg_one_overflows() {
 fn the_overflow_alternatives_answer_where_a_checked_add_faults() {
     // MAX = 9223372036854775807. Wrapping lands on MIN; adding MAX back and one
     // more brings it to 0, which is a number the harness can compare.
-    let src = "fn main() -> Int {\n  let m = 9223372036854775807\n  \
+    let src = "fn main() -> Int {\n  var m = 9223372036854775807\n  \
                m.wrapping_add(1) + m + 1\n}";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "wrapping_add must not fault");
     assert_eq!(result.as_int(), 0, "MAX.wrapping_add(1) is MIN");
 
     // Saturating stays at MAX, so subtracting MAX is zero.
-    let src = "fn main() -> Int {\n  let m = 9223372036854775807\n  \
+    let src = "fn main() -> Int {\n  var m = 9223372036854775807\n  \
                m.saturating_add(1) - m\n}";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "saturating_add must not fault");
@@ -530,7 +530,7 @@ fn the_overflow_alternatives_answer_where_a_checked_add_faults() {
 
     // `checked_add` answers an `Option[Int]` — a real one (ADR-076), so a
     // `match` reaches inside it. `None` on overflow, `Some` below it.
-    let src = "fn main() -> Int {\n  let m = 9223372036854775807\n  \
+    let src = "fn main() -> Int {\n  var m = 9223372036854775807\n  \
                match m.checked_add(1) { Some(n) => n\n None => 7 }\n}";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "checked_add must not fault");
@@ -558,20 +558,20 @@ fn the_overflow_alternatives_answer_where_a_checked_add_faults() {
 #[test]
 fn the_sub_alternatives_answer_where_a_checked_sub_faults() {
     // MIN.wrapping_sub(1) is MAX, so subtracting MAX is 0.
-    let src = "fn main() -> Int {\n  let m = -9223372036854775807 - 1\n  \
+    let src = "fn main() -> Int {\n  var m = -9223372036854775807 - 1\n  \
                m.wrapping_sub(1) - 9223372036854775807\n}";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "wrapping_sub must not fault");
     assert_eq!(result.as_int(), 0, "MIN.wrapping_sub(1) is MAX");
 
     // Saturating stays at MIN, so subtracting MIN is 0.
-    let src = "fn main() -> Int {\n  let m = -9223372036854775807 - 1\n  \
+    let src = "fn main() -> Int {\n  var m = -9223372036854775807 - 1\n  \
                m.saturating_sub(1) - m\n}";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "saturating_sub must not fault");
     assert_eq!(result.as_int(), 0, "MIN.saturating_sub(1) is MIN");
 
-    let src = "fn main() -> Int {\n  let m = -9223372036854775807 - 1\n  \
+    let src = "fn main() -> Int {\n  var m = -9223372036854775807 - 1\n  \
                match m.checked_sub(1) { Some(n) => n\n None => 7 }\n}";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "checked_sub must not fault");
@@ -633,7 +633,7 @@ fn the_mul_alternatives_answer_where_a_checked_mul_faults() {
 /// the wrong place.
 #[test]
 fn counter_inc_at_the_int_ceiling_faults_rather_than_wrapping() {
-    let src = "fn main() -> Int {\n  let c = Counter()\n  c[\"k\"] = 9223372036854775807\n  \
+    let src = "fn main() -> Int {\n  var c = Counter()\n  c[\"k\"] = 9223372036854775807\n  \
                c.inc(\"k\")\n  c[\"k\"]\n}";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault(), "inc past i64::MAX should fault");
@@ -648,7 +648,7 @@ fn counter_inc_at_the_int_ceiling_faults_rather_than_wrapping() {
 /// among the block's gates.
 #[test]
 fn counter_inc_below_the_ceiling_still_counts() {
-    let src = "fn main() -> Int {\n  let c = Counter()\n  c[\"k\"] = 9223372036854775806\n  \
+    let src = "fn main() -> Int {\n  var c = Counter()\n  c[\"k\"] = 9223372036854775806\n  \
                c.inc(\"k\")\n  c.inc(\"fresh\")\n  c[\"k\"] - 9223372036854775806 + c[\"fresh\"]\n}";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "no overflow here");
@@ -820,7 +820,7 @@ fn main() -> Int { fib(20) }
 #[test]
 fn vec_push_and_len_end_to_end() {
     // The headline M5 vertical slice: construct a Vec, push values, read len.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "no fault expected");
     assert_eq!(result.as_int(), 3);
@@ -829,7 +829,7 @@ fn vec_push_and_len_end_to_end() {
 #[test]
 fn vec_get_reads_back_elements() {
     // Push 10, 20, 30; get index 1 → 20.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.get(1)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.get(1)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 20);
@@ -838,7 +838,7 @@ fn vec_get_reads_back_elements() {
 #[test]
 fn vec_get_out_of_bounds_faults() {
     // Accessing index 0 of an empty vector faults IndexOutOfBounds.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.get(0)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.get(0)\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault(), "OOB should fault");
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IndexOutOfBounds);
@@ -849,7 +849,7 @@ fn vec_push_many_with_collection_during_growth() {
     // Push 500 elements (forcing many GCs during growth), check length.
     // This exercises both the method surface and the shadow-stack spill: the
     // vector `v` must survive across every push's allocation + collection.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 500 { v.push(i); i = i + 1 }\n  v.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 500 { v.push(i); i = i + 1 }\n  v.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 500);
@@ -860,7 +860,7 @@ fn vec_push_many_read_back_correct() {
     // Push 500 elements and read back the last (index 499 = value 499). This is
     // a stricter test of the shadow-stack spill: the vec's *contents* must
     // survive across every collection, not just the vec object itself.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 500 { v.push(i); i = i + 1 }\n  v.get(499)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 500 { v.push(i); i = i + 1 }\n  v.get(499)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 499);
@@ -876,7 +876,7 @@ fn vec_of_vec_equality_after_construction() {
     // `VEC`, not the null/INT default), so nested equality dispatches through
     // `vec_equals` on the inner elements. This is the headline M7-carryover
     // fix for M8-WS1.
-    let src = "fn main() -> Int {\n  let outer_a = Vec()\n  let inner_a = Vec()\n  inner_a.push(1)\n  inner_a.push(2)\n  outer_a.push(inner_a)\n  let outer_b = Vec()\n  let inner_b = Vec()\n  inner_b.push(1)\n  inner_b.push(2)\n  outer_b.push(inner_b)\n  if outer_a == outer_b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var outer_a = Vec()\n  var inner_a = Vec()\n  inner_a.push(1)\n  inner_a.push(2)\n  outer_a.push(inner_a)\n  var outer_b = Vec()\n  var inner_b = Vec()\n  inner_b.push(1)\n  inner_b.push(2)\n  outer_b.push(inner_b)\n  if outer_a == outer_b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -888,7 +888,7 @@ fn vec_of_vec_inequality_after_construction() {
     // vectors must be structurally unequal. Guards a regression where the
     // element descriptor defaulted to INT (which would compare only lengths or
     // mis-dispatch and could spuriously report equal).
-    let src = "fn main() -> Int {\n  let outer_a = Vec()\n  let inner_a = Vec()\n  inner_a.push(1)\n  inner_a.push(2)\n  outer_a.push(inner_a)\n  let outer_b = Vec()\n  let inner_b = Vec()\n  inner_b.push(1)\n  inner_b.push(9)\n  outer_b.push(inner_b)\n  if outer_a == outer_b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var outer_a = Vec()\n  var inner_a = Vec()\n  inner_a.push(1)\n  inner_a.push(2)\n  outer_a.push(inner_a)\n  var outer_b = Vec()\n  var inner_b = Vec()\n  inner_b.push(1)\n  inner_b.push(9)\n  outer_b.push(inner_b)\n  if outer_a == outer_b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -899,7 +899,7 @@ fn vec_of_vec_inequality_after_construction() {
 #[test]
 fn deque_push_back_and_len_end_to_end() {
     // Construct a Deque, push_back three values, read len → 3.
-    let src = "fn main() -> Int {\n  let d = Deque()\n  d.push_back(1)\n  d.push_back(2)\n  d.push_back(3)\n  d.len()\n}\n";
+    let src = "fn main() -> Int {\n  var d = Deque()\n  d.push_back(1)\n  d.push_back(2)\n  d.push_back(3)\n  d.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -909,7 +909,7 @@ fn deque_push_back_and_len_end_to_end() {
 fn deque_push_front_yields_fifo_order() {
     // push_front(1), push_front(2), push_front(3) → front-to-back is [3,2,1].
     // pop_front returns 3 (the last pushed), proving FIFO-from-front semantics.
-    let src = "fn main() -> Int {\n  let d = Deque()\n  d.push_front(1)\n  d.push_front(2)\n  d.push_front(3)\n  d.pop_front()\n}\n";
+    let src = "fn main() -> Int {\n  var d = Deque()\n  d.push_front(1)\n  d.push_front(2)\n  d.push_front(3)\n  d.pop_front()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -918,7 +918,7 @@ fn deque_push_front_yields_fifo_order() {
 #[test]
 fn deque_push_back_pop_front_is_fifo() {
     // push_back then pop_front is a classic FIFO queue: 1,2,3 in → 1 out first.
-    let src = "fn main() -> Int {\n  let d = Deque()\n  d.push_back(1)\n  d.push_back(2)\n  d.push_back(3)\n  d.pop_front()\n}\n";
+    let src = "fn main() -> Int {\n  var d = Deque()\n  d.push_back(1)\n  d.push_back(2)\n  d.push_back(3)\n  d.pop_front()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -927,7 +927,7 @@ fn deque_push_back_pop_front_is_fifo() {
 #[test]
 fn deque_push_front_pop_back_is_lifo() {
     // push_front then pop_back is LIFO: 1,2,3 pushed to front → pop_back gives 1.
-    let src = "fn main() -> Int {\n  let d = Deque()\n  d.push_front(1)\n  d.push_front(2)\n  d.push_front(3)\n  d.pop_back()\n}\n";
+    let src = "fn main() -> Int {\n  var d = Deque()\n  d.push_front(1)\n  d.push_front(2)\n  d.push_front(3)\n  d.pop_back()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -936,7 +936,7 @@ fn deque_push_front_pop_back_is_lifo() {
 #[test]
 fn deque_get_indexes_from_front() {
     // push_back 10,20,30 → get(0)=10, get(2)=30 (0-based from the front).
-    let src = "fn main() -> Int {\n  let d = Deque()\n  d.push_back(10)\n  d.push_back(20)\n  d.push_back(30)\n  d.get(2)\n}\n";
+    let src = "fn main() -> Int {\n  var d = Deque()\n  d.push_back(10)\n  d.push_back(20)\n  d.push_back(30)\n  d.get(2)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 30);
@@ -945,7 +945,7 @@ fn deque_get_indexes_from_front() {
 #[test]
 fn deque_pop_front_on_empty_faults() {
     // Popping an empty deque faults EmptyCollection.
-    let src = "fn main() -> Int {\n  let d = Deque()\n  d.pop_front()\n}\n";
+    let src = "fn main() -> Int {\n  var d = Deque()\n  d.pop_front()\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault(), "empty pop should fault");
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyCollection);
@@ -953,7 +953,7 @@ fn deque_pop_front_on_empty_faults() {
 
 #[test]
 fn deque_pop_back_on_empty_faults() {
-    let src = "fn main() -> Int {\n  let d = Deque()\n  d.pop_back()\n}\n";
+    let src = "fn main() -> Int {\n  var d = Deque()\n  d.pop_back()\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault(), "empty pop should fault");
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyCollection);
@@ -962,7 +962,7 @@ fn deque_pop_back_on_empty_faults() {
 #[test]
 fn deque_is_empty_true_then_false() {
     // An empty deque is_empty → 1; after a push it is not → 0.
-    let src = "fn main() -> Int {\n  let d = Deque()\n  if d.is_empty() { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var d = Deque()\n  if d.is_empty() { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -971,7 +971,7 @@ fn deque_is_empty_true_then_false() {
 #[test]
 fn deque_drained_is_empty() {
     // Push one, pop one → empty again.
-    let src = "fn main() -> Int {\n  let d = Deque()\n  d.push_back(7)\n  let _ = d.pop_front()\n  if d.is_empty() { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var d = Deque()\n  d.push_back(7)\n  var _ = d.pop_front()\n  if d.is_empty() { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -980,7 +980,7 @@ fn deque_drained_is_empty() {
 #[test]
 fn deque_equality_is_structural() {
     // Two deques with the same elements in the same order are equal.
-    let src = "fn main() -> Int {\n  let a = Deque()\n  a.push_back(1)\n  a.push_back(2)\n  let b = Deque()\n  b.push_back(1)\n  b.push_back(2)\n  if a == b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var a = Deque()\n  a.push_back(1)\n  a.push_back(2)\n  var b = Deque()\n  b.push_back(1)\n  b.push_back(2)\n  if a == b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -994,7 +994,7 @@ fn deque_equality_is_structural() {
 fn map_insert_get_len_end_to_end() {
     // Insert two (Int→Int) entries, get one back, check len.
     let src =
-        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  m.insert(2, 20)\n  m.len()\n}\n";
+        "fn main() -> Int {\n  var m = Map()\n  m.insert(1, 10)\n  m.insert(2, 20)\n  m.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -1002,7 +1002,7 @@ fn map_insert_get_len_end_to_end() {
 
 #[test]
 fn map_get_returns_inserted_value() {
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(7, 42)\n  m[7]\n}\n";
+    let src = "fn main() -> Int {\n  var m = Map()\n  m.insert(7, 42)\n  m[7]\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
@@ -1020,13 +1020,13 @@ fn map_get_returns_inserted_value() {
 fn an_absent_map_get_answers_none_and_a_present_one_answers_some() {
     let unwrap = "fn unwrap(o: Option[Int]) -> Int {\n  match o {\n    Some(v) => v,\n    None => 0 - 1,\n  }\n}\n";
     let (rt, result) = run_main(&format!(
-        "{unwrap}fn main() -> Int {{\n  let m = Map()\n  m.insert(1, 10)\n  unwrap(m.get(99))\n}}\n"
+        "{unwrap}fn main() -> Int {{\n  var m = Map()\n  m.insert(1, 10)\n  unwrap(m.get(99))\n}}\n"
     ));
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), -1, "an absent key is `None`");
 
     let (rt, result) = run_main(&format!(
-        "{unwrap}fn main() -> Int {{\n  let m = Map()\n  m.insert(1, 10)\n  unwrap(m.get(1))\n}}\n"
+        "{unwrap}fn main() -> Int {{\n  var m = Map()\n  m.insert(1, 10)\n  unwrap(m.get(1))\n}}\n"
     ));
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 10, "a present key is `Some(value)`");
@@ -1034,7 +1034,7 @@ fn an_absent_map_get_answers_none_and_a_present_one_answers_some() {
 
 #[test]
 fn map_contains_distinguishes_present_and_absent() {
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(5, 1)\n  if m.contains(5) { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var m = Map()\n  m.insert(5, 1)\n  if m.contains(5) { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1042,7 +1042,7 @@ fn map_contains_distinguishes_present_and_absent() {
 
 #[test]
 fn map_remove_drops_entry() {
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  m.insert(2, 20)\n  m.remove(1)\n  m.len()\n}\n";
+    let src = "fn main() -> Int {\n  var m = Map()\n  m.insert(1, 10)\n  m.insert(2, 20)\n  m.remove(1)\n  m.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1051,7 +1051,7 @@ fn map_remove_drops_entry() {
 #[test]
 fn map_insert_overwrites_prior_value() {
     let src =
-        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  m.insert(1, 99)\n  m[1]\n}\n";
+        "fn main() -> Int {\n  var m = Map()\n  m.insert(1, 10)\n  m.insert(1, 99)\n  m[1]\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 99);
@@ -1061,7 +1061,7 @@ fn map_insert_overwrites_prior_value() {
 fn map_with_tuple_keys_end_to_end() {
     // The headline §19.7 criterion: tuples as map keys. Two structurally-equal
     // tuples must hit the same entry.
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert((1, 2), 100)\n  m[(1, 2)]\n}\n";
+    let src = "fn main() -> Int {\n  var m = Map()\n  m.insert((1, 2), 100)\n  m[(1, 2)]\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 100);
@@ -1070,7 +1070,7 @@ fn map_with_tuple_keys_end_to_end() {
 #[test]
 fn map_with_distinct_tuple_keys() {
     // (1,2) and (1,3) are distinct keys.
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert((1, 2), 100)\n  m.insert((1, 3), 200)\n  m.len()\n}\n";
+    let src = "fn main() -> Int {\n  var m = Map()\n  m.insert((1, 2), 100)\n  m.insert((1, 3), 200)\n  m.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -1079,7 +1079,7 @@ fn map_with_distinct_tuple_keys() {
 #[test]
 fn map_with_text_keys_end_to_end() {
     // Text keys: two equal strings hit the same entry.
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"hello\", 1)\n  m[\"hello\"]\n}\n";
+    let src = "fn main() -> Int {\n  var m = Map()\n  m.insert(\"hello\", 1)\n  m[\"hello\"]\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1087,7 +1087,7 @@ fn map_with_text_keys_end_to_end() {
 
 #[test]
 fn set_insert_contains_len_end_to_end() {
-    let src = "fn main() -> Int {\n  let s = Set()\n  s.insert(1)\n  s.insert(2)\n  s.insert(1)\n  s.len()\n}\n";
+    let src = "fn main() -> Int {\n  var s = Set()\n  s.insert(1)\n  s.insert(2)\n  s.insert(1)\n  s.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // Duplicate insert (1 twice) → 2 distinct elements.
@@ -1096,7 +1096,7 @@ fn set_insert_contains_len_end_to_end() {
 
 #[test]
 fn set_contains_true_false() {
-    let src = "fn main() -> Int {\n  let s = Set()\n  s.insert(7)\n  if s.contains(7) { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var s = Set()\n  s.insert(7)\n  if s.contains(7) { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1105,7 +1105,7 @@ fn set_contains_true_false() {
 #[test]
 fn set_with_tuple_keys() {
     // Tuples in a set (§19.7).
-    let src = "fn main() -> Int {\n  let s = Set()\n  s.insert((1, 2))\n  s.insert((1, 2))\n  s.insert((3, 4))\n  s.len()\n}\n";
+    let src = "fn main() -> Int {\n  var s = Set()\n  s.insert((1, 2))\n  s.insert((1, 2))\n  s.insert((3, 4))\n  s.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -1115,7 +1115,7 @@ fn set_with_tuple_keys() {
 fn counter_absent_reads_zero() {
     // §6.2: "Counter missing values behave as zero" — the §19.8 acceptance
     // criterion. An absent key's count is 0.
-    let src = "fn main() -> Int {\n  let c = Counter()\n  c.get(\"absent\")\n}\n";
+    let src = "fn main() -> Int {\n  var c = Counter()\n  c.get(\"absent\")\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -1123,7 +1123,7 @@ fn counter_absent_reads_zero() {
 
 #[test]
 fn counter_inc_increments() {
-    let src = "fn main() -> Int {\n  let c = Counter()\n  c.inc(\"a\")\n  c.inc(\"a\")\n  c.inc(\"a\")\n  c.get(\"a\")\n}\n";
+    let src = "fn main() -> Int {\n  var c = Counter()\n  c.inc(\"a\")\n  c.inc(\"a\")\n  c.inc(\"a\")\n  c.get(\"a\")\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -1131,7 +1131,7 @@ fn counter_inc_increments() {
 
 #[test]
 fn counter_distinct_keys_tracked_separately() {
-    let src = "fn main() -> Int {\n  let c = Counter()\n  c.inc(\"a\")\n  c.inc(\"b\")\n  c.inc(\"b\")\n  c.get(\"b\")\n}\n";
+    let src = "fn main() -> Int {\n  var c = Counter()\n  c.inc(\"a\")\n  c.inc(\"b\")\n  c.inc(\"b\")\n  c.get(\"b\")\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -1144,7 +1144,7 @@ fn counter_vec_sourced_text_keys_accumulate() {
     // it was NOT reproduced. This test pins the working behavior: Text keys
     // sourced from a Vec (distinct allocations) accumulate correctly in a
     // Counter via structural Text hashing.
-    let src = "fn main() -> Int {\n  let words = Vec()\n  words.push(\"apple\")\n  words.push(\"apple\")\n  words.push(\"banana\")\n  let counts = Counter()\n  var i = 0\n  while i < words.len() {\n    counts.inc(words.get(i))\n    i = i + 1\n  }\n  counts.get(\"apple\")\n}\n";
+    let src = "fn main() -> Int {\n  var words = Vec()\n  words.push(\"apple\")\n  words.push(\"apple\")\n  words.push(\"banana\")\n  var counts = Counter()\n  var i = 0\n  while i < words.len() {\n    counts.inc(words.get(i))\n    i = i + 1\n  }\n  counts.get(\"apple\")\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -1152,7 +1152,7 @@ fn counter_vec_sourced_text_keys_accumulate() {
 
 #[test]
 fn counter_len_counts_distinct_keys() {
-    let src = "fn main() -> Int {\n  let c = Counter()\n  c.inc(\"a\")\n  c.inc(\"a\")\n  c.inc(\"b\")\n  c.len()\n}\n";
+    let src = "fn main() -> Int {\n  var c = Counter()\n  c.inc(\"a\")\n  c.inc(\"a\")\n  c.inc(\"b\")\n  c.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -1171,7 +1171,7 @@ fn adv_counter_text_keys_from_vec_accumulate() {
     // literal Texts, count each via a Counter; the second occurrence of the
     // same *value* must hit the existing entry even though it's a distinct
     // allocation (exercises DynamicKey structural eq, not pointer identity).
-    let src = "fn main() -> Int {\n  let words = Vec()\n  words.push(\"apple\")\n  words.push(\"apple\")\n  words.push(\"pear\")\n  let c = Counter()\n  var i = 0\n  while i < words.len() { c.inc(words.get(i)); i = i + 1 }\n  c.get(\"apple\")\n}\n";
+    let src = "fn main() -> Int {\n  var words = Vec()\n  words.push(\"apple\")\n  words.push(\"apple\")\n  words.push(\"pear\")\n  var c = Counter()\n  var i = 0\n  while i < words.len() { c.inc(words.get(i)); i = i + 1 }\n  c.get(\"apple\")\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -1182,7 +1182,7 @@ fn adv_counter_text_keys_from_read_accumulate() {
     // The strongest form of the known-bug probe: Text keys sourced from `read`
     // (source-slice TextPayload, distinct from any literal). Count repeated
     // words parsed from input; equal values must aggregate.
-    let src = "fn main() -> Int {\n  let words = read lines(word)\n  let c = Counter()\n  var i = 0\n  while i < words.len() { c.inc(words.get(i)); i = i + 1 }\n  c.len()\n}\n";
+    let src = "fn main() -> Int {\n  var words = read lines(word)\n  var c = Counter()\n  var i = 0\n  while i < words.len() { c.inc(words.get(i)); i = i + 1 }\n  c.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "apple\napple\npear\napple\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // 2 distinct values ("apple", "pear")
@@ -1193,7 +1193,7 @@ fn adv_counter_text_keys_from_read_accumulate() {
 fn adv_counter_text_keys_from_read_get_count() {
     // As above but read back the count for "apple" (3 occurrences). This is the
     // exact scenario the handover flagged as broken.
-    let src = "fn main() -> Int {\n  let words = read lines(word)\n  let c = Counter()\n  var i = 0\n  while i < words.len() { c.inc(words.get(i)); i = i + 1 }\n  c.get(\"apple\")\n}\n";
+    let src = "fn main() -> Int {\n  var words = read lines(word)\n  var c = Counter()\n  var i = 0\n  while i < words.len() { c.inc(words.get(i)); i = i + 1 }\n  c.get(\"apple\")\n}\n";
     let (rt, result) = run_main_with_input(src, "apple\napple\npear\napple\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -1204,7 +1204,7 @@ fn adv_map_text_key_distinct_alloc_lookup() {
     // Map insert with a literal Text key, then look up with a structurally-
     // equal Text from a different source (a Vec). Must find the entry via
     // structural eq, not pointer identity.
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"hello\", 42)\n  let keys = Vec()\n  keys.push(\"hello\")\n  m[keys.get(0)]\n}\n";
+    let src = "fn main() -> Int {\n  var m = Map()\n  m.insert(\"hello\", 42)\n  var keys = Vec()\n  keys.push(\"hello\")\n  m[keys.get(0)]\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
@@ -1214,7 +1214,7 @@ fn adv_map_text_key_distinct_alloc_lookup() {
 fn adv_map_text_key_from_read_lookup() {
     // Map keyed by source-slice Text from `read`. Insert all, then look up one
     // by a literal of equal value.
-    let src = "fn main() -> Int {\n  let words = read lines(word)\n  let m = Map()\n  var i = 0\n  while i < words.len() { m.insert(words.get(i), i); i = i + 1 }\n  m[\"pear\"]\n}\n";
+    let src = "fn main() -> Int {\n  var words = read lines(word)\n  var m = Map()\n  var i = 0\n  while i < words.len() { m.insert(words.get(i), i); i = i + 1 }\n  m[\"pear\"]\n}\n";
     let (rt, result) = run_main_with_input(src, "apple\npear\nkiwi\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // "pear" was inserted at index 1
@@ -1225,7 +1225,7 @@ fn adv_map_text_key_from_read_lookup() {
 fn adv_set_text_key_distinct_alloc_contains() {
     // Set with a literal Text member; `contains` with a distinct-allocation
     // equal Text must return true via structural eq.
-    let src = "fn main() -> Int {\n  let s = Set()\n  s.insert(\"hello\")\n  let keys = Vec()\n  keys.push(\"hello\")\n  let b = s.contains(keys.get(0))\n  if b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var s = Set()\n  s.insert(\"hello\")\n  var keys = Vec()\n  keys.push(\"hello\")\n  var b = s.contains(keys.get(0))\n  if b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1235,7 +1235,7 @@ fn adv_set_text_key_distinct_alloc_contains() {
 fn adv_set_dedupes_distinct_alloc_equal_text() {
     // Insert the same Text value twice (distinct allocations from a Vec); the
     // set must dedupe to one member (structural eq).
-    let src = "fn main() -> Int {\n  let words = Vec()\n  words.push(\"x\")\n  words.push(\"x\")\n  words.push(\"y\")\n  let s = Set()\n  var i = 0\n  while i < words.len() { s.insert(words.get(i)); i = i + 1 }\n  s.len()\n}\n";
+    let src = "fn main() -> Int {\n  var words = Vec()\n  words.push(\"x\")\n  words.push(\"x\")\n  words.push(\"y\")\n  var s = Set()\n  var i = 0\n  while i < words.len() { s.insert(words.get(i)); i = i + 1 }\n  s.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -1245,7 +1245,7 @@ fn adv_set_dedupes_distinct_alloc_equal_text() {
 fn adv_map_tuple_key_distinct_alloc() {
     // Tuple keys built from distinct allocations. Two (1,2) tuples from
     // different construction sites must map to the same entry.
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert((1, 2), 100)\n  let pairs = Vec()\n  pairs.push((1, 2))\n  m[pairs.get(0)]\n}\n";
+    let src = "fn main() -> Int {\n  var m = Map()\n  m.insert((1, 2), 100)\n  var pairs = Vec()\n  pairs.push((1, 2))\n  m[pairs.get(0)]\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 100);
@@ -1255,7 +1255,7 @@ fn adv_map_tuple_key_distinct_alloc() {
 fn adv_map_large_under_gc_pressure() {
     // Insert 500 entries under GC pressure, then look up a mid-range key.
     // Verifies map entries (keys + values) survive GC via map_trace.
-    let src = "fn main() -> Int {\n  let m = Map()\n  var i = 0\n  while i < 500 { m.insert(i, i * 2); i = i + 1 }\n  m[250]\n}\n";
+    let src = "fn main() -> Int {\n  var m = Map()\n  var i = 0\n  while i < 500 { m.insert(i, i * 2); i = i + 1 }\n  m[250]\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 500);
@@ -1264,7 +1264,7 @@ fn adv_map_large_under_gc_pressure() {
 #[test]
 fn adv_set_large_under_gc_pressure() {
     // 500 set members under GC; contains must still find a mid-range one.
-    let src = "fn main() -> Int {\n  let s = Set()\n  var i = 0\n  while i < 500 { s.insert(i); i = i + 1 }\n  let b = s.contains(499)\n  if b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var s = Set()\n  var i = 0\n  while i < 500 { s.insert(i); i = i + 1 }\n  var b = s.contains(499)\n  if b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1273,7 +1273,7 @@ fn adv_set_large_under_gc_pressure() {
 #[test]
 fn adv_counter_large_under_gc_pressure() {
     // 500 distinct keys, each incremented once, then count distinct + one count.
-    let src = "fn main() -> Int {\n  let c = Counter()\n  var i = 0\n  while i < 500 { c.inc(i); i = i + 1 }\n  c.get(300)\n}\n";
+    let src = "fn main() -> Int {\n  var c = Counter()\n  var i = 0\n  while i < 500 { c.inc(i); i = i + 1 }\n  c.get(300)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1282,7 +1282,7 @@ fn adv_counter_large_under_gc_pressure() {
 #[test]
 fn adv_map_overwrite_then_get() {
     // Overwriting an existing key's value must not duplicate the entry.
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"k\", 1)\n  m.insert(\"k\", 2)\n  m.insert(\"k\", 3)\n  m.len()\n}\n";
+    let src = "fn main() -> Int {\n  var m = Map()\n  m.insert(\"k\", 1)\n  m.insert(\"k\", 2)\n  m.insert(\"k\", 3)\n  m.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1299,13 +1299,13 @@ fn adv_map_overwrite_then_get() {
 /// `Option`. The rewrite matches on the answer instead of probing it.
 #[test]
 fn an_absent_map_get_is_a_none_the_program_can_match_on() {
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"a\", 1)\n  match m.get(\"missing\") {\n    Some(v) => v,\n    None => 7,\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var m = Map()\n  m.insert(\"a\", 1)\n  match m.get(\"missing\") {\n    Some(v) => v,\n    None => 7,\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7, "the `None` arm ran");
 
     // And a `Some` binds the value rather than merely being "not Unit".
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"a\", 1)\n  match m.get(\"a\") {\n    Some(v) => v,\n    None => 7,\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var m = Map()\n  m.insert(\"a\", 1)\n  match m.get(\"a\") {\n    Some(v) => v,\n    None => 7,\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1319,10 +1319,10 @@ fn adv_map_index_of_a_missing_key_faults_where_get_answers() {
     //
     // This test used to assert the opposite — that `m[key]` does *not* fault —
     // and it passed for a reason that had nothing to do with maps: there was no
-    // subscript grammar at all, so `let v = m["missing"]` parsed as `let v = m`
+    // subscript grammar at all, so `var v = m["missing"]` parsed as `var v = m`
     // followed by a recovered statement, and the `v` it compared was the map.
     // The two spellings really are two operations now.
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"a\", 1)\n  let v = m[\"missing\"]\n  if v == 0 { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var m = Map()\n  m.insert(\"a\", 1)\n  var v = m[\"missing\"]\n  if v == 0 { 1 } else { 0 }\n}\n";
     let (rt, _) = run_main(src);
     assert!(
         rt.has_pending_fault(),
@@ -1336,13 +1336,13 @@ fn adv_map_index_of_a_missing_key_faults_where_get_answers() {
     // 0")` — it asserted that the sentinel `.get` handed back was not an `Int`,
     // which pinned RT-14 rather than stating §4.7's rule. What §4.7 actually
     // says is that `.get` answers `Option`, so the arm is what the test reads.
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"a\", 1)\n  match m.get(\"missing\") {\n    Some(v) => v,\n    None => 0,\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var m = Map()\n  m.insert(\"a\", 1)\n  match m.get(\"missing\") {\n    Some(v) => v,\n    None => 0,\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0, "explicit absence, not a fault");
 
     // A present key is the value, through the subscript.
-    let src = "fn main() -> Int {\n  let m = Map()\n  m.insert(\"a\", 7)\n  m[\"a\"]\n}\n";
+    let src = "fn main() -> Int {\n  var m = Map()\n  m.insert(\"a\", 7)\n  m[\"a\"]\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
@@ -1353,7 +1353,7 @@ fn adv_map_index_of_a_missing_key_faults_where_get_answers() {
 #[test]
 fn max_heap_pop_returns_largest() {
     // Push 3, 1, 2; pop yields 3 (the largest first).
-    let src = "fn main() -> Int {\n  let h = MaxHeap()\n  h.push(3)\n  h.push(1)\n  h.push(2)\n  h.pop()\n}\n";
+    let src = "fn main() -> Int {\n  var h = MaxHeap()\n  h.push(3)\n  h.push(1)\n  h.push(2)\n  h.pop()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -1362,7 +1362,7 @@ fn max_heap_pop_returns_largest() {
 #[test]
 fn max_heap_pop_ordering_is_descending() {
     // Pop all three: 3, 2, 1 (descending).
-    let src = "fn main() -> Int {\n  let h = MaxHeap()\n  h.push(3)\n  h.push(1)\n  h.push(2)\n  let a = h.pop()\n  let b = h.pop()\n  let c = h.pop()\n  a * 100 + b * 10 + c\n}\n";
+    let src = "fn main() -> Int {\n  var h = MaxHeap()\n  h.push(3)\n  h.push(1)\n  h.push(2)\n  var a = h.pop()\n  var b = h.pop()\n  var c = h.pop()\n  a * 100 + b * 10 + c\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 321);
@@ -1370,7 +1370,7 @@ fn max_heap_pop_ordering_is_descending() {
 
 #[test]
 fn max_heap_peek_does_not_remove() {
-    let src = "fn main() -> Int {\n  let h = MaxHeap()\n  h.push(5)\n  h.push(10)\n  let _ = h.peek()\n  h.len()\n}\n";
+    let src = "fn main() -> Int {\n  var h = MaxHeap()\n  h.push(5)\n  h.push(10)\n  var _ = h.peek()\n  h.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -1378,7 +1378,7 @@ fn max_heap_peek_does_not_remove() {
 
 #[test]
 fn max_heap_peek_returns_largest() {
-    let src = "fn main() -> Int {\n  let h = MaxHeap()\n  h.push(7)\n  h.push(3)\n  h.push(9)\n  h.peek()\n}\n";
+    let src = "fn main() -> Int {\n  var h = MaxHeap()\n  h.push(7)\n  h.push(3)\n  h.push(9)\n  h.peek()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 9);
@@ -1386,7 +1386,7 @@ fn max_heap_peek_returns_largest() {
 
 #[test]
 fn max_heap_pop_empty_faults() {
-    let src = "fn main() -> Int {\n  let h = MaxHeap()\n  h.pop()\n}\n";
+    let src = "fn main() -> Int {\n  var h = MaxHeap()\n  h.pop()\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault(), "empty pop should fault");
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyCollection);
@@ -1394,7 +1394,7 @@ fn max_heap_pop_empty_faults() {
 
 #[test]
 fn max_heap_is_empty_true() {
-    let src = "fn main() -> Int {\n  let h = MaxHeap()\n  if h.is_empty() { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var h = MaxHeap()\n  if h.is_empty() { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1403,7 +1403,7 @@ fn max_heap_is_empty_true() {
 #[test]
 fn min_heap_pop_returns_smallest() {
     // Push 3, 1, 2; pop yields 1 (the smallest first).
-    let src = "fn main() -> Int {\n  let h = MinHeap()\n  h.push(3)\n  h.push(1)\n  h.push(2)\n  h.pop()\n}\n";
+    let src = "fn main() -> Int {\n  var h = MinHeap()\n  h.push(3)\n  h.push(1)\n  h.push(2)\n  h.pop()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1412,7 +1412,7 @@ fn min_heap_pop_returns_smallest() {
 #[test]
 fn min_heap_pop_ordering_is_ascending() {
     // Pop all three: 1, 2, 3 (ascending).
-    let src = "fn main() -> Int {\n  let h = MinHeap()\n  h.push(3)\n  h.push(1)\n  h.push(2)\n  let a = h.pop()\n  let b = h.pop()\n  let c = h.pop()\n  a * 100 + b * 10 + c\n}\n";
+    let src = "fn main() -> Int {\n  var h = MinHeap()\n  h.push(3)\n  h.push(1)\n  h.push(2)\n  var a = h.pop()\n  var b = h.pop()\n  var c = h.pop()\n  a * 100 + b * 10 + c\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 123);
@@ -1420,7 +1420,7 @@ fn min_heap_pop_ordering_is_ascending() {
 
 #[test]
 fn min_heap_peek_returns_smallest() {
-    let src = "fn main() -> Int {\n  let h = MinHeap()\n  h.push(7)\n  h.push(3)\n  h.push(9)\n  h.peek()\n}\n";
+    let src = "fn main() -> Int {\n  var h = MinHeap()\n  h.push(7)\n  h.push(3)\n  h.push(9)\n  h.peek()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -1428,7 +1428,7 @@ fn min_heap_peek_returns_smallest() {
 
 #[test]
 fn min_heap_pop_empty_faults() {
-    let src = "fn main() -> Int {\n  let h = MinHeap()\n  h.pop()\n}\n";
+    let src = "fn main() -> Int {\n  var h = MinHeap()\n  h.pop()\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault(), "empty pop should fault");
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyCollection);
@@ -1438,7 +1438,7 @@ fn min_heap_pop_empty_faults() {
 
 #[test]
 fn bitset_insert_contains_len() {
-    let src = "fn main() -> Int {\n  let b = BitSet()\n  b.insert(0)\n  b.insert(64)\n  b.insert(1000)\n  b.len()\n}\n";
+    let src = "fn main() -> Int {\n  var b = BitSet()\n  b.insert(0)\n  b.insert(64)\n  b.insert(1000)\n  b.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -1446,7 +1446,7 @@ fn bitset_insert_contains_len() {
 
 #[test]
 fn bitset_contains_true_false() {
-    let src = "fn main() -> Int {\n  let b = BitSet()\n  b.insert(5)\n  if b.contains(5) { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var b = BitSet()\n  b.insert(5)\n  if b.contains(5) { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1454,7 +1454,7 @@ fn bitset_contains_true_false() {
 
 #[test]
 fn bitset_contains_absent_false() {
-    let src = "fn main() -> Int {\n  let b = BitSet()\n  b.insert(5)\n  if b.contains(6) { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var b = BitSet()\n  b.insert(5)\n  if b.contains(6) { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -1462,7 +1462,7 @@ fn bitset_contains_absent_false() {
 
 #[test]
 fn bitset_remove_clears_bit() {
-    let src = "fn main() -> Int {\n  let b = BitSet()\n  b.insert(5)\n  b.insert(10)\n  b.remove(5)\n  b.len()\n}\n";
+    let src = "fn main() -> Int {\n  var b = BitSet()\n  b.insert(5)\n  b.insert(10)\n  b.remove(5)\n  b.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1470,7 +1470,7 @@ fn bitset_remove_clears_bit() {
 
 #[test]
 fn bitset_is_empty_true_then_false() {
-    let src = "fn main() -> Int {\n  let b = BitSet()\n  let first = if b.is_empty() { 1 } else { 0 }\n  b.insert(1)\n  let second = if b.is_empty() { 1 } else { 0 }\n  first * 10 + second\n}\n";
+    let src = "fn main() -> Int {\n  var b = BitSet()\n  var first = if b.is_empty() { 1 } else { 0 }\n  b.insert(1)\n  var second = if b.is_empty() { 1 } else { 0 }\n  first * 10 + second\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 10);
@@ -1481,7 +1481,7 @@ fn bitset_is_empty_true_then_false() {
 #[test]
 fn grid_width_height_from_parsed_grid() {
     // Parse a 2-column × 2-row grid; width=2, height=2.
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  g.width() * 10 + g.height()\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  g.width() * 10 + g.height()\n}\n";
     let (rt, result) = run_main_with_input(src, "ab\ncd\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 22);
@@ -1490,9 +1490,9 @@ fn grid_width_height_from_parsed_grid() {
 #[test]
 fn grid_get_reads_cell() {
     // Grid "ab/cd": get(1, 0) returns the Char 'b'. Compare via find_all: the
-    // count of cells equal to the (1,0) cell should be 1. Intermediate `let`
+    // count of cells equal to the (1,0) cell should be 1. Intermediate `var`
     // bindings avoid the method-chain-after-args parser limitation.
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let cell = g.get(1, 0)\n  let matches = g.find_all(cell)\n  matches.len()\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var cell = g.get(1, 0)\n  var matches = g.find_all(cell)\n  matches.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "ab\ncd\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1500,7 +1500,7 @@ fn grid_get_reads_cell() {
 
 #[test]
 fn grid_get_out_of_bounds_faults() {
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let _ = g.get(9, 9)\n  0\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var _ = g.get(9, 9)\n  0\n}\n";
     let (rt, _result) = run_main_with_input(src, "ab\n");
     assert!(rt.has_pending_fault(), "OOB should fault");
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IndexOutOfBounds);
@@ -1509,7 +1509,7 @@ fn grid_get_out_of_bounds_faults() {
 #[test]
 fn grid_contains_in_and_out() {
     // (1,1) is in a 2×2 grid; (5,5) is not.
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let a = if g.contains(1, 1) { 1 } else { 0 }\n  let b = if g.contains(5, 5) { 1 } else { 0 }\n  a * 10 + b\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var a = if g.contains(1, 1) { 1 } else { 0 }\n  var b = if g.contains(5, 5) { 1 } else { 0 }\n  a * 10 + b\n}\n";
     let (rt, result) = run_main_with_input(src, "ab\ncd\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 10);
@@ -1518,7 +1518,7 @@ fn grid_contains_in_and_out() {
 #[test]
 fn grid_neighbors4_corner() {
     // Top-left corner (0,0) of a 2×2 grid has 2 in-bounds neighbors (right, down).
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let ns = g.neighbors4((0, 0))\n  ns.len()\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var ns = g.neighbors4((0, 0))\n  ns.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "ab\ncd\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -1527,7 +1527,7 @@ fn grid_neighbors4_corner() {
 #[test]
 fn grid_neighbors8_center() {
     // Center (1,1) of a 3×3 grid has all 8 neighbors.
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let ns = g.neighbors8((1, 1))\n  ns.len()\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var ns = g.neighbors8((1, 1))\n  ns.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "abc\ndef\nghi\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 8);
@@ -1535,10 +1535,10 @@ fn grid_neighbors8_center() {
 
 #[test]
 fn grid_positions_count() {
-    // A 2×3 grid has 6 positions. (Intermediate `let` avoids the method-chain
+    // A 2×3 grid has 6 positions. (Intermediate `var` avoids the method-chain
     // parser limitation for chains after a no-arg method returning a collection.)
     let src =
-        "fn main() -> Int {\n  let g = read grid(char)\n  let ps = g.positions()\n  ps.len()\n}\n";
+        "fn main() -> Int {\n  var g = read grid(char)\n  var ps = g.positions()\n  ps.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "abc\ndef\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 6);
@@ -1547,7 +1547,7 @@ fn grid_positions_count() {
 #[test]
 fn grid_cells_count() {
     let src =
-        "fn main() -> Int {\n  let g = read grid(char)\n  let cs = g.cells()\n  cs.len()\n}\n";
+        "fn main() -> Int {\n  var g = read grid(char)\n  var cs = g.cells()\n  cs.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "ab\ncd\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 4);
@@ -1556,7 +1556,7 @@ fn grid_cells_count() {
 #[test]
 fn grid_row() {
     // Row 1 of "ab/cd" is "cd" (length 2). The row is a Vec[Char]; check its len.
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let r = g.row(1)\n  r.len()\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var r = g.row(1)\n  r.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "ab\ncd\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -1566,7 +1566,7 @@ fn grid_row() {
 fn grid_column() {
     // Column 0 of "ab/cd" is "ac" (length 2).
     let src =
-        "fn main() -> Int {\n  let g = read grid(char)\n  let c = g.column(0)\n  c.len()\n}\n";
+        "fn main() -> Int {\n  var g = read grid(char)\n  var c = g.column(0)\n  c.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "ab\ncd\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -1575,7 +1575,7 @@ fn grid_column() {
 #[test]
 fn grid_find_locates_first_match() {
     // Grid "ab/cd": find a cell, then verify find_all for that cell finds 1.
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let cell = g.get(0, 1)\n  let matches = g.find_all(cell)\n  matches.len()\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var cell = g.get(0, 1)\n  var matches = g.find_all(cell)\n  matches.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "ab\ncd\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1584,7 +1584,7 @@ fn grid_find_locates_first_match() {
 #[test]
 fn grid_find_all_count() {
     // Grid with two 'x' cells. Get the 'x' value via get(0,0) then find_all.
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let x = g.get(0, 0)\n  let matches = g.find_all(x)\n  matches.len()\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var x = g.get(0, 0)\n  var matches = g.find_all(x)\n  matches.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "x.\n.x\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -1593,7 +1593,7 @@ fn grid_find_all_count() {
 #[test]
 fn grid_transpose_round_trips_dimensions() {
     // A 3-wide × 2-tall grid transposes to 2-wide × 3-tall.
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let t = g.transpose()\n  t.width() * 10 + t.height()\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var t = g.transpose()\n  t.width() * 10 + t.height()\n}\n";
     let (rt, result) = run_main_with_input(src, "abc\ndef\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 23);
@@ -1602,7 +1602,7 @@ fn grid_transpose_round_trips_dimensions() {
 #[test]
 fn grid_rotate_left_changes_dimensions() {
     // A 3-wide × 2-tall grid rotated left → 2-wide × 3-tall.
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let r = g.rotate_left()\n  r.width() * 10 + r.height()\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var r = g.rotate_left()\n  r.width() * 10 + r.height()\n}\n";
     let (rt, result) = run_main_with_input(src, "abc\ndef\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 23);
@@ -1610,7 +1610,7 @@ fn grid_rotate_left_changes_dimensions() {
 
 #[test]
 fn grid_rotate_right_changes_dimensions() {
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let r = g.rotate_right()\n  r.width() * 10 + r.height()\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var r = g.rotate_right()\n  r.width() * 10 + r.height()\n}\n";
     let (rt, result) = run_main_with_input(src, "abc\ndef\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 23);
@@ -1631,7 +1631,7 @@ fn grid_rotate_right_changes_dimensions() {
 /// bodies *again* would pass either half alone.
 #[test]
 fn grid_rotate_left_and_right_turn_in_opposite_directions() {
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let l = g.rotate_left()\n  let r = g.rotate_right()\n  var n = 0\n  if l.get(0, 0) == g.get(2, 0) { n = n + 1 }\n  if r.get(0, 0) == g.get(0, 1) { n = n + 10 }\n  n\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var l = g.rotate_left()\n  var r = g.rotate_right()\n  var n = 0\n  if l.get(0, 0) == g.get(2, 0) { n = n + 1 }\n  if r.get(0, 0) == g.get(0, 1) { n = n + 10 }\n  n\n}\n";
     let (rt, result) = run_main_with_input(src, "abc\ndef\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 11);
@@ -1642,7 +1642,7 @@ fn grid_rotate_left_and_right_turn_in_opposite_directions() {
 /// the same way, so it is a companion to the test above rather than a gate.
 #[test]
 fn grid_rotate_left_then_right_restores_the_contents() {
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let back = g.rotate_left().rotate_right()\n  if g == back { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var back = g.rotate_left().rotate_right()\n  if g == back { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main_with_input(src, "abc\ndef\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -1651,7 +1651,7 @@ fn grid_rotate_left_then_right_restores_the_contents() {
 #[test]
 fn grid_rotate_four_times_is_identity() {
     // Rotating right 4× returns to the original dimensions (3×2).
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let r1 = g.rotate_right()\n  let r2 = r1.rotate_right()\n  let r3 = r2.rotate_right()\n  let r4 = r3.rotate_right()\n  r4.width() * 10 + r4.height()\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var r1 = g.rotate_right()\n  var r2 = r1.rotate_right()\n  var r3 = r2.rotate_right()\n  var r4 = r3.rotate_right()\n  r4.width() * 10 + r4.height()\n}\n";
     let (rt, result) = run_main_with_input(src, "abc\ndef\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 32); // back to 3-wide × 2-tall
@@ -1661,7 +1661,7 @@ fn grid_rotate_four_times_is_identity() {
 
 #[test]
 fn for_loop_sums_vec_elements() {
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  var sum = 0\n  for x in v { sum = sum + x }\n  sum\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  var sum = 0\n  for x in v { sum = sum + x }\n  sum\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 60);
@@ -1669,7 +1669,7 @@ fn for_loop_sums_vec_elements() {
 
 #[test]
 fn for_loop_empty_vec_zero_iterations() {
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var sum = 0\n  for x in v { sum = sum + x }\n  sum\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var sum = 0\n  for x in v { sum = sum + x }\n  sum\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -1677,7 +1677,7 @@ fn for_loop_empty_vec_zero_iterations() {
 
 #[test]
 fn for_loop_counts_iterations() {
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(1)\n  v.push(1)\n  v.push(1)\n  var n = 0\n  for x in v { n = n + 1 }\n  n\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(1)\n  v.push(1)\n  v.push(1)\n  var n = 0\n  for x in v { n = n + 1 }\n  n\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 4);
@@ -1692,8 +1692,8 @@ fn an_immediately_invoked_closure_mutates_the_var_it_captured() {
     let src = concat!(
         "fn main() -> Int {\n",
         "  var count = 0\n",
-        "  let a = (|n| { count = count + n\n  count })(1)\n",
-        "  let b = (|n| { count = count + n\n  count })(10)\n",
+        "  var a = (|n| { count = count + n\n  count })(1)\n",
+        "  var b = (|n| { count = count + n\n  count })(10)\n",
         "  count\n",
         "}\n"
     );
@@ -1725,7 +1725,7 @@ fn expression_loop_returns_the_value_its_break_carried() {
     assert_eq!(result.as_int(), 10);
 
     // …and the value flows onward like any other: bound, then used.
-    let src = "fn main() -> Int {\n  var i = 0\n  let found = loop { i = i + 1 if i * i > 30 { break i } }\n  found + 100\n}\n";
+    let src = "fn main() -> Int {\n  var i = 0\n  var found = loop { i = i + 1 if i * i > 30 { break i } }\n  found + 100\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 106, "6 * 6 = 36 is the first over 30");
@@ -1789,7 +1789,7 @@ fn continue_skips_rest_of_body() {
 /// skipped the increment, so this program never terminated.
 #[test]
 fn continue_in_a_for_loop_still_advances_the_index() {
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var seen = 0\n  for x in v { if x == 2 { continue } seen = seen + x }\n  seen\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var seen = 0\n  for x in v { if x == 2 { continue } seen = seen + x }\n  seen\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 4, "1 + 3, with 2 skipped");
@@ -1797,7 +1797,7 @@ fn continue_in_a_for_loop_still_advances_the_index() {
 
 #[test]
 fn return_exits_function_early() {
-    let src = "fn first(v: Vec[Int]) -> Int { for x in v { return x } 0 }\n  fn main() -> Int {\n  let v = Vec()\n  v.push(42)\n  v.push(99)\n  first(v)\n}\n";
+    let src = "fn first(v: Vec[Int]) -> Int { for x in v { return x } 0 }\n  fn main() -> Int {\n  var v = Vec()\n  v.push(42)\n  v.push(99)\n  first(v)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
@@ -1814,7 +1814,7 @@ fn nested_loops_with_break() {
 
 #[test]
 fn for_loop_over_deque() {
-    let src = "fn main() -> Int {\n  let d = Deque()\n  d.push_back(5)\n  d.push_back(10)\n  d.push_back(15)\n  var sum = 0\n  for x in d { sum = sum + x }\n  sum\n}\n";
+    let src = "fn main() -> Int {\n  var d = Deque()\n  d.push_back(5)\n  d.push_back(10)\n  d.push_back(15)\n  var sum = 0\n  for x in d { sum = sum + x }\n  sum\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 30);
@@ -1824,7 +1824,7 @@ fn for_loop_over_deque() {
 
 #[test]
 fn pipeline_sum_sums_elements() {
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 60);
@@ -1832,7 +1832,7 @@ fn pipeline_sum_sums_elements() {
 
 #[test]
 fn pipeline_count_counts_elements() {
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.count()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.count()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -1841,7 +1841,7 @@ fn pipeline_count_counts_elements() {
 #[test]
 fn pipeline_map_applies_closure() {
     // map (|x| x*2) over [1,2,3] → [2,4,6], then sum → 12.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let doubled = v.map(|x| x * 2)\n  doubled.sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var doubled = v.map(|x| x * 2)\n  doubled.sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 12);
@@ -1850,7 +1850,7 @@ fn pipeline_map_applies_closure() {
 #[test]
 fn pipeline_filter_keeps_matching() {
     // filter (|x| even) over [1,2,3,4] → [2,4], sum → 6.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  let evens = v.filter(|x| x - x / 2 * 2 == 0)\n  evens.sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  var evens = v.filter(|x| x - x / 2 * 2 == 0)\n  evens.sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 6);
@@ -1859,7 +1859,7 @@ fn pipeline_filter_keeps_matching() {
 #[test]
 fn pipeline_collect_materializes() {
     // collect into a Vec, then len.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let copy = v.collect()\n  copy.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var copy = v.collect()\n  copy.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -1868,7 +1868,7 @@ fn pipeline_collect_materializes() {
 #[test]
 fn pipeline_map_then_len_chains() {
     // map then .len() (method chain after a method-with-args, fixed in WS6).
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.map(|x| x * 2).len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.map(|x| x * 2).len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -1882,7 +1882,7 @@ fn pipeline_map_then_len_chains() {
 fn pipeline_map_filter_sum_fuses() {
     // [1,2,3,4].map(*2)=[2,4,6,8].filter(even)=[2,4,6,8].sum()=20. (All doubled
     // values are even, so filter keeps all four.) One fused loop.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.map(|x| x * 2).filter(|x| x - x / 2 * 2 == 0).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.map(|x| x * 2).filter(|x| x - x / 2 * 2 == 0).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 20);
@@ -1891,7 +1891,7 @@ fn pipeline_map_filter_sum_fuses() {
 #[test]
 fn pipeline_filter_map_sum_fuses() {
     // [1,2,3,4,5].filter(odd)=[1,3,5].map(*10)=[10,30,50].sum()=90.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter(|x| x - x / 2 * 2 == 1).map(|x| x * 10).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter(|x| x - x / 2 * 2 == 1).map(|x| x * 10).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 90);
@@ -1900,7 +1900,7 @@ fn pipeline_filter_map_sum_fuses() {
 #[test]
 fn pipeline_map_map_sum_fuses() {
     // [1,2,3].map(+1)=[2,3,4].map(*10)=[20,30,40].sum()=90.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.map(|x| x + 1).map(|x| x * 10).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.map(|x| x + 1).map(|x| x * 10).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 90);
@@ -1909,7 +1909,7 @@ fn pipeline_map_map_sum_fuses() {
 #[test]
 fn pipeline_filter_filter_sum_fuses() {
     // [1..6].filter(>2)=[3,4,5].filter(<5)=[3,4].sum()=7.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter(|x| x > 2).filter(|x| x < 5).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter(|x| x > 2).filter(|x| x < 5).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
@@ -1918,7 +1918,7 @@ fn pipeline_filter_filter_sum_fuses() {
 #[test]
 fn pipeline_three_stage_map_filter_map_sum() {
     // [1..6].map(+1)=[2..6].filter(even)=[2,4,6].map(*3)=[6,12,18].sum()=36.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.map(|x| x + 1).filter(|x| x - x / 2 * 2 == 0).map(|x| x * 3).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.map(|x| x + 1).filter(|x| x - x / 2 * 2 == 0).map(|x| x * 3).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 36);
@@ -1927,8 +1927,8 @@ fn pipeline_three_stage_map_filter_map_sum() {
 #[test]
 fn pipeline_chain_with_capturing_closure() {
     // Capturing closure in a fused chain (untested combination pre-WS11).
-    // let k = 10; [1..5].map(+k)=[11..14].filter(>13)=[14].sum()=14.
-    let src = "fn main() -> Int {\n  let k = 10\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.map(|x| x + k).filter(|x| x > 13).sum()\n}\n";
+    // var k = 10; [1..5].map(+k)=[11..14].filter(>13)=[14].sum()=14.
+    let src = "fn main() -> Int {\n  var k = 10\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.map(|x| x + k).filter(|x| x > 13).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 14);
@@ -1937,7 +1937,7 @@ fn pipeline_chain_with_capturing_closure() {
 #[test]
 fn pipeline_map_filter_count_fuses() {
     // [1..6].map(*2).filter(>5)=[6,8,10].count()=3.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.map(|x| x * 2).filter(|x| x > 5).count()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.map(|x| x * 2).filter(|x| x > 5).count()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -1946,7 +1946,7 @@ fn pipeline_map_filter_count_fuses() {
 #[test]
 fn pipeline_map_filter_collect_len() {
     // Fused chain ending in collect → len. [1..5].map(*2).filter(>4)=[6,8].len()=2.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  let out = v.map(|x| x * 2).filter(|x| x > 4)\n  out.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  var out = v.map(|x| x * 2).filter(|x| x > 4)\n  out.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -1957,7 +1957,7 @@ fn pipeline_fused_chain_survives_gc_stress() {
     // 300 elements through a fused map+filter+sum. Verifies every fused stage
     // roots its live GcRefs across the collections the loop triggers (the
     // GC-rooting risk flagged in the M8 handover §7).
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  v.map(|x| x * 2).filter(|x| x > 100).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  v.map(|x| x * 2).filter(|x| x > 100).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // The loop pushes i = 0..299 (300 elements). Sum of 2*i for i in 51..=299
@@ -1970,7 +1970,7 @@ fn pipeline_fused_chain_survives_gc_stress() {
     // the loop, exactly like the source cursor, so a root set that did not cover
     // them would hand the collector a stale word — and after MIR-01/MIR-02, a
     // slot the liveness pass misses is nulled rather than merely stale.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  var t = 0\n  for p in v.filter(|x| x > 100).enumerate().take(3).collect() { t = t + p.0 * 1000 + p.1 }\n  t\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  var t = 0\n  for p in v.filter(|x| x > 100).enumerate().take(3).collect() { t = t + p.0 * 1000 + p.1 }\n  t\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // Filtered is 101..=299; enumerate numbers it densely from zero; take(3)
@@ -1981,7 +1981,7 @@ fn pipeline_fused_chain_survives_gc_stress() {
 #[test]
 fn pipeline_fold_threads_accumulator() {
     // Closes the M8 fold stub. [1..4].fold(100, |a,x| a - x) = 100-1-2-3 = 94.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.fold(100, |a, x| a - x)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.fold(100, |a, x| a - x)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 94);
@@ -1990,7 +1990,7 @@ fn pipeline_fold_threads_accumulator() {
 #[test]
 fn pipeline_fold_in_fused_chain() {
     // [1..4].map(*2)=[2,4,6].fold(0,|a,x|a+x)=12.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.map(|x| x * 2).fold(0, |a, x| a + x)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.map(|x| x * 2).fold(0, |a, x| a + x)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 12);
@@ -1999,7 +1999,7 @@ fn pipeline_fold_in_fused_chain() {
 #[test]
 fn pipeline_product_multiplies() {
     // [2,3,4].product() = 24.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.product()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.product()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 24);
@@ -2010,7 +2010,7 @@ fn pipeline_reduce_seeds_from_first() {
     // [3,1,2].reduce(|a,x| if a<x then a else x) — but Praxis closures can't
     // branch by returning different values without an if-expression. Use a
     // simpler reducer: |a,x| a*10 + x → 3*10+1=31, 31*10+2=312.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(3)\n  v.push(1)\n  v.push(2)\n  v.reduce(|a, x| a * 10 + x)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(3)\n  v.push(1)\n  v.push(2)\n  v.reduce(|a, x| a * 10 + x)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 312);
@@ -2019,7 +2019,7 @@ fn pipeline_reduce_seeds_from_first() {
 #[test]
 fn pipeline_min_finds_smallest() {
     // [5,2,8,1,9].min() = 1.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(5)\n  v.push(2)\n  v.push(8)\n  v.push(1)\n  v.push(9)\n  v.min()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(5)\n  v.push(2)\n  v.push(8)\n  v.push(1)\n  v.push(9)\n  v.min()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -2028,7 +2028,7 @@ fn pipeline_min_finds_smallest() {
 #[test]
 fn pipeline_max_finds_largest() {
     // [5,2,8,1,9].max() = 9.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(5)\n  v.push(2)\n  v.push(8)\n  v.push(1)\n  v.push(9)\n  v.max()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(5)\n  v.push(2)\n  v.push(8)\n  v.push(1)\n  v.push(9)\n  v.max()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 9);
@@ -2037,7 +2037,7 @@ fn pipeline_max_finds_largest() {
 #[test]
 fn pipeline_min_after_map_fuses() {
     // [1,5,2].map(*2)=[2,10,4].min()=2.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(5)\n  v.push(2)\n  v.map(|x| x * 2).min()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(5)\n  v.push(2)\n  v.map(|x| x * 2).min()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -2046,7 +2046,7 @@ fn pipeline_min_after_map_fuses() {
 #[test]
 fn pipeline_max_in_fused_chain() {
     // [1..5].filter(>2)=[3,4,5].max()=5.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter(|x| x > 2).max()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter(|x| x > 2).max()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 5);
@@ -2055,7 +2055,7 @@ fn pipeline_max_in_fused_chain() {
 #[test]
 fn pipeline_any_true_when_one_matches() {
     // [1,2,3].any(|x| x == 2) = true → packed as 1.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let b = v.any(|x| x == 2)\n  if b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var b = v.any(|x| x == 2)\n  if b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -2064,7 +2064,7 @@ fn pipeline_any_true_when_one_matches() {
 #[test]
 fn pipeline_any_false_when_none_match() {
     // [1,2,3].any(|x| x == 9) = false → packed as 0.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let b = v.any(|x| x == 9)\n  if b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var b = v.any(|x| x == 9)\n  if b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -2073,7 +2073,7 @@ fn pipeline_any_false_when_none_match() {
 #[test]
 fn pipeline_all_true_when_all_match() {
     // [2,4,6].all(even) = true → 1.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(2)\n  v.push(4)\n  v.push(6)\n  let b = v.all(|x| x - x / 2 * 2 == 0)\n  if b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(2)\n  v.push(4)\n  v.push(6)\n  var b = v.all(|x| x - x / 2 * 2 == 0)\n  if b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -2082,7 +2082,7 @@ fn pipeline_all_true_when_all_match() {
 #[test]
 fn pipeline_all_false_short_circuits() {
     // [2,4,5,6].all(even) = false (short-circuits at 5) → 0.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(2)\n  v.push(4)\n  v.push(5)\n  v.push(6)\n  let b = v.all(|x| x - x / 2 * 2 == 0)\n  if b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(2)\n  v.push(4)\n  v.push(5)\n  v.push(6)\n  var b = v.all(|x| x - x / 2 * 2 == 0)\n  if b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -2100,7 +2100,7 @@ fn pipeline_all_false_short_circuits() {
 /// answers `Some(1)`, which is not `Some(20)`.
 #[test]
 fn find_answers_the_matching_element_not_its_index() {
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  match v.find(|x| x == 20) { Some(n) => n, None => 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  match v.find(|x| x == 20) { Some(n) => n, None => 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 20);
@@ -2115,7 +2115,7 @@ fn find_answers_the_matching_element_not_its_index() {
 fn a_find_that_matches_nothing_answers_none() {
     // The miss arm answers 7, a number no element could produce, so a `Some`
     // sneaking through is visible rather than merely different.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  match v.find(|x| x == 99) { Some(n) => n, None => 7 }\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  match v.find(|x| x == 99) { Some(n) => n, None => 7 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
@@ -2130,7 +2130,7 @@ fn position_answers_the_index_and_find_answers_the_element() {
     // `[10,20,30]`: `position(== 30)` is 2 and `find(== 30)` is 30. Summing the
     // two makes a swapped pair (30 + 2 the other way round) impossible to miss,
     // and a `-1` sentinel on either side lands nowhere near 32.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  let p = match v.position(|x| x == 30) { Some(i) => i, None => 0 }\n  let f = match v.find(|x| x == 30) { Some(n) => n, None => 0 }\n  f * 10 + p\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  var p = match v.position(|x| x == 30) { Some(i) => i, None => 0 }\n  var f = match v.find(|x| x == 30) { Some(n) => n, None => 0 }\n  f * 10 + p\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 302);
@@ -2142,7 +2142,7 @@ fn position_answers_the_index_and_find_answers_the_element() {
 /// `find` — the row's result was `Int` whatever the receiver held.
 #[test]
 fn find_reaches_a_non_int_element() {
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(\"alpha\")\n  v.push(\"beta\")\n  match v.find(|s| s == \"beta\") { Some(s) => s.len(), None => 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(\"alpha\")\n  v.push(\"beta\")\n  match v.find(|s| s == \"beta\") { Some(s) => s.len(), None => 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 4);
@@ -2151,7 +2151,7 @@ fn find_reaches_a_non_int_element() {
 #[test]
 fn pipeline_take_limits_elements() {
     // [1..5].take(3).sum() = 1+2+3 = 6.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.take(3).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.take(3).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 6);
@@ -2160,7 +2160,7 @@ fn pipeline_take_limits_elements() {
 #[test]
 fn pipeline_take_more_than_length() {
     // [1,2,3].take(10).sum() = 6 (take is bounded by length).
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.take(10).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.take(10).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 6);
@@ -2169,7 +2169,7 @@ fn pipeline_take_more_than_length() {
 #[test]
 fn pipeline_skip_drops_prefix() {
     // [1..5].skip(2).sum() = 3+4+5 = 12.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.skip(2).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.skip(2).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 12);
@@ -2178,7 +2178,7 @@ fn pipeline_skip_drops_prefix() {
 #[test]
 fn pipeline_take_then_map_then_sum() {
     // [1..5].take(3).map(*10)=[10,20,30].sum()=60.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.take(3).map(|x| x * 10).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.take(3).map(|x| x * 10).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 60);
@@ -2191,7 +2191,7 @@ fn pipeline_take_then_map_then_sum() {
 /// answer the Unit singleton — which the enclosing chain then read as a Vec.
 #[test]
 fn a_take_or_skip_bound_is_any_int_expression() {
-    let five = "  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n";
+    let five = "  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n";
     let answer = |tail: &str| {
         let (rt, result) = run_main(&format!("fn main() -> Int {{\n{five}  {tail}\n}}\n"));
         assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -2199,30 +2199,30 @@ fn a_take_or_skip_bound_is_any_int_expression() {
     };
 
     // A binding, the shape the ignored regressions used.
-    assert_eq!(answer("let n = 3\n  v.take(n).sum()"), 6);
-    assert_eq!(answer("let n = 2\n  v.skip(n).sum()"), 12);
+    assert_eq!(answer("var n = 3\n  v.take(n).sum()"), 6);
+    assert_eq!(answer("var n = 2\n  v.skip(n).sum()"), 12);
     // An arithmetic expression, and one that calls back into the receiver.
-    assert_eq!(answer("let n = 1\n  v.take(n + n).sum()"), 3);
+    assert_eq!(answer("var n = 1\n  v.take(n + n).sum()"), 3);
     assert_eq!(answer("v.skip(v.len() - 2).sum()"), 9);
     // The bound still composes with the stages around it.
-    assert_eq!(answer("let n = 4\n  v.take(n).map(|x| x * 10).sum()"), 100);
-    assert_eq!(answer("let n = 4\n  v.take(n).filter(|x| x > 2).sum()"), 7);
+    assert_eq!(answer("var n = 4\n  v.take(n).map(|x| x * 10).sum()"), 100);
+    assert_eq!(answer("var n = 4\n  v.take(n).filter(|x| x > 2).sum()"), 7);
     // Degenerate bounds keep the meaning the literal spelling had: `take` of
     // nothing is empty, `skip` of nothing drops nothing, and a negative bound is
     // the same comparison rather than a special case.
-    assert_eq!(answer("let n = 0\n  v.take(n).sum()"), 0);
-    assert_eq!(answer("let n = 0\n  v.skip(n).sum()"), 15);
-    assert_eq!(answer("let n = 0 - 1\n  v.take(n).sum()"), 0);
-    assert_eq!(answer("let n = 0 - 1\n  v.skip(n).sum()"), 15);
-    assert_eq!(answer("let n = 99\n  v.take(n).sum()"), 15);
-    assert_eq!(answer("let n = 99\n  v.skip(n).sum()"), 0);
+    assert_eq!(answer("var n = 0\n  v.take(n).sum()"), 0);
+    assert_eq!(answer("var n = 0\n  v.skip(n).sum()"), 15);
+    assert_eq!(answer("var n = 0 - 1\n  v.take(n).sum()"), 0);
+    assert_eq!(answer("var n = 0 - 1\n  v.skip(n).sum()"), 15);
+    assert_eq!(answer("var n = 99\n  v.take(n).sum()"), 15);
+    assert_eq!(answer("var n = 99\n  v.skip(n).sum()"), 0);
 }
 
 #[test]
 fn pipeline_take_while_stops_at_predicate() {
     // [1,2,3,4,1].take_while(<4) = [1,2,3] (stops at first 4, does NOT resume
     // at the trailing 1). sum() = 6.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(1)\n  v.take_while(|x| x < 4).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(1)\n  v.take_while(|x| x < 4).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 6);
@@ -2231,7 +2231,7 @@ fn pipeline_take_while_stops_at_predicate() {
 #[test]
 fn pipeline_take_while_then_count() {
     // [2,4,6,1,8].take_while(even) = [2,4,6].count() = 3.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(2)\n  v.push(4)\n  v.push(6)\n  v.push(1)\n  v.push(8)\n  v.take_while(|x| x - x / 2 * 2 == 0).count()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(2)\n  v.push(4)\n  v.push(6)\n  v.push(1)\n  v.push(8)\n  v.take_while(|x| x - x / 2 * 2 == 0).count()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -2241,7 +2241,7 @@ fn pipeline_take_while_then_count() {
 fn pipeline_enumerate_count() {
     // enumerate produces (i, item) pairs but we only count them → 3.
     // (Tuple field access .0/.1 is deferred per ADR-026, so we only count here.)
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.enumerate().count()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.enumerate().count()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -2260,14 +2260,14 @@ fn enumerate_after_filter_numbers_the_filtered_sequence() {
     // Weighted 100*index + value: 2 + 104 = 106. Reading source indices would
     // give (1,2), (3,4) → 406, and a swap of the halves gives something else
     // again.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  var t = 0\n  for p in v.filter(|x| x % 2 == 0).enumerate().collect() { t = t + p.0 * 100 + p.1 }\n  t\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  var t = 0\n  for p in v.filter(|x| x % 2 == 0).enumerate().collect() { t = t + p.0 * 100 + p.1 }\n  t\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 106);
 
     // And after a `skip`, which drops from the front: [1,2,3,4].skip(2) is
     // [3,4], numbered (0,3), (1,4) → 3 + 104 = 107.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  var t = 0\n  for p in v.skip(2).enumerate().collect() { t = t + p.0 * 100 + p.1 }\n  t\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  var t = 0\n  for p in v.skip(2).enumerate().collect() { t = t + p.0 * 100 + p.1 }\n  t\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 107);
@@ -2286,7 +2286,7 @@ fn each_stage_counts_the_sequence_that_reaches_it() {
     // [1..6].skip(1) = [2,3,4,5,6]; filter(even) = [2,4,6]; take(2) = [2,4].
     // Sum 6. With one source cursor, `take` stops once the *source* index
     // reaches 2, so only the 2 survives and the answer is 2.
-    let six = "  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.push(6)\n";
+    let six = "  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.push(6)\n";
     let answer = |tail: &str| {
         let (rt, result) = run_main(&format!("fn main() -> Int {{\n{six}  {tail}\n}}\n"));
         assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -2301,7 +2301,7 @@ fn each_stage_counts_the_sequence_that_reaches_it() {
     // pairs, of which two are taken.
     assert_eq!(
         answer(
-            "let rhs = Vec()\n  rhs.push(10)\n  rhs.push(20)\n  rhs.push(30)\n  v.filter(|x| x % 2 == 0).zip(rhs).take(2).count()"
+            "var rhs = Vec()\n  rhs.push(10)\n  rhs.push(20)\n  rhs.push(30)\n  v.filter(|x| x % 2 == 0).zip(rhs).take(2).count()"
         ),
         2
     );
@@ -2313,7 +2313,7 @@ fn each_stage_counts_the_sequence_that_reaches_it() {
     // per-inner, the first Vec answers 1 and the second overwrites it with 0.
     // (The `match` is REP-39: the index arrives inside a `Some` now. What this
     // measures — *which* index — is unchanged.)
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  match v.flat_map(|x| {\n    let r = Vec()\n    if x == 1 { r.push(0) }\n    r.push(x * 5)\n    r\n  }).position(|p| p > 4) { Some(i) => i, None => -1 }\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  match v.flat_map(|x| {\n    var r = Vec()\n    if x == 1 { r.push(0) }\n    r.push(x * 5)\n    r\n  }).position(|p| p > 4) { Some(i) => i, None => -1 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1, "the flattened stream's index, once");
@@ -2322,7 +2322,7 @@ fn each_stage_counts_the_sequence_that_reaches_it() {
 #[test]
 fn pipeline_zip_count_pairs_to_shorter() {
     // [1,2,3].zip([10,20]) = 2 pairs (shorter length). count() = 2.
-    let src = "fn main() -> Int {\n  let a = Vec()\n  a.push(1)\n  a.push(2)\n  a.push(3)\n  let b = Vec()\n  b.push(10)\n  b.push(20)\n  a.zip(b).count()\n}\n";
+    let src = "fn main() -> Int {\n  var a = Vec()\n  a.push(1)\n  a.push(2)\n  a.push(3)\n  var b = Vec()\n  b.push(10)\n  b.push(20)\n  a.zip(b).count()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -2332,7 +2332,7 @@ fn pipeline_zip_count_pairs_to_shorter() {
 fn pipeline_flat_map_collect_len() {
     // [1,2,3].flat_map(|x| Vec-of-two) → 6 elements. Each closure returns a
     // 2-element Vec via push. We then collect and read len.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let out = v.flat_map(|x| {\n    let r = Vec()\n    r.push(x)\n    r.push(x)\n    r\n  })\n  out.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var out = v.flat_map(|x| {\n    var r = Vec()\n    r.push(x)\n    r.push(x)\n    r\n  })\n  out.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 6);
@@ -2341,7 +2341,7 @@ fn pipeline_flat_map_collect_len() {
 #[test]
 fn pipeline_flat_map_sum() {
     // [1,2,3].flat_map(|x| Vec(x, x*10)) = [1,10,2,20,3,30].sum() = 66.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.flat_map(|x| {\n    let r = Vec()\n    r.push(x)\n    r.push(x * 10)\n    r\n  }).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.flat_map(|x| {\n    var r = Vec()\n    r.push(x)\n    r.push(x * 10)\n    r\n  }).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 66);
@@ -2361,8 +2361,8 @@ fn a_flat_map_inside_a_flat_map_flattens_both_levels() {
     // [1,2] -flat_map(x -> [x, x*10])-> [1,10,2,20]
     //       -flat_map(y -> [y, y*100])-> [1,100,10,1000,2,200,20,2000]
     // sum = 101 * (1 + 10 + 2 + 20) = 3333, and there are eight elements.
-    let outer = "  let v = Vec()\n  v.push(1)\n  v.push(2)\n";
-    let two_levels = "v.flat_map(|x| {\n    let a = Vec()\n    a.push(x)\n    a.push(x * 10)\n    a\n  }).flat_map(|y| {\n    let c = Vec()\n    c.push(y)\n    c.push(y * 100)\n    c\n  })";
+    let outer = "  var v = Vec()\n  v.push(1)\n  v.push(2)\n";
+    let two_levels = "v.flat_map(|x| {\n    var a = Vec()\n    a.push(x)\n    a.push(x * 10)\n    a\n  }).flat_map(|y| {\n    var c = Vec()\n    c.push(y)\n    c.push(y * 100)\n    c\n  })";
     let (rt, result) = run_main(&format!(
         "fn main() -> Int {{\n{outer}  {two_levels}.sum()\n}}\n"
     ));
@@ -2380,7 +2380,7 @@ fn a_flat_map_inside_a_flat_map_flattens_both_levels() {
     // [1,2] -> [1,10,2,20] -map(*2)-> [2,20,4,40] -flat_map(y -> [y, y+1])->
     // [2,3,20,21,4,5,40,41], sum = 136.
     let (rt, result) = run_main(&format!(
-        "fn main() -> Int {{\n{outer}  v.flat_map(|x| {{\n    let a = Vec()\n    a.push(x)\n    a.push(x * 10)\n    a\n  }}).map(|y| y * 2).flat_map(|z| {{\n    let c = Vec()\n    c.push(z)\n    c.push(z + 1)\n    c\n  }}).sum()\n}}\n"
+        "fn main() -> Int {{\n{outer}  v.flat_map(|x| {{\n    var a = Vec()\n    a.push(x)\n    a.push(x * 10)\n    a\n  }}).map(|y| y * 2).flat_map(|z| {{\n    var c = Vec()\n    c.push(z)\n    c.push(z + 1)\n    c\n  }}).sum()\n}}\n"
     ));
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(
@@ -2403,7 +2403,7 @@ fn take_while_after_flat_map_stops_the_whole_stream() {
     // 100 / (3 - 5) = -50. Per inner Vec, `1` is merely dropped and `5` goes on
     // to divide by zero — which is the assertion, because a wrong answer here
     // would be indistinguishable from a right one for a total mapper.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(3)\n  v.push(1)\n  v.push(5)\n  v.flat_map(|x| {\n    let a = Vec()\n    a.push(x)\n    a\n  }).take_while(|y| y > 2).map(|y| 100 / (y - 5)).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(3)\n  v.push(1)\n  v.push(5)\n  v.flat_map(|x| {\n    var a = Vec()\n    a.push(x)\n    a\n  }).take_while(|y| y > 2).map(|y| 100 / (y - 5)).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(
         !rt.has_pending_fault(),
@@ -2415,7 +2415,7 @@ fn take_while_after_flat_map_stops_the_whole_stream() {
     // The same with inner Vecs of length two, so the stop lands *inside* an
     // inner sequence rather than at its start: [1,2] -> [1,10,2,20],
     // take_while(< 5) -> [1].
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let a = Vec()\n    a.push(x)\n    a.push(x * 10)\n    a\n  }).take_while(|y| y < 5).count()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    var a = Vec()\n    a.push(x)\n    a.push(x * 10)\n    a\n  }).take_while(|y| y < 5).count()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1, "the stream stops at the first 10");
@@ -2440,7 +2440,7 @@ fn filter_map_drops_the_nones_rather_than_carrying_them() {
     // [1,2,3,4,5] |> Some(x*2) when x > 2 → [6, 8, 10], summing to 24. Under
     // the old map-keep lowering the chain is [None, None, Some(6), Some(8),
     // Some(10)] and `sum` has nothing to add.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter_map(|x| if x > 2 { Some(x * 2) } else { None }).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter_map(|x| if x > 2 { Some(x * 2) } else { None }).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 24);
@@ -2452,7 +2452,7 @@ fn filter_map_drops_the_nones_rather_than_carrying_them() {
 /// without any type error to hide behind.
 #[test]
 fn a_filter_map_that_matches_nothing_yields_nothing() {
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.filter_map(|x| if x > 100 { Some(x) } else { None }).collect().len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.filter_map(|x| if x > 100 { Some(x) } else { None }).collect().len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -2467,7 +2467,7 @@ fn filter_map_in_the_middle_of_a_chain_drops_only_its_own_element() {
     // [1..6] .map(+1) = [2,3,4,5,6]
     //        .filter_map(Some(x*10) when even) = [20, 40, 60]
     //        .filter(> 20) = [40, 60] → 100
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.map(|x| x + 1).filter_map(|x| if x - x / 2 * 2 == 0 { Some(x * 10) } else { None }).filter(|x| x > 20).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.map(|x| x + 1).filter_map(|x| if x - x / 2 * 2 == 0 { Some(x * 10) } else { None }).filter(|x| x > 20).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 100);
@@ -2477,7 +2477,7 @@ fn filter_map_in_the_middle_of_a_chain_drops_only_its_own_element() {
 fn pipeline_min_by_with_comparator() {
     // min_by picks the element for which the comparator (a < b) holds vs. the
     // running best. [|10, 5, 8|].min_by(|a, b| a < b) = 5.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(5)\n  v.push(8)\n  v.min_by(|a, b| a < b)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(10)\n  v.push(5)\n  v.push(8)\n  v.min_by(|a, b| a < b)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 5);
@@ -2488,7 +2488,7 @@ fn pipeline_max_by_with_comparator() {
     // max_by picks the element for which the comparator says candidate < best
     // (i.e. best is "less than" candidate → candidate is larger).
     // [|3, 7, 2|].max_by(|a, b| a < b) = 7.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(3)\n  v.push(7)\n  v.push(2)\n  v.max_by(|a, b| a < b)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(3)\n  v.push(7)\n  v.push(2)\n  v.max_by(|a, b| a < b)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
@@ -2497,7 +2497,7 @@ fn pipeline_max_by_with_comparator() {
 #[test]
 fn pipeline_empty_vec_sum_is_zero() {
     // An empty source: the fused loop body never runs; sum accumulator stays 0.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -2510,7 +2510,7 @@ fn pipeline_empty_vec_sum_is_zero() {
 /// exactly what distinguishes it from `min`/`reduce` (D1).
 #[test]
 fn an_empty_source_makes_find_answer_none() {
-    let src = "fn main() -> Int {\n  let v = Vec()\n  match v.find(|x| x == 0) { Some(n) => n, None => 7 }\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  match v.find(|x| x == 0) { Some(n) => n, None => 7 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
@@ -2528,7 +2528,7 @@ fn text_len_and_get_end_to_end() {
     // the wrong *type* — the row answered an `Int` because M5 reserved `Char`.
     // The scalar value is still 101; naming it now takes the `.to_int()` that
     // ADR-086 added for exactly this.
-    let src = "fn main() -> Int {\n  let s = \"hello\"\n  s.get(1).to_int()\n}\n";
+    let src = "fn main() -> Int {\n  var s = \"hello\"\n  s.get(1).to_int()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault());
     // 'e' = 101
@@ -2538,7 +2538,7 @@ fn text_len_and_get_end_to_end() {
 #[test]
 fn text_len_counts_unicode_scalars() {
     // "héllo" has 5 Unicode scalar values (é is one char).
-    let src = "fn main() -> Int {\n  let s = \"héllo\"\n  s.len()\n}\n";
+    let src = "fn main() -> Int {\n  var s = \"héllo\"\n  s.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 5);
@@ -2556,7 +2556,7 @@ fn text_get_indexes_by_scalar_not_byte() {
     // The subject is unchanged by ADR-086 and is why this test was rewritten
     // rather than deleted (§8.2): scalar-not-byte indexing is the property, and
     // it is now observed through the `Char` the row answers.
-    let src = "fn main() -> Int {\n  let s = \"héllo\"\n  s.get(1).to_int()\n}\n";
+    let src = "fn main() -> Int {\n  var s = \"héllo\"\n  s.get(1).to_int()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 233);
@@ -2584,7 +2584,7 @@ fn a_char_and_its_code_point_convert_both_ways() {
     // (b) The round trip. `Int.to_char()` is the half that makes `Vec[Char]`
     // and `Map[Char, _]` writable from the language rather than read-only.
     let src =
-        "fn main() -> Int {\n  let c = \"héllo\"[1]\n  if 233.to_char() == c { 1 } else { 0 }\n}\n";
+        "fn main() -> Int {\n  var c = \"héllo\"[1]\n  if 233.to_char() == c { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 1);
@@ -2594,7 +2594,7 @@ fn a_char_and_its_code_point_convert_both_ways() {
     // `Grid[Char]` cell is finally comparable to one. Before ADR-086 this was
     // `Y001`, and the corpus worked around it by comparing a cell to another
     // cell through `find_all`.
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  if g[1, 0] == \"#\"[0] { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  if g[1, 0] == \"#\"[0] { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main_with_input(src, "a#\ncd\n");
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 1);
@@ -2612,7 +2612,7 @@ fn int_to_char_faults_on_a_value_that_is_not_a_scalar() {
 #[test]
 fn text_is_empty_works() {
     // An empty text literal's .is_empty() → Bool → compare as 1.
-    let src = "fn main() -> Int {\n  let s = \"\"\n  if s.is_empty() { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var s = \"\"\n  if s.is_empty() { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 1);
@@ -2620,7 +2620,7 @@ fn text_is_empty_works() {
 
 #[test]
 fn text_get_out_of_bounds_faults() {
-    let src = "fn main() -> Int {\n  let s = \"ab\"\n  s.get(5)\n}\n";
+    let src = "fn main() -> Int {\n  var s = \"ab\"\n  s.get(5)\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IndexOutOfBounds);
@@ -2643,7 +2643,7 @@ fn out_writes_to_stdout_and_returns_unit() {
 }
 
 // ===========================================================================
-// Milestone 5: var reassignment and let object mutation under GC (§4.2).
+// Milestone 5: reassignment and object mutation through a binding, under GC (§4.2).
 // ===========================================================================
 
 #[test]
@@ -2658,9 +2658,9 @@ fn var_vec_reassign_survives_gc() {
 
 #[test]
 fn let_vec_mutation_visible_after_gc() {
-    // §4.2: "A let binding may still point to a mutable object." Push 1000
-    // elements to a `let v` (mutating the object), survive GCs, read back.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 1000 { v.push(i * 2); i = i + 1 }\n  v.get(500)\n}\n";
+    // §4.2: "A binding may still point to a mutable object." Push 1000
+    // elements to a `var v` (mutating the object), survive GCs, read back.
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 1000 { v.push(i * 2); i = i + 1 }\n  v.get(500)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 1000); // 500 * 2
@@ -2703,7 +2703,7 @@ fn char_runtime_roundtrip() {
 fn read_lines_of_int_parses_input() {
     // `read lines(int)` against "10\n20\n30" → Vec[Int] of [10, 20, 30].
     // The program reads .len() and returns it.
-    let src = "fn main() -> Int {\n  let v = read lines(int)\n  v.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = read lines(int)\n  v.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "10\n20\n30\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -2712,7 +2712,7 @@ fn read_lines_of_int_parses_input() {
 #[test]
 fn read_lines_of_int_first_element() {
     // Read the first element of a lines(int) parse.
-    let src = "fn main() -> Int {\n  let v = read lines(int)\n  v.get(0)\n}\n";
+    let src = "fn main() -> Int {\n  var v = read lines(int)\n  v.get(0)\n}\n";
     let (rt, result) = run_main_with_input(src, "42\n99\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
@@ -2731,7 +2731,7 @@ fn read_with_var_binding() {
 fn multiple_reads_parse_same_buffer() {
     // Acceptance criterion 3: multiple `read` expressions deterministically
     // parse the same complete source buffer.
-    let src = "fn main() -> Int {\n  let a = read lines(int)\n  let b = read lines(int)\n  a.get(0) + b.get(1)\n}\n";
+    let src = "fn main() -> Int {\n  var a = read lines(int)\n  var b = read lines(int)\n  a.get(0) + b.get(1)\n}\n";
     let (rt, result) = run_main_with_input(src, "100\n200\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 300); // 100 + 200
@@ -2746,7 +2746,7 @@ fn read_sections_lines_csv_int_nested() {
     // descriptor to resolve recursively (an M6 follow-up). For now we verify
     // the outer structure is correct (non-faulting, returns a Vec).
     let src =
-        "fn main() -> Int {\n  let groups = read sections(lines(csv(int)))\n  groups.len()\n}\n";
+        "fn main() -> Int {\n  var groups = read sections(lines(csv(int)))\n  groups.len()\n}\n";
     let input = "1,2,3\n4,5,6\n\n7,8,9\n";
     let (rt, result) = run_main_with_input(src, input);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -2760,7 +2760,7 @@ fn read_lines_of_named_capture_template_parses_records() {
     // `read lines(`{x:int},{y:int}`)` → Vec[{x:Int,y:Int}]. Each line matches the
     // template; named captures become record fields. We read .len() to confirm
     // three records parsed without faulting.
-    let src = "fn main() -> Int {\n  let v = read lines(`{x:int},{y:int}`)\n  v.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = read lines(`{x:int},{y:int}`)\n  v.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "1,2\n3,4\n5,6\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -2770,7 +2770,7 @@ fn read_lines_of_named_capture_template_parses_records() {
 fn read_lines_of_single_anon_capture_parses_scalars() {
     // `read lines(`{int}`)` → Vec[Int]. A single anonymous capture yields the
     // scalar value directly. Read the first element to confirm the value flows.
-    let src = "fn main() -> Int {\n  let v = read lines(`{int}`)\n  v.get(1)\n}\n";
+    let src = "fn main() -> Int {\n  var v = read lines(`{int}`)\n  v.get(1)\n}\n";
     let (rt, result) = run_main_with_input(src, "10\n20\n30\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 20);
@@ -2780,7 +2780,7 @@ fn read_lines_of_single_anon_capture_parses_scalars() {
 fn read_lines_of_multi_anon_capture_parses_tuples() {
     // `read lines(`{int},{int}`)` → Vec[(Int, Int)]. Two anonymous captures
     // assemble into a tuple. We read .len() to confirm parsing succeeded.
-    let src = "fn main() -> Int {\n  let v = read lines(`{int},{int}`)\n  v.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = read lines(`{int},{int}`)\n  v.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "1,2\n3,4\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -2790,7 +2790,7 @@ fn read_lines_of_multi_anon_capture_parses_tuples() {
 fn read_standalone_named_capture_template_parses_one_record() {
     // A standalone template (no `lines`) against the whole buffer. `{x:int},{y:int}`
     // parses a single record from "7,8".
-    let src = "fn main() -> Int {\n  let r = read `{x:int},{y:int}`\n  0\n}\n";
+    let src = "fn main() -> Int {\n  var r = read `{x:int},{y:int}`\n  0\n}\n";
     let (rt, result) = run_main_with_input(src, "7,8\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -2802,7 +2802,7 @@ fn read_nested_collections_descriptor_is_composite() {
     // descriptor as a Vec (not the leaf Int), so formatting/equality on nested
     // collections dispatches correctly. Compare two identical nested parses for
     // structural equality → true (1).
-    let src = "fn main() -> Int {\n  let a = read sections(lines(csv(int)))\n  let b = read sections(lines(csv(int)))\n  if a == b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var a = read sections(lines(csv(int)))\n  var b = read sections(lines(csv(int)))\n  if a == b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main_with_input(src, "1,2\n3,4\n\n1,2\n3,4\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -2817,7 +2817,7 @@ fn adv_parser_record_with_text_field_equal_to_literal_record() {
     // with the INT descriptor it SEGFAULTED (INT.equals reinterpreting a
     // TextPayload as i64). Fixed: alloc_record now uses value.descriptor().
     // Two identical parses → equal (1).
-    let src = "fn main() -> Int {\n  let a = read lines(`{name:word},{port:int}`)\n  let b = read lines(`{name:word},{port:int}`)\n  if a == b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var a = read lines(`{name:word},{port:int}`)\n  var b = read lines(`{name:word},{port:int}`)\n  if a == b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main_with_input(src, "alpha,80\nbeta,443\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -2827,7 +2827,7 @@ fn adv_parser_record_with_text_field_equal_to_literal_record() {
 fn adv_parser_record_with_text_field_unequal_when_differs() {
     // Complement: two parser records whose Text fields differ must compare
     // unequal (no false-positive pointer collision).
-    let src = "fn main() -> Int {\n  let a = read lines(`{name:word},{port:int}`)\n  let b = read lines(`{name:word},{port:int}`)\n  if a == b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var a = read lines(`{name:word},{port:int}`)\n  var b = read lines(`{name:word},{port:int}`)\n  if a == b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main_with_input(src, "alpha,80\nbeta,443\n");
     // a and b parse the SAME input, so they ARE equal → 1. (This confirms the
     // equal path; a differing-input variant would need two run_main calls with
@@ -2842,7 +2842,7 @@ fn adv_parser_record_text_field_as_map_key() {
     // dispatch through the field descriptor; with the old INT-descriptor bug
     // this SEGFAULTED (INT.hash reinterpreting a TextPayload). Insert the same
     // parser record twice; the set must dedupe to 1.
-    let src = "fn main() -> Int {\n  let recs = read lines(`{name:word},{port:int}`)\n  let s = Set()\n  s.insert(recs.get(0))\n  s.insert(recs.get(0))\n  s.len()\n}\n";
+    let src = "fn main() -> Int {\n  var recs = read lines(`{name:word},{port:int}`)\n  var s = Set()\n  s.insert(recs.get(0))\n  s.insert(recs.get(0))\n  s.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "alpha,80\nbeta,443\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -2853,7 +2853,7 @@ fn adv_parser_record_with_text_field_survives_gc() {
     // Parser records with Text fields must survive GC (record_trace traces
     // items directly, so this should work). Force GC then read len.
     // Template mirrors the working {x:int},{y:int} pattern but with a word field.
-    let src = "fn main() -> Int {\n  let recs = read lines(`{name:word},{port:int}`)\n  let garbage = Vec()\n  var i = 0\n  while i < 500 { garbage.push(i); i = i + 1 }\n  recs.len()\n}\n";
+    let src = "fn main() -> Int {\n  var recs = read lines(`{name:word},{port:int}`)\n  var garbage = Vec()\n  var i = 0\n  while i < 500 { garbage.push(i); i = i + 1 }\n  recs.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "alpha,80\nbeta,443\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -2882,17 +2882,17 @@ fn adv_parser_record_same_name_diff_type_no_schema_collision() {
     // the equality of the Text record (INT.equals reinterpreting a TextPayload).
     let src = String::from("fn main() -> Int {\n")
         // First template seen: {v:word} → v is Text. Parse, compare, key it.
-        + "  let ws = read lines(`{v:word}`)\n"
-        + "  let w_ok = if ws.get(0) == ws.get(0) { 1 } else { 0 }\n"
-        + "  let ws_set = Set()\n"
+        + "  var ws = read lines(`{v:word}`)\n"
+        + "  var w_ok = if ws.get(0) == ws.get(0) { 1 } else { 0 }\n"
+        + "  var ws_set = Set()\n"
         + "  ws_set.insert(ws.get(0))\n"
         // Second template seen: {v:char} → v is Char, SAME field name `v`.
         // Both parse the single char `a`, but the field descriptor differs
         // (TEXT vs CHAR). Pre-fix this got the word-template's schema (Text
         // descriptor), which would miscompare/mishash the Char field.
-        + "  let cs = read lines(`{v:char}`)\n"
-        + "  let c_ok = if cs.get(0) == cs.get(0) { 1 } else { 0 }\n"
-        + "  let cs_set = Set()\n"
+        + "  var cs = read lines(`{v:char}`)\n"
+        + "  var c_ok = if cs.get(0) == cs.get(0) { 1 } else { 0 }\n"
+        + "  var cs_set = Set()\n"
         + "  cs_set.insert(cs.get(0))\n"
         + "  w_ok + c_ok\n"
         + "}\n";
@@ -2908,11 +2908,11 @@ fn adv_parser_record_same_name_diff_type_survives_gc() {
     // two parses to confirm nothing about the cached-schema dispatch is
     // sensitive to GC ordering. Parses cleanly and counts both records.
     let src = String::from("fn main() -> Int {\n")
-        + "  let ws = read lines(`{v:word}`)\n"
-        + "  let garbage = Vec()\n"
+        + "  var ws = read lines(`{v:word}`)\n"
+        + "  var garbage = Vec()\n"
         + "  var i = 0\n"
         + "  while i < 300 { garbage.push(i); i = i + 1 }\n"
-        + "  let cs = read lines(`{v:char}`)\n"
+        + "  var cs = read lines(`{v:char}`)\n"
         + "  ws.len() + cs.len()\n"
         + "}\n";
     let (rt, result) = run_main_with_input(&src, "a\n");
@@ -2930,7 +2930,7 @@ fn adv_read_against_non_text_input_faults_cleanly() {
     // parser garbage. This program reads against the UNSET (Unit) input_source;
     // pre-fix it killed the host (SIGSEGV). Now it must return with a clean
     // ParseFailed fault and the host stays alive.
-    let src = "fn main() -> Int {\n  let v = read lines(`{x:word}`)\n  v.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = read lines(`{x:word}`)\n  v.len()\n}\n";
     let (rt, result) = run_main_no_input(src);
     assert!(
         rt.has_pending_fault(),
@@ -2978,7 +2978,7 @@ fn adv_csv_inside_sections_nonzero_offset() {
     // §7.5's full-consumption half is carried by
     // `a_csv_field_the_child_does_not_consume_is_a_parse_failure` and
     // `csv_rest_parser_is_bounded_to_each_token` (parser.rs), not by this test.
-    let src = "fn main() -> Int {\n  let s = read sections(lines(csv(int)))\n  \
+    let src = "fn main() -> Int {\n  var s = read sections(lines(csv(int)))\n  \
                s.get(1).get(0).get(1)\n}\n";
     let (rt, result) = run_main_with_input(src, "1,2,3\n4,5,6\n\n7,8\n9,10\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -2992,7 +2992,7 @@ fn adv_csv_inside_sections_nonzero_offset() {
     // so any offset that names the wrong field — a re-based-to-zero section
     // walk, or a search that resolves inside the first section — answers with
     // different bytes and this fails.
-    let src = "fn main() -> Text {\n  let s = read sections(lines(csv(word)))\n  \
+    let src = "fn main() -> Text {\n  var s = read sections(lines(csv(word)))\n  \
                s.get(1).get(1).get(0)\n}\n";
     let (rt, result) = run_main_with_input(src, "aa,bb\ncc,dd\n\nee,ff\ngg,hh\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -3006,7 +3006,7 @@ fn adv_csv_inside_sections_nonzero_offset() {
     // `windows(0)`. `"10,20,"` was enough. The assertion is the empty field's
     // own length: a panic here is not a failed assertion, it is undefined
     // behaviour across the ABI (D12).
-    let src = "fn main() -> Int {\n  let s = read sections(lines(csv(rest)))\n  \
+    let src = "fn main() -> Int {\n  var s = read sections(lines(csv(rest)))\n  \
                s.get(1).get(0).get(2).len()\n}\n";
     let (rt, result) = run_main_with_input(src, "1,2,3\n\n10,20,\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -3018,12 +3018,12 @@ fn adv_csv_inside_sections_nonzero_offset() {
 ///
 /// The predecessor computed each field's bounds and then walked the child
 /// against everything from the field's start to the end of the buffer, with the
-/// end explicitly discarded (`let _ = token_end;`). So `csv(int)` over a region
+/// end explicitly discarded (`var _ = token_end;`). So `csv(int)` over a region
 /// with a stray newline in it "worked" by reading the digits it liked.
 #[test]
 fn a_csv_field_the_child_does_not_consume_is_a_parse_failure() {
     let (rt, _result) = run_main_with_input(
-        "fn main() -> Int {\n  let v = read csv(int)\n  v.len()\n}\n",
+        "fn main() -> Int {\n  var v = read csv(int)\n  v.len()\n}\n",
         "1,2x,3\n",
     );
     assert_eq!(
@@ -3037,7 +3037,7 @@ fn a_csv_field_the_child_does_not_consume_is_a_parse_failure() {
 fn adv_csv_at_buffer_start_zero_offset() {
     // Sanity: csv(int) at the buffer start (offset 0). Compare with the
     // non-zero-offset variant above to isolate the offset handling.
-    let src = "fn main() -> Int {\n  let v = read csv(int)\n  v.get(3)\n}\n";
+    let src = "fn main() -> Int {\n  var v = read csv(int)\n  v.get(3)\n}\n";
     let (rt, result) = run_main_with_input(src, "10,20,30,40,50\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 40);
@@ -3046,7 +3046,7 @@ fn adv_csv_at_buffer_start_zero_offset() {
 #[test]
 fn adv_read_empty_input_yields_empty_vec() {
     // Empty input to `read lines(int)`: should yield an empty Vec, not fault.
-    let src = "fn main() -> Int {\n  let v = read lines(int)\n  v.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = read lines(int)\n  v.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -3056,7 +3056,7 @@ fn adv_read_empty_input_yields_empty_vec() {
 fn adv_grid_rotate_four_times_is_identity() {
     // Rotate right 4× → original. Verifies the rotate operation composes
     // correctly (a single rotate-is-some-permutation is already tested).
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let r1 = g.rotate_right()\n  let r2 = r1.rotate_right()\n  let r3 = r2.rotate_right()\n  let r4 = r3.rotate_right()\n  if g == r4 { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var r1 = g.rotate_right()\n  var r2 = r1.rotate_right()\n  var r3 = r2.rotate_right()\n  var r4 = r3.rotate_right()\n  if g == r4 { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main_with_input(src, "abc\ndef\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -3065,7 +3065,7 @@ fn adv_grid_rotate_four_times_is_identity() {
 #[test]
 fn adv_grid_transpose_twice_is_identity() {
     // Transpose is its own inverse for a rectangular grid.
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let t1 = g.transpose()\n  let t2 = t1.transpose()\n  if g == t2 { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var t1 = g.transpose()\n  var t2 = t1.transpose()\n  if g == t2 { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main_with_input(src, "abc\ndef\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -3075,7 +3075,7 @@ fn adv_grid_transpose_twice_is_identity() {
 fn adv_grid_equality_false_for_different_content() {
     // Two grids of the same dimensions but different content must compare
     // unequal (guards against a width-only equality shortcut).
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let h = read grid(char)\n  if g == h { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var h = read grid(char)\n  if g == h { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main_with_input(src, "abc\ndef\n");
     // Both read the SAME input, so they ARE equal → 1. (A differing-content
     // test would need distinct inputs; this confirms equal grids compare
@@ -3092,7 +3092,7 @@ fn adv_grid_large_under_gc_pressure() {
     let input: String = (0..30)
         .map(|_| "abcdefghijabcdefghijabcdefghij\n")
         .collect();
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  let garbage = Vec()\n  var i = 0\n  while i < 500 { garbage.push(i); i = i + 1 }\n  g.width()\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  var garbage = Vec()\n  var i = 0\n  while i < 500 { garbage.push(i); i = i + 1 }\n  g.width()\n}\n";
     let (rt, result) = run_main_with_input(src, &input);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 30);
@@ -3104,7 +3104,7 @@ fn adv_bitset_remove_high_bit_then_equals_untouched() {
     // equals/hash must still treat it as distinct from a never-touched bitset
     // of the same low bits. Guards the equals⇒hash-equal invariant for the
     // trailing-zero-word case.
-    let src = "fn main() -> Int {\n  let a = BitSet()\n  a.insert(100)\n  a.remove(100)\n  let b = BitSet()\n  let ea = a.contains(1)\n  let eb = b.contains(1)\n  if ea == eb { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var a = BitSet()\n  a.insert(100)\n  a.remove(100)\n  var b = BitSet()\n  var ea = a.contains(1)\n  var eb = b.contains(1)\n  if ea == eb { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // both empty after a's remove → neither contains 1 → ea==eb (both false)
@@ -3114,7 +3114,7 @@ fn adv_bitset_remove_high_bit_then_equals_untouched() {
 #[test]
 fn adv_bitset_large_under_gc_pressure() {
     // Insert 500 bits under GC; the bitset backing must survive.
-    let src = "fn main() -> Int {\n  let b = BitSet()\n  var i = 0\n  while i < 500 { b.insert(i); i = i + 1 }\n  let garbage = Vec()\n  var j = 0\n  while j < 500 { garbage.push(j); j = j + 1 }\n  let p = b.contains(499)\n  if p { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var b = BitSet()\n  var i = 0\n  while i < 500 { b.insert(i); i = i + 1 }\n  var garbage = Vec()\n  var j = 0\n  while j < 500 { garbage.push(j); j = j + 1 }\n  var p = b.contains(499)\n  if p { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -3124,7 +3124,7 @@ fn adv_bitset_large_under_gc_pressure() {
 fn adv_min_heap_ordering_under_gc_pressure() {
     // Push 200 ints to a MinHeap under GC, pop all and confirm ascending order
     // by checking the first pop is the min.
-    let src = "fn main() -> Int {\n  let h = MinHeap()\n  var i = 0\n  while i < 200 { h.push((i * 37 + 11) - 100); i = i + 1 }\n  let garbage = Vec()\n  var j = 0\n  while j < 300 { garbage.push(j); j = j + 1 }\n  h.pop()\n}\n";
+    let src = "fn main() -> Int {\n  var h = MinHeap()\n  var i = 0\n  while i < 200 { h.push((i * 37 + 11) - 100); i = i + 1 }\n  var garbage = Vec()\n  var j = 0\n  while j < 300 { garbage.push(j); j = j + 1 }\n  h.pop()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // The min of (i*37+11)-100 for i in 0..200: i=0 → -89; i=1 → -52; ... i=0 gives -89
@@ -3137,7 +3137,7 @@ fn adv_tuple_with_record_field_equality() {
     // A tuple containing records — equality must dispatch through each
     // element's own descriptor (tuples.rs uses item.descriptor()). Two
     // structurally-equal tuples must compare equal.
-    let src = "struct P { x: Int, y: Int }\nfn main() -> Int {\n  let a = (P { x: 1, y: 2 }, P { x: 3, y: 4 })\n  let b = (P { x: 1, y: 2 }, P { x: 3, y: 4 })\n  if a == b { 1 } else { 0 }\n}\n";
+    let src = "struct P { x: Int, y: Int }\nfn main() -> Int {\n  var a = (P { x: 1, y: 2 }, P { x: 3, y: 4 })\n  var b = (P { x: 1, y: 2 }, P { x: 3, y: 4 })\n  if a == b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -3146,7 +3146,7 @@ fn adv_tuple_with_record_field_equality() {
 #[test]
 fn adv_nested_vec_equality_deep() {
     // Deeply nested Vec equality: Vec[Vec[Vec[Int]]]. Equal shapes+content.
-    let src = "fn main() -> Int {\n  let a = Vec()\n  let inner_a = Vec()\n  let leaf_a = Vec()\n  leaf_a.push(1)\n  leaf_a.push(2)\n  inner_a.push(leaf_a)\n  a.push(inner_a)\n  let b = Vec()\n  let inner_b = Vec()\n  let leaf_b = Vec()\n  leaf_b.push(1)\n  leaf_b.push(2)\n  inner_b.push(leaf_b)\n  b.push(inner_b)\n  if a == b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var a = Vec()\n  var inner_a = Vec()\n  var leaf_a = Vec()\n  leaf_a.push(1)\n  leaf_a.push(2)\n  inner_a.push(leaf_a)\n  a.push(inner_a)\n  var b = Vec()\n  var inner_b = Vec()\n  var leaf_b = Vec()\n  leaf_b.push(1)\n  leaf_b.push(2)\n  inner_b.push(leaf_b)\n  b.push(inner_b)\n  if a == b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -3155,7 +3155,7 @@ fn adv_nested_vec_equality_deep() {
 #[test]
 fn adv_nested_vec_equality_unequal_leaf() {
     // Complement: differing leaf content → unequal.
-    let src = "fn main() -> Int {\n  let a = Vec()\n  let inner_a = Vec()\n  inner_a.push(1)\n  inner_a.push(2)\n  a.push(inner_a)\n  let b = Vec()\n  let inner_b = Vec()\n  inner_b.push(1)\n  inner_b.push(9)\n  b.push(inner_b)\n  if a == b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var a = Vec()\n  var inner_a = Vec()\n  inner_a.push(1)\n  inner_a.push(2)\n  a.push(inner_a)\n  var b = Vec()\n  var inner_b = Vec()\n  inner_b.push(1)\n  inner_b.push(9)\n  b.push(inner_b)\n  if a == b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -3177,7 +3177,7 @@ fn adv_two_faults_in_sequence_clean() {
 #[test]
 fn adv_out_of_bounds_vec_get_faults() {
     // OOB index must fault as IndexOutOfBounds, not crash.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.get(5)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.get(5)\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault(), "OOB vec get should fault");
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IndexOutOfBounds);
@@ -3186,7 +3186,7 @@ fn adv_out_of_bounds_vec_get_faults() {
 #[test]
 fn adv_out_of_bounds_vec_negative_index_faults() {
     // Negative index — must fault cleanly, not wrap to a huge usize and crash.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.get(0 - 1)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.get(0 - 1)\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault(), "negative index should fault");
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IndexOutOfBounds);
@@ -3197,7 +3197,7 @@ fn adv_out_of_bounds_vec_negative_index_faults() {
 #[test]
 fn logical_or_returns_true_when_lhs_true() {
     // true || false → true (→ 1).
-    let src = "fn main() -> Int {\n  let b = true || false\n  if b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var b = true || false\n  if b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -3206,7 +3206,7 @@ fn logical_or_returns_true_when_lhs_true() {
 #[test]
 fn logical_or_returns_rhs_when_lhs_false() {
     // false || true → true (→ 1).
-    let src = "fn main() -> Int {\n  let b = false || true\n  if b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var b = false || true\n  if b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -3215,7 +3215,7 @@ fn logical_or_returns_rhs_when_lhs_false() {
 #[test]
 fn logical_or_returns_false_when_both_false() {
     // false || false → false (→ 0).
-    let src = "fn main() -> Int {\n  let b = false || false\n  if b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var b = false || false\n  if b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -3225,7 +3225,7 @@ fn logical_or_returns_false_when_both_false() {
 fn logical_or_short_circuits_skipping_rhs_side_effect() {
     // The acceptance test for short-circuit: when lhs is true, the rhs division
     // by zero must NOT execute (no fault). If || were eager, this would fault.
-    let src = "fn main() -> Int {\n  let b = true || (1 / 0 == 0)\n  if b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var b = true || (1 / 0 == 0)\n  if b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(
         !rt.has_pending_fault(),
@@ -3238,7 +3238,7 @@ fn logical_or_short_circuits_skipping_rhs_side_effect() {
 #[test]
 fn logical_or_evaluates_rhs_side_effect_when_lhs_false() {
     // When lhs is false, the rhs IS evaluated — so a div-by-zero faults.
-    let src = "fn main() -> Int {\n  let b = false || (1 / 0 == 0)\n  if b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var b = false || (1 / 0 == 0)\n  if b { 1 } else { 0 }\n}\n";
     let (rt, _result) = run_main(src);
     assert!(
         rt.has_pending_fault(),
@@ -3249,7 +3249,7 @@ fn logical_or_evaluates_rhs_side_effect_when_lhs_false() {
 #[test]
 fn logical_not_flips_bool() {
     // !true → false (→ 0); !false → true (→ 1).
-    let src = "fn main() -> Int {\n  let a = !true\n  let b = !false\n  if a { 0 } else { if b { 1 } else { 0 } }\n}\n";
+    let src = "fn main() -> Int {\n  var a = !true\n  var b = !false\n  if a { 0 } else { if b { 1 } else { 0 } }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -3258,7 +3258,7 @@ fn logical_not_flips_bool() {
 #[test]
 fn double_not_is_identity() {
     // !!true → true (→ 1).
-    let src = "fn main() -> Int {\n  let b = !!true\n  if b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var b = !!true\n  if b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -3269,7 +3269,7 @@ fn double_not_is_identity() {
 #[test]
 fn record_construction_and_field_access() {
     // `Point { x: 3, y: 4 }` → read back x + y = 7.
-    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  let p = Point { x: 3, y: 4 }\n  p.x + p.y\n}\n";
+    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  var p = Point { x: 3, y: 4 }\n  p.x + p.y\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
@@ -3278,7 +3278,7 @@ fn record_construction_and_field_access() {
 #[test]
 fn record_field_access_independently() {
     // Read just one field.
-    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  let p = Point { x: 30, y: 4 }\n  p.x\n}\n";
+    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  var p = Point { x: 30, y: 4 }\n  p.x\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 30);
@@ -3287,7 +3287,7 @@ fn record_field_access_independently() {
 #[test]
 fn record_with_text_field() {
     // A record with a Text field, accessed and used.
-    let src = "struct Entry { key: Int, label: Text }\nfn main() -> Int {\n  let e = Entry { key: 42, label: \"hello\" }\n  e.key\n}\n";
+    let src = "struct Entry { key: Int, label: Text }\nfn main() -> Int {\n  var e = Entry { key: 42, label: \"hello\" }\n  e.key\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
@@ -3297,7 +3297,7 @@ fn record_with_text_field() {
 fn record_survives_gc() {
     // Allocate a record, trigger GC by allocating many objects, then read back.
     // This verifies the record's GcRef is rooted across safepoints.
-    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  let p = Point { x: 100, y: 200 }\n  var i = 0\n  while i < 100 {\n    let junk = i + 1\n    i = i + 1\n  }\n  p.x + p.y\n}\n";
+    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  var p = Point { x: 100, y: 200 }\n  var i = 0\n  while i < 100 {\n    var junk = i + 1\n    i = i + 1\n  }\n  p.x + p.y\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 300);
@@ -3306,7 +3306,7 @@ fn record_survives_gc() {
 #[test]
 fn record_field_punning() {
     // Field punning: `Point { x, y }` where x and y are bindings.
-    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  let x = 5\n  let y = 7\n  let p = Point { x, y }\n  p.x * p.y\n}\n";
+    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  var x = 5\n  var y = 7\n  var p = Point { x, y }\n  p.x * p.y\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 35);
@@ -3318,7 +3318,7 @@ fn record_field_punning() {
 fn tuple_construction_does_not_fault() {
     // M7 Part 2: tuples now materialize as real objects. Constructing one must
     // not fault (previously this was a Unit stub).
-    let src = "fn main() -> Int {\n  let t = (1, 2, 3)\n  7\n}\n";
+    let src = "fn main() -> Int {\n  var t = (1, 2, 3)\n  7\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
@@ -3329,7 +3329,7 @@ fn tuple_survives_gc() {
     // Allocate a tuple, trigger GC by allocating many objects, and confirm the
     // program completes without faulting (the tuple's GcRef must be rooted
     // across safepoints).
-    let src = "fn main() -> Int {\n  let t = (100, 200)\n  var i = 0\n  while i < 100 {\n    let junk = i + 1\n    i = i + 1\n  }\n  9\n}\n";
+    let src = "fn main() -> Int {\n  var t = (100, 200)\n  var i = 0\n  while i < 100 {\n    var junk = i + 1\n    i = i + 1\n  }\n  9\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 9);
@@ -3338,7 +3338,7 @@ fn tuple_survives_gc() {
 #[test]
 fn tuple_of_mixed_types() {
     // A tuple with heterogeneous element types (Int, Bool) constructs cleanly.
-    let src = "fn main() -> Int {\n  let t = (42, true)\n  5\n}\n";
+    let src = "fn main() -> Int {\n  var t = (42, true)\n  5\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 5);
@@ -3348,9 +3348,9 @@ fn tuple_of_mixed_types() {
 
 #[test]
 fn record_equality_true() {
-    // `Point{1,2} == Point{1,2}` → true (1). Bind to `let` first because record
+    // `Point{1,2} == Point{1,2}` → true (1). Bind to `var` first because record
     // literals are blocked in `if` conditions (`no_struct_literal`).
-    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  let a = Point { x: 1, y: 2 }\n  let b = Point { x: 1, y: 2 }\n  if a == b { 1 } else { 0 }\n}\n";
+    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  var a = Point { x: 1, y: 2 }\n  var b = Point { x: 1, y: 2 }\n  if a == b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -3359,7 +3359,7 @@ fn record_equality_true() {
 #[test]
 fn record_equality_false() {
     // `Point{1,2} == Point{1,3}` → false (0).
-    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  let a = Point { x: 1, y: 2 }\n  let b = Point { x: 1, y: 3 }\n  if a == b { 1 } else { 0 }\n}\n";
+    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  var a = Point { x: 1, y: 2 }\n  var b = Point { x: 1, y: 3 }\n  if a == b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -3368,7 +3368,7 @@ fn record_equality_false() {
 #[test]
 fn record_inequality() {
     // `Point{1,2} != Point{1,3}` → true (1).
-    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  let a = Point { x: 1, y: 2 }\n  let b = Point { x: 1, y: 3 }\n  if a != b { 1 } else { 0 }\n}\n";
+    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  var a = Point { x: 1, y: 2 }\n  var b = Point { x: 1, y: 3 }\n  if a != b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -3378,7 +3378,7 @@ fn record_inequality() {
 fn tuple_equality_true() {
     // `(1, 2) == (1, 2)` → true.
     let src =
-        "fn main() -> Int {\n  let a = (1, 2)\n  let b = (1, 2)\n  if a == b { 1 } else { 0 }\n}\n";
+        "fn main() -> Int {\n  var a = (1, 2)\n  var b = (1, 2)\n  if a == b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -3388,7 +3388,7 @@ fn tuple_equality_true() {
 fn tuple_equality_false() {
     // `(1, 2) == (1, 3)` → false.
     let src =
-        "fn main() -> Int {\n  let a = (1, 2)\n  let b = (1, 3)\n  if a == b { 1 } else { 0 }\n}\n";
+        "fn main() -> Int {\n  var a = (1, 2)\n  var b = (1, 3)\n  if a == b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -3415,7 +3415,7 @@ fn enum_equality_different_variant() {
 #[test]
 fn enum_equality_with_payload() {
     // `Number(42) == Number(42)` → true; `Number(42) == Number(7)` → false.
-    let src = "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  let a = Number(42) == Number(42)\n  let b = Number(42) == Number(7)\n  if a { if b { 3 } else { 2 } } else { 1 }\n}\n";
+    let src = "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  var a = Number(42) == Number(42)\n  var b = Number(42) == Number(7)\n  if a { if b { 3 } else { 2 } } else { 1 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -3436,7 +3436,7 @@ fn scalar_equality_still_works() {
 fn enum_payload_variant_construction() {
     // `Number(5)` constructs a payload variant. Verify construction doesn't fault.
     let src =
-        "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  let t = Number(42)\n  7\n}\n";
+        "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  var t = Number(42)\n  7\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
@@ -3445,7 +3445,7 @@ fn enum_payload_variant_construction() {
 #[test]
 fn enum_zero_payload_variant_as_value() {
     // `Empty` is a bare zero-payload variant value.
-    let src = "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  let t = Empty\n  8\n}\n";
+    let src = "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  var t = Empty\n  8\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 8);
@@ -3454,7 +3454,7 @@ fn enum_zero_payload_variant_as_value() {
 #[test]
 fn enum_construction_does_not_fault() {
     // Direct enum construction — verify it allocates without faulting.
-    let src = "enum Tile { Empty, Wall, Number(Int) }\nfn main() -> Int {\n  let a = Empty\n  let b = Wall\n  let c = Number(99)\n  42\n}\n";
+    let src = "enum Tile { Empty, Wall, Number(Int) }\nfn main() -> Int {\n  var a = Empty\n  var b = Wall\n  var c = Number(99)\n  42\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
@@ -3463,7 +3463,7 @@ fn enum_construction_does_not_fault() {
 #[test]
 fn enum_survives_gc() {
     // Allocate enum values, trigger GC, verify no fault.
-    let src = "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  let t = Number(123)\n  var i = 0\n  while i < 50 {\n    let junk = i + 1\n    i = i + 1\n  }\n  456\n}\n";
+    let src = "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  var t = Number(123)\n  var i = 0\n  while i < 50 {\n    var junk = i + 1\n    i = i + 1\n  }\n  456\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 456);
@@ -3473,7 +3473,7 @@ fn enum_survives_gc() {
 
 #[test]
 fn match_enum_wall_arm() {
-    let src = "enum Tile { Empty, Wall }\nfn main() -> Int {\n  let t = Wall\n  match t {\n    Empty => 1\n    Wall => 2\n  }\n}\n";
+    let src = "enum Tile { Empty, Wall }\nfn main() -> Int {\n  var t = Wall\n  match t {\n    Empty => 1\n    Wall => 2\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -3481,7 +3481,7 @@ fn match_enum_wall_arm() {
 
 #[test]
 fn match_enum_with_wildcard_default() {
-    let src = "enum Tile { Empty, Wall, Number(Int) }\nfn main() -> Int {\n  let t = Wall\n  match t {\n    Empty => 1\n    _ => 99\n  }\n}\n";
+    let src = "enum Tile { Empty, Wall, Number(Int) }\nfn main() -> Int {\n  var t = Wall\n  match t {\n    Empty => 1\n    _ => 99\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 99);
@@ -3489,7 +3489,7 @@ fn match_enum_with_wildcard_default() {
 
 #[test]
 fn match_enum_zero_payload_returns_arm_value() {
-    let src = "enum Tile { Empty, Wall }\nfn main() -> Int {\n  let t = Empty\n  match t {\n    Empty => 1\n    Wall => 2\n  }\n}\n";
+    let src = "enum Tile { Empty, Wall }\nfn main() -> Int {\n  var t = Empty\n  match t {\n    Empty => 1\n    Wall => 2\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -3497,7 +3497,7 @@ fn match_enum_zero_payload_returns_arm_value() {
 
 #[test]
 fn match_enum_payload_binding() {
-    let src = "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  let t = Number(42)\n  match t {\n    Empty => 0\n    Number(n) => n\n  }\n}\n";
+    let src = "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  var t = Number(42)\n  match t {\n    Empty => 0\n    Number(n) => n\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
@@ -3509,7 +3509,7 @@ fn match_enum_payload_binding() {
 fn match_literal_int() {
     // Literal Int patterns — the WS5 bug always took the first arm; this now
     // tests each value. `match n { 1 => 10, 2 => 20, _ => 0 }`.
-    let src = "fn main() -> Int {\n  let n = 2\n  match n {\n    1 => 10\n    2 => 20\n    _ => 0\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var n = 2\n  match n {\n    1 => 10\n    2 => 20\n    _ => 0\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 20);
@@ -3518,7 +3518,7 @@ fn match_literal_int() {
 #[test]
 fn match_literal_int_default() {
     // The wildcard arm must catch unmatched literals.
-    let src = "fn main() -> Int {\n  let n = 99\n  match n {\n    1 => 10\n    2 => 20\n    _ => 0\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var n = 99\n  match n {\n    1 => 10\n    2 => 20\n    _ => 0\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -3527,7 +3527,7 @@ fn match_literal_int_default() {
 #[test]
 fn match_literal_int_first_arm() {
     // Matching the first literal arm.
-    let src = "fn main() -> Int {\n  let n = 1\n  match n {\n    1 => 10\n    2 => 20\n    _ => 0\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var n = 1\n  match n {\n    1 => 10\n    2 => 20\n    _ => 0\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 10);
@@ -3537,7 +3537,7 @@ fn match_literal_int_first_arm() {
 fn match_bool() {
     // Bool patterns: `match b { true => 1, false => 0 }`.
     let src =
-        "fn main() -> Int {\n  let b = true\n  match b {\n    true => 1\n    false => 0\n  }\n}\n";
+        "fn main() -> Int {\n  var b = true\n  match b {\n    true => 1\n    false => 0\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -3547,7 +3547,7 @@ fn match_bool() {
 fn match_nested_variant_pattern() {
     // Nested pattern: `Wrapped(Some(n))` extracts through two layers of variant.
     // The WS5 bug silently dropped nested sub-patterns; this now recurses.
-    let src = "enum Inner { None, Some(Int) }\nenum Outer { Wrapped(Inner), Bare }\nfn main() -> Int {\n  let v = Wrapped(Some(7))\n  match v {\n    Wrapped(Some(n)) => n\n    Wrapped(None) => 0\n    Bare => 1\n  }\n}\n";
+    let src = "enum Inner { None, Some(Int) }\nenum Outer { Wrapped(Inner), Bare }\nfn main() -> Int {\n  var v = Wrapped(Some(7))\n  match v {\n    Wrapped(Some(n)) => n\n    Wrapped(None) => 0\n    Bare => 1\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
@@ -3556,7 +3556,7 @@ fn match_nested_variant_pattern() {
 #[test]
 fn match_nested_variant_none_branch() {
     // The same nested match but matching the inner None.
-    let src = "enum Inner { None, Some(Int) }\nenum Outer { Wrapped(Inner), Bare }\nfn main() -> Int {\n  let v = Wrapped(None)\n  match v {\n    Wrapped(Some(n)) => n\n    Wrapped(None) => 0\n    Bare => 1\n  }\n}\n";
+    let src = "enum Inner { None, Some(Int) }\nenum Outer { Wrapped(Inner), Bare }\nfn main() -> Int {\n  var v = Wrapped(None)\n  match v {\n    Wrapped(Some(n)) => n\n    Wrapped(None) => 0\n    Bare => 1\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -3575,7 +3575,7 @@ fn a_padded_payload_wildcard_selects_its_arm_at_runtime() {
     let enums = "enum Inner { Nil, Val(Int) }\nenum Outer { Wrapped(Inner), Bare }\n";
     for arm in ["Wrapped(_)", "Wrapped(i)"] {
         let src = format!(
-            "{enums}fn main() -> Int {{\n  let v = Wrapped(Val(7))\n  \
+            "{enums}fn main() -> Int {{\n  var v = Wrapped(Val(7))\n  \
              match v {{\n    {arm} => 5\n    Bare => 1\n  }}\n}}\n"
         );
         let (rt, result) = run_main(&src);
@@ -3587,7 +3587,7 @@ fn a_padded_payload_wildcard_selects_its_arm_at_runtime() {
     // `Val(_)`, so it emits a payload read it never used to. The value it
     // selects must be unchanged, and the discarded slot must not fault.
     let src = format!(
-        "{enums}fn main() -> Int {{\n  let v = Wrapped(Val(7))\n  \
+        "{enums}fn main() -> Int {{\n  var v = Wrapped(Val(7))\n  \
          match v {{\n    Wrapped(Nil) => 1\n    Wrapped(Val) => 2\n    Bare => 3\n  }}\n}}\n"
     );
     let (rt, result) = run_main(&src);
@@ -3597,7 +3597,7 @@ fn a_padded_payload_wildcard_selects_its_arm_at_runtime() {
     // …and the padded arm is still a *test*: the other payload constructor
     // takes its own arm rather than falling into the padded one.
     let src = format!(
-        "{enums}fn main() -> Int {{\n  let v = Wrapped(Nil)\n  \
+        "{enums}fn main() -> Int {{\n  var v = Wrapped(Nil)\n  \
          match v {{\n    Wrapped(Val) => 2\n    Wrapped(Nil) => 1\n    Bare => 3\n  }}\n}}\n"
     );
     let (rt, result) = run_main(&src);
@@ -3608,7 +3608,7 @@ fn a_padded_payload_wildcard_selects_its_arm_at_runtime() {
 #[test]
 fn match_multi_payload_binding() {
     // A variant with multiple payload fields, all bound.
-    let src = "enum Shape { Point(Int, Int), Empty }\nfn main() -> Int {\n  let s = Point(3, 4)\n  match s {\n    Point(x, y) => x + y\n    Empty => 0\n  }\n}\n";
+    let src = "enum Shape { Point(Int, Int), Empty }\nfn main() -> Int {\n  var s = Point(3, 4)\n  match s {\n    Point(x, y) => x + y\n    Empty => 0\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
@@ -3617,7 +3617,7 @@ fn match_multi_payload_binding() {
 #[test]
 fn match_variable_bind_whole_scrutinee() {
     // A bare variable bind `x` matches anything and binds the whole value.
-    let src = "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  let t = Number(5)\n  match t {\n    x => 99\n  }\n}\n";
+    let src = "enum Tile { Empty, Number(Int) }\nfn main() -> Int {\n  var t = Number(5)\n  match t {\n    x => 99\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 99);
@@ -3625,22 +3625,22 @@ fn match_variable_bind_whole_scrutinee() {
 
 // --- M7-WS7: closures (§4.10) ---------------------------------------------
 //
-// Closures capture outer `let`/`param` values by copying them into the closure's
+// Closures capture outer `var`/`param` values by copying them into the closure's
 // runtime environment; the synthetic function loads them at entry (Approach B).
 // Calling a closure value is an indirect call through its `fn_ptr`.
 
 #[test]
 fn closure_no_captures() {
     // A closure that references only its own param.
-    let (rt, result) = run_main("fn main() -> Int { let f = |x| x * 2; f(21) }");
+    let (rt, result) = run_main("fn main() -> Int { var f = |x| x * 2; f(21) }");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
 }
 
 #[test]
 fn closure_captures_outer_let() {
-    // The headline demo: `let o = 10; let f = |x| x + o; f(5)` → 15.
-    let (rt, result) = run_main("fn main() -> Int { let o = 10; let f = |x| x + o; f(5) }");
+    // The headline demo: `var o = 10; var f = |x| x + o; f(5)` → 15.
+    let (rt, result) = run_main("fn main() -> Int { var o = 10; var f = |x| x + o; f(5) }");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 15);
 }
@@ -3649,7 +3649,7 @@ fn closure_captures_outer_let() {
 fn closure_captures_multiple() {
     // Two captures, used together.
     let (rt, result) =
-        run_main("fn main() -> Int { let a = 3; let b = 4; let f = |x| x + a * b; f(5) }");
+        run_main("fn main() -> Int { var a = 3; var b = 4; var f = |x| x + a * b; f(5) }");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 17);
 }
@@ -3658,7 +3658,7 @@ fn closure_captures_multiple() {
 fn closure_captures_param_of_enclosing_fn() {
     // The captured value is the enclosing fn's param.
     let (rt, result) = run_main(
-        "fn make(o: Int) -> Int { let f = |x| x + o; f(5) }\nfn main() -> Int { make(10) }",
+        "fn make(o: Int) -> Int { var f = |x| x + o; f(5) }\nfn main() -> Int { make(10) }",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 15);
@@ -3669,7 +3669,7 @@ fn closure_returned_and_called() {
     // A fn returns a closure; main calls it. Exercises capture across a fn
     // boundary (the closure outlives `make`'s frame — the env is GC'd).
     let (rt, result) = run_main(
-        "fn make(o: Int) -> Int { |x| x + o }\nfn main() -> Int { let f = make(10); f(5) }",
+        "fn make(o: Int) -> Int { |x| x + o }\nfn main() -> Int { var f = make(10); f(5) }",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 15);
@@ -3680,7 +3680,7 @@ fn closure_curried() {
     // A closure returning a closure: |x| |y| x + y. The inner closure captures
     // the outer's param `x`.
     let (rt, result) =
-        run_main("fn main() -> Int { let add = |x| |y| x + y; let inc = add(1); inc(41) }");
+        run_main("fn main() -> Int { var add = |x| |y| x + y; var inc = add(1); inc(41) }");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
 }
@@ -3695,7 +3695,7 @@ fn closure_curried() {
 fn closure_reads_mutable_capture() {
     // The closure reads (but does not write) a captured `var` — the cell holds
     // the initial value.
-    let (rt, result) = run_main("fn main() -> Int {\n  var c = 10\n  let f = |_| c\n  f(0)\n}\n");
+    let (rt, result) = run_main("fn main() -> Int {\n  var c = 10\n  var f = |_| c\n  f(0)\n}\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 10);
 }
@@ -3705,7 +3705,7 @@ fn closure_mutates_mutable_capture_visible_outside() {
     // The headline mutable-capture scenario: a closure mutates the captured
     // `var`, and the outer scope reads the updated value after the closure runs.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  var counter = 0\n  let inc = |_| { counter = counter + 1 }\n  inc(0)\n  inc(0)\n  counter\n}\n",
+        "fn main() -> Int {\n  var counter = 0\n  var inc = |_| { counter = counter + 1 }\n  inc(0)\n  inc(0)\n  counter\n}\n",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -3716,7 +3716,7 @@ fn closure_compound_assign_on_mutable_capture() {
     // A compound assignment (`+=`) on a captured `var` inside a closure: read
     // the cell, add, write back.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  var total = 100\n  let add = |n| { total += n }\n  add(5)\n  add(10)\n  total\n}\n",
+        "fn main() -> Int {\n  var total = 100\n  var add = |n| { total += n }\n  add(5)\n  add(10)\n  total\n}\n",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 115);
@@ -3727,7 +3727,7 @@ fn mutable_capture_survives_returned_closure() {
     // A closure capturing a `var` is returned from a fn; calling it mutates the
     // cell (which outlives the fn's frame — it's GC'd).
     let (rt, result) = run_main(
-        "fn make() {\n  var n = 0\n  |x| { n = n + x; n }\n}\nfn main() -> Int {\n  let bump = make()\n  bump(3)\n  bump(4)\n}\n",
+        "fn make() {\n  var n = 0\n  |x| { n = n + x; n }\n}\nfn main() -> Int {\n  var bump = make()\n  bump(3)\n  bump(4)\n}\n",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
@@ -3767,10 +3767,10 @@ fn monomorphization_two_clones_of_same_generic_fn() {
 fn monomorphization_distinguishes_option_element_types() {
     let src = "fn id(x) { x }\n\
                fn main() -> Int {\n  \
-                 let a = id(Some(7))\n  \
-                 let b = id(Some(\"hi\"))\n  \
-                 let n = match a {\n    Some(v) => v\n    None => 0\n  }\n  \
-                 let s = match b {\n    Some(v) => v\n    None => \"\"\n  }\n  \
+                 var a = id(Some(7))\n  \
+                 var b = id(Some(\"hi\"))\n  \
+                 var n = match a {\n    Some(v) => v\n    None => 0\n  }\n  \
+                 var s = match b {\n    Some(v) => v\n    None => \"\"\n  }\n  \
                  if s == \"hi\" { n } else { 0 }\n\
                }\n";
     let (rt, result) = run_main(src);
@@ -3801,7 +3801,7 @@ fn monomorphization_transitive_generic_call() {
 fn monomorphization_generic_fn_called_from_closure_body() {
     // A generic fn called from inside a closure. The mono pass rewrites the
     // call inside the closure's body too.
-    let (rt, result) = run_main("fn id(x) { x }\nfn main() -> Int { let f = |n| id(n); f(42) }");
+    let (rt, result) = run_main("fn id(x) { x }\nfn main() -> Int { var f = |n| id(n); f(42) }");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
 }
@@ -3821,7 +3821,7 @@ fn monomorphization_generic_fn_called_from_closure_body() {
 /// starting at `start`, as a sequence of `v.push(...)` statements bound to `v`.
 /// (`.push()` returns Unit, so it cannot be chained.)
 fn vec_of(start: i64, n: i64) -> String {
-    let mut s = String::from("let v = Vec()");
+    let mut s = String::from("var v = Vec()");
     for i in 0..n {
         s.push_str(&format!("\n  v.push({})", start + i));
     }
@@ -3836,7 +3836,7 @@ fn adv_pipeline_mutable_capture_mutated_in_fused_loop() {
     // pipeline, and GC pressure (the map allocates an Int per call).
     // v=[1..5].map(|x| { counter += x; x }) → counter=15, map result sum=15.
     let src = format!(
-        "fn main() -> Int {{\n  var counter = 0\n  {vec}\n  let out = v.map(|x| {{ counter += x; x }})\n  counter\n}}\n",
+        "fn main() -> Int {{\n  var counter = 0\n  {vec}\n  var out = v.map(|x| {{ counter += x; x }})\n  counter\n}}\n",
         vec = vec_of(1, 5)
     );
     let (rt, result) = run_main(&src);
@@ -3850,7 +3850,7 @@ fn adv_pipeline_mutable_capture_mutated_in_fused_loop_gc_stress() {
     // fused loop while the VarCell is being mutated. If the VarCell isn't
     // rooted across the fused loop's safepoints, the cell gets collected and
     // the counter resets or corrupts.
-    let src = "fn main() -> Int {\n  var counter = 0\n  let v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  let out = v.map(|x| { counter += x; x })\n  counter\n}\n";
+    let src = "fn main() -> Int {\n  var counter = 0\n  var v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  var out = v.map(|x| { counter += x; x })\n  counter\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // sum(0..=299) = 299*300/2 = 44850
@@ -3863,7 +3863,7 @@ fn adv_pipeline_map_result_used_after_gc_stress() {
     // the loop. Forces the collect_vec to stay rooted across GC inside the
     // loop, then read back. This exercises the Sink::Collect path under
     // pressure (the existing GC-stress test only sums, never reads the Vec).
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  let out = v.map(|x| x * 2)\n  out.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  var out = v.map(|x| x * 2)\n  out.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 300);
@@ -3874,7 +3874,7 @@ fn adv_pipeline_collect_vec_elements_survive_gc_stress() {
     // Collect into a Vec under heavy GC pressure, then sum the collected Vec
     // in a *separate* step. If the collect_vec's freshly-pushed elements are
     // not properly rooted, the second sum reads garbage / freed objects.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  let out = v.map(|x| x * 3)\n  var sum = 0\n  var j = 0\n  while j < out.len() { sum += out.get(j); j = j + 1 }\n  sum\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  var out = v.map(|x| x * 3)\n  var sum = 0\n  var j = 0\n  while j < out.len() { sum += out.get(j); j = j + 1 }\n  sum\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // 3 * sum(0..=299) = 3 * 44850 = 134550
@@ -3938,7 +3938,7 @@ fn adv_pipeline_fold_accumulator_is_gc_int_under_pressure() {
     // iterations under GC pressure. The accumulator GcRef must stay rooted
     // across every iteration's GC. (fold into a Vec is blocked by inference —
     // see handover — so this tests the GC-rooting of the fold acc with Int.)
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 500 { v.push(i); i = i + 1 }\n  v.fold(0, |a, x| a + x)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 500 { v.push(i); i = i + 1 }\n  v.fold(0, |a, x| a + x)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // sum(0..=499) = 499*500/2 = 124750
@@ -3953,7 +3953,7 @@ fn adv_pipeline_fold_into_vec_now_supported() {
     // (the name-shared `Acc` in fold's signature) into the closure's params
     // before the body is inferred, so `a.push(x)` resolves. Pre-fix this was
     // rejected with Y110; now it collects [1,2] → len 2.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  let acc = v.fold(Vec(), |a, x| { a.push(x); a })\n  acc.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  var acc = v.fold(Vec(), |a, x| { a.push(x); a })\n  acc.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -3963,7 +3963,7 @@ fn adv_pipeline_fold_into_vec_now_supported() {
 fn adv_pipeline_reduce_into_int_accumulator() {
     // reduce over Ints under GC pressure. The Reduce sink seeds from the first
     // element then folds. Verifies the seen-flag + Gc acc survive the loop.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 200 { v.push(i); i = i + 1 }\n  v.reduce(|a, x| a + x)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 200 { v.push(i); i = i + 1 }\n  v.reduce(|a, x| a + x)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // sum(0..=199) = 199*200/2 = 19900
@@ -3976,7 +3976,7 @@ fn adv_pipeline_nested_closure_allocation_in_fused_map() {
     // each iteration). This stresses closure allocation + capture rooting
     // inside the fused loop. We then count the collected closures.
     // [1,2,3].map(|x| |y| x + y) → Vec of 3 closures. collect().len() = 3.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let fs = v.map(|x| |y| x + y)\n  fs.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var fs = v.map(|x| |y| x + y)\n  fs.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -3987,7 +3987,7 @@ fn adv_pipeline_nested_closure_allocation_gc_stress() {
     // Same as above but 200 elements: each map call allocates a closure with
     // a captured Int env. The captured env objects must survive GC across the
     // rest of the loop while the collect_vec accumulates them.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 200 { v.push(i); i = i + 1 }\n  let fs = v.map(|x| |y| x + y)\n  fs.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 200 { v.push(i); i = i + 1 }\n  var fs = v.map(|x| |y| x + y)\n  fs.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 200);
@@ -4002,7 +4002,7 @@ fn adv_pipeline_nested_vec_elements_survive_fused_count() {
     // runs. (We can't call .len() on the closure param — inference limitation,
     // see adv_pipeline_method_on_closure_param_from_collection_rejected — so we
     // count the collected Vecs instead.)
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 200 {\n    let inner = Vec()\n    inner.push(i)\n    inner.push(i)\n    v.push(inner)\n    i = i + 1\n  }\n  v.map(|inner| inner).count()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 200 {\n    var inner = Vec()\n    inner.push(i)\n    inner.push(i)\n    v.push(inner)\n    i = i + 1\n  }\n  v.map(|inner| inner).count()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // 200 inner Vecs collected
@@ -4018,14 +4018,14 @@ fn adv_pipeline_method_on_closure_param_from_collection_now_supported() {
     // 1. Bidirectional inference threads the receiver's element type into the
     //    closure param before the body is inferred, so `.len()` resolves once
     //    the element type is known.
-    // 2. The HM value restriction: `let v = Vec()` no longer generalizes to
+    // 2. The HM value restriction: `var v = Vec()` no longer generalizes to
     //    `forall T. Vec[T]` (an expansive RHS is left monomorphic), so the
     //    element-type pinning from `v.push(inner)` propagates to the later
     //    `v.map(...)` instead of each call instantiating a fresh element type.
     //
     // The idiomatic build-then-map pattern now type-checks and runs.
     // inner = [1] → len 1 → sum = 1.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  let inner = Vec()\n  inner.push(1)\n  v.push(inner)\n  v.map(|i| i.len()).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var inner = Vec()\n  inner.push(1)\n  v.push(inner)\n  v.map(|i| i.len()).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -4040,11 +4040,11 @@ fn adv_pipeline_min_by_on_nested_collection_lengths() {
     // resolve. min_by takes a (T,T)->Bool comparator; "shorter" is
     // `a.len() < b.len()`. inner lengths [3,1,2] → shortest = b → len 1.
     let src = String::from("fn main() -> Int {\n")
-        + "  let v = Vec()\n"
-        + "  let a = Vec()\n  a.push(1)\n  a.push(2)\n  a.push(3)\n  v.push(a)\n"
-        + "  let b = Vec()\n  b.push(9)\n  v.push(b)\n"
-        + "  let c = Vec()\n  c.push(4)\n  c.push(5)\n  v.push(c)\n"
-        + "  let shortest = v.min_by(|a, b| a.len() < b.len())\n"
+        + "  var v = Vec()\n"
+        + "  var a = Vec()\n  a.push(1)\n  a.push(2)\n  a.push(3)\n  v.push(a)\n"
+        + "  var b = Vec()\n  b.push(9)\n  v.push(b)\n"
+        + "  var c = Vec()\n  c.push(4)\n  c.push(5)\n  v.push(c)\n"
+        + "  var shortest = v.min_by(|a, b| a.len() < b.len())\n"
         + "  shortest.len()\n"
         + "}\n";
     let (rt, result) = run_main(&src);
@@ -4058,7 +4058,7 @@ fn adv_pipeline_collect_nested_vecs_then_count() {
     // nested Vec GcRefs survive collect + a downstream .len() on the *outer*
     // collected Vec (whose type is Vec[Vec[Int]] — known to inference, unlike
     // the inner element type).
-    let src = "fn main() -> Int {\n  let v = Vec()\n  let a = Vec()\n  a.push(10)\n  a.push(20)\n  v.push(a)\n  let b = Vec()\n  b.push(30)\n  v.push(b)\n  v.map(|inner| inner).len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var a = Vec()\n  a.push(10)\n  a.push(20)\n  v.push(a)\n  var b = Vec()\n  b.push(30)\n  v.push(b)\n  v.map(|inner| inner).len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // 2 inner Vecs collected
@@ -4072,7 +4072,7 @@ fn adv_pipeline_find_with_allocating_predicate() {
     // allocation, find matches the wrong element or faults. REP-39 makes this
     // stronger rather than weaker: the answer is now the *element*, which the
     // loop has to have kept alive across that allocation to hand back at all.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 100 { v.push(i); i = i + 1 }\n  match v.find(|x| x + 0 == 50) { Some(n) => n, None => -1 }\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 100 { v.push(i); i = i + 1 }\n  match v.find(|x| x + 0 == 50) { Some(n) => n, None => -1 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 50);
@@ -4082,7 +4082,7 @@ fn adv_pipeline_find_with_allocating_predicate() {
 fn adv_pipeline_any_short_circuits_keeps_loop_invariant() {
     // any short-circuits; verify the break leaves the source Vec intact (no
     // corruption from the fused loop's bookkeeping) by summing it afterwards.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  let b = v.any(|x| x == 3)\n  var after = 0\n  var i = 0\n  while i < v.len() { after += v.get(i); i = i + 1 }\n  if b { after } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  var b = v.any(|x| x == 3)\n  var after = 0\n  var i = 0\n  while i < v.len() { after += v.get(i); i = i + 1 }\n  if b { after } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // sum(1..=4) = 10
@@ -4094,7 +4094,7 @@ fn adv_pipeline_two_chains_share_no_state() {
     // Run two independent fused chains on the same source. If the recognizer
     // or builder accidentally shared slot state between chains, the second
     // result would be wrong.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let a = v.map(|x| x * 10).sum()\n  let b = v.map(|x| x * 100).sum()\n  a + b\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var a = v.map(|x| x * 10).sum()\n  var b = v.map(|x| x * 100).sum()\n  a + b\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // a = 10+20+30 = 60; b = 100+200+300 = 600; total = 660
@@ -4106,7 +4106,7 @@ fn adv_pipeline_min_by_under_gc_pressure() {
     // min_by over 500 Ints under GC pressure, comparator is plain less-than.
     // The running-best GcRef (an Int) must survive every collection during the
     // loop. The existing min_by test uses 3 elements with no GC.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 500 { v.push(i); i = i + 1 }\n  v.min_by(|a, b| a < b)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 500 { v.push(i); i = i + 1 }\n  v.min_by(|a, b| a < b)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // min is 0
@@ -4116,7 +4116,7 @@ fn adv_pipeline_min_by_under_gc_pressure() {
 #[test]
 fn adv_pipeline_max_by_under_gc_pressure() {
     // max_by over 500 Ints under GC pressure.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 500 { v.push(i); i = i + 1 }\n  v.max_by(|a, b| a < b)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 500 { v.push(i); i = i + 1 }\n  v.max_by(|a, b| a < b)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // max is 499
@@ -4128,7 +4128,7 @@ fn adv_pipeline_min_under_gc_pressure() {
     // min over 500 Ints under GC pressure (no comparator). The Min sink holds
     // the running min as a scalar but the element GcRef must survive the
     // predicate/extract across collections.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 1\n  while i <= 500 { v.push(i); i = i + 1 }\n  v.min()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 1\n  while i <= 500 { v.push(i); i = i + 1 }\n  v.min()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -4140,7 +4140,7 @@ fn adv_pipeline_map_filter_map_filter_sum_deep_chain() {
     // fused loop. Verifies stage composition doesn't lose elements.
     // [1..8].map(+1)=[2..9].filter(>3)=[4..9].map(*2)=[8,10,12,14,16,18]
     //      .filter(<15)=[8,10,12,14].sum()=44
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.push(6)\n  v.push(7)\n  v.map(|x| x + 1).filter(|x| x > 3).map(|x| x * 2).filter(|x| x < 15).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.push(6)\n  v.push(7)\n  v.map(|x| x + 1).filter(|x| x > 3).map(|x| x * 2).filter(|x| x < 15).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 44);
@@ -4151,7 +4151,7 @@ fn adv_pipeline_flat_map_gc_stress_preserves_inner_vecs() {
     // flat_map under GC stress: each closure call allocates a fresh Vec, the
     // inner loop reads it. If the inner Vec isn't rooted, the inner loop
     // faults or reads freed memory. 100 outer × 3 inner = 300 sum if i.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 100 { v.push(i); i = i + 1 }\n  v.flat_map(|x| {\n    let r = Vec()\n    r.push(x)\n    r.push(x)\n    r.push(x)\n    r\n  }).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 100 { v.push(i); i = i + 1 }\n  v.flat_map(|x| {\n    var r = Vec()\n    r.push(x)\n    r.push(x)\n    r.push(x)\n    r\n  }).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // sum(0..=99) * 3 = 4950 * 3 = 14850
@@ -4162,7 +4162,7 @@ fn adv_pipeline_flat_map_gc_stress_preserves_inner_vecs() {
 fn adv_pipeline_empty_source_collect_is_empty_vec() {
     // Empty source → collect → empty Vec → len 0. Verifies the Collect sink's
     // collect_vec is allocated and returned even when the loop body never runs.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  let out = v.map(|x| x * 2)\n  out.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var out = v.map(|x| x * 2)\n  out.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -4185,7 +4185,7 @@ fn adv_pipeline_empty_source_collect_is_empty_vec() {
 #[test]
 fn an_empty_min_or_max_faults_rather_than_answering_zero() {
     for sink in ["min", "max"] {
-        let src = format!("fn main() -> Int {{\n  let v = Vec()\n  v.{sink}()\n}}\n");
+        let src = format!("fn main() -> Int {{\n  var v = Vec()\n  v.{sink}()\n}}\n");
         let (rt, _result) = run_main(&src);
         assert_eq!(
             rt.fault(),
@@ -4197,7 +4197,7 @@ fn an_empty_min_or_max_faults_rather_than_answering_zero() {
     // A source that a `filter` empties is the same case, and is the one a real
     // program hits: the Vec is non-empty and nothing survives the predicate.
     let (rt, _result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  \
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  \
          v.filter(|x| x > 100).min()\n}\n",
     );
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyCollection);
@@ -4205,11 +4205,11 @@ fn an_empty_min_or_max_faults_rather_than_answering_zero() {
     // …and a non-empty one still answers, so the guard is the empty case and
     // not a new refusal.
     let (rt, result) =
-        run_main("fn main() -> Int {\n  let v = Vec()\n  v.push(3)\n  v.push(4)\n  v.min()\n}\n");
+        run_main("fn main() -> Int {\n  var v = Vec()\n  v.push(3)\n  v.push(4)\n  v.min()\n}\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  v.push(0 - 3)\n  v.push(0 - 4)\n  v.max()\n}\n",
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(0 - 3)\n  v.push(0 - 4)\n  v.max()\n}\n",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), -3, "the seeded 0 was above every element");
@@ -4218,7 +4218,7 @@ fn an_empty_min_or_max_faults_rather_than_answering_zero() {
 #[test]
 fn adv_pipeline_empty_source_any_is_false() {
     // Empty source → any → false (vacuously). Packed as 0.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  let b = v.any(|x| x == 0)\n  if b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var b = v.any(|x| x == 0)\n  if b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -4227,7 +4227,7 @@ fn adv_pipeline_empty_source_any_is_false() {
 #[test]
 fn adv_pipeline_empty_source_all_is_true() {
     // Empty source → all → true (vacuously). Packed as 1.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  let b = v.all(|x| x > 0)\n  if b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var b = v.all(|x| x > 0)\n  if b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -4239,7 +4239,7 @@ fn adv_pipeline_empty_source_reduce() {
     // is none — so the answer is a fault, not whatever the unseeded Gc slot
     // happened to hold (MIR-09). This test used to assert only that the host
     // survived, because there was no contract to assert; now there is.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.reduce(|a, x| a + x)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.reduce(|a, x| a + x)\n}\n";
     let (rt, _result) = run_main(src);
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyCollection);
 }
@@ -4276,7 +4276,7 @@ fn adv_pipeline_chained_collect_used_as_receiver_of_next_chain() {
 fn adv_closure_returned_from_fn_used_in_pipeline() {
     // A fn returns a capturing closure; that closure is passed to .map.
     // Combines returned-closure (GC'd env outlives frame) with the fused loop.
-    let src = "fn mk(off: Int) { |x| x + off }\nfn main() -> Int {\n  let f = mk(100)\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.map(f).sum()\n}\n";
+    let src = "fn mk(off: Int) { |x| x + off }\nfn main() -> Int {\n  var f = mk(100)\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.map(f).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // 101 + 102 + 103 = 306
@@ -4289,7 +4289,7 @@ fn adv_pipeline_sum_does_not_mutate_source_vec() {
     // sum again to confirm the source is intact (a buggy fuser that consumed
     // the Vec or advanced an index would give a different second sum).
     let src = format!(
-        "fn main() -> Int {{\n  {vec}\n  let a = v.sum()\n  let b = v.sum()\n  a + b\n}}\n",
+        "fn main() -> Int {{\n  {vec}\n  var a = v.sum()\n  var b = v.sum()\n  a + b\n}}\n",
         vec = vec_of(1, 5)
     );
     let (rt, result) = run_main(&src);
@@ -4302,7 +4302,7 @@ fn adv_pipeline_sum_does_not_mutate_source_vec() {
 fn adv_pipeline_take_then_count_under_gc_pressure() {
     // take(50) on a 200-element Vec under GC pressure, then count. The Take
     // stage's break must fire correctly even after collections have run.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 200 { v.push(i); i = i + 1 }\n  v.take(50).count()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 200 { v.push(i); i = i + 1 }\n  v.take(50).count()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 50);
@@ -4312,7 +4312,7 @@ fn adv_pipeline_take_then_count_under_gc_pressure() {
 fn adv_pipeline_zip_under_gc_pressure() {
     // zip of two 300-element Vecs, count the pairs. Both source Vecs and the
     // index must survive GC.
-    let src = "fn main() -> Int {\n  let a = Vec()\n  let b = Vec()\n  var i = 0\n  while i < 300 { a.push(i); b.push(i); i = i + 1 }\n  a.zip(b).count()\n}\n";
+    let src = "fn main() -> Int {\n  var a = Vec()\n  var b = Vec()\n  var i = 0\n  while i < 300 { a.push(i); b.push(i); i = i + 1 }\n  a.zip(b).count()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 300);
@@ -4321,7 +4321,7 @@ fn adv_pipeline_zip_under_gc_pressure() {
 #[test]
 fn adv_pipeline_take_while_then_collect_under_gc_pressure() {
     // take_while under GC pressure: stops at the first element >= 50, collects.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 200 { v.push(i); i = i + 1 }\n  v.take_while(|x| x < 50).count()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 200 { v.push(i); i = i + 1 }\n  v.take_while(|x| x < 50).count()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // 0..49 → 50 elements
@@ -4339,7 +4339,7 @@ fn adv_fused_sum_overflow_faults_cleanly() {
     // Sum overflows on the 3rd element. The fault must propagate out of the
     // fused loop without corrupting the host (no Rust panic/abort). The fused
     // Sum sink does acc += item in a scalar; overflow must fault.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(9223372036854775807)\n  v.push(0)\n  v.push(1)\n  v.sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(9223372036854775807)\n  v.push(0)\n  v.push(1)\n  v.sum()\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault(), "sum overflow should fault");
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
@@ -4350,7 +4350,7 @@ fn adv_fused_map_closure_fault_propagates() {
     // A map closure faults (div-by-zero on element 2). The fault must propagate
     // through the fused loop's CallIndirect + check_fault without the loop
     // continuing or the host crashing.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(0)\n  v.push(30)\n  v.map(|x| 100 / x).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(10)\n  v.push(0)\n  v.push(30)\n  v.map(|x| 100 / x).sum()\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault(), "div-by-zero in map should fault");
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::DivByZero);
@@ -4360,7 +4360,7 @@ fn adv_fused_map_closure_fault_propagates() {
 fn adv_fused_filter_predicate_fault_propagates() {
     // A filter predicate faults. Verifies fault propagation through the
     // predicate's CallIndirect + the filter stage's branch structure.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(5)\n  v.push(0)\n  v.filter(|x| 100 / x > 1).count()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(5)\n  v.push(0)\n  v.filter(|x| 100 / x > 1).count()\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault(), "div-by-zero in filter should fault");
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::DivByZero);
@@ -4370,7 +4370,7 @@ fn adv_fused_filter_predicate_fault_propagates() {
 fn adv_fused_fold_closure_fault_propagates() {
     // A fold closure faults mid-fold. Verifies the Fold sink's CallIndirect
     // fault check works and the accumulator isn't left corrupted.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(0)\n  v.fold(0, |a, x| a + 100 / x)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(0)\n  v.fold(0, |a, x| a + 100 / x)\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault(), "div-by-zero in fold should fault");
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::DivByZero);
@@ -4379,7 +4379,7 @@ fn adv_fused_fold_closure_fault_propagates() {
 #[test]
 fn adv_fused_find_predicate_fault_propagates() {
     // A find predicate faults. Verifies short-circuit sink fault propagation.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(0)\n  v.find(|x| 10 / x == 1)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(0)\n  v.find(|x| 10 / x == 1)\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault(), "div-by-zero in find should fault");
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::DivByZero);
@@ -4389,7 +4389,7 @@ fn adv_fused_find_predicate_fault_propagates() {
 fn adv_nested_closures_share_var_cell() {
     // Two closures capture the same `var`; calling one then the other observes
     // the shared cell. inc mutates, getn returns it.
-    let src = "fn main() -> Int {\n  var n = 0\n  let inc = |x| { n = n + x }\n  let getn = |_| n\n  inc(10)\n  inc(5)\n  getn(0)\n}\n";
+    let src = "fn main() -> Int {\n  var n = 0\n  var inc = |x| { n = n + x }\n  var getn = |_| n\n  inc(10)\n  inc(5)\n  getn(0)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 15);
@@ -4399,7 +4399,7 @@ fn adv_nested_closures_share_var_cell() {
 fn adv_nested_closures_share_var_cell_under_gc_pressure() {
     // Same as above but allocate heavily between calls so GC runs while both
     // closures' envs (pointing at the same VarCell) must survive.
-    let src = "fn main() -> Int {\n  var n = 0\n  let inc = |x| { n = n + x }\n  let getn = |_| n\n  inc(10)\n  var i = 0\n  let garbage = Vec()\n  while i < 500 { garbage.push(i); i = i + 1 }\n  inc(5)\n  getn(0)\n}\n";
+    let src = "fn main() -> Int {\n  var n = 0\n  var inc = |x| { n = n + x }\n  var getn = |_| n\n  inc(10)\n  var i = 0\n  var garbage = Vec()\n  while i < 500 { garbage.push(i); i = i + 1 }\n  inc(5)\n  getn(0)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 15);
@@ -4409,7 +4409,7 @@ fn adv_nested_closures_share_var_cell_under_gc_pressure() {
 fn adv_closure_mutating_capture_then_returned_and_called_repeatedly() {
     // A returned closure mutates its captured `var` each call; called 100× under
     // GC pressure. The VarCell must survive across every call's potential GC.
-    let src = "fn make() {\n  var n = 0\n  |x| { n = n + x; n }\n}\nfn main() -> Int {\n  let bump = make()\n  var i = 0\n  while i < 100 { bump(1); i = i + 1 }\n  bump(0)\n}\n";
+    let src = "fn make() {\n  var n = 0\n  |x| { n = n + x; n }\n}\nfn main() -> Int {\n  var bump = make()\n  var i = 0\n  while i < 100 { bump(1); i = i + 1 }\n  bump(0)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 100);
@@ -4420,7 +4420,7 @@ fn adv_recursive_function_with_captured_var() {
     // A closure that captures a `var` and recurses (via a named fn, since
     // recursive closures aren't specially handled). The VarCell must survive
     // the recursion's GC pressure.
-    let src = "fn count(n: Int, dec) -> Int {\n  if n == 0 { dec(0) } else { dec(1); count(n - 1, dec) }\n}\nfn main() -> Int {\n  var total = 0\n  let add = |x| { total += x }\n  count(100, add)\n  total\n}\n";
+    let src = "fn count(n: Int, dec) -> Int {\n  if n == 0 { dec(0) } else { dec(1); count(n - 1, dec) }\n}\nfn main() -> Int {\n  var total = 0\n  var add = |x| { total += x }\n  count(100, add)\n  total\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // add called with 1 a hundred times → total = 100
@@ -4435,7 +4435,7 @@ fn adv_for_loop_sum_does_not_corrupt_on_reallocation() {
     // iteration (or the runtime must keep access behind calls). We don't grow
     // the iterated Vec here (undefined behavior territory); instead we verify
     // the for loop reads the *snapshot* length taken at loop entry.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var sum = 0\n  for x in v {\n    sum = sum + x\n  }\n  sum\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var sum = 0\n  for x in v {\n    sum = sum + x\n  }\n  sum\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 6);
@@ -4445,7 +4445,7 @@ fn adv_for_loop_sum_does_not_corrupt_on_reallocation() {
 fn adv_for_loop_over_vec_under_gc_pressure() {
     // for-loop iterating a 500-element Vec, summing. The loop counter and the
     // source Vec must survive GC during iteration.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  var i = 0\n  while i < 500 { v.push(i); i = i + 1 }\n  var sum = 0\n  for x in v { sum += x }\n  sum\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 500 { v.push(i); i = i + 1 }\n  var sum = 0\n  for x in v { sum += x }\n  sum\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // sum(0..=499) = 124750
@@ -4459,7 +4459,7 @@ fn adv_pipeline_chain_after_pipeline_chain_nested() {
     // capturing closure in the inner map AND a predicate in the outer filter,
     // both reading the same captured `var`. Verifies two closures + a shared
     // cell all root correctly in one fused loop.
-    let src = "fn main() -> Int {\n  var threshold = 5\n  let v = Vec()\n  var i = 0\n  while i < 20 { v.push(i); i = i + 1 }\n  v.map(|x| x + threshold).filter(|x| x > threshold).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var threshold = 5\n  var v = Vec()\n  var i = 0\n  while i < 20 { v.push(i); i = i + 1 }\n  v.map(|x| x + threshold).filter(|x| x > threshold).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // x+5 for x in 0..19, keep where x+5 > 5 i.e. x > 0 → x in 1..19
@@ -4472,7 +4472,7 @@ fn adv_curried_closure_used_in_pipeline_gc_stress() {
     // A curried closure (closure returning a closure) is the map function in a
     // fused pipeline under GC pressure. The outer closure's env must survive
     // while the inner closures it produces are invoked.
-    let src = "fn main() -> Int {\n  let adder = |off| |x| x + off\n  let add10 = adder(10)\n  let v = Vec()\n  var i = 0\n  while i < 200 { v.push(i); i = i + 1 }\n  v.map(add10).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var adder = |off| |x| x + off\n  var add10 = adder(10)\n  var v = Vec()\n  var i = 0\n  while i < 200 { v.push(i); i = i + 1 }\n  v.map(add10).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // sum(0..=199) + 10*200 = 19900 + 2000 = 21900
@@ -4483,7 +4483,7 @@ fn adv_curried_closure_used_in_pipeline_gc_stress() {
 fn adv_mutable_capture_read_in_predicate_of_fused_filter() {
     // A filter predicate reads a captured `var` (not mutating). The VarCell
     // read must work inside the fused filter stage.
-    let src = "fn main() -> Int {\n  var limit = 10\n  let v = Vec()\n  var i = 0\n  while i < 30 { v.push(i); i = i + 1 }\n  v.filter(|x| x > limit).count()\n}\n";
+    let src = "fn main() -> Int {\n  var limit = 10\n  var v = Vec()\n  var i = 0\n  while i < 30 { v.push(i); i = i + 1 }\n  v.filter(|x| x > limit).count()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // x > 10 for x in 0..29 → 19 values (11..29)
@@ -4495,7 +4495,7 @@ fn adv_mutable_capture_mutated_by_one_closure_read_by_pipeline_predicate() {
     // One closure mutates the captured `var`; a pipeline filter predicate
     // reads the *current* value. Verifies the VarCell is shared and the read in
     // the fused loop sees the post-mutation value.
-    let src = "fn main() -> Int {\n  var limit = 5\n  let setlimit = |n| { limit = n }\n  setlimit(15)\n  let v = Vec()\n  var i = 0\n  while i < 30 { v.push(i); i = i + 1 }\n  v.filter(|x| x > limit).count()\n}\n";
+    let src = "fn main() -> Int {\n  var limit = 5\n  var setlimit = |n| { limit = n }\n  setlimit(15)\n  var v = Vec()\n  var i = 0\n  while i < 30 { v.push(i); i = i + 1 }\n  v.filter(|x| x > limit).count()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // limit now 15; x > 15 for x in 0..29 → 14 values (16..29)
@@ -4507,7 +4507,7 @@ fn adv_pipeline_empty_flat_map_yields_empty() {
     // flat_map where every closure returns an empty Vec → zero elements.
     // Verifies the inner loop's bounds check (empty inner Vec) terminates
     // correctly and the outer loop continues.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.flat_map(|x| Vec()).count()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.flat_map(|x| Vec()).count()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
@@ -4519,7 +4519,7 @@ fn adv_pipeline_flat_map_with_filter_then_sum() {
     // This combines the flat_map special-case (inner loop) with downstream
     // stages — a tricky control-flow composition.
     // [1,2].flat_map(|x|[x,x*10]) = [1,10,2,20].filter(>5)=[10,20].sum()=30.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let r = Vec()\n    r.push(x)\n    r.push(x * 10)\n    r\n  }).filter(|x| x > 5).sum()\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    var r = Vec()\n    r.push(x)\n    r.push(x * 10)\n    r\n  }).filter(|x| x > 5).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 30);
@@ -4531,7 +4531,7 @@ fn adv_indirect_call_on_local_closure_works() {
     // (the callee resolves to a local). The closures-from-collections case is
     // now ALSO supported — see adv_call_closure_retrieved_from_collection and
     // siblings below.
-    let src = "fn main() -> Int {\n  let f = |x| x + 7\n  f(100)\n}\n";
+    let src = "fn main() -> Int {\n  var f = |x| x + 7\n  f(100)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 107);
@@ -4549,7 +4549,7 @@ fn adv_call_closure_retrieved_from_collection() {
     // Inst::CallIndirect (reads the closure's fn_ptr and calls through it).
     // Pre-fix this segfaulted; now it returns 101.
     let src = String::from("fn main() -> Int {\n")
-        + "  let fs = Vec()\n"
+        + "  var fs = Vec()\n"
         + "  fs.push(|x| x + 1)\n"
         + "  fs.get(0)(100)\n"
         + "}\n";
@@ -4575,7 +4575,7 @@ fn adv_call_result_of_call() {
     // returned by f). The outer call's callee is the inner CALL_EXPR, the same
     // arbitrary-expression-callee path.
     let src = String::from("fn main() -> Int {\n")
-        + "  let mk = |a| |b| a + b\n"
+        + "  var mk = |a| |b| a + b\n"
         + "  mk(40)(2)\n"
         + "}\n";
     let (rt, result) = run_main(&src);
@@ -4590,10 +4590,10 @@ fn adv_call_closure_from_collection_under_gc_pressure() {
     // between the get and the indirect call. Retrieves the second closure and
     // calls it after allocating garbage.
     let src = String::from("fn main() -> Int {\n")
-        + "  let fs = Vec()\n"
+        + "  var fs = Vec()\n"
         + "  fs.push(|x| x + 1)\n"
         + "  fs.push(|x| x * 100)\n"
-        + "  let garbage = Vec()\n"
+        + "  var garbage = Vec()\n"
         + "  var i = 0\n"
         + "  while i < 300 { garbage.push(i); i = i + 1 }\n"
         + "  fs.get(1)(7)\n"
@@ -4609,7 +4609,7 @@ fn adv_shadowing_then_closure_captures_correct_binding_same_type() {
     // binding it originally captured. Same-type shadow (Int→Int). (Uses a `_`
     // param because `|| a` parses as logical-or, not a zero-arg closure.)
     let src =
-        "fn main() -> Int {\n  let a = 4\n  let show_old = |_| a\n  let a = 99\n  show_old(0)\n}\n";
+        "fn main() -> Int {\n  var a = 4\n  var show_old = |_| a\n  var a = 99\n  show_old(0)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // show_old captured the first a (4), not the shadowed a (99)
@@ -4618,9 +4618,9 @@ fn adv_shadowing_then_closure_captures_correct_binding_same_type() {
 
 #[test]
 fn adv_shadowing_then_closure_captures_correct_binding_type_change() {
-    // §4.2: the headline example — a closure created before a shadowing `let`
+    // §4.2: the headline example — a closure created before a shadowing `var`
     // with a different type retains the original Int binding.
-    let src = "fn main() -> Int {\n  let a = 4\n  let show_old = |_| a\n  let a = \"Foo\"\n  show_old(0)\n}\n";
+    let src = "fn main() -> Int {\n  var a = 4\n  var show_old = |_| a\n  var a = \"Foo\"\n  show_old(0)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // show_old captured the first a (Int 4), not the Text "Foo"
@@ -4630,8 +4630,8 @@ fn adv_shadowing_then_closure_captures_correct_binding_type_change() {
 #[test]
 fn adv_shadowing_initializer_resolves_previous_binding() {
     // §5.3: a shadowing initializer resolves names in the preceding environment.
-    // `let a = a + 1` — the RHS `a` is the previous binding.
-    let src = "fn main() -> Int {\n  let a = 4\n  let a = a + 1\n  a\n}\n";
+    // `var a = a + 1` — the RHS `a` is the previous binding.
+    let src = "fn main() -> Int {\n  var a = 4\n  var a = a + 1\n  a\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 5);
@@ -4639,8 +4639,8 @@ fn adv_shadowing_initializer_resolves_previous_binding() {
 
 #[test]
 fn adv_let_shadowing_changes_type() {
-    // §4.2: shadowing may change type. `let a = 4; let a = "x"` — both valid.
-    let src = "fn main() -> Int {\n  let a = 4\n  let a = a + 1\n  a\n}\n";
+    // §4.2: shadowing may change type. `var a = 4; var a = "x"` — both valid.
+    let src = "fn main() -> Int {\n  var a = 4\n  var a = a + 1\n  a\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 5);
@@ -4654,7 +4654,7 @@ fn adv_let_shadowing_changes_type() {
 #[test]
 fn m9_option_some_construction_and_match() {
     // `Some(42)` constructs; matching `.Some(n)` extracts the payload.
-    let src = "fn main() -> Int {\n  let v = Some(42)\n  match v {\n    Some(n) => n\n    None => 0\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var v = Some(42)\n  match v {\n    Some(n) => n\n    None => 0\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
@@ -4663,7 +4663,7 @@ fn m9_option_some_construction_and_match() {
 #[test]
 fn m9_option_none_construction_and_match() {
     // `None` constructs a payload-less variant.
-    let src = "fn main() -> Int {\n  let v = None\n  match v {\n    Some(n) => n\n    None => 7\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var v = None\n  match v {\n    Some(n) => n\n    None => 7\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
@@ -4672,7 +4672,7 @@ fn m9_option_none_construction_and_match() {
 #[test]
 fn m9_option_some_none_equality() {
     // `Some(1) == Some(1)` is true; `Some(1) == None` is false; `None == None` is true.
-    let src = "fn main() -> Int {\n  let a = Some(1) == Some(1)\n  let b = Some(1) == None\n  let c = None == None\n  if a { if b { 3 } else { if c { 2 } else { 4 } } } else { 1 }\n}\n";
+    let src = "fn main() -> Int {\n  var a = Some(1) == Some(1)\n  var b = Some(1) == None\n  var c = None == None\n  if a { if b { 3 } else { if c { 2 } else { 4 } } } else { 1 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 2);
@@ -4682,7 +4682,7 @@ fn m9_option_some_none_equality() {
 fn m9_option_unifies_across_construction_sites() {
     // Two independently-constructed Some values unify through match + equality,
     // exercising the same-named-enum structural unification.
-    let src = "fn main() -> Int {\n  let a = Some(10)\n  let b = Some(20)\n  if a == Some(10) { if b == Some(20) { 1 } else { 2 } } else { 3 }\n}\n";
+    let src = "fn main() -> Int {\n  var a = Some(10)\n  var b = Some(20)\n  if a == Some(10) { if b == Some(20) { 1 } else { 2 } } else { 3 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -4691,7 +4691,7 @@ fn m9_option_unifies_across_construction_sites() {
 #[test]
 fn m9_option_text_payload() {
     // Option is polymorphic: Some(Text) works, not just Some(Int).
-    let src = "fn main() -> Int {\n  let v = Some(\"hi\")\n  match v {\n    Some(s) => if s == \"hi\" { 1 } else { 0 }\n    None => 9\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var v = Some(\"hi\")\n  match v {\n    Some(s) => if s == \"hi\" { 1 } else { 0 }\n    None => 9\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -4700,7 +4700,7 @@ fn m9_option_text_payload() {
 #[test]
 fn m9_option_type_annotation() {
     // An explicit `Option[Int]` annotation unifies with Some(5).
-    let src = "fn main() -> Int {\n  let v: Option[Int] = Some(5)\n  match v {\n    Some(n) => n\n    None => 0\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var v: Option[Int] = Some(5)\n  match v {\n    Some(n) => n\n    None => 0\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 5);
@@ -4733,7 +4733,7 @@ fn m9_named_sections_two_fields() {
     // sections(rules: ..., updates: ...) → record { rules, updates }.
     // rules = Vec[Int] of 2 values; updates = Vec[Int] of 3 values.
     // Access `.a` and `.b` field on the record.
-    let src = "fn main() -> Int {\n  let data = read sections(a: lines(int), b: lines(int))\n  data.a.len() + data.b.len()\n}\n";
+    let src = "fn main() -> Int {\n  var data = read sections(a: lines(int), b: lines(int))\n  data.a.len() + data.b.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "1\n2\n\n3\n4\n5");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 5); // 2 + 3
@@ -4742,7 +4742,7 @@ fn m9_named_sections_two_fields() {
 #[test]
 fn m9_named_sections_field_values() {
     // The first section's first value is 7.
-    let src = "fn main() -> Int {\n  let data = read sections(a: lines(int), b: lines(int))\n  data.a.get(0)\n}\n";
+    let src = "fn main() -> Int {\n  var data = read sections(a: lines(int), b: lines(int))\n  data.a.get(0)\n}\n";
     let (rt, result) = run_main_with_input(src, "7\n8\n\n9\n10");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
@@ -4752,7 +4752,7 @@ fn m9_named_sections_field_values() {
 fn m9_named_sections_with_repeated_tail() {
     // sections(single: lines(int), rest: repeated(lines(int))) — one fixed
     // section then all remaining sections folded into a Vec[Vec[Int]].
-    let src = "fn main() -> Int {\n  let data = read sections(single: lines(int), rest: repeated(lines(int)))\n  data.single.len() + data.rest.len()\n}\n";
+    let src = "fn main() -> Int {\n  var data = read sections(single: lines(int), rest: repeated(lines(int)))\n  data.single.len() + data.rest.len()\n}\n";
     // 1 section of 1 line (single), then 3 sections (rest has 3 elements).
     let (rt, result) = run_main_with_input(src, "100\n\n1\n\n2\n\n3");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4763,7 +4763,7 @@ fn m9_named_sections_with_repeated_tail() {
 fn m9_named_sections_template_fields() {
     // Named sections with template parsers → record of records. Access the
     // inner record's fields directly through indexing.
-    let src = "fn main() -> Int {\n  let data = read sections(p: lines(`{x:int},{y:int}`))\n  let first = data.p.get(0)\n  first.x + first.y\n}\n";
+    let src = "fn main() -> Int {\n  var data = read sections(p: lines(`{x:int},{y:int}`))\n  var first = data.p.get(0)\n  first.x + first.y\n}\n";
     let (rt, result) = run_main_with_input(src, "3,4");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
@@ -4773,7 +4773,7 @@ fn m9_named_sections_template_fields() {
 fn m9_named_sections_too_few_sections_faults() {
     // Fewer sections than named fields → ParseFailed fault.
     let src =
-        "fn main() -> Int {\n  let data = read sections(a: lines(int), b: lines(int))\n  42\n}\n";
+        "fn main() -> Int {\n  var data = read sections(a: lines(int), b: lines(int))\n  42\n}\n";
     let (rt, _result) = run_main_with_input(src, "1\n2\n3"); // one section, two fields wanted
     assert!(
         rt.has_pending_fault(),
@@ -4789,7 +4789,7 @@ fn m9_block_template_plus_named_field() {
     // sections(block(`Monkey {id:int}:`, items: lines(int))) — each section is
     // a block: a positional header template (flattening `id`) + a named `items`
     // field consuming the remaining lines.
-    let src = "fn main() -> Int {\n  let monkeys = read sections(block(`Monkey {id:int}:`, items: lines(int)))\n  let m0 = monkeys.get(0)\n  m0.id + m0.items.len()\n}\n";
+    let src = "fn main() -> Int {\n  var monkeys = read sections(block(`Monkey {id:int}:`, items: lines(int)))\n  var m0 = monkeys.get(0)\n  m0.id + m0.items.len()\n}\n";
     let input = "Monkey 1:\n10\n20\n\nMonkey 2:\n30\n40";
     let (rt, result) = run_main_with_input(src, input);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4800,7 +4800,7 @@ fn m9_block_template_plus_named_field() {
 #[test]
 fn m9_block_second_section() {
     // The second monkey's id and item count.
-    let src = "fn main() -> Int {\n  let monkeys = read sections(block(`Monkey {id:int}:`, items: lines(int)))\n  let m1 = monkeys.get(1)\n  m1.id + m1.items.len()\n}\n";
+    let src = "fn main() -> Int {\n  var monkeys = read sections(block(`Monkey {id:int}:`, items: lines(int)))\n  var m1 = monkeys.get(1)\n  m1.id + m1.items.len()\n}\n";
     let input = "Monkey 1:\n10\n20\n\nMonkey 2:\n30\n40";
     let (rt, result) = run_main_with_input(src, input);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4812,7 +4812,7 @@ fn m9_block_second_section() {
 fn m9_block_two_template_fields_flatten() {
     // A block with two positional templates whose named captures both flatten
     // into the record: `{x:int},{y:int}` then `\n{z:int}`.
-    let src = "fn main() -> Int {\n  let b = read block(`{x:int},{y:int}\\n{z:int}`)\n  b.x + b.y + b.z\n}\n";
+    let src = "fn main() -> Int {\n  var b = read block(`{x:int},{y:int}\\n{z:int}`)\n  b.x + b.y + b.z\n}\n";
     let (rt, result) = run_main_with_input(src, "1,2\n3");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 6);
@@ -4831,7 +4831,7 @@ fn m9_block_template_that_writes_a_newline_spans_the_lines_it_writes() {
     // `at input offset 3..3: expected whitespace`, because the template's own
     // `\n` part has no terminator left inside its window.
     let src =
-        "fn main() -> Int {\n  let b = read block(`{x:int},{y:int}\\n{z:int}`, `{w:rest}`)\n  \
+        "fn main() -> Int {\n  var b = read block(`{x:int},{y:int}\\n{z:int}`, `{w:rest}`)\n  \
                b.x + b.y + b.z + b.w.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "1,2\n3\nabcd\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4845,7 +4845,7 @@ fn m9_block_template_that_writes_a_newline_spans_the_lines_it_writes() {
 fn m9_choice_first_alternative_matches() {
     // choice(A: `{a:int}`, B: `{b:int}`) on "42" → first case wins (.A).
     // Scalar payload recovered directly.
-    let src = "fn main() -> Int {\n  let v = read choice(A: int, B: int)\n  match v {\n    A(n) => n\n    B(n) => n\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var v = read choice(A: int, B: int)\n  match v {\n    A(n) => n\n    B(n) => n\n  }\n}\n";
     let (rt, result) = run_main_with_input(src, "42");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
@@ -4857,7 +4857,7 @@ fn m9_choice_second_alternative_via_backtrack() {
     // backtracking. Scalar payloads keep this test about *backtracking*; the
     // record-payload field access it used to avoid is covered by
     // `a_choice_payload_records_fields_are_readable`.
-    let src = "fn main() -> Int {\n  let v = read choice(A: int, B: word)\n  match v {\n    A(n) => n\n    B(w) => 99\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var v = read choice(A: int, B: word)\n  match v {\n    A(n) => n\n    B(w) => 99\n  }\n}\n";
     let (rt, result) = run_main_with_input(src, "hello");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 99);
@@ -4867,7 +4867,7 @@ fn m9_choice_second_alternative_via_backtrack() {
 fn m9_choice_distinct_payloads() {
     // Two cases with different scalar payload types; the matched case's payload
     // is recovered.
-    let src = "fn main() -> Int {\n  let v = read choice(Num: int, Txt: word)\n  match v {\n    Num(n) => n\n    Txt(w) => 7\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var v = read choice(Num: int, Txt: word)\n  match v {\n    Num(n) => n\n    Txt(w) => 7\n  }\n}\n";
     let (rt, result) = run_main_with_input(src, "123");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 123);
@@ -4876,7 +4876,7 @@ fn m9_choice_distinct_payloads() {
 #[test]
 fn m9_choice_equality() {
     // Two choice results of the same shape compare equal when same variant+payload.
-    let src = "fn main() -> Int {\n  let a = read choice(N: int)\n  let b = read choice(N: int)\n  if a == b { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var a = read choice(N: int)\n  var b = read choice(N: int)\n  if a == b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main_with_input(src, "5");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -4900,7 +4900,7 @@ fn m9_choice_equality() {
 #[test]
 fn a_choice_payload_records_fields_are_readable() {
     // Through a binding: the payload record reaches the field read.
-    let src = "fn main() -> Int {\n  let v = read choice(A: `{a:int},{b:int}`)\n  \
+    let src = "fn main() -> Int {\n  var v = read choice(A: `{a:int},{b:int}`)\n  \
                match v {\n    A(p) => p.a * p.b\n  }\n}\n";
     let (rt, result) = run_main_with_input(src, "6,7");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4909,7 +4909,7 @@ fn a_choice_payload_records_fields_are_readable() {
     // …and through the headless record pattern (REP-57), which is the only
     // spelling available: the payload record is anonymous, so there is no name
     // a head could write.
-    let src = "fn main() -> Int {\n  let v = read choice(A: `{a:int},{b:int}`)\n  \
+    let src = "fn main() -> Int {\n  var v = read choice(A: `{a:int},{b:int}`)\n  \
                match v {\n    A({a, b}) => a * b\n  }\n}\n";
     let (rt, result) = run_main_with_input(src, "6,7");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4921,7 +4921,7 @@ fn a_choice_payload_records_fields_are_readable() {
 #[test]
 fn m9_optional_present_returns_some() {
     // optional(int) on "42" → Some(42).
-    let src = "fn main() -> Int {\n  let v = read optional(int)\n  match v {\n    Some(n) => n\n    None => 0\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var v = read optional(int)\n  match v {\n    Some(n) => n\n    None => 0\n  }\n}\n";
     let (rt, result) = run_main_with_input(src, "42");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
@@ -4930,7 +4930,7 @@ fn m9_optional_present_returns_some() {
 #[test]
 fn m9_optional_absent_returns_none() {
     // optional(int) on "hello" → None (int parse fails). No fault raised.
-    let src = "fn main() -> Int {\n  let v = read optional(int)\n  match v {\n    Some(n) => n\n    None => 7\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var v = read optional(int)\n  match v {\n    Some(n) => n\n    None => 7\n  }\n}\n";
     let (rt, result) = run_main_with_input(src, "hello");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
@@ -4939,7 +4939,7 @@ fn m9_optional_absent_returns_none() {
 #[test]
 fn m9_optional_some_none_equality() {
     // Some(5) == Some(5) is true; Some(5) == None is false; None == None is true.
-    let src = "fn main() -> Int {\n  let a = read optional(int)\n  let b = read optional(int)\n  let same = a == b\n  if same { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var a = read optional(int)\n  var b = read optional(int)\n  var same = a == b\n  if same { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main_with_input(src, "5");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -4949,7 +4949,7 @@ fn m9_optional_some_none_equality() {
 fn m9_optional_present_and_absent_differ() {
     // Each read re-parses the whole input (§7.10). a = optional(int) on "5" →
     // Some(5); b = optional(word) on "5" → Some("5"). Both Some; result is a's n.
-    let src = "fn main() -> Int {\n  let a = read optional(int)\n  let b = read optional(word)\n  match a {\n    Some(n) => match b {\n      Some(w) => n\n      None => 99\n    }\n    None => 0\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var a = read optional(int)\n  var b = read optional(word)\n  match a {\n    Some(n) => match b {\n      Some(w) => n\n      None => 99\n    }\n    None => 0\n  }\n}\n";
     let (rt, result) = run_main_with_input(src, "5");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 5);
@@ -4961,7 +4961,7 @@ fn m9_optional_present_and_absent_differ() {
 fn m9_scan_extracts_matches_in_order() {
     // scan(choice(Mul: `mul({a:int},{b:int})`)) over corrupted text — finds all
     // mul(a,b) in source order, ignoring other text. Counts the matches.
-    let src = "fn main() -> Int {\n  let ms = read scan(choice(M: `mul({a:int},{b:int})`))\n  ms.len()\n}\n";
+    let src = "fn main() -> Int {\n  var ms = read scan(choice(M: `mul({a:int},{b:int})`))\n  ms.len()\n}\n";
     let input = "xmul(2,3)ymul(4,5)don't()mul(6,7)";
     let (rt, result) = run_main_with_input(src, input);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4972,7 +4972,7 @@ fn m9_scan_extracts_matches_in_order() {
 fn m9_scan_extracts_payload_values() {
     // The match count, which is what this test is about. Reading the payload's
     // own fields is `a_choice_payload_records_fields_are_readable`.
-    let src = "fn main() -> Int {\n  let ms = read scan(choice(M: `mul({a:int},{b:int})`))\n  ms.len()\n}\n";
+    let src = "fn main() -> Int {\n  var ms = read scan(choice(M: `mul({a:int},{b:int})`))\n  ms.len()\n}\n";
     let input = "abc()mul(1,2)xyz";
     let (rt, result) = run_main_with_input(src, input);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4982,7 +4982,7 @@ fn m9_scan_extracts_payload_values() {
 #[test]
 fn m9_scan_no_matches_returns_empty_vec() {
     // scan on text with no matches → empty Vec, no fault.
-    let src = "fn main() -> Int {\n  let ms = read scan(choice(M: `mul({a:int},{b:int})`))\n  ms.len()\n}\n";
+    let src = "fn main() -> Int {\n  var ms = read scan(choice(M: `mul({a:int},{b:int})`))\n  ms.len()\n}\n";
     let input = "nothing here at all";
     let (rt, result) = run_main_with_input(src, input);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4995,7 +4995,7 @@ fn m9_scan_no_matches_returns_empty_vec() {
 fn m9_one_of_matches_a_char() {
     // one_of("LR") on "L" → Char 'L'. Verify by counting via chars.
     let src =
-        "fn main() -> Int {\n  let cs = read chars(one_of(\"LR\"), skip: none)\n  cs.len()\n}\n";
+        "fn main() -> Int {\n  var cs = read chars(one_of(\"LR\"), skip: none)\n  cs.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "LLRRL");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 5);
@@ -5004,7 +5004,7 @@ fn m9_one_of_matches_a_char() {
 #[test]
 fn m9_chars_skip_whitespace() {
     // chars(one_of("^v<>"), skip: whitespace) extracts moves ignoring spaces.
-    let src = "fn main() -> Int {\n  let cs = read chars(one_of(\"^v<>\"), skip: whitespace)\n  cs.len()\n}\n";
+    let src = "fn main() -> Int {\n  var cs = read chars(one_of(\"^v<>\"), skip: whitespace)\n  cs.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "^ v < > <");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 5);
@@ -5013,7 +5013,7 @@ fn m9_chars_skip_whitespace() {
 #[test]
 fn m9_matrix_rectangular_int() {
     // matrix(int) on whitespace-separated ints → Grid[Int]. Count cells = w*h.
-    let src = "fn main() -> Int {\n  let m = read matrix(int)\n  m.height() + m.width()\n}\n";
+    let src = "fn main() -> Int {\n  var m = read matrix(int)\n  m.height() + m.width()\n}\n";
     let input = "1 2 3\n4 5 6";
     let (rt, result) = run_main_with_input(src, input);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -5038,7 +5038,7 @@ fn m9_matrix_rectangular_int() {
 /// Observed red with the fix removed: the span is `(0, 9)`, the whole input.
 #[test]
 fn m9_matrix_uniformity_faults_on_ragged() {
-    let src = "fn main() -> Int {\n  let m = read matrix(int)\n  42\n}\n";
+    let src = "fn main() -> Int {\n  var m = read matrix(int)\n  42\n}\n";
     // Lines are 0..5 (`1 2 3`) and 6..9 (`4 5`). The second is the offender.
     let input = "1 2 3\n4 5";
     let (rt, _result) = run_main_with_input(src, input);
@@ -5083,7 +5083,7 @@ fn m9_matrix_uniformity_faults_on_ragged() {
 fn m10ws1_parse_failed_records_expected_and_preview() {
     // `read lines(int)` against non-integer input faults. The detail should
     // carry a non-empty `expected` and a non-empty `actual_preview`.
-    let src = "fn main() -> Int {\n  let xs = read lines(int)\n  0\n}\n";
+    let src = "fn main() -> Int {\n  var xs = read lines(int)\n  0\n}\n";
     let (rt, _result) = run_main_with_input(src, "not a number");
     assert!(
         rt.has_pending_fault(),
@@ -5112,7 +5112,7 @@ fn m10ws1_parse_failed_records_literal_expectation() {
     // not just a generic atomic kind. We use `read` with a template that
     // expects a `:` between two ints; input with the wrong separator faults at
     // the literal.
-    let src = "fn main() -> Int {\n  let r = read `{a:int}:{b:int}`\n  0\n}\n";
+    let src = "fn main() -> Int {\n  var r = read `{a:int}:{b:int}`\n  0\n}\n";
     let (rt, _result) = run_main_with_input(src, "3;4");
     assert!(rt.has_pending_fault());
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::ParseFailed);
@@ -5129,7 +5129,7 @@ fn m10ws1_parse_failed_records_literal_expectation() {
 fn m10ws1_no_detail_when_parse_succeeds() {
     // A successful parse must NOT leave stale detail behind (the slot is
     // cleared at the start of each `run_plan`).
-    let src = "fn main() -> Int {\n  let xs = read lines(int)\n  xs.len()\n}\n";
+    let src = "fn main() -> Int {\n  var xs = read lines(int)\n  xs.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "1\n2\n3\n");
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 3);
@@ -5143,7 +5143,7 @@ fn m10ws1_no_detail_when_parse_succeeds() {
 fn m10ws1_parse_failed_preview_is_single_line() {
     // The actual preview must not contain raw newlines (rendered as ⏎) so the
     // noninteractive fallback prints a clean one-line glance.
-    let src = "fn main() -> Int {\n  let xs = read lines(int)\n  0\n}\n";
+    let src = "fn main() -> Int {\n  var xs = read lines(int)\n  0\n}\n";
     let input = "line one\nline two\nstill not an int";
     let (rt, _result) = run_main_with_input(src, input);
     assert!(rt.has_pending_fault());
@@ -5217,8 +5217,8 @@ fn m10ws2_debug_frame_locals_survive_gc_during_recursion() {
     // the GC (which walks the parallel shadow stack) or the returned value
     // would be wrong. The correct sum confirms the two stay consistent across
     // collections.
-    let src = "fn build(n: Int) -> Vec[Int] {\n  if n == 0 { Vec() } else { let v = build(n - 1); v.push(n); v }\n}\n
-               fn main() -> Int {\n  let v = build(100);\n  var s = 0;\n  var i = 0;\n  while i < v.len() { s = s + v.get(i); i = i + 1 }\n  s\n}\n";
+    let src = "fn build(n: Int) -> Vec[Int] {\n  if n == 0 { Vec() } else { var v = build(n - 1); v.push(n); v }\n}\n
+               fn main() -> Int {\n  var v = build(100);\n  var s = 0;\n  var i = 0;\n  while i < v.len() { s = s + v.get(i); i = i + 1 }\n  s\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     // sum 1..=100 = 5050.
@@ -5239,7 +5239,7 @@ fn m10ws3_snapshot_captured_on_index_fault() {
     // An index-out-of-bounds fault drops into the snapshot. The chain must be
     // non-empty and carry the function name. The faulting frame is `main` here
     // (the OOB access is inline); a deeper chain is exercised by the WS3 GC test.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.get(5)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.get(5)\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IndexOutOfBounds);
@@ -5273,7 +5273,7 @@ fn m10ws3_snapshot_retains_reachable_objects_across_gc() {
     // referenced Vec must survive (its elements remain readable through the
     // snapshot's locals).
     let src =
-        "fn main() -> Int {\n  let xs = Vec()\n  xs.push(11)\n  xs.push(22)\n  xs.get(99)\n}\n";
+        "fn main() -> Int {\n  var xs = Vec()\n  xs.push(11)\n  xs.push(22)\n  xs.get(99)\n}\n";
     let (mut rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
     let snap = rt.crash_snapshot().expect("snapshot captured");
@@ -5324,7 +5324,7 @@ fn m10b_ws1_snapshot_frame_carries_source_span() {
     // `main` has a real source span; the snapshot's frame for `main` must carry
     // a non-empty `[start, end)` byte range, not the `(0, 0)` default. A
     // deliberately-placed OOB get faults inside `main`, so frame 0 is `main`.
-    let src = "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.get(9)\n}\n";
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.get(9)\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
     let snap = rt.crash_snapshot().expect("snapshot captured");
@@ -5353,7 +5353,7 @@ fn m10b_ws1_snapshot_locals_carry_distinct_type_ids() {
     // static `Type` (not just the runtime descriptor, which collapses all
     // collections to `VEC`) is threaded through, so the M10b `p EXPR` evaluator
     // can reconstruct `Vec[Int]` element types for type-checking.
-    let src = "fn main() -> Int {\n  let n = 42\n  let xs = Vec()\n  xs.push(n)\n  xs.get(9)\n}\n";
+    let src = "fn main() -> Int {\n  var n = 42\n  var xs = Vec()\n  xs.push(n)\n  xs.get(9)\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
     let snap = rt.crash_snapshot().expect("snapshot captured");
@@ -5420,7 +5420,7 @@ fn a_local_the_root_set_dropped_is_still_renderable() {
     // This is the property store-at-def could plausibly have broken, because
     // `xs`'s definition is now the only point that writes its debug slot. It
     // does not break it, because the debug slot is never cleared.
-    let src = "fn main() -> Int {\n  let xs = Vec()\n  xs.push(11)\n  let ys = Vec()\n  \
+    let src = "fn main() -> Int {\n  var xs = Vec()\n  xs.push(11)\n  var ys = Vec()\n  \
                ys.push(22)\n  ys.get(99)\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
@@ -5449,7 +5449,7 @@ fn a_fault_between_a_definition_and_the_next_safepoint_shows_the_value() {
     //
     // The comment the spill carried named this exact program: "a snapshot taken
     // on the fault path sees `<uninit>` for the `0` divisor in `x / 0`".
-    let src = "fn main() -> Int {\n  let n = 10\n  let d = 0\n  n / d\n}\n";
+    let src = "fn main() -> Int {\n  var n = 10\n  var d = 0\n  n / d\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::DivByZero);
@@ -5479,7 +5479,7 @@ fn a_temp_that_never_reached_a_shadow_slot_is_still_renderable() {
     // it is not rooted". The temp is therefore in *no* shadow slot at any point
     // in this program, yet `locals` must show it: `m11_locals_split_users_and_
     // temps_with_types` asserts on its `@ "a + b"` provenance line.
-    let src = "fn main() -> Int {\n  let a = 10\n  let b = 20\n  \
+    let src = "fn main() -> Int {\n  var a = 10\n  var b = 20\n  \
                a + b + 9223372036854775807\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
@@ -5512,8 +5512,8 @@ fn a_temp_that_never_reached_a_shadow_slot_is_still_renderable() {
 /// slot the collector must be shown not to follow.
 #[test]
 fn an_elided_float_box_renders_its_value_and_not_its_bit_pattern() {
-    let src = "fn main() -> Int {\n  let a = 2.5\n  let b = 4.0\n  \
-               let c = a * b + b\n  1 / 0\n}\n";
+    let src = "fn main() -> Int {\n  var a = 2.5\n  var b = 4.0\n  \
+               var c = a * b + b\n  1 / 0\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
     let snap = rt.crash_snapshot().expect("snapshot captured");
@@ -5543,8 +5543,8 @@ fn an_elided_float_box_renders_its_value_and_not_its_bit_pattern() {
 #[test]
 fn an_elided_boxs_scalar_is_not_a_root_of_the_snapshot() {
     use praxis_runtime::RootSet;
-    let src = "fn main() -> Int {\n  let a = 2.5\n  let b = 4.0\n  \
-               let c = a * b + b\n  1 / 0\n}\n";
+    let src = "fn main() -> Int {\n  var a = 2.5\n  var b = 4.0\n  \
+               var c = a * b + b\n  1 / 0\n}\n";
     let (rt, _result) = run_main(src);
     let snap = rt.crash_snapshot().expect("snapshot captured");
     let scalars = snap.frames[0]
@@ -5582,7 +5582,7 @@ fn an_elided_boxs_scalar_is_not_a_root_of_the_snapshot() {
 /// assertion is here and not in a comment.
 #[test]
 fn an_overflowing_temp_is_not_given_the_wrapped_value_it_never_produced() {
-    let src = "fn main() -> Int {\n  let a = 10\n  let b = 20\n  \
+    let src = "fn main() -> Int {\n  var a = 10\n  var b = 20\n  \
                a + b + 9223372036854775807\n}\n";
     let (rt, _result) = run_main(src);
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
@@ -5617,8 +5617,8 @@ fn a_snapshot_orders_its_frames_innermost_first_with_each_functions_own_locals()
     // pointers. This is the test for that reversal, and for the rejoin: each
     // frame's locals come from *its* function's static metadata zipped with
     // *its own* run of value slots, so two frames must not show each other's.
-    let src = "fn inner(a: Int) -> Int {\n  let deep = a + 1\n  deep / 0\n}\n\
-               fn main() -> Int {\n  let outer = 7\n  inner(outer)\n}\n";
+    let src = "fn inner(a: Int) -> Int {\n  var deep = a + 1\n  deep / 0\n}\n\
+               fn main() -> Int {\n  var outer = 7\n  inner(outer)\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::DivByZero);
@@ -5688,7 +5688,7 @@ fn a_snapshot_orders_its_frames_innermost_first_with_each_functions_own_locals()
 fn a_local_the_collector_reclaimed_renders_as_an_absence_not_as_a_dangling_ref() {
     let src = "\
 fn main() -> Int {
-  let xs = Vec()
+  var xs = Vec()
   var i = 0
   while i < 200 {
     xs.push(i + 2000)
@@ -5697,12 +5697,12 @@ fn main() -> Int {
   var sum = xs.len()
   var j = 0
   while j < 40000 {
-    let junk = Vec()
+    var junk = Vec()
     junk.push(j + 2000)
     sum = sum + junk.len()
     j = j + 1
   }
-  let ys = Vec()
+  var ys = Vec()
   ys.push(sum)
   ys.get(99)
 }
@@ -5738,7 +5738,7 @@ fn main() -> Int {
 fn a_local_that_survives_the_collection_is_renderable_with_its_real_contents() {
     let src = "\
 fn main() -> Int {
-  let xs = Vec()
+  var xs = Vec()
   var i = 0
   while i < 3 {
     xs.push(i + 2000)
@@ -5747,12 +5747,12 @@ fn main() -> Int {
   var sum = 0
   var j = 0
   while j < 40000 {
-    let junk = Vec()
+    var junk = Vec()
     junk.push(j + 2000)
     sum = sum + junk.len()
     j = j + 1
   }
-  let ys = Vec()
+  var ys = Vec()
   ys.push(sum + xs.len())
   ys.get(99)
 }
@@ -5819,7 +5819,7 @@ fn dbg_hands_back_the_value_it_was_given() {
     // The same reference, not an equal copy: a collection round-trips its
     // identity, so a push through the result is visible in the original.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let xs = Vec()\n  xs.push(1)\n  dbg(xs).push(2)\n  xs.len()\n}\n",
+        "fn main() -> Int {\n  var xs = Vec()\n  xs.push(1)\n  dbg(xs).push(2)\n  xs.len()\n}\n",
     );
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 2);
@@ -5988,7 +5988,7 @@ fn a_flood_fill_reaches_exactly_the_states_the_graph_connects() {
     // Membership is the `Set`'s own structural `contains`, not a length check.
     let (rt, result) = run_main(&format!(
         "{DIAMOND}fn main() -> Int {{\n\
-         \x20 let seen = flood_fill(1, |n| steps(n))\n\
+         \x20 var seen = flood_fill(1, |n| steps(n))\n\
          \x20 if seen.contains(4) {{ 1 }} else {{ 0 }}\n\
          }}"
     ));
@@ -5996,7 +5996,7 @@ fn a_flood_fill_reaches_exactly_the_states_the_graph_connects() {
     assert_eq!(result.as_int(), 1);
     let (rt, result) = run_main(&format!(
         "{DIAMOND}fn main() -> Int {{\n\
-         \x20 let seen = flood_fill(1, |n| steps(n))\n\
+         \x20 var seen = flood_fill(1, |n| steps(n))\n\
          \x20 if seen.contains(9) {{ 1 }} else {{ 0 }}\n\
          }}"
     ));
@@ -6209,7 +6209,7 @@ fn a_state_may_be_any_value_that_can_be_remembered() {
     // position finds its entry.
     let (rt, result) = run_main(&format!(
         "{grid}fn main() -> Int {{\n\
-         \x20 let costs = dijkstra(P {{ x: 0, y: 0 }}, |p| steps(p), |a, b| 1)\n\
+         \x20 var costs = dijkstra(P {{ x: 0, y: 0 }}, |p| steps(p), |a, b| 1)\n\
          \x20 costs[P {{ x: 2, y: 2 }}]\n\
          }}"
     ));
@@ -6270,7 +6270,7 @@ fn a_fault_inside_a_closure_stops_the_walk() {
     let (rt, _result) = run_main(
         "fn steps(n: Int) -> Vec[Int] { Vec() }\n\
          fn main() -> Int {\n\
-         \x20 let d = bfs_distance(1, |n| steps(n), |n| panic(\"stop\"))\n\
+         \x20 var d = bfs_distance(1, |n| steps(n), |n| panic(\"stop\"))\n\
          \x20 0\n\
          }",
     );
@@ -6325,10 +6325,10 @@ fn a_for_over_a_range_runs_its_integers_in_order() {
 /// a `Map` key — and it renders as the half-open interval it is.
 #[test]
 fn a_range_is_a_value_that_outlives_its_expression() {
-    // Bound to a `let`, then iterated — the range object has to survive the
+    // Bound to a `var`, then iterated — the range object has to survive the
     // binding and the allocations between.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let r = 2..6\n  let v = Vec()\n  v.push(9)\n\
+        "fn main() -> Int {\n  var r = 2..6\n  var v = Vec()\n  v.push(9)\n\
          \x20 var t = 0\n  for i in r { t = t + i }\n  t + v.len()\n}\n",
     );
     assert!(!rt.has_pending_fault());
@@ -6345,14 +6345,14 @@ fn a_range_is_a_value_that_outlives_its_expression() {
     // As a `Map` key: hashable *and* immutable, so it is findable again by an
     // equal range built separately (ADR-057 D4, ADR-059).
     let (rt, result) =
-        run_main("fn main() -> Int {\n  let m = Map()\n  m.insert(0..3, 41)\n  m[0..3] + 1\n}\n");
+        run_main("fn main() -> Int {\n  var m = Map()\n  m.insert(0..3, 41)\n  m[0..3] + 1\n}\n");
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 42);
 
     // …and `1..=4` really is `1..5`, which is what normalizing at construction
     // means: the two spellings are one key and one rendering.
     let (rt, result) =
-        run_main("fn main() -> Int {\n  let m = Map()\n  m.insert(1..=4, 5)\n  m[1..5]\n}\n");
+        run_main("fn main() -> Int {\n  var m = Map()\n  m.insert(1..=4, 5)\n  m[1..5]\n}\n");
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 5);
 }
@@ -6399,7 +6399,7 @@ fn a_method_on_an_unannotated_parameter_runs() {
     let (rt, result) = run_main(
         "fn total(values) { values.sum() }\n\
          fn main() -> Int {\n  \
-           let values = Vec()\n  \
+           var values = Vec()\n  \
            values.push(1)\n  \
            values.push(2)\n  \
            total(values)\n\
@@ -6418,7 +6418,7 @@ fn a_deferred_method_with_arguments_runs() {
     let (rt, result) = run_main(
         "fn add(v, x) { v.push(x) }\n\
          fn main() -> Int {\n  \
-           let values = Vec()\n  \
+           var values = Vec()\n  \
            values.push(1)\n  \
            add(values, 41)\n  \
            values.sum()\n\
@@ -6433,23 +6433,23 @@ fn a_deferred_method_with_arguments_runs() {
 /// **REP-01, the only P0 left in the repair.** A top-level `fn` used as a value
 /// is a callable closure.
 ///
-/// `let f = double` lowered to `Unit` and `Inst::CallIndirect` then read that
+/// `var f = double` lowered to `Unit` and `Inst::CallIndirect` then read that
 /// Unit's payload as a function pointer, so this program — which `praxis check`
 /// accepts, because a `fn`'s type *is* a `Func` — took the host down with a
 /// SIGBUS. **This test aborting the test process is the failure mode**, not a
 /// wrong answer.
 ///
-/// All three routes the stage names are here: a `let`, a parameter of declared
+/// All three routes the stage names are here: a `var`, a parameter of declared
 /// function type, and a graph helper's closure argument (§6.5's helpers were the
 /// new way to reach the bug, and their descriptor check is containment, not a
 /// fix). A `Vec` element is a fourth, and is the one that also exercises the
 /// postfix call form.
 #[test]
 fn a_top_level_fn_is_a_callable_value() {
-    // Through a `let`, then called by name — the finding's own reproduction.
+    // Through a `var`, then called by name — the finding's own reproduction.
     let (rt, result) = run_main(
         "fn double(n: Int) -> Int { n * 2 }\n\
-         fn main() -> Int {\n  let f = double\n  f(3)\n}\n",
+         fn main() -> Int {\n  var f = double\n  f(3)\n}\n",
     );
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 6);
@@ -6468,7 +6468,7 @@ fn a_top_level_fn_is_a_callable_value() {
     // answer rather than only as a crash.
     let (rt, result) = run_main(
         "fn sub(a: Int, b: Int) -> Int { a - b }\n\
-         fn main() -> Int {\n  let f = sub\n  f(50, 8)\n}\n",
+         fn main() -> Int {\n  var f = sub\n  f(50, 8)\n}\n",
     );
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 42);
@@ -6477,7 +6477,7 @@ fn a_top_level_fn_is_a_callable_value() {
     // through `callee_expr` rather than through a name.
     let (rt, result) = run_main(
         "fn double(n: Int) -> Int { n * 2 }\n\
-         fn main() -> Int {\n  let fs = Vec()\n  fs.push(double)\n  fs.get(0)(21)\n}\n",
+         fn main() -> Int {\n  var fs = Vec()\n  fs.push(double)\n  fs.get(0)(21)\n}\n",
     );
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 42);
@@ -6491,13 +6491,13 @@ fn a_top_level_fn_is_a_callable_value() {
 fn a_fn_value_is_callable_from_the_runtime_side() {
     let (rt, result) = run_main(
         "fn step(n: Int) -> Vec[Int] {\n  \
-           let v = Vec()\n  \
+           var v = Vec()\n  \
            if n < 4 { v.push(n + 1) }\n  \
            v\n\
          }\n\
          fn at_goal(n: Int) -> Bool { n == 4 }\n\
          fn main() -> Int {\n  \
-           let d = bfs_distance(0, step, at_goal)\n  \
+           var d = bfs_distance(0, step, at_goal)\n  \
            match d { Some(k) => k, None => 0 - 1 }\n\
          }\n",
     );
@@ -6512,7 +6512,7 @@ fn a_fn_value_is_callable_from_the_runtime_side() {
 fn a_fault_inside_a_fn_value_is_not_swallowed_by_its_adapter() {
     let (rt, _result) = run_main(
         "fn half(n: Int) -> Int { n / 0 }\n\
-         fn main() -> Int {\n  let f = half\n  f(10)\n}\n",
+         fn main() -> Int {\n  var f = half\n  f(10)\n}\n",
     );
     assert!(rt.has_pending_fault(), "the DivByZero has to arrive");
 }
@@ -6569,14 +6569,14 @@ fn a_for_over_an_unannotated_parameter_runs_against_each_iterable_it_is_given() 
     const COPY: &str = "fn copy(vs) { var o = Vec()\n for v in vs { o.push(v) }\n o }\n";
     let (rt, result) = run_main(&format!(
         "{COPY}fn main() -> Int {{ var s = Vec()\n s.push(7)\n s.push(9)\n \
-         let d = copy(s)\n d.get(0) + d.get(1) }}"
+         var d = copy(s)\n d.get(0) + d.get(1) }}"
     ));
     assert!(!rt.has_pending_fault(), "copy over a Vec faulted");
     assert_eq!(result.as_int(), 16);
     // …and the same body over a different ctor, so the element type is read from
     // the argument and not from the first use.
     let (rt, result) = run_main(&format!(
-        "{COPY}fn main() -> Int {{ let d = copy(1..4)\n d.len() + d.get(2) }}"
+        "{COPY}fn main() -> Int {{ var d = copy(1..4)\n d.len() + d.get(2) }}"
     ));
     assert!(!rt.has_pending_fault(), "copy over a Range faulted");
     assert_eq!(result.as_int(), 6);
@@ -6642,7 +6642,7 @@ fn the_logical_operators_short_circuit_and_answer_their_truth_table() {
     // §3.3's own shape, end to end: comparisons under `&&` under a `!`.
     let (rt, result) = run_main(
         "fn main() -> Int {\n  \
-           let diagonals = false\n  let dx = 1\n  let dy = 0\n  \
+           var diagonals = false\n  var dx = 1\n  var dy = 0\n  \
            if !diagonals && dx != 0 && dy != 0 { 9 } else { 8 }\n\
          }",
     );
@@ -6672,13 +6672,13 @@ fn a_tuple_element_reads_the_value_at_that_position() {
         ("fn main() -> Int { ((1, 2), 3).0.1 }", 2),
         ("fn main() -> Int { ((1, 2), 3).1 }", 3),
         // Through a binding, a parameter, and a closure body.
-        ("fn main() -> Int { let p = (7, 9)\n p.0 + p.1 }", 16),
+        ("fn main() -> Int { var p = (7, 9)\n p.0 + p.1 }", 16),
         (
             "fn snd(p: (Int, Int)) -> Int { p.1 }\nfn main() -> Int { snd((3, 4)) }",
             4,
         ),
         (
-            "fn main() -> Int { let f = |p: (Int, Int)| p.0 * p.1\n f((6, 7)) }",
+            "fn main() -> Int { var f = |p: (Int, Int)| p.0 * p.1\n f((6, 7)) }",
             42,
         ),
         // Out of a collection, which is how a corpus program actually holds them.
@@ -6716,16 +6716,16 @@ fn a_tuple_element_reads_the_value_at_that_position() {
 fn a_subscript_reads_and_writes_through_the_wrapper_its_receiver_needs() {
     // Read, on each of the six.
     for (src, want) in [
-        ("let v = Vec()\n v.push(10)\n v.push(20)\n v[1]", 20),
+        ("var v = Vec()\n v.push(10)\n v.push(20)\n v[1]", 20),
         (
-            "let d = Deque()\n d.push_back(4)\n d.push_front(9)\n d[0]",
+            "var d = Deque()\n d.push_back(4)\n d.push_front(9)\n d[0]",
             9,
         ),
-        ("let m = Map()\n m.insert(\"a\", 7)\n m[\"a\"]", 7),
+        ("var m = Map()\n m.insert(\"a\", 7)\n m[\"a\"]", 7),
         // §6.2: a `Counter`'s absent key reads as zero and does not fault, which
         // is the one read that differs from its `Map` sibling's.
         (
-            "let c = Counter()\n c.inc(\"a\")\n c[\"a\"] + c[\"nope\"]",
+            "var c = Counter()\n c.inc(\"a\")\n c[\"a\"] + c[\"nope\"]",
             1,
         ),
         // `Text`'s read answers a `Char` (ADR-086), so naming its scalar value
@@ -6741,9 +6741,9 @@ fn a_subscript_reads_and_writes_through_the_wrapper_its_receiver_needs() {
     // Store, on the three that have one — and read back through the subscript, so
     // the pair has to agree about which collection it is talking to.
     for (src, want) in [
-        ("let m = Map()\n m[\"a\"] = 5\n m[\"a\"]", 5),
-        ("let m = Map()\n m[\"a\"] = 5\n m[\"a\"] = 6\n m.len()", 1),
-        ("let c = Counter()\n c[\"a\"] = 4\n c[\"a\"]", 4),
+        ("var m = Map()\n m[\"a\"] = 5\n m[\"a\"]", 5),
+        ("var m = Map()\n m[\"a\"] = 5\n m[\"a\"] = 6\n m.len()", 1),
+        ("var c = Counter()\n c[\"a\"] = 4\n c[\"a\"]", 4),
     ] {
         let (rt, result) = run_main(&format!("fn main() -> Int {{\n  {src}\n}}\n"));
         assert!(!rt.has_pending_fault(), "{src} faulted: {:?}", rt.fault());
@@ -6755,7 +6755,7 @@ fn a_subscript_reads_and_writes_through_the_wrapper_its_receiver_needs() {
     // `inc` in disguise.
     for (op, want) in [("+=", 13), ("-=", 7), ("*=", 30), ("/=", 3), ("%=", 1)] {
         let src = format!(
-            "fn main() -> Int {{\n  let c = Counter()\n  c[\"k\"] = 10\n  c[\"k\"] {op} 3\n  c[\"k\"]\n}}\n"
+            "fn main() -> Int {{\n  var c = Counter()\n  c[\"k\"] = 10\n  c[\"k\"] {op} 3\n  c[\"k\"]\n}}\n"
         );
         let (rt, result) = run_main(&src);
         assert!(!rt.has_pending_fault(), "{op} faulted: {:?}", rt.fault());
@@ -6765,7 +6765,7 @@ fn a_subscript_reads_and_writes_through_the_wrapper_its_receiver_needs() {
     // A `Counter`'s zero default is what makes `counts[key] += 1` work on a key
     // that has never been seen — §3.3 never initializes one.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let c = Counter()\n  c[\"a\"] += 1\n  c[\"a\"] += 1\n  \
+        "fn main() -> Int {\n  var c = Counter()\n  c[\"a\"] += 1\n  c[\"a\"] += 1\n  \
          c[\"b\"] += 5\n  c[\"a\"] * 100 + c[\"b\"]\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -6774,7 +6774,7 @@ fn a_subscript_reads_and_writes_through_the_wrapper_its_receiver_needs() {
     // A tuple key, which is what §3.3 counts by. The key is a fresh allocation
     // every iteration, so this only works if identity is structural (ADR-026).
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let c = Counter()\n  \
+        "fn main() -> Int {\n  var c = Counter()\n  \
          for i in 0..3 { c[(1, 2)] += 1 }\n  c[(1, 2)] * 10 + c.len()\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -6807,7 +6807,7 @@ fn a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names() {
     // `a_grid_of_char_is_positional_so_a_space_is_a_cell`
     // (adversarial_audit.rs).
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let g = read grid(int)\n  g[1, 0] = 7\n  \
+        "fn main() -> Int {\n  var g = read grid(int)\n  g[1, 0] = 7\n  \
          g[1, 0] * 100 + g[0, 0] * 10 + g[0, 1]\n}\n",
         "1 2\n3 4\n",
     );
@@ -6817,7 +6817,7 @@ fn a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names() {
     // `.get`/`.set` and the subscript are the same cell, which is what says the
     // two spellings are one operation for a `Grid` (unlike a `Map`'s, §4.7).
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let g = read grid(int)\n  g.set(1, 1, 5)\n  \
+        "fn main() -> Int {\n  var g = read grid(int)\n  g.set(1, 1, 5)\n  \
          g[1, 1] * 10 + g.get(1, 1)\n}\n",
         "1 2\n3 4\n",
     );
@@ -6826,12 +6826,12 @@ fn a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names() {
 
     // Out of range faults rather than reading a neighbour, from either side.
     let (rt, _) = run_main_with_input(
-        "fn main() -> Int {\n  let g = read grid(int)\n  g[99, 0]\n}\n",
+        "fn main() -> Int {\n  var g = read grid(int)\n  g[99, 0]\n}\n",
         "1 2\n3 4\n",
     );
     assert!(rt.has_pending_fault(), "an out-of-range read faults");
     let (rt, _) = run_main_with_input(
-        "fn main() -> Int {\n  let g = read grid(int)\n  g[0, 99] = 1\n  0\n}\n",
+        "fn main() -> Int {\n  var g = read grid(int)\n  g[0, 99] = 1\n  0\n}\n",
         "1 2\n3 4\n",
     );
     assert!(rt.has_pending_fault(), "an out-of-range store faults");
@@ -6850,7 +6850,7 @@ fn a_compound_assignment_through_a_subscript_evaluates_its_place_once() {
     // number of times the index expression ran.
     let (rt, result) = run_main(
         "fn key(log) { log.push(1)\n \"k\" }\n\
-         fn main() -> Int {\n  let log = Vec()\n  let c = Counter()\n  \
+         fn main() -> Int {\n  var log = Vec()\n  var c = Counter()\n  \
          c[key(log)] += 1\n  log.len() * 10 + c[\"k\"]\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -6859,7 +6859,7 @@ fn a_compound_assignment_through_a_subscript_evaluates_its_place_once() {
     // …and the receiver too, which is the other half a desugaring would double.
     let (rt, result) = run_main(
         "fn pick(log, c) { log.push(1)\n c }\n\
-         fn main() -> Int {\n  let log = Vec()\n  let c = Counter()\n  \
+         fn main() -> Int {\n  var log = Vec()\n  var c = Counter()\n  \
          pick(log, c)[\"k\"] += 2\n  log.len() * 10 + c[\"k\"]\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -6893,7 +6893,7 @@ fn a_sequence_stores_the_element_its_subscript_reads() {
 
     // A `Deque`, indexed from the front.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let d = Deque[Int]()\n  d.push_back(1)\n  \
+        "fn main() -> Int {\n  var d = Deque[Int]()\n  d.push_back(1)\n  \
          d.push_back(2)\n  d[1] = 7\n  d[0] * 10 + d[1]\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -6903,7 +6903,7 @@ fn a_sequence_stores_the_element_its_subscript_reads() {
     // that fails if the store is ever pointed at the appending wrapper.
     for src in [
         "var v = [1, 2, 3]\n  v[3] = 9\n  v.len()",
-        "let d = Deque[Int]()\n  d.push_back(1)\n  d[1] = 9\n  d.len()",
+        "var d = Deque[Int]()\n  d.push_back(1)\n  d[1] = 9\n  d.len()",
     ] {
         let (rt, _) = run_main(&format!("fn main() -> Int {{\n  {src}\n}}\n"));
         assert!(
@@ -6928,7 +6928,7 @@ fn a_field_store_writes_the_slot_the_field_read_reads() {
     // wrong index gets backwards.
     let (rt, result) = run_main(
         "struct P { x: Int, y: Int }\n\
-         fn main() -> Int {\n  let p = P { x: 1, y: 2 }\n  p.x = 5\n  \
+         fn main() -> Int {\n  var p = P { x: 1, y: 2 }\n  p.x = 5\n  \
          p.x * 10 + p.y\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -6937,7 +6937,7 @@ fn a_field_store_writes_the_slot_the_field_read_reads() {
     // The compound forms read the same slot they write.
     let (rt, result) = run_main(
         "struct P { x: Int, y: Int }\n\
-         fn main() -> Int {\n  let p = P { x: 1, y: 2 }\n  p.y += 10\n  p.y *= 2\n  \
+         fn main() -> Int {\n  var p = P { x: 1, y: 2 }\n  p.y += 10\n  p.y *= 2\n  \
          p.x * 100 + p.y\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -6949,7 +6949,7 @@ fn a_field_store_writes_the_slot_the_field_read_reads() {
     let (rt, result) = run_main(
         "struct P { x: Int }\n\
          fn bump(q) { q.x += 1 }\n\
-         fn main() -> Int {\n  let p = P { x: 1 }\n  bump(p)\n  bump(p)\n  p.x\n}\n",
+         fn main() -> Int {\n  var p = P { x: 1 }\n  bump(p)\n  bump(p)\n  p.x\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -6958,8 +6958,8 @@ fn a_field_store_writes_the_slot_the_field_read_reads() {
     // `o.inner.v` and `rs[0].v` reach the record the outer one holds.
     let (rt, result) = run_main(
         "struct I { v: Int }\nstruct O { inner: I }\n\
-         fn main() -> Int {\n  let o = O { inner: I { v: 1 } }\n  o.inner.v = 4\n  \
-         let rs = [I { v: 1 }, I { v: 2 }]\n  rs[0].v = 9\n  \
+         fn main() -> Int {\n  var o = O { inner: I { v: 1 } }\n  o.inner.v = 4\n  \
+         var rs = [I { v: 1 }, I { v: 2 }]\n  rs[0].v = 9\n  \
          o.inner.v * 100 + rs[0].v * 10 + rs[1].v\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -6969,7 +6969,7 @@ fn a_field_store_writes_the_slot_the_field_read_reads() {
     // arithmetic the other four compounds take.
     let (rt, result) = run_main(
         "struct N { name: Text }\n\
-         fn main() -> Int {\n  let n = N { name: \"ab\" }\n  n.name += \"cd\"\n  \
+         fn main() -> Int {\n  var n = N { name: \"ab\" }\n  n.name += \"cd\"\n  \
          n.name.len()\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -6988,7 +6988,7 @@ fn a_compound_assignment_through_a_field_evaluates_its_receiver_once() {
     let (rt, result) = run_main(
         "struct C { n: Int }\n\
          fn pick(log, c) { log.push(1)\n c }\n\
-         fn main() -> Int {\n  let log = Vec()\n  let c = C { n: 0 }\n  \
+         fn main() -> Int {\n  var log = Vec()\n  var c = C { n: 0 }\n  \
          pick(log, c).n += 5\n  log.len() * 10 + c.n\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7009,7 +7009,7 @@ fn a_constructor_with_written_type_arguments_builds_what_it_names() {
     // allocation each iteration, so the three increments only land on one key if
     // the descriptor gives structural identity (ADR-026).
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let c = Counter[(Int, Int)]()\n  \
+        "fn main() -> Int {\n  var c = Counter[(Int, Int)]()\n  \
          for i in 0..3 { c[(1, 2)] += 1 }\n  c[(1, 2)] * 10 + c.len()\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7017,10 +7017,10 @@ fn a_constructor_with_written_type_arguments_builds_what_it_names() {
 
     // Each ctor arity, and a nested argument.
     for (src, want) in [
-        ("let v = Vec[Int]()\n  v.push(4)\n  v[0]", 4),
-        ("let m = Map[Text, Int]()\n  m[\"a\"] = 9\n  m[\"a\"]", 9),
+        ("var v = Vec[Int]()\n  v.push(4)\n  v[0]", 4),
+        ("var m = Map[Text, Int]()\n  m[\"a\"] = 9\n  m[\"a\"]", 9),
         (
-            "let m = Map[Text, Vec[Int]]()\n  let inner = Vec()\n  inner.push(3)\n  \
+            "var m = Map[Text, Vec[Int]]()\n  var inner = Vec()\n  inner.push(3)\n  \
              m[\"a\"] = inner\n  m[\"a\"].len()",
             1,
         ),
@@ -7044,7 +7044,7 @@ fn a_constructor_with_written_type_arguments_builds_what_it_names() {
 fn a_keyed_collection_enumerates_in_a_deterministic_order() {
     // `values()` on a Counter, which is what §3.3 needs.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let c = Counter[Text]()\n  c[\"a\"] = 3\n  c[\"b\"] = 1\n  \
+        "fn main() -> Int {\n  var c = Counter[Text]()\n  c[\"a\"] = 3\n  c[\"b\"] = 1\n  \
          c[\"c\"] = 5\n  c.values().count(|n| n >= 2)\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7060,7 +7060,7 @@ fn a_keyed_collection_enumerates_in_a_deterministic_order() {
         ("v.map(|n| n * 2).count(|n| n > 4)", 2),
     ] {
         let program = format!(
-            "fn main() -> Int {{\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  \
+            "fn main() -> Int {{\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  \
              v.push(4)\n  {src}\n}}\n"
         );
         let (rt, result) = run_main(&program);
@@ -7073,8 +7073,8 @@ fn a_keyed_collection_enumerates_in_a_deterministic_order() {
     // so an implementation that returned the `HashMap`'s order would disagree with
     // itself here rather than only look untidy.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map[Text, Int]()\n  m[\"c\"] = 3\n  m[\"a\"] = 1\n  \
-         m[\"b\"] = 2\n  let ks = m.keys()\n  let vs = m.values()\n  \
+        "fn main() -> Int {\n  var m = Map[Text, Int]()\n  m[\"c\"] = 3\n  m[\"a\"] = 1\n  \
+         m[\"b\"] = 2\n  var ks = m.keys()\n  var vs = m.values()\n  \
          var ok = 0\n  for i in 0..ks.len() { if m[ks[i]] == vs[i] { ok += 1 } }\n  ok\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7087,15 +7087,15 @@ fn a_keyed_collection_enumerates_in_a_deterministic_order() {
     // The order itself, twice in one process and asserted against the rendered-key
     // order the formatter already uses.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map[Text, Int]()\n  m[\"c\"] = 3\n  m[\"a\"] = 1\n  \
-         m[\"b\"] = 2\n  let vs = m.values()\n  vs[0] * 100 + vs[1] * 10 + vs[2]\n}\n",
+        "fn main() -> Int {\n  var m = Map[Text, Int]()\n  m[\"c\"] = 3\n  m[\"a\"] = 1\n  \
+         m[\"b\"] = 2\n  var vs = m.values()\n  vs[0] * 100 + vs[1] * 10 + vs[2]\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 123, "ordered by key: a, b, c");
 
     // An empty collection enumerates to an empty `Vec` rather than faulting.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map[Text, Int]()\n  \
+        "fn main() -> Int {\n  var m = Map[Text, Int]()\n  \
          m.keys().len() + m.values().len()\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7113,7 +7113,7 @@ fn a_keyed_collection_enumerates_in_a_deterministic_order() {
 fn a_template_literal_that_begins_with_a_space_matches() {
     // The finding's own shape, and §3.3's.
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let rs = read lines(`{a:int} -> {b:int}`)\n  \
+        "fn main() -> Int {\n  var rs = read lines(`{a:int} -> {b:int}`)\n  \
          var t = 0\n  for r in rs { t = t + r.a * r.b }\n  t\n}\n",
         "1 -> 2\n3 -> 4\n",
     );
@@ -7122,7 +7122,7 @@ fn a_template_literal_that_begins_with_a_space_matches() {
 
     let (rt, result) = run_main_with_input(
         "fn main() -> Int {\n  \
-         let rs = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)\n  \
+         var rs = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)\n  \
          var t = 0\n  for r in rs { t = t + r.x2 - r.x1 + r.y2 - r.y1 }\n  t\n}\n",
         "0,9 -> 5,9\n8,0 -> 0,8\n",
     );
@@ -7146,7 +7146,7 @@ fn a_template_literal_that_begins_with_a_space_matches() {
     // just below.
     for input in ["1 -> 2\n", "1    ->    2\n", "1\t->\t2\n"] {
         let (rt, result) = run_main_with_input(
-            "fn main() -> Int {\n  let rs = read lines(`{a:int} -> {b:int}`)\n  \
+            "fn main() -> Int {\n  var rs = read lines(`{a:int} -> {b:int}`)\n  \
              var t = 0\n  for r in rs { t = t + r.a + r.b }\n  t\n}\n",
             input,
         );
@@ -7161,7 +7161,7 @@ fn a_template_literal_that_begins_with_a_space_matches() {
     // And the other side of "one or more": a run the template asked for has to
     // be there.
     let (rt, _result) = run_main_with_input(
-        "fn main() -> Int {\n  let rs = read lines(`{a:int} -> {b:int}`)\n  rs.len()\n}\n",
+        "fn main() -> Int {\n  var rs = read lines(`{a:int} -> {b:int}`)\n  rs.len()\n}\n",
         "1->2\n",
     );
     assert_eq!(
@@ -7173,14 +7173,14 @@ fn a_template_literal_that_begins_with_a_space_matches() {
     // A literal with no leading space is untouched, and one that is *only* spaces
     // is a whitespace part.
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let rs = read lines(`{a:int},{b:int}`)\n  \
+        "fn main() -> Int {\n  var rs = read lines(`{a:int},{b:int}`)\n  \
          var t = 0\n  for r in rs { t = t + r.a + r.b }\n  t\n}\n",
         "1,2\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let rs = read lines(`{a:int} {b:int}`)\n  \
+        "fn main() -> Int {\n  var rs = read lines(`{a:int} {b:int}`)\n  \
          var t = 0\n  for r in rs { t = t + r.a + r.b }\n  t\n}\n",
         "1 2\n",
     );
@@ -7208,7 +7208,7 @@ fn a_template_literals_trailing_space_run_is_its_policy_too() {
     // (1) The run is CONSUMED by the policy, not by the capture: `a` is the
     // eleven bytes after the space, not twelve starting with it.
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let rs = read lines(`x: {a:rest}`)\n  \
+        "fn main() -> Int {\n  var rs = read lines(`x: {a:rest}`)\n  \
          var t = 0\n  for r in rs { t = t + r.a.len() }\n  t\n}\n",
         "x: hello world\n",
     );
@@ -7223,7 +7223,7 @@ fn a_template_literals_trailing_space_run_is_its_policy_too() {
     // `Card {id:int}: {body:rest}` whose body is compared against what the file
     // actually holds.
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let rs = read lines(`Card {id:int}: {body:rest}`)\n  \
+        "fn main() -> Int {\n  var rs = read lines(`Card {id:int}: {body:rest}`)\n  \
          var t = 0\n  for r in rs { if r.body == \"41 48 83\" { t = t + r.id } }\n  t\n}\n",
         "Card 1: 41 48 83\n",
     );
@@ -7236,7 +7236,7 @@ fn a_template_literals_trailing_space_run_is_its_policy_too() {
 
     // `text` bounded by a following literal, same rule.
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let rs = read lines(`x: {a:text} END`)\n  \
+        "fn main() -> Int {\n  var rs = read lines(`x: {a:text} END`)\n  \
          var t = 0\n  for r in rs { t = t + r.a.len() }\n  t\n}\n",
         "x: hello END\n",
     );
@@ -7246,7 +7246,7 @@ fn a_template_literals_trailing_space_run_is_its_policy_too() {
     // (2) The run is REQUIRED — §7.2's ordinary run "matches one or more spaces
     // or tabs", and that is the same one-or-more the leading half now enforces.
     let (rt, _result) = run_main_with_input(
-        "fn main() -> Int {\n  let rs = read lines(`x: {a:rest}`)\n  rs.len()\n}\n",
+        "fn main() -> Int {\n  var rs = read lines(`x: {a:rest}`)\n  rs.len()\n}\n",
         "x:hello\n",
     );
     assert_eq!(
@@ -7258,7 +7258,7 @@ fn a_template_literals_trailing_space_run_is_its_policy_too() {
     // The mirror of the leading-run assertion in the test above: `-> ` and
     // ` ->` are the same policy on opposite sides, and both refuse `1->2`.
     let (rt, _result) = run_main_with_input(
-        "fn main() -> Int {\n  let rs = read lines(`{a:int}-> {b:int}`)\n  rs.len()\n}\n",
+        "fn main() -> Int {\n  var rs = read lines(`{a:int}-> {b:int}`)\n  rs.len()\n}\n",
         "1->2\n",
     );
     assert_eq!(
@@ -7269,7 +7269,7 @@ fn a_template_literals_trailing_space_run_is_its_policy_too() {
     // …and matches when the run is there, flexibly.
     for input in ["1-> 2\n", "1->    2\n", "1->\t2\n"] {
         let (rt, result) = run_main_with_input(
-            "fn main() -> Int {\n  let rs = read lines(`{a:int}-> {b:int}`)\n  \
+            "fn main() -> Int {\n  var rs = read lines(`{a:int}-> {b:int}`)\n  \
              var t = 0\n  for r in rs { t = t + r.a + r.b }\n  t\n}\n",
             input,
         );
@@ -7287,7 +7287,7 @@ fn a_template_literals_trailing_space_run_is_its_policy_too() {
     // looked for at the space.
     let (rt, result) = run_main_with_input(
         "fn main() -> Int {\n  \
-         let rs = read lines(`op: {g:choice(Plus: `plus {n:int}`, Times: `times {n:int}`)}`)\n  \
+         var rs = read lines(`op: {g:choice(Plus: `plus {n:int}`, Times: `times {n:int}`)}`)\n  \
          rs.len()\n}\n",
         "op: plus 3\nop: times 4\n",
     );
@@ -7297,7 +7297,7 @@ fn a_template_literals_trailing_space_run_is_its_policy_too() {
     // A nested template body behind the same literal, and `char`, which reads
     // the space if it is handed one.
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let rs = read lines(`op: {g:`plus {n:int}`}`)\n  \
+        "fn main() -> Int {\n  var rs = read lines(`op: {g:`plus {n:int}`}`)\n  \
          var t = 0\n  for r in rs { t = t + r.g.n }\n  t\n}\n",
         "op: plus 3\n",
     );
@@ -7305,7 +7305,7 @@ fn a_template_literals_trailing_space_run_is_its_policy_too() {
     assert_eq!(result.as_int(), 3);
 
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let rs = read lines(`x: {a:char}`)\n  rs.len()\n}\n",
+        "fn main() -> Int {\n  var rs = read lines(`x: {a:char}`)\n  rs.len()\n}\n",
         "x: A\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7317,7 +7317,7 @@ fn a_template_literals_trailing_space_run_is_its_policy_too() {
     // forgiven by `walk_exact`. `{a:int} ` has one policy part, not two, and it
     // is satisfied by the line's own trailing space.
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let rs = read lines(`{a:int},{b:int}`)\n  \
+        "fn main() -> Int {\n  var rs = read lines(`{a:int},{b:int}`)\n  \
          var t = 0\n  for r in rs { t = t + r.a + r.b }\n  t\n}\n",
         "1,2 \n",
     );
@@ -7331,7 +7331,7 @@ fn a_template_literals_trailing_space_run_is_its_policy_too() {
     // A literal that is *only* a run stays one part: it must not be counted as
     // a leading run and a trailing run and demand two.
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let rs = read lines(`{a:int} {b:int}`)\n  \
+        "fn main() -> Int {\n  var rs = read lines(`{a:int} {b:int}`)\n  \
          var t = 0\n  for r in rs { t = t + r.a + r.b }\n  t\n}\n",
         "1 2\n",
     );
@@ -7359,13 +7359,13 @@ fn a_for_reaches_every_member_of_every_iterable() {
     // than quietly turning into a snapshot.
     for (src, want, what) in [
         (
-            "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  \
+            "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  \
              var t = 0\n  for x in v { t = t * 10 + x }\n  t\n}\n",
             12,
             "Vec, in push order",
         ),
         (
-            "fn main() -> Int {\n  let d = Deque()\n  d.push_back(1)\n  d.push_front(2)\n  \
+            "fn main() -> Int {\n  var d = Deque()\n  d.push_back(1)\n  d.push_front(2)\n  \
              var t = 0\n  for x in d { t = t * 10 + x }\n  t\n}\n",
             21,
             "Deque, front to back",
@@ -7378,7 +7378,7 @@ fn a_for_reaches_every_member_of_every_iterable() {
         // A `Set` is the one that killed the process. Two members, so a
         // one-member answer is a different number from a two-member one.
         (
-            "fn main() -> Int {\n  let s = Set()\n  s.insert(3)\n  s.insert(1)\n  \
+            "fn main() -> Int {\n  var s = Set()\n  s.insert(3)\n  s.insert(1)\n  \
              var t = 0\n  for x in s { t = t * 10 + x }\n  t\n}\n",
             13,
             "Set, ascending by rendered member",
@@ -7386,7 +7386,7 @@ fn a_for_reaches_every_member_of_every_iterable() {
         // A `BitSet`'s members are bit positions, not objects: each is boxed by
         // the snapshot rather than copied out of the payload.
         (
-            "fn main() -> Int {\n  let b = BitSet()\n  b.insert(5)\n  b.insert(2)\n  \
+            "fn main() -> Int {\n  var b = BitSet()\n  b.insert(5)\n  b.insert(2)\n  \
              var t = 0\n  for i in b { t = t * 10 + i }\n  t\n}\n",
             25,
             "BitSet, ascending",
@@ -7396,13 +7396,13 @@ fn a_for_reaches_every_member_of_every_iterable() {
         // it would answer in insertion-history order even if the read were
         // type-correct.
         (
-            "fn main() -> Int {\n  let h = MinHeap()\n  h.push(3)\n  h.push(1)\n  h.push(2)\n  \
+            "fn main() -> Int {\n  var h = MinHeap()\n  h.push(3)\n  h.push(1)\n  h.push(2)\n  \
              var t = 0\n  for x in h { t = t * 10 + x }\n  t\n}\n",
             123,
             "MinHeap, ascending (pop order)",
         ),
         (
-            "fn main() -> Int {\n  let h = MaxHeap()\n  h.push(1)\n  h.push(3)\n  h.push(2)\n  \
+            "fn main() -> Int {\n  var h = MaxHeap()\n  h.push(1)\n  h.push(3)\n  h.push(2)\n  \
              var t = 0\n  for x in h { t = t * 10 + x }\n  t\n}\n",
             321,
             "MaxHeap, descending (pop order)",
@@ -7411,13 +7411,13 @@ fn a_for_reaches_every_member_of_every_iterable() {
         // said it does; both halves are read here so a pair built in the wrong
         // order fails.
         (
-            "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 7)\n  m.insert(2, 8)\n  \
+            "fn main() -> Int {\n  var m = Map()\n  m.insert(1, 7)\n  m.insert(2, 8)\n  \
              var t = 0\n  for kv in m { t = t * 100 + kv.0 * 10 + kv.1 }\n  t\n}\n",
             1728,
             "Map, key then value",
         ),
         (
-            "fn main() -> Int {\n  let c = Counter()\n  c.inc(1)\n  c.inc(1)\n  c.inc(2)\n  \
+            "fn main() -> Int {\n  var c = Counter()\n  c.inc(1)\n  c.inc(1)\n  c.inc(2)\n  \
              var t = 0\n  for kv in c { t = t * 100 + kv.0 * 10 + kv.1 }\n  t\n}\n",
             1221,
             "Counter, key then count",
@@ -7430,7 +7430,7 @@ fn a_for_reaches_every_member_of_every_iterable() {
 
     // A `Grid` is the tenth, and it needs input: a `Grid()` is 0×0.
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let g = read grid(char)\n  var n = 0\n  \
+        "fn main() -> Int {\n  var g = read grid(char)\n  var n = 0\n  \
          for c in g { n = n + 1 }\n  n\n}\n",
         "ab\ncd\n",
     );
@@ -7440,12 +7440,12 @@ fn a_for_reaches_every_member_of_every_iterable() {
     // An empty one of each iterates zero times rather than once or forever —
     // the shape a length read off the wrong payload gets wrong first.
     for (src, what) in [
-        ("let s = Set()\n  for x in s { n = n + 1 }", "Set"),
-        ("let b = BitSet()\n  for x in b { n = n + 1 }", "BitSet"),
-        ("let h = MinHeap()\n  for x in h { n = n + 1 }", "MinHeap"),
-        ("let h = MaxHeap()\n  for x in h { n = n + 1 }", "MaxHeap"),
-        ("let m = Map()\n  for kv in m { n = n + 1 }", "Map"),
-        ("let c = Counter()\n  for kv in c { n = n + 1 }", "Counter"),
+        ("var s = Set()\n  for x in s { n = n + 1 }", "Set"),
+        ("var b = BitSet()\n  for x in b { n = n + 1 }", "BitSet"),
+        ("var h = MinHeap()\n  for x in h { n = n + 1 }", "MinHeap"),
+        ("var h = MaxHeap()\n  for x in h { n = n + 1 }", "MaxHeap"),
+        ("var m = Map()\n  for kv in m { n = n + 1 }", "Map"),
+        ("var c = Counter()\n  for kv in c { n = n + 1 }", "Counter"),
     ] {
         let src = format!("fn main() -> Int {{\n  var n = 0\n  {src}\n  n\n}}\n");
         let (rt, result) = run_main(&src);
@@ -7472,7 +7472,7 @@ fn a_for_iterates_a_snapshot_of_what_it_was_given() {
     // Inserting into the set being walked adds nothing to *this* walk. Members
     // 1 and 2 are visited; 11 and 12 are inserted and not seen.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let s = Set()\n  s.insert(1)\n  s.insert(2)\n  \
+        "fn main() -> Int {\n  var s = Set()\n  s.insert(1)\n  s.insert(2)\n  \
          var n = 0\n  for x in s { n = n + 1\n s.insert(x + 10) }\n  n * 10 + s.len()\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7480,7 +7480,7 @@ fn a_for_iterates_a_snapshot_of_what_it_was_given() {
 
     // The heap still holds everything it held: iterating is not popping.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let h = MinHeap()\n  h.push(3)\n  h.push(1)\n  \
+        "fn main() -> Int {\n  var h = MinHeap()\n  h.push(3)\n  h.push(1)\n  \
          var n = 0\n  for x in h { n = n + 1 }\n  n * 10 + h.len()\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7491,7 +7491,7 @@ fn a_for_iterates_a_snapshot_of_what_it_was_given() {
     // `Vec` being indexed. 300 members × an allocating body is well past the
     // initial 64 KiB threshold.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let s = Set()\n  var i = 0\n  \
+        "fn main() -> Int {\n  var s = Set()\n  var i = 0\n  \
          while i < 300 { s.insert(i)\n i = i + 1 }\n  \
          var t = 0\n  for x in s { t = t + x * 2 }\n  t\n}\n",
     );
@@ -7501,7 +7501,7 @@ fn a_for_iterates_a_snapshot_of_what_it_was_given() {
     // …and so must the *pair* of snapshots a keyed collection walks, where the
     // keys must survive the values' allocation as well as the body's.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map()\n  var i = 0\n  \
+        "fn main() -> Int {\n  var m = Map()\n  var i = 0\n  \
          while i < 300 { m.insert(i, i)\n i = i + 1 }\n  \
          var t = 0\n  for kv in m { t = t + kv.0 + kv.1 }\n  t\n}\n",
     );
@@ -7520,8 +7520,8 @@ fn a_for_iterates_a_snapshot_of_what_it_was_given() {
 fn an_iterables_order_is_the_one_its_own_accessors_promise() {
     // A `Map`'s `for` visits exactly what `keys()`/`values()` list, in step.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map()\n  m.insert(3, 30)\n  m.insert(1, 10)\n  \
-         m.insert(2, 20)\n  let ks = m.keys()\n  let vs = m.values()\n  \
+        "fn main() -> Int {\n  var m = Map()\n  m.insert(3, 30)\n  m.insert(1, 10)\n  \
+         m.insert(2, 20)\n  var ks = m.keys()\n  var vs = m.values()\n  \
          var i = 0\n  var agree = 1\n  \
          for kv in m { if kv.0 != ks.get(i) { agree = 0 }\n \
          if kv.1 != vs.get(i) { agree = 0 }\n i = i + 1 }\n  agree * 10 + i\n}\n",
@@ -7531,8 +7531,8 @@ fn an_iterables_order_is_the_one_its_own_accessors_promise() {
 
     // A `Counter`'s is the same rule through the same helper.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let c = Counter()\n  c.inc(2)\n  c.inc(1)\n  c.inc(1)\n  \
-         let ks = c.keys()\n  var i = 0\n  var agree = 1\n  \
+        "fn main() -> Int {\n  var c = Counter()\n  c.inc(2)\n  c.inc(1)\n  c.inc(1)\n  \
+         var ks = c.keys()\n  var i = 0\n  var agree = 1\n  \
          for kv in c { if kv.0 != ks.get(i) { agree = 0 }\n i = i + 1 }\n  agree * 10 + i\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7542,7 +7542,7 @@ fn an_iterables_order_is_the_one_its_own_accessors_promise() {
     // rather than merely fixed — so it is asserted as a sequence and not only as
     // a set. Popping the same heap answers the same sequence.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let h = MinHeap()\n  h.push(5)\n  h.push(1)\n  h.push(9)\n  \
+        "fn main() -> Int {\n  var h = MinHeap()\n  h.push(5)\n  h.push(1)\n  h.push(9)\n  \
          var walked = 0\n  for x in h { walked = walked * 10 + x }\n  \
          var popped = 0\n  while h.len() > 0 { popped = popped * 10 + h.pop() }\n  \
          if walked == popped { walked } else { 0 }\n}\n",
@@ -7554,11 +7554,11 @@ fn an_iterables_order_is_the_one_its_own_accessors_promise() {
     // concatenate to the same number. (An in-process proxy for the per-process
     // seed, which is the same one `maps.rs`'s own gates use.)
     let (rt, forward) = run_main(
-        "fn main() -> Int {\n  let s = Set()\n  s.insert(1)\n  s.insert(2)\n  s.insert(3)\n  \
+        "fn main() -> Int {\n  var s = Set()\n  s.insert(1)\n  s.insert(2)\n  s.insert(3)\n  \
          var t = 0\n  for x in s { t = t * 10 + x }\n  t\n}\n",
     );
     let (rt2, backward) = run_main(
-        "fn main() -> Int {\n  let s = Set()\n  s.insert(3)\n  s.insert(2)\n  s.insert(1)\n  \
+        "fn main() -> Int {\n  var s = Set()\n  s.insert(3)\n  s.insert(2)\n  s.insert(1)\n  \
          var t = 0\n  for x in s { t = t * 10 + x }\n  t\n}\n",
     );
     assert!(!rt.has_pending_fault() && !rt2.has_pending_fault());
@@ -7580,10 +7580,10 @@ fn a_for_over_an_unannotated_parameter_reaches_each_iterable_it_is_given() {
     let (rt, result) = run_main(
         "fn total(c) { var t = 0\n for x in c { t = t + x }\n t }\n\
          fn main() -> Int {\n  \
-         let v = Vec()\n  v.push(1)\n  \
-         let s = Set()\n  s.insert(2)\n  \
-         let b = BitSet()\n  b.insert(4)\n  \
-         let h = MinHeap()\n  h.push(8)\n  \
+         var v = Vec()\n  v.push(1)\n  \
+         var s = Set()\n  s.insert(2)\n  \
+         var b = BitSet()\n  b.insert(4)\n  \
+         var h = MinHeap()\n  h.push(8)\n  \
          total(v) + total(s) + total(b) + total(h)\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7593,8 +7593,8 @@ fn a_for_over_an_unannotated_parameter_reaches_each_iterable_it_is_given() {
     let (rt, result) = run_main(
         "fn tally(c) { var t = 0\n for kv in c { t = t + kv.1 }\n t }\n\
          fn main() -> Int {\n  \
-         let m = Map()\n  m.insert(1, 5)\n  \
-         let c = Counter()\n  c.inc(9)\n  \
+         var m = Map()\n  m.insert(1, 5)\n  \
+         var c = Counter()\n  c.inc(9)\n  \
          tally(m) * 10 + tally(c)\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7618,7 +7618,7 @@ fn a_fused_pair_carries_both_of_its_halves() {
     // `enumerate` pairs an index with an element, so reading `.0` and `.1` with
     // different weights fails on a swap as well as on a drop.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  \
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  \
          var t = 0\n  for p in v.enumerate().collect() { t = t + p.0 * 100 + p.1 }\n  t\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7626,8 +7626,8 @@ fn a_fused_pair_carries_both_of_its_halves() {
 
     // `zip` is the other producer of an `Opaque`-typed pair.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let a = Vec()\n  a.push(1)\n  a.push(2)\n  \
-         let b = Vec()\n  b.push(30)\n  b.push(40)\n  \
+        "fn main() -> Int {\n  var a = Vec()\n  a.push(1)\n  a.push(2)\n  \
+         var b = Vec()\n  b.push(30)\n  b.push(40)\n  \
          var t = 0\n  for p in a.zip(b).collect() { t = t + p.0 * 100 + p.1 }\n  t\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7637,10 +7637,10 @@ fn a_fused_pair_carries_both_of_its_halves() {
     // one whose halves differ is not — so the elements reach equality's
     // element-wise walk and are not compared as two empty tuples.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  \
-         let w = Vec()\n  w.push(1)\n  w.push(9)\n  \
-         let same = v.enumerate().collect() == v.enumerate().collect()\n  \
-         let diff = v.enumerate().collect() == w.enumerate().collect()\n  \
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  \
+         var w = Vec()\n  w.push(1)\n  w.push(9)\n  \
+         var same = v.enumerate().collect() == v.enumerate().collect()\n  \
+         var diff = v.enumerate().collect() == w.enumerate().collect()\n  \
          if same { 10 } else { 0 } + if diff { 1 } else { 0 }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7659,7 +7659,7 @@ fn a_record_and_a_tuple_pattern_read_the_components_they_name() {
     // A record, punned. `x * 100 + y` is a different answer from `y * 100 + x`.
     let (rt, result) = run_main(
         "struct P { x: Int, y: Int }\n\
-         fn main() -> Int {\n  let p = P { x: 3, y: 4 }\n  \
+         fn main() -> Int {\n  var p = P { x: 3, y: 4 }\n  \
          match p { P { x, y } => x * 100 + y }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7670,7 +7670,7 @@ fn a_record_and_a_tuple_pattern_read_the_components_they_name() {
     // field index answers 403.
     let (rt, result) = run_main(
         "struct P { x: Int, y: Int }\n\
-         fn main() -> Int {\n  let p = P { x: 3, y: 4 }\n  \
+         fn main() -> Int {\n  var p = P { x: 3, y: 4 }\n  \
          match p { P { y: b, x: a } => a * 100 + b }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7678,7 +7678,7 @@ fn a_record_and_a_tuple_pattern_read_the_components_they_name() {
 
     // A tuple, by position.
     let (rt, result) =
-        run_main("fn main() -> Int {\n  let t = (3, 4)\n  match t { (a, b) => a * 100 + b }\n}\n");
+        run_main("fn main() -> Int {\n  var t = (3, 4)\n  match t { (a, b) => a * 100 + b }\n}\n");
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 304);
 
@@ -7686,7 +7686,7 @@ fn a_record_and_a_tuple_pattern_read_the_components_they_name() {
     // merely bound, so the first arm has to fail on its first element.
     let (rt, result) = run_main(
         "fn main() -> Int {\n  var t = 0\n  \
-         for n in 1..4 {\n    let p = (n, n * 10)\n    \
+         for n in 1..4 {\n    var p = (n, n * 10)\n    \
          t = t + match p { (1, b) => b, (2, _) => 200, (_, b) => b * 2 }\n  }\n  t\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7700,7 +7700,7 @@ fn a_record_and_a_tuple_pattern_read_the_components_they_name() {
     // which is the three component readers chained in one decision tree.
     let (rt, result) = run_main(
         "struct P { x: Int, y: Int }\n\
-         fn main() -> Int {\n  let o = Some((P { x: 3, y: 4 }, 5))\n  \
+         fn main() -> Int {\n  var o = Some((P { x: 3, y: 4 }, 5))\n  \
          match o { Some((P { x, y }, k)) => x * 100 + y * 10 + k, None => 0 }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7710,7 +7710,7 @@ fn a_record_and_a_tuple_pattern_read_the_components_they_name() {
     // still read from their own slots — a padded row must not shift the rest.
     let (rt, result) = run_main(
         "struct P { a: Int, b: Int, c: Int }\n\
-         fn main() -> Int {\n  let p = P { a: 1, b: 2, c: 3 }\n  \
+         fn main() -> Int {\n  var p = P { a: 1, b: 2, c: 3 }\n  \
          match p { P { c } => c }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7720,7 +7720,7 @@ fn a_record_and_a_tuple_pattern_read_the_components_they_name() {
     // arithmetic above could hide a mis-read of.
     let (rt, result) = run_main(
         "struct Tagged { name: Text, n: Int }\n\
-         fn main() -> Int {\n  let t = Tagged { name: \"abc\", n: 7 }\n  \
+         fn main() -> Int {\n  var t = Tagged { name: \"abc\", n: 7 }\n  \
          match t { Tagged { name, n } => name.len() * 10 + n }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7736,7 +7736,7 @@ fn an_updating_store_keeps_the_better_value_and_accepts_the_first() {
     // `min=` on a key that already has a value: the smaller wins, whichever
     // order the candidates arrive in, and a *worse* candidate changes nothing.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let d = Map()\n  d[\"a\"] = 10\n  \
+        "fn main() -> Int {\n  var d = Map()\n  d[\"a\"] = 10\n  \
          d[\"a\"] min= 4\n  d[\"a\"] min= 7\n  d[\"a\"] min= 9\n  d[\"a\"]\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7745,7 +7745,7 @@ fn an_updating_store_keeps_the_better_value_and_accepts_the_first() {
     // `max=` is its dual, and the two are different wrappers: a program that
     // computed one with the other answers 4 here.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let b = Map()\n  b[\"a\"] = 10\n  \
+        "fn main() -> Int {\n  var b = Map()\n  b[\"a\"] = 10\n  \
          b[\"a\"] max= 4\n  b[\"a\"] max= 17\n  b[\"a\"] max= 9\n  b[\"a\"]\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7755,8 +7755,8 @@ fn an_updating_store_keeps_the_better_value_and_accepts_the_first() {
     // a subscript *read* of an absent key does (§4.7), which is exactly why this
     // cannot be a read-modify-write and is a row of its own.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let d = Map()\n  d[\"fresh\"] min= 42\n  \
-         let b = Map()\n  b[\"fresh\"] max= 7\n  d[\"fresh\"] * 100 + b[\"fresh\"]\n}\n",
+        "fn main() -> Int {\n  var d = Map()\n  d[\"fresh\"] min= 42\n  \
+         var b = Map()\n  b[\"fresh\"] max= 7\n  d[\"fresh\"] * 100 + b[\"fresh\"]\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 4207);
@@ -7764,7 +7764,7 @@ fn an_updating_store_keeps_the_better_value_and_accepts_the_first() {
     // …and the first value is accepted *whatever* it is: a later, larger
     // candidate does not replace it under `min=`.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let d = Map()\n  d[\"k\"] min= 3\n  d[\"k\"] min= 100\n  d[\"k\"]\n}\n",
+        "fn main() -> Int {\n  var d = Map()\n  d[\"k\"] min= 3\n  d[\"k\"] min= 100\n  d[\"k\"]\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
@@ -7772,7 +7772,7 @@ fn an_updating_store_keeps_the_better_value_and_accepts_the_first() {
     // Several keys, and a key computed by an expression — the place is a real
     // subscript and not a name in disguise.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let d = Map()\n  var i = 0\n  \
+        "fn main() -> Int {\n  var d = Map()\n  var i = 0\n  \
          while i < 6 {\n    d[i % 3] min= 10 - i\n    i = i + 1\n  }\n  \
          d[0] * 100 + d[1] * 10 + d[2]\n}\n",
     );
@@ -7783,7 +7783,7 @@ fn an_updating_store_keeps_the_better_value_and_accepts_the_first() {
     // the deferred receiver reaches the backend as well as the type checker.
     let (rt, result) = run_main(
         "fn relax(dist, key, candidate) {\n  dist[key] min= candidate\n}\n\
-         fn main() -> Int {\n  let distance = Map()\n  \
+         fn main() -> Int {\n  var distance = Map()\n  \
          relax(distance, 1, 7)\n  relax(distance, 1, 3)\n  relax(distance, 2, 9)\n  \
          distance[1] * 100 + distance[2]\n}\n",
     );
@@ -7793,7 +7793,7 @@ fn an_updating_store_keeps_the_better_value_and_accepts_the_first() {
     // The update does not read: a `min=` on a map with an absent key runs where
     // `d[k] = d[k] + 1` would fault, and the map still holds one entry per key.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let d = Map()\n  d[\"a\"] min= 5\n  d[\"a\"] min= 5\n  d.len()\n}\n",
+        "fn main() -> Int {\n  var d = Map()\n  d[\"a\"] min= 5\n  d[\"a\"] min= 5\n  d.len()\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1);
@@ -7806,7 +7806,7 @@ fn a_destructuring_for_binding_reads_each_item_apart() {
     // `for (k, v) in m` — §6.2's shape for walking a map, weighted so a swapped
     // pair or a dropped half is a different answer.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map()\n  m[1] = 20\n  m[3] = 40\n  \
+        "fn main() -> Int {\n  var m = Map()\n  m[1] = 20\n  m[3] = 40\n  \
          var t = 0\n  for (k, v) in m { t = t + k * 100 + v }\n  t\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7815,7 +7815,7 @@ fn a_destructuring_for_binding_reads_each_item_apart() {
     // …over a `Vec` of pairs, which is the in-place plan rather than the paired
     // snapshot — the two lowerings meet the same binding.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  v.push((1, 20))\n  v.push((3, 40))\n  \
+        "fn main() -> Int {\n  var v = Vec()\n  v.push((1, 20))\n  v.push((3, 40))\n  \
          var t = 0\n  for (a, b) in v { t = t + a * 100 + b }\n  t\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7824,7 +7824,7 @@ fn a_destructuring_for_binding_reads_each_item_apart() {
     // A record pattern in the header, and a field the pattern does not name.
     let (rt, result) = run_main(
         "struct P { x: Int, y: Int, z: Int }\n\
-         fn main() -> Int {\n  let ps = Vec()\n  ps.push(P { x: 1, y: 2, z: 3 })\n  \
+         fn main() -> Int {\n  var ps = Vec()\n  ps.push(P { x: 1, y: 2, z: 3 })\n  \
          ps.push(P { x: 4, y: 5, z: 6 })\n  var t = 0\n  \
          for P { z, x } in ps { t = t + x * 10 + z }\n  t\n}\n",
     );
@@ -7834,7 +7834,7 @@ fn a_destructuring_for_binding_reads_each_item_apart() {
     // Nested, and mutated: the binding is a fresh read each step, so a name bound
     // in one step does not leak into the next.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  v.push((1, (2, 3)))\n  v.push((4, (5, 6)))\n  \
+        "fn main() -> Int {\n  var v = Vec()\n  v.push((1, (2, 3)))\n  v.push((4, (5, 6)))\n  \
          var t = 0\n  for (a, (b, c)) in v { t = t * 10 + a + b + c }\n  t\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7843,7 +7843,7 @@ fn a_destructuring_for_binding_reads_each_item_apart() {
     // A bare name still binds the whole item, and the pair is still readable
     // with `.0`/`.1` — the spelling every existing program uses.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map()\n  m[1] = 20\n  \
+        "fn main() -> Int {\n  var m = Map()\n  m[1] = 20\n  \
          var t = 0\n  for kv in m { t = t + kv.0 * 100 + kv.1 }\n  t\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7852,8 +7852,8 @@ fn a_destructuring_for_binding_reads_each_item_apart() {
     // The destructured names survive an allocation inside the body: they are
     // real slots, not borrowed views into the item.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map()\n  m[1] = 2\n  m[3] = 4\n  \
-         var t = 0\n  for (k, v) in m {\n    let scratch = Vec()\n    var i = 0\n    \
+        "fn main() -> Int {\n  var m = Map()\n  m[1] = 2\n  m[3] = 4\n  \
+         var t = 0\n  for (k, v) in m {\n    var scratch = Vec()\n    var i = 0\n    \
          while i < 50 { scratch.push(i)\n i = i + 1 }\n    t = t + k * 10 + v\n  }\n  t\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7876,14 +7876,14 @@ fn a_destructuring_for_binding_reads_each_item_apart() {
 #[test]
 fn an_absent_map_get_matches_none_and_a_present_one_matches_some() {
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  \
+        "fn main() -> Int {\n  var m = Map()\n  m.insert(1, 10)\n  \
          match m.get(1) {\n    Some(v) => v,\n    None => 0 - 1,\n  }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 10);
 
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  \
+        "fn main() -> Int {\n  var m = Map()\n  m.insert(1, 10)\n  \
          match m.get(2) {\n    Some(v) => v,\n    None => 0 - 1,\n  }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7892,7 +7892,7 @@ fn an_absent_map_get_matches_none_and_a_present_one_matches_some() {
     // The value inside the `Some` is the real one, whatever its type: a `Text`
     // value comes back as a `Text`, not as an `i64` read of its buffer pointer.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, \"abc\")\n  \
+        "fn main() -> Int {\n  var m = Map()\n  m.insert(1, \"abc\")\n  \
          match m.get(1) {\n    Some(v) => v.len(),\n    None => 0 - 1,\n  }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7900,7 +7900,7 @@ fn an_absent_map_get_matches_none_and_a_present_one_matches_some() {
 
     // …and `map[key]` is still the other half of §4.7's sentence: the
     // assertion-like spelling, which faults rather than answering `None`.
-    let (rt, _) = run_main("fn main() -> Int {\n  let m = Map()\n  m[7]\n}\n");
+    let (rt, _) = run_main("fn main() -> Int {\n  var m = Map()\n  m[7]\n}\n");
     assert!(
         rt.has_pending_fault(),
         "§4.7: indexing a missing key faults"
@@ -7911,13 +7911,13 @@ fn an_absent_map_get_matches_none_and_a_present_one_matches_some() {
 /// `Option[(Int, Int)]`, and the point survives being carried inside the enum.
 #[test]
 fn an_absent_grid_find_is_none_and_a_hit_is_some_of_the_point() {
-    let src = "fn main() -> Int {\n  let g = read matrix(int)\n  \
+    let src = "fn main() -> Int {\n  var g = read matrix(int)\n  \
                match g.find(4) {\n    Some((x, y)) => x * 10 + y,\n    None => 0 - 1,\n  }\n}\n";
     let (rt, result) = run_main_with_input(src, "1 2\n3 4\n");
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 11, "4 is at (1, 1)");
 
-    let src = "fn main() -> Int {\n  let g = read matrix(int)\n  \
+    let src = "fn main() -> Int {\n  var g = read matrix(int)\n  \
                match g.find(99) {\n    Some((x, y)) => x * 10 + y,\n    None => 0 - 1,\n  }\n}\n";
     let (rt, result) = run_main_with_input(src, "1 2\n3 4\n");
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7938,7 +7938,7 @@ fn an_absent_grid_find_is_none_and_a_hit_is_some_of_the_point() {
 fn an_option_from_the_runtime_and_one_from_the_program_are_one_type() {
     // Same type, same payload: equal.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  \
+        "fn main() -> Int {\n  var m = Map()\n  m.insert(1, 10)\n  \
          if m.get(1) == Some(10) { 1 } else { 0 }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7950,7 +7950,7 @@ fn an_option_from_the_runtime_and_one_from_the_program_are_one_type() {
 
     // Same type, different payload: not equal.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  \
+        "fn main() -> Int {\n  var m = Map()\n  m.insert(1, 10)\n  \
          if m.get(1) == Some(11) { 1 } else { 0 }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7958,7 +7958,7 @@ fn an_option_from_the_runtime_and_one_from_the_program_are_one_type() {
 
     // Absence is `None`, and `None` is not `Some` of anything.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 10)\n  \
+        "fn main() -> Int {\n  var m = Map()\n  m.insert(1, 10)\n  \
          if m.get(2) == None { 1 } else { 0 }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -7967,7 +7967,7 @@ fn an_option_from_the_runtime_and_one_from_the_program_are_one_type() {
     // A `Text` payload stays a `Text`: the schema slot the runtime filled is
     // unknown, so the value's own descriptor decides, and it is never wrong.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map()\n  m.insert(1, \"x\")\n  \
+        "fn main() -> Int {\n  var m = Map()\n  m.insert(1, \"x\")\n  \
          if m.get(1) == Some(\"x\") { 1 } else { 0 }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -8030,7 +8030,7 @@ fn a_field_read_on_an_unannotated_parameter_reads_that_records_field() {
     let (rt, result) = run_main(
         "struct P { x: Int, y: Int }\n\
          fn sumx(p) -> Int { p.x }\n\
-         fn main() -> Int {\n  let ps = Vec()\n  ps.push(P { x: 5, y: 0 })\n  \
+         fn main() -> Int {\n  var ps = Vec()\n  ps.push(P { x: 5, y: 0 })\n  \
          ps.push(P { x: 6, y: 0 })\n  var t = 0\n  \
          for p in ps { t = t + sumx(p) }\n  t\n}\n",
     );
@@ -8041,7 +8041,7 @@ fn a_field_read_on_an_unannotated_parameter_reads_that_records_field() {
     // receiver is a rooted value and not a stale view.
     let (rt, result) = run_main(
         "struct P { x: Int, y: Int }\n\
-         fn far(p) -> Int {\n  let scratch = Vec()\n  var i = 0\n  \
+         fn far(p) -> Int {\n  var scratch = Vec()\n  var i = 0\n  \
          while i < 200 { scratch.push(P { x: i, y: i })\n i = i + 1 }\n  p.x + p.y\n}\n\
          fn main() -> Int { far(P { x: 11, y: 22 }) }\n",
     );
@@ -8059,7 +8059,7 @@ fn a_field_read_on_an_unannotated_parameter_reads_that_records_field() {
 fn a_destructuring_closure_parameter_reads_each_argument_apart() {
     // Appendix D's shape: a pair destructured in a `map`.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  v.push((1, 20))\n  v.push((3, 40))\n  \
+        "fn main() -> Int {\n  var v = Vec()\n  v.push((1, 20))\n  v.push((3, 40))\n  \
          v.map(|(a, b)| a * 100 + b).sum()\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -8069,7 +8069,7 @@ fn a_destructuring_closure_parameter_reads_each_argument_apart() {
     // must not shift the ones it does.
     let (rt, result) = run_main(
         "struct P { x: Int, y: Int, z: Int }\n\
-         fn main() -> Int {\n  let f = |P { z, x }| x * 10 + z\n  \
+         fn main() -> Int {\n  var f = |P { z, x }| x * 10 + z\n  \
          f(P { x: 1, y: 2, z: 3 })\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -8078,12 +8078,12 @@ fn a_destructuring_closure_parameter_reads_each_argument_apart() {
     // Several parameters, only some of them patterns, in both orders — each
     // `match` wraps its own argument and none of them shifts another.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let f = |(a, b), c| a * 100 + b * 10 + c\n  f((1, 2), 3)\n}\n",
+        "fn main() -> Int {\n  var f = |(a, b), c| a * 100 + b * 10 + c\n  f((1, 2), 3)\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 123);
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let f = |a, (b, c)| a * 100 + b * 10 + c\n  f(1, (2, 3))\n}\n",
+        "fn main() -> Int {\n  var f = |a, (b, c)| a * 100 + b * 10 + c\n  f(1, (2, 3))\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 123);
@@ -8091,7 +8091,7 @@ fn a_destructuring_closure_parameter_reads_each_argument_apart() {
     // Nested, and through a record — the reads chain.
     let (rt, result) = run_main(
         "struct P { at: (Int, Int), w: Int }\n\
-         fn main() -> Int {\n  let f = |P { at: (x, y), w }| x * 100 + y * 10 + w\n  \
+         fn main() -> Int {\n  var f = |P { at: (x, y), w }| x * 100 + y * 10 + w\n  \
          f(P { at: (1, 2), w: 3 })\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -8099,15 +8099,15 @@ fn a_destructuring_closure_parameter_reads_each_argument_apart() {
 
     // A wildcard component reads nothing, and the named one is still the one it
     // names.
-    let (rt, result) = run_main("fn main() -> Int {\n  let f = |(_, b)| b\n  f((9, 4))\n}\n");
+    let (rt, result) = run_main("fn main() -> Int {\n  var f = |(_, b)| b\n  f((9, 4))\n}\n");
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 4);
 
     // The destructured names are real slots: they survive 200 allocations inside
     // the body, and they capture into a nested closure.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let f = |(a, b)| {\n    let scratch = Vec()\n    var i = 0\n    \
-         while i < 200 { scratch.push((i, i))\n i = i + 1 }\n    let g = |n| n + a * 10 + b\n    \
+        "fn main() -> Int {\n  var f = |(a, b)| {\n    var scratch = Vec()\n    var i = 0\n    \
+         while i < 200 { scratch.push((i, i))\n i = i + 1 }\n    var g = |n| n + a * 10 + b\n    \
          g(0)\n  }\n  f((1, 2))\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -8115,7 +8115,7 @@ fn a_destructuring_closure_parameter_reads_each_argument_apart() {
 
     // A bare-name parameter is untouched — same slot, same reads, same answer.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  v.push((1, 20))\n  \
+        "fn main() -> Int {\n  var v = Vec()\n  v.push((1, 20))\n  \
          v.map(|kv| kv.0 * 100 + kv.1).sum()\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -8132,14 +8132,14 @@ fn a_destructuring_closure_parameter_reads_each_argument_apart() {
 #[test]
 fn a_zero_parameter_closure_runs_and_the_or_it_is_spelled_like_still_short_circuits() {
     // The closure itself: called, and called twice.
-    let (rt, result) = run_main("fn main() -> Int {\n  let f = || 5\n  f() + f()\n}\n");
+    let (rt, result) = run_main("fn main() -> Int {\n  var f = || 5\n  f() + f()\n}\n");
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 10);
 
     // §4.2's shadowing example: the closure keeps the binding it captured, and a
     // zero-parameter closure is the shape §4.2 writes it in.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let a = 4\n  let show_old = || a\n  let a = 9\n  \
+        "fn main() -> Int {\n  var a = 4\n  var show_old = || a\n  var a = 9\n  \
          show_old() * 10 + a\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -8149,8 +8149,8 @@ fn a_zero_parameter_closure_runs_and_the_or_it_is_spelled_like_still_short_circu
     // would leave: `true || …` must not run the right operand, and `false || …`
     // must. A `var` captured by cell is what makes the count visible.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  var n = 0\n  let bump = || { n = n + 1\n true }\n  \
-         let a = true || bump()\n  let b = false || bump()\n  \
+        "fn main() -> Int {\n  var n = 0\n  var bump = || { n = n + 1\n true }\n  \
+         var a = true || bump()\n  var b = false || bump()\n  \
          if a { 0 } else { 0 }\n  if b { n } else { 100 }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -8162,21 +8162,21 @@ fn a_zero_parameter_closure_runs_and_the_or_it_is_spelled_like_still_short_circu
 
     // …and `&&` is unaffected, from the other side of the precedence table.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  var n = 0\n  let bump = || { n = n + 1\n true }\n  \
-         let a = false && bump()\n  if a { 100 } else { n }\n}\n",
+        "fn main() -> Int {\n  var n = 0\n  var bump = || { n = n + 1\n true }\n  \
+         var a = false && bump()\n  if a { 100 } else { n }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
 
     // A zero-parameter closure nests inside another one — the body of a `||` is
     // an ordinary expression, so `|| || 7` is a closure returning a closure.
-    let (rt, result) = run_main("fn main() -> Int {\n  let f = || || 7\n  f()()\n}\n");
+    let (rt, result) = run_main("fn main() -> Int {\n  var f = || || 7\n  f()()\n}\n");
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
 
     // …and it survives allocation pressure between its creation and its call.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let n = 6\n  let f = || n * 7\n  let scratch = Vec()\n  \
+        "fn main() -> Int {\n  var n = 6\n  var f = || n * 7\n  var scratch = Vec()\n  \
          var i = 0\n  while i < 200 { scratch.push(i)\n i = i + 1 }\n  f()\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -8203,7 +8203,7 @@ fn a_zero_parameter_closure_runs_and_the_or_it_is_spelled_like_still_short_circu
 #[test]
 fn a_wildcard_parameter_keeps_its_slot_so_later_parameters_do_not_shift() {
     // The reviewer's closure repro: `10` before the fix, `6` after.
-    let (rt, result) = run_main("fn main() -> Int {\n  let f = |_, b| b + 1\n  f(9, 5)\n}\n");
+    let (rt, result) = run_main("fn main() -> Int {\n  var f = |_, b| b + 1\n  f(9, 5)\n}\n");
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 6, "`b` must be the *second* argument");
 
@@ -8214,7 +8214,7 @@ fn a_wildcard_parameter_keeps_its_slot_so_later_parameters_do_not_shift() {
 
     // A wildcard in the middle: the parameters on *both* sides of it stay put.
     let (rt, result) =
-        run_main("fn main() -> Int {\n  let f = |a, _, c| a * 100 + c\n  f(1, 2, 3)\n}\n");
+        run_main("fn main() -> Int {\n  var f = |a, _, c| a * 100 + c\n  f(1, 2, 3)\n}\n");
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 103);
     let (rt, result) =
@@ -8224,7 +8224,7 @@ fn a_wildcard_parameter_keeps_its_slot_so_later_parameters_do_not_shift() {
 
     // Two wildcards are two slots, not one: each `_` is minted at its own range,
     // so they do not collide and the shift is two wide rather than one.
-    let (rt, result) = run_main("fn main() -> Int {\n  let f = |_, _, c| c * 7\n  f(1, 2, 3)\n}\n");
+    let (rt, result) = run_main("fn main() -> Int {\n  var f = |_, _, c| c * 7\n  f(1, 2, 3)\n}\n");
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 21);
     let (rt, result) =
@@ -8234,14 +8234,14 @@ fn a_wildcard_parameter_keeps_its_slot_so_later_parameters_do_not_shift() {
 
     // A trailing wildcard has nothing after it to shift, and must still be
     // accepted rather than becoming an arity mismatch.
-    let (rt, result) = run_main("fn main() -> Int {\n  let f = |a, _| a * 2\n  f(21, 99)\n}\n");
+    let (rt, result) = run_main("fn main() -> Int {\n  var f = |a, _| a * 2\n  f(21, 99)\n}\n");
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
 
     // ADR-049 D7's own spelling, `|_| 0`, through the pipeline the doc writes it
     // for — the shape REP-29's gates covered only at the parse-tree level.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  \
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  \
          v.map(|_| 7).sum()\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -8250,22 +8250,22 @@ fn a_wildcard_parameter_keeps_its_slot_so_later_parameters_do_not_shift() {
     // A wildcard *component* is a different thing and keeps working: the pattern
     // owns the argument, and the `_` inside it has no slot of its own.
     let (rt, result) =
-        run_main("fn main() -> Int {\n  let f = |(_, b), c| b * 10 + c\n  f((9, 4), 3)\n}\n");
+        run_main("fn main() -> Int {\n  var f = |(_, b), c| b * 10 + c\n  f((9, 4), 3)\n}\n");
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 43);
 
     // A wildcard next to a destructuring parameter: two different anonymous
     // slots, both at their own ranges, neither shifting the other.
     let (rt, result) =
-        run_main("fn main() -> Int {\n  let f = |_, (a, b)| a * 10 + b\n  f(9, (1, 2))\n}\n");
+        run_main("fn main() -> Int {\n  var f = |_, (a, b)| a * 10 + b\n  f(9, (1, 2))\n}\n");
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 12);
 
     // The wildcard's argument is still *evaluated* — D7's rule that a binder a
     // program does not name still runs what it is given.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  let bump = |n| { v.push(n)\n n }\n  \
-         let f = |_, b| b\n  let r = f(bump(1), 5)\n  r * 10 + v.len()\n}\n",
+        "fn main() -> Int {\n  var v = Vec()\n  var bump = |n| { v.push(n)\n n }\n  \
+         var f = |_, b| b\n  var r = f(bump(1), 5)\n  r * 10 + v.len()\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 51);
@@ -8284,7 +8284,7 @@ fn a_wildcard_parameter_keeps_its_slot_so_later_parameters_do_not_shift() {
 fn every_atomic_the_design_requires_runs_in_a_compiled_program() {
     // `uint` is an Int, and arithmetic on it works.
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let n = read uint\n  n + 1\n}\n",
+        "fn main() -> Int {\n  var n = read uint\n  n + 1\n}\n",
         "41",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -8293,14 +8293,14 @@ fn every_atomic_the_design_requires_runs_in_a_compiled_program() {
     // A leading `-` is not a `uint`: §7.4's non-negativity is the parse rule,
     // because `ScalarType::UInt` has no runtime object to be typed with.
     let (rt, _) = run_main_with_input(
-        "fn main() -> Int {\n  let n = read uint\n  n + 1\n}\n",
+        "fn main() -> Int {\n  var n = read uint\n  n + 1\n}\n",
         "-1",
     );
     assert!(rt.has_pending_fault(), "`uint` must refuse a negative");
 
     // `float` is a Float, and it reads a fraction.
     let (rt, result) = run_main_with_input(
-        "fn main() -> Float {\n  let x = read float\n  x + 0.5\n}\n",
+        "fn main() -> Float {\n  var x = read float\n  x + 0.5\n}\n",
         "3.25",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -8308,18 +8308,18 @@ fn every_atomic_the_design_requires_runs_in_a_compiled_program() {
 
     // `byte` is a Byte in 0..=255.
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let bs = read csv(byte)\n  bs.len()\n}\n",
+        "fn main() -> Int {\n  var bs = read csv(byte)\n  bs.len()\n}\n",
         "0,127,255",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
-    let (rt, _) = run_main_with_input("fn main() -> Int {\n  let b = read byte\n  1\n}\n", "256");
+    let (rt, _) = run_main_with_input("fn main() -> Int {\n  var b = read byte\n  1\n}\n", "256");
     assert!(rt.has_pending_fault(), "256 is not a byte");
 
     // `identifier` is a Text under §4.1's one character class, so a Unicode
     // name is a name — a deliberate widening of §7.4's "ASCII-like by default".
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let names = read lines(identifier)\n  names.len()\n}\n",
+        "fn main() -> Int {\n  var names = read lines(identifier)\n  names.len()\n}\n",
         "alpha\nλx\n_beta9\n",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -8328,7 +8328,7 @@ fn every_atomic_the_design_requires_runs_in_a_compiled_program() {
     // And in a template capture, which is the shape they will actually be
     // written in.
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let rows = read lines(`{name:identifier}={n:uint}`)\n  \
+        "fn main() -> Int {\n  var rows = read lines(`{name:identifier}={n:uint}`)\n  \
          var t = 0\n  for r in rows { t = t + r.n }\n  t\n}\n",
         "a=1\nb=2\nc=39\n",
     );
@@ -8351,7 +8351,7 @@ fn every_atomic_the_design_requires_runs_in_a_compiled_program() {
 fn text_concatenation_joins_two_texts() {
     // The basic case, checked as bytes.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let c = \"ab\" + \"cde\"\n  \
+        "fn main() -> Int {\n  var c = \"ab\" + \"cde\"\n  \
          if c == \"abcde\" { c.len() } else { 0 - 1 }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -8366,7 +8366,7 @@ fn text_concatenation_joins_two_texts() {
     // Left-associative chaining, and four live temporaries across an allocating
     // call.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let a = \"1\"\n  let b = \"2\"\n  let c = \"3\"\n  let d = \"4\"\n  \
+        "fn main() -> Int {\n  var a = \"1\"\n  var b = \"2\"\n  var c = \"3\"\n  var d = \"4\"\n  \
          if (a + b) + (c + d) == \"1234\" { 1 } else { 0 }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -8385,7 +8385,7 @@ fn text_concatenation_joins_two_texts() {
     // for the neighbouring reason: its bytes are the caller's promise, and the
     // literals below are where that promise is kept.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let c = \"héllo\" + \" wörld\"\n  \
+        "fn main() -> Int {\n  var c = \"héllo\" + \" wörld\"\n  \
          if c == \"héllo wörld\" { c.len() } else { 0 - 1 }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -8394,7 +8394,7 @@ fn text_concatenation_joins_two_texts() {
     // `+=` on a `Text` binding is the same operator (ADR-085), including through
     // the `VarCell` a captured `var` lives in (§4.2).
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  var s = \"a\"\n  let read_it = || s\n  s += \"b\"\n  s += \"c\"\n  \
+        "fn main() -> Int {\n  var s = \"a\"\n  var read_it = || s\n  s += \"b\"\n  s += \"c\"\n  \
          if s == \"abc\" && read_it() == \"abc\" { s.len() } else { 0 - 1 }\n}\n",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -8408,7 +8408,7 @@ fn text_concatenation_joins_two_texts() {
     // structurally like any other (§5.5) — a `Map` keyed by one must find the
     // entry a literal key inserted.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map()\n  m.insert(\"ab\", 7)\n  m[\"a\" + \"b\"]\n}\n",
+        "fn main() -> Int {\n  var m = Map()\n  m.insert(\"ab\", 7)\n  m[\"a\" + \"b\"]\n}\n",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(
@@ -8441,7 +8441,7 @@ fn text_concatenation_joins_two_texts() {
 fn a_multibyte_text_literal_still_round_trips_through_the_jit() {
     let (rt, result) = run_main(
         "fn main() -> Int {\n  var hits = 0\n  var i = 0\n  while i < 5 {\n    \
-         let s = \"héllo wörld\"\n    if s == \"héllo wörld\" && s.len() == 11 { hits = hits + 1 }\n    \
+         var s = \"héllo wörld\"\n    if s == \"héllo wörld\" && s.len() == 11 { hits = hits + 1 }\n    \
          i = i + 1\n  }\n  hits\n}\n",
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -8454,7 +8454,7 @@ fn a_multibyte_text_literal_still_round_trips_through_the_jit() {
     // And a `Map` keyed by one still finds the entry: hashing is structural, so
     // one shared object and five separate ones key the same slot.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let m = Map()\n  m.insert(\"ключ\", 9)\n  \
+        "fn main() -> Int {\n  var m = Map()\n  m.insert(\"ключ\", 9)\n  \
          var total = 0\n  var i = 0\n  while i < 3 {\n    total = total + m[\"ключ\"]\n    \
          i = i + 1\n  }\n  total\n}\n",
     );
@@ -8477,14 +8477,14 @@ fn a_multibyte_text_literal_still_round_trips_through_the_jit() {
 #[test]
 fn a_sorted_vec_is_ordered_by_the_descriptor_and_the_source_is_untouched() {
     // Integers: the easy half, and the one a wrong implementation also passes.
-    let src = "fn main() -> Int {\n  let v = Vec[Int]()\n  v.push(5)\n  v.push(1)\n  \
-               v.push(3)\n  let s = v.sorted()\n  s.get(0) * 100 + s.get(1) * 10 + s.get(2)\n}";
+    let src = "fn main() -> Int {\n  var v = Vec[Int]()\n  v.push(5)\n  v.push(1)\n  \
+               v.push(3)\n  var s = v.sorted()\n  s.get(0) * 100 + s.get(1) * 10 + s.get(2)\n}";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 135, "1, 3, 5 in that order");
 
     // Text: ordered by `compare`, not by the payload's first eight bytes.
-    let src = "fn main() -> Text {\n  let v = Vec[Text]()\n  v.push(\"b\")\n  \
+    let src = "fn main() -> Text {\n  var v = Vec[Text]()\n  v.push(\"b\")\n  \
                v.push(\"a\")\n  v.push(\"c\")\n  v.sorted().get(0)\n}";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -8496,15 +8496,15 @@ fn a_sorted_vec_is_ordered_by_the_descriptor_and_the_source_is_untouched() {
 
     // An empty Vec sorts to an empty Vec rather than faulting on a `compare` it
     // would never have called.
-    let src = "fn main() -> Int {\n  let v = Vec[Int]()\n  v.sorted().len()\n}";
+    let src = "fn main() -> Int {\n  var v = Vec[Int]()\n  v.sorted().len()\n}";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
 
     // The receiver keeps its own order: `sorted` answers a new Vec. `51` is
     // `v.get(0)` still 5 and `s.get(0)` already 1.
-    let src = "fn main() -> Int {\n  let v = Vec[Int]()\n  v.push(5)\n  v.push(1)\n  \
-               let s = v.sorted()\n  v.get(0) * 10 + s.get(0)\n}";
+    let src = "fn main() -> Int {\n  var v = Vec[Int]()\n  v.push(5)\n  v.push(1)\n  \
+               var s = v.sorted()\n  v.get(0) * 10 + s.get(0)\n}";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 51, "the source Vec is not mutated");
@@ -8521,8 +8521,8 @@ fn a_sorted_vec_is_ordered_by_the_descriptor_and_the_source_is_untouched() {
 /// on type `Vec[Int]` taking 0 argument(s)`.
 #[test]
 fn frequencies_counts_every_element_and_an_absent_key_reads_zero() {
-    let src = "fn main() -> Int {\n  let v = Vec[Int]()\n  v.push(3)\n  v.push(3)\n  \
-               v.push(4)\n  v.push(3)\n  v.push(9)\n  let c = v.frequencies()\n  \
+    let src = "fn main() -> Int {\n  var v = Vec[Int]()\n  v.push(3)\n  v.push(3)\n  \
+               v.push(4)\n  v.push(3)\n  v.push(9)\n  var c = v.frequencies()\n  \
                c[3] * 100 + c[4] * 10 + c[7]\n}";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -8534,8 +8534,8 @@ fn frequencies_counts_every_element_and_an_absent_key_reads_zero() {
 
     // `unique` in first-occurrence order, not sorted: `231` is two elements,
     // `3` first and `1` second — the order they were pushed, not `1, 3`.
-    let src = "fn main() -> Int {\n  let v = Vec[Int]()\n  v.push(3)\n  v.push(1)\n  \
-               v.push(3)\n  v.push(1)\n  let u = v.unique()\n  \
+    let src = "fn main() -> Int {\n  var v = Vec[Int]()\n  v.push(3)\n  v.push(1)\n  \
+               v.push(3)\n  v.push(1)\n  var u = v.unique()\n  \
                u.len() * 100 + u.get(0) * 10 + u.get(1)\n}";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -8561,42 +8561,42 @@ fn frequencies_counts_every_element_and_an_absent_key_reads_zero() {
 fn a_list_literal_builds_a_vec_of_its_elements_in_order() {
     for (src, want, what) in [
         (
-            "fn main() -> Int {\n  let v = [1, 2, 3]\n  v.len()\n}\n",
+            "fn main() -> Int {\n  var v = [1, 2, 3]\n  v.len()\n}\n",
             3,
             "three elements",
         ),
         // Positional: `123` and not `321`, so a reversed push order fails.
         (
-            "fn main() -> Int {\n  let v = [1, 2, 3]\n  v.get(0) * 100 + v.get(1) * 10 + v.get(2)\n}\n",
+            "fn main() -> Int {\n  var v = [1, 2, 3]\n  v.get(0) * 100 + v.get(1) * 10 + v.get(2)\n}\n",
             123,
             "elements in source order",
         ),
         (
-            "fn main() -> Int {\n  let v = []\n  v.len()\n}\n",
+            "fn main() -> Int {\n  var v = []\n  v.len()\n}\n",
             0,
             "the empty list",
         ),
         (
-            "fn main() -> Int {\n  let v = [7]\n  v[0]\n}\n",
+            "fn main() -> Int {\n  var v = [7]\n  v[0]\n}\n",
             7,
             "one element, read by subscript",
         ),
         // An element is an arbitrary expression, evaluated where it is written.
         (
-            "fn main() -> Int {\n  let n = 4\n  let v = [n + 1, n * 2]\n  v.get(0) * 10 + v.get(1)\n}\n",
+            "fn main() -> Int {\n  var n = 4\n  var v = [n + 1, n * 2]\n  v.get(0) * 10 + v.get(1)\n}\n",
             58,
             "computed elements",
         ),
         // Nested: the inner literals are elements of the outer one.
         (
-            "fn main() -> Int {\n  let v = [[1, 2], [3]]\n  v.len() * 100 + v.get(0).len() * 10 + v.get(1).len()\n}\n",
+            "fn main() -> Int {\n  var v = [[1, 2], [3]]\n  v.len() * 100 + v.get(0).len() * 10 + v.get(1).len()\n}\n",
             221,
             "a list of lists",
         ),
         // The `Vec` a literal builds takes every `Vec` method, including the
         // ones that read the element descriptor.
         (
-            "fn main() -> Int {\n  let v = [3, 1, 2]\n  let s = v.sorted()\n  \
+            "fn main() -> Int {\n  var v = [3, 1, 2]\n  var s = v.sorted()\n  \
              s.get(0) * 100 + s.get(1) * 10 + s.get(2)\n}\n",
             123,
             "sorted, which dispatches on the element descriptor",
@@ -8608,7 +8608,7 @@ fn a_list_literal_builds_a_vec_of_its_elements_in_order() {
         ),
         // …and it is a real, mutable `Vec`: pushing into one works.
         (
-            "fn main() -> Int {\n  let v = [1]\n  v.push(2)\n  v.len() * 10 + v.get(1)\n}\n",
+            "fn main() -> Int {\n  var v = [1]\n  v.push(2)\n  v.len() * 10 + v.get(1)\n}\n",
             22,
             "a literal is mutable afterwards",
         ),
@@ -8643,7 +8643,7 @@ fn a_for_over_a_list_literal_reaches_every_element() {
     // threshold, so an unrooted iteration source would be reclaimed under it.
     let (rt, result) = run_main(
         "fn main() -> Int {\n  var t = 0\n  var i = 0\n  \
-         while i < 300 { for x in [1, 2, 3] { let junk = Vec()\n junk.push(x)\n t = t + x }\n i = i + 1 }\n  t\n}\n",
+         while i < 300 { for x in [1, 2, 3] { var junk = Vec()\n junk.push(x)\n t = t + x }\n i = i + 1 }\n  t\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(
@@ -8655,7 +8655,7 @@ fn a_for_over_a_list_literal_reaches_every_element() {
     // A literal of a *heap* type: each element allocates, and the `Vec` being
     // built has to be rooted across those allocations.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let v = [\"aa\", \"b\", \"ccc\"]\n  var t = 0\n  \
+        "fn main() -> Int {\n  var v = [\"aa\", \"b\", \"ccc\"]\n  var t = 0\n  \
          for s in v { t = t * 10 + s.len() }\n  t\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -8682,7 +8682,7 @@ fn a_for_over_a_text_yields_its_characters() {
     // The loop and the subscript are one answer: walking `t` and indexing it
     // must produce the same characters in the same order.
     let (rt, result) = run_main(
-        "fn main() -> Int {\n  let t = \"abc\"\n  var i = 0\n  var same = 1\n  \
+        "fn main() -> Int {\n  var t = \"abc\"\n  var i = 0\n  var same = 1\n  \
          for c in t { if c == t[i] { same = same } else { same = 0 }\n i = i + 1 }\n  \
          same * 10 + i\n}\n",
     );
@@ -8711,7 +8711,7 @@ fn a_for_over_a_text_yields_its_characters() {
     // this clone's symbols are `praxis_text_*`.
     let (rt, result) = run_main(
         "fn count(r) { var n = 0\n for x in r { n = n + 1 }\n n }\n\
-         fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  \
+         fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  \
          count(\"abc\") * 10 + count(v)\n}\n",
     );
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
@@ -8736,8 +8736,8 @@ fn a_parsed_text_reads_the_same_as_the_literal_it_came_from() {
     // ASCII input: every capture is a view of a one-byte-per-scalar owner, so
     // every `len()` and `[i]` takes the byte-index path.
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let ws = read lines(word)\n  var n = 0\n  \
-         var i = 0\n  while i < ws.len() {\n    let w = ws[i]\n    \
+        "fn main() -> Int {\n  var ws = read lines(word)\n  var n = 0\n  \
+         var i = 0\n  while i < ws.len() {\n    var w = ws[i]\n    \
          for c in w { n = n + c.to_int() }\n    n = n + w.len()\n    i = i + 1\n  }\n  n\n}\n",
         "ab\ncde\n",
     );
@@ -8751,7 +8751,7 @@ fn a_parsed_text_reads_the_same_as_the_literal_it_came_from() {
     // decoding and both must still answer in scalars. A view that inherited the
     // byte-index path from its own bytes would answer 6 for "wörld".
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let ws = read lines(word)\n  var n = 0\n  \
+        "fn main() -> Int {\n  var ws = read lines(word)\n  var n = 0\n  \
          var i = 0\n  while i < ws.len() {\n    n = n * 10 + ws[i].len()\n    i = i + 1\n  }\n  n\n}\n",
         "wörld\nabc\n",
     );
@@ -8766,7 +8766,7 @@ fn a_parsed_text_reads_the_same_as_the_literal_it_came_from() {
     // multi-byte scalar *before* the view starts — the case where a byte index
     // is not merely wide but misaligned.
     let (rt, result) = run_main_with_input(
-        "fn main() -> Int {\n  let ws = read lines(word)\n  var n = 0\n  \
+        "fn main() -> Int {\n  var ws = read lines(word)\n  var n = 0\n  \
          for c in ws[1] { n = n + c.to_int() }\n  n\n}\n",
         "ö\nxyz\n",
     );
@@ -9076,7 +9076,7 @@ fn a_bool_or_unit_literal_is_the_runtime_singleton_and_allocates_nothing() {
     // A hundred `true`s and a hundred `false`s: one object each, no allocation.
     let (rt, result) = run_main(
         "fn main() -> Int {\n  var i = 0\n  var n = 0\n  \
-         while i < 100 { let t = true\n let f = false\n \
+         while i < 100 { var t = true\n var f = false\n \
          if t { n = n + 1 } else { n = n }\n \
          if f { n = n } else { n = n + 1 }\n i = i + 1 }\n  n\n}\n",
     );
@@ -9098,7 +9098,7 @@ fn a_bool_or_unit_literal_is_the_runtime_singleton_and_allocates_nothing() {
         "a `true` literal is the immortal `true`"
     );
 
-    let (rt, result) = run_main("fn main() -> Unit {\n  let x = 1\n}\n");
+    let (rt, result) = run_main("fn main() -> Unit {\n  var x = 1\n}\n");
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(
         result.as_ptr(),
@@ -9119,7 +9119,7 @@ fn a_bool_or_unit_literal_is_the_runtime_singleton_and_allocates_nothing() {
 fn a_crash_snapshot_still_shows_an_interned_literal_bound_to_a_local() {
     // `n` is 7 — interned, so its lowering is a `ConstGc` and nothing spills it
     // at that point. The division then faults, and the snapshot must show `n`.
-    let src = "fn main() -> Int {\n  let n = 7\n  let z = 0\n  n / z\n}\n";
+    let src = "fn main() -> Int {\n  var n = 7\n  var z = 0\n  n / z\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault(), "the division must fault");
     let snap = rt.crash_snapshot().expect("snapshot captured");
@@ -9154,7 +9154,7 @@ fn adr100_a_clean_run_leaves_the_shadow_stack_empty() {
     // Recursion, allocation and collection, then a balanced unwind: 200 nested
     // frames each holding a live `Vec` across the recursive call.
     let src = "fn build(n: Int) -> Vec[Int] {\n  \
-               if n == 0 { Vec() } else { let v = build(n - 1)\n v.push(n)\n v }\n}\n\
+               if n == 0 { Vec() } else { var v = build(n - 1)\n v.push(n)\n v }\n}\n\
                fn main() -> Int { build(200).len() }\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -9174,7 +9174,7 @@ fn adr100_a_fault_epilogue_restores_the_shadow_stack() {
     // before `main` was entered.
     let src = "fn inner(v: Vec[Int]) -> Int { v[5] }\n\
                fn middle(v: Vec[Int]) -> Int { inner(v) }\n\
-               fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  middle(v)\n}\n";
+               fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  middle(v)\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IndexOutOfBounds);
@@ -9193,7 +9193,7 @@ fn adr100_a_stack_overflow_restores_the_shadow_stack() {
     // so that path claimed nothing. Wrong in either direction and the stack
     // ends non-empty (nothing popped) or below its base (popped twice), the
     // second of which trips `SlotStackHeader::live_slots`' debug assertion.
-    let src = "fn count(n: Int) -> Int {\n  let v = Vec()\n  v.push(n)\n  \
+    let src = "fn count(n: Int) -> Int {\n  var v = Vec()\n  v.push(n)\n  \
                count(n + 1) + v.len()\n}\n\
                fn main() -> Int { count(0) }\n";
     let (rt, _result) = run_main(src);
@@ -9236,7 +9236,7 @@ fn adr100_a_wide_frame_recursing_deep_claims_and_gives_back_every_slot() {
     // once temporaries are counted), which nothing else in the suite reaches.
     let mut body = String::from("fn wide(n: Int) -> Int {\n  if n == 0 { return 0 }\n");
     for i in 0..20 {
-        body.push_str(&format!("  let v{i} = Vec()\n  v{i}.push(n)\n"));
+        body.push_str(&format!("  var v{i} = Vec()\n  v{i}.push(n)\n"));
     }
     body.push_str("  var s = wide(n - 1)\n");
     for i in 0..20 {
@@ -9288,7 +9288,7 @@ fn adr105_a_wide_frame_faults_where_a_reference_frame_does_not() {
     // budget buys it far fewer frames.
     let mut body = String::from("fn wide(n: Int) -> Int {\n  if n == 0 { return 0 }\n");
     for i in 0..22 {
-        body.push_str(&format!("  let v{i} = Vec()\n  v{i}.push(n)\n"));
+        body.push_str(&format!("  var v{i} = Vec()\n  v{i}.push(n)\n"));
     }
     body.push_str("  var s = wide(n - 1)\n");
     for i in 0..22 {
@@ -9372,9 +9372,9 @@ fn adr100_a_praxis_closure_called_from_a_graph_helper_balances_the_shadow_stack(
     // The closure recurses and allocates, so it pushes frames of its own and
     // forces collections while the helper's own intermediates are half-built.
     let src = "fn chain(n: Int, k: Int) -> Vec[Int] {\n  \
-               let v = Vec()\n  \
+               var v = Vec()\n  \
                if k == 0 {\n    if n < 60 { v.push(n + 1) }\n    return v\n  }\n  \
-               let inner = chain(n, k - 1)\n  \
+               var inner = chain(n, k - 1)\n  \
                for x in inner { v.push(x) }\n  \
                v\n}\n\
                fn main() -> Int { bfs(0, |n| chain(n, 8)).len() }\n";
@@ -9386,4 +9386,100 @@ fn adr100_a_praxis_closure_called_from_a_graph_helper_balances_the_shadow_stack(
         "{} slots are still claimed after a re-entrant walk",
         rt.shadow_stack().len()
     );
+}
+
+// ===========================================================================
+// ADR-125: every binding is a binding, and the compiler decides its storage.
+//
+// Removing the `let`/`var` split made a parameter, a `for` variable and a name
+// a pattern introduces assignable. Each of those had a binding site the MIR
+// builder gave a plain slot — or, for a match arm, no slot at all — so each one
+// is a distinct way for a write to land in the wrong place. These four tests
+// are one per site, and they run rather than type-check because what is being
+// asserted is where the value went.
+// ===========================================================================
+
+#[test]
+fn a_captured_and_assigned_parameter_shares_one_cell() {
+    // The write is in the closure and the read is in the frame that owns the
+    // parameter, so a copy would answer 1. Only a `VarCell` allocated in the
+    // prologue — the parameter's binding site — answers 16.
+    let src = "fn bump(n: Int) -> Int {\n  \
+               var add = |k| { n = n + k }\n  \
+               add(10)\n  add(5)\n  n\n}\n\
+               fn main() -> Int { bump(1) }\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 16, "both writes reached the parameter");
+}
+
+#[test]
+fn a_for_variable_can_be_assigned_within_its_step() {
+    // The clamp writes the loop variable, and the next step overwrites it from
+    // the iterator — so the write must last exactly one iteration.
+    let src = "fn main() -> Int {\n  \
+               var v = Vec()\n  v.push(1)\n  v.push(50)\n  v.push(3)\n  \
+               var total = 0\n  \
+               for x in v {\n    if x > 10 { x = 10 }\n    total += x\n  }\n  \
+               total\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 14, "1 + 10 + 3");
+}
+
+#[test]
+fn each_step_of_a_for_captures_its_own_cell() {
+    // Each iteration of a `for` is a *fresh* binding, so three closures made in
+    // three steps must hold three values. One cell hoisted out of the loop —
+    // the obvious way to write the boxing — would answer 200 three times.
+    let src = "fn main() -> Int {\n  \
+               var fs = Vec()\n  \
+               for i in 0..3 {\n    i = i * 100\n    fs.push(|_| i)\n  }\n  \
+               fs.get(0)(0) + fs.get(1)(0) * 10 + fs.get(2)(0) * 100\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    // 0 + 100·10 + 200·100 — positional, so a shared cell (200 in all three)
+    // would read 222000 and not merely a wrong total.
+    assert_eq!(result.as_int(), 21000, "steps 0, 100, 200 in that order");
+}
+
+#[test]
+fn assigning_a_match_binding_does_not_write_the_scrutinee() {
+    // A match arm's binding used to *alias* the scrutinee's local outright, and
+    // for a plain `match v` that local is `v`'s own — so the write would have
+    // landed in `v`. The arm binds a slot of its own precisely when something
+    // writes it.
+    let src = "fn main() -> Int {\n  \
+               var v = 7\n  \
+               var got = match v { n => { n = 99\n n } }\n  \
+               got * 100 + v\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 9907, "the arm saw 99 and `v` is still 7");
+}
+
+#[test]
+fn a_captured_and_assigned_destructured_name_shares_one_cell() {
+    // The same property as the parameter's, at the fifth binding site: a name a
+    // destructuring pattern introduces, boxed where the component is bound.
+    let src = "fn main() -> Int {\n  \
+               var g = |(a, b)| {\n    var h = |k| { a = a + k }\n    h(10)\n    a + b\n  }\n  \
+               g((1, 2))\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 13, "11 + 2");
+}
+
+#[test]
+fn a_binding_nothing_writes_is_captured_by_value() {
+    // The complement of the four above, and the reason `reassigned` is a fact
+    // and not a keyword: a capture nothing writes still needs no cell, so the
+    // old `let`'s representation survives the keyword's removal.
+    let src = "fn main() -> Int {\n  \
+               var base = 10\n  \
+               var f = |k| k + base\n  \
+               f(1) + f(2)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 23);
 }

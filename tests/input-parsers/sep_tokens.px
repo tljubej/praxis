@@ -8,6 +8,6 @@
 // defect was introduced and closed inside this branch — a regression fixture,
 // not a gate for an audit finding.
 fn main() -> Int {
-    let v = read sep(" -> ", word);
+    var v = read sep(" -> ", word);
     v.len()
 }

@@ -15,17 +15,17 @@
 // Output: the map's size, the set's size, the counter's total, then the hit
 // count of the lookup pass.
 
-let n = read int
+var n = read int
 
-let m = Map()
-let seen = Set()
-let counts = Counter()
+var m = Map()
+var seen = Set()
+var counts = Counter()
 
 var state = 12345
 var i = 0
 while i < n {
     state = (state * 1103515245 + 12345) % 2147483648
-    let k = state % 65536
+    var k = state % 65536
     m.insert(k, i)
     seen.insert(k % 1024)
     counts[k % 256] += 1
@@ -37,7 +37,7 @@ var hits = 0
 var j = 0
 while j < n {
     probe = (probe * 1103515245 + 12345) % 2147483648
-    let k = probe % 98304
+    var k = probe % 98304
     if m.contains(k) {
         hits = hits + 1
     }

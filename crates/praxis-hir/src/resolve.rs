@@ -2,10 +2,10 @@
 //! [`SymbolId`] per declaration, and resolve every name reference to its symbol
 //! (§13.3).
 //!
-//! Shadowing (§4.2/§5.3): a `let`/`var` declaration's *initializer* is resolved
-//! in the preceding environment, and only then does the new symbol enter scope.
-//! So `let a = a + 1` resolves the right-hand `a` to the *previous* binding,
-//! then introduces the new one. Each shadowing declaration gets a fresh
+//! Shadowing (§4.2/§5.3): a `var` declaration's *initializer* is resolved in the
+//! preceding environment, and only then does the new symbol enter scope. So
+//! `var a = a + 1` resolves the right-hand `a` to the *previous* binding, then
+//! introduces the new one. Each shadowing declaration gets a fresh
 //! [`SymbolId`].
 //!
 //! This module does NOT infer types — it only resolves names and produces the
@@ -25,8 +25,8 @@ use std::collections::HashMap;
 
 use praxis_ast::{
     ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, BreakExpr, CallExpr, ContinueExpr,
-    ElseBranch, EnumItem, Expr, ExprStmt, FieldExpr, FnItem, ForExpr, IfExpr, LetStmt, LoopExpr,
-    Param, ParamList, PlaceAssignStmt, RecordLitExpr, ReturnExpr, SourceFile, StructItem, VarStmt,
+    ElseBranch, EnumItem, Expr, ExprStmt, FieldExpr, FnItem, ForExpr, IfExpr, LoopExpr, Param,
+    ParamList, PlaceAssignStmt, RecordLitExpr, ReturnExpr, SourceFile, StructItem, VarStmt,
     WhileExpr,
 };
 use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
@@ -110,7 +110,7 @@ pub fn resolve(file: FileId, root: &SourceFile) -> NameResolution {
     let mut r = Resolver::new(file);
     let root_scope = r.out.scopes.root();
     r.seed_prelude(root_scope);
-    // Pass 1: register all top-level declaration names (fn/let/var, and in WS3+
+    // Pass 1: register all top-level declaration names (fn/var, and in WS3+
     // struct/enum) so they are visible before any annotation is checked.
     for stmt in root.stmts() {
         r.register_top_level(root_scope, &stmt);
@@ -136,7 +136,7 @@ struct Resolver {
     ///
     /// A **closure** body opens no boundary of its own: a closure does capture,
     /// so the question is always about the nearest enclosing `fn`. A closure at
-    /// the top level therefore has none, which is why `let offset = 10` and
+    /// the top level therefore has none, which is why `var offset = 10` and
     /// `v.map(|x| x + offset)` is fine.
     fn_boundary: Option<(ScopeId, String)>,
 }
@@ -167,6 +167,9 @@ impl Resolver {
             name: name.into(),
             kind,
             decl: span,
+            // Nothing has been seen writing it yet. `resolve_assign` flips this
+            // when it reaches an assignment whose target name resolves here.
+            reassigned: false,
             scheme: None,
         })
     }
@@ -268,7 +271,7 @@ impl Resolver {
     /// `struct`/`enum`) names visible before any type annotation is checked or
     /// any body is resolved, so forward references and mutual recursion work.
     ///
-    /// Only `fn` names are registered here: `let`/`var` follow lexical order
+    /// Only `fn` names are registered here: a `var` follows lexical order
     /// (their shadowing semantics require the initializer to resolve in the
     /// *preceding* environment, §5.3, so pre-registering would break that).
     fn register_top_level(&mut self, scope: ScopeId, node: &praxis_syntax::SyntaxNode) {
@@ -334,9 +337,7 @@ impl Resolver {
     // --- pass 2: top-level statements --------------------------------------
 
     fn resolve_top_stmt(&mut self, scope: ScopeId, node: &praxis_syntax::SyntaxNode) {
-        if let Some(let_) = LetStmt::cast(node.clone()) {
-            self.resolve_let(scope, &let_);
-        } else if let Some(var_) = VarStmt::cast(node.clone()) {
+        if let Some(var_) = VarStmt::cast(node.clone()) {
             self.resolve_var(scope, &var_);
         } else if let Some(fn_) = FnItem::cast(node.clone()) {
             self.resolve_fn(scope, &fn_);
@@ -417,8 +418,9 @@ impl Resolver {
         }
     }
 
-    fn resolve_let(&mut self, scope: ScopeId, stmt: &LetStmt) {
-        // The initializer resolves in the PRECEDING environment (shadowing rule).
+    fn resolve_var(&mut self, scope: ScopeId, stmt: &VarStmt) {
+        // The initializer resolves in the PRECEDING environment (shadowing rule):
+        // `var a = 4` then `var a = a + 1` reads the first `a`.
         if let Some(ty) = stmt.ty() {
             self.check_type_annotation(scope, &ty);
         }
@@ -429,29 +431,12 @@ impl Resolver {
         if let Some(name_tok) = stmt.name() {
             self.bind(
                 scope,
-                SymbolKind::Let,
-                name_tok.text().to_string(),
-                name_tok.text_range(),
-            );
-        } else {
-            // Malformed `let` (no name) — the parser already diagnosed it.
-        }
-    }
-
-    fn resolve_var(&mut self, scope: ScopeId, stmt: &VarStmt) {
-        if let Some(ty) = stmt.ty() {
-            self.check_type_annotation(scope, &ty);
-        }
-        if let Some(init) = stmt.init() {
-            self.resolve_expr(scope, &init);
-        }
-        if let Some(name_tok) = stmt.name() {
-            self.bind(
-                scope,
                 SymbolKind::Var,
                 name_tok.text().to_string(),
                 name_tok.text_range(),
             );
+        } else {
+            // Malformed `var` (no name) — the parser already diagnosed it.
         }
     }
 
@@ -566,10 +551,21 @@ impl Resolver {
         self.resolve_pattern_bindings(scope, &pat);
     }
 
+    /// `name = expr` / `name += expr` (§4.2).
+    ///
+    /// The lhs name is a *reference*, not a declaration — and it is the one
+    /// reference that **writes**, so this is where [`Symbol::reassigned`] is
+    /// set (ADR-125). It has to be here rather than in a later pass because
+    /// under shadowing the target is decided by scope, not by spelling:
+    /// `var a = 1; a = 2; var a = "s"` writes the *first* `a`, and only the
+    /// walk that has the scope at that point can say so.
     fn resolve_assign(&mut self, scope: ScopeId, stmt: &AssignStmt) {
-        // The lhs name is a reference (not a declaration).
         if let Some(name_tok) = stmt.name() {
-            self.resolve_name_ref(scope, &name_tok);
+            if let Some(symbol) = self.resolve_name_ref(scope, &name_tok) {
+                if let Some(sym) = self.out.names.get_mut(symbol) {
+                    sym.reassigned = true;
+                }
+            }
         }
         if let Some(value) = stmt.value() {
             self.resolve_expr(scope, &value);
@@ -723,7 +719,7 @@ impl Resolver {
             praxis_ast::PatternKind::Wildcard | praxis_ast::PatternKind::Literal => {}
             praxis_ast::PatternKind::Name(name) => {
                 if let Some(tok) = pat.name_token() {
-                    self.bind(scope, SymbolKind::Let, name, tok.text_range());
+                    self.bind(scope, SymbolKind::Var, name, tok.text_range());
                 }
             }
             // `(a, b)` — every element is a pattern of its own (REP-10).
@@ -753,7 +749,7 @@ impl Resolver {
                         None => {
                             self.bind(
                                 scope,
-                                SymbolKind::Let,
+                                SymbolKind::Var,
                                 name_tok.text().to_string(),
                                 name_tok.text_range(),
                             );
@@ -948,22 +944,33 @@ impl Resolver {
 
     /// Resolve a bare `Ident` token used as a reference. Looks it up, records the
     /// resolved ref, or emits `N001`.
-    fn resolve_name_ref(&mut self, scope: ScopeId, tok: &praxis_syntax::SyntaxToken) {
+    /// Resolve one name *reference* and record it. Returns the declaration the
+    /// name reached, or `None` when nothing is in scope under that spelling
+    /// (which is reported as `N001` here, so callers need not).
+    fn resolve_name_ref(
+        &mut self,
+        scope: ScopeId,
+        tok: &praxis_syntax::SyntaxToken,
+    ) -> Option<SymbolId> {
         let range = tok.text_range();
         let name = tok.text().to_string();
         match self.out.scopes.lookup_binding(scope, &name) {
             Some((symbol, bound_in)) => {
                 self.reject_outer_binding(&name, symbol, bound_in, range);
                 self.record_ref(scope, symbol, range);
+                Some(symbol)
             }
-            None => self.unresolved(range, &name),
+            None => {
+                self.unresolved(range, &name);
+                None
+            }
         }
     }
 
     /// Report a `fn` body naming a binding declared outside it (REP-22,
     /// ADR-068).
     ///
-    /// Only *bindings* cross badly: a `let`, a `var` or another function's
+    /// Only *bindings* cross badly: a `var` or another function's
     /// parameter is a local of the function that declared it, and a `fn` body has
     /// no slot for one. Every other kind is fine by construction — another `fn`,
     /// a `struct`, an `enum`, a variant constructor and the prelude's builtins
@@ -986,12 +993,11 @@ impl Resolver {
         if self.out.scopes.is_within(bound_in, boundary) {
             return;
         }
-        let is_binding = self.out.names.get(symbol).is_some_and(|s| {
-            matches!(
-                s.kind,
-                SymbolKind::Let | SymbolKind::Var | SymbolKind::Param
-            )
-        });
+        let is_binding = self
+            .out
+            .names
+            .get(symbol)
+            .is_some_and(|s| matches!(s.kind, SymbolKind::Var | SymbolKind::Param));
         if !is_binding {
             return;
         }

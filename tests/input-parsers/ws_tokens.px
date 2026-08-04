@@ -10,7 +10,7 @@
 // defect was introduced and closed inside this branch — a regression fixture,
 // not a gate for an audit finding.
 fn main() -> Int {
-    let v = read ws(int);
+    var v = read ws(int);
     var total = 0;
     for n in v {
         total = total + n;

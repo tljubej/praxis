@@ -39,13 +39,13 @@ fn pair_digits(c) {
 fn main() {
     // A Vec, a Deque and a Range are the three that always worked; they are here
     // so a regression in the in-place plan fails alongside the snapshot ones.
-    let v = Vec()
+    var v = Vec()
     v.push(1)
     v.push(2)
     v.push(3)
     out(digits(v))
 
-    let d = Deque()
+    var d = Deque()
     d.push_back(2)
     d.push_front(1)
     out(digits(d))
@@ -53,7 +53,7 @@ fn main() {
     out(digits(1..4))
 
     // A Set: inserted out of order, walked in order.
-    let s = Set()
+    var s = Set()
     s.insert(3)
     s.insert(1)
     s.insert(2)
@@ -61,20 +61,20 @@ fn main() {
 
     // A BitSet's members are bit positions rather than objects, so the snapshot
     // boxes each one.
-    let b = BitSet()
+    var b = BitSet()
     b.insert(5)
     b.insert(1)
     out(digits(b))
 
     // The heaps walk in pop order without being drained: the length afterwards
     // says so.
-    let lo = MinHeap()
+    var lo = MinHeap()
     lo.push(3)
     lo.push(1)
     lo.push(2)
     out(digits(lo) * 10 + lo.len())
 
-    let hi = MaxHeap()
+    var hi = MaxHeap()
     hi.push(1)
     hi.push(3)
     hi.push(2)
@@ -82,19 +82,19 @@ fn main() {
 
     // A keyed collection yields the (key, value) pair, and both halves are read
     // through the tuple element syntax REP-08 added.
-    let m = Map()
+    var m = Map()
     m.insert(1, 4)
     m.insert(2, 5)
     out(pair_digits(m))
 
-    let c = Counter()
+    var c = Counter()
     c.inc(7)
     c.inc(7)
     c.inc(9)
     out(pair_digits(c))
 
     // A Grid yields its cells row-major. A `Grid()` is 0×0, so this one is read.
-    let g = read grid(char)
+    var g = read grid(char)
     var cells = 0
     for cell in g {
         cells = cells + 1

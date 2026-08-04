@@ -15,20 +15,20 @@
 // Output: the open-cell count, then the summed (reached, distance-sum) pair
 // over every search.
 
-let runs = read int
-let w = 320
-let h = 320
+var runs = read int
+var w = 320
+var h = 320
 
 fn open_cell(x: Int, y: Int) -> Bool {
     (x * 31 + y * 17 + 5) % 11 != 0
 }
 
-let adj = Vec()
+var adj = Vec()
 var y = 0
 while y < h {
     var x = 0
     while x < w {
-        let nb = Vec()
+        var nb = Vec()
         if open_cell(x, y) {
             if x > 0 && open_cell(x - 1, y) { nb.push(y * w + x - 1) }
             if x + 1 < w && open_cell(x + 1, y) { nb.push(y * w + x + 1) }
@@ -64,9 +64,9 @@ while run < runs {
     var dist = 0
 
     while current.len() > 0 {
-        let next = Deque()
+        var next = Deque()
         while current.len() > 0 {
-            let node = current.pop_front()
+            var node = current.pop_front()
             reached_total = reached_total + 1
             dist_total = (dist_total + dist) % 1000003
             for nb in adj[node] {

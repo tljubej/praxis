@@ -31,7 +31,6 @@ fn any_text() -> impl Strategy<Value = String> {
 /// non-ASCII scalars on both sides of the identifier boundary.
 fn praxis_shaped_text() -> impl Strategy<Value = String> {
     let piece = prop_oneof![
-        Just("let "),
         Just("var "),
         Just("fn f("),
         Just("if "),

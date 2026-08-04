@@ -8,4 +8,4 @@
 // predecessor manufactured one out of the whole token and reported "unterminated
 // nested template" — a construct this file does not contain — at a byte offset
 // that means nothing.
-let v = read `{int`
+var v = read `{int`

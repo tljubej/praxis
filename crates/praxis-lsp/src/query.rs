@@ -403,7 +403,7 @@ mod tests {
     /// **WS2's gate.** Two queries at one revision parse once.
     #[test]
     fn two_queries_at_one_revision_parse_once() {
-        let s = snap("let x = 1\nout(x)\n");
+        let s = snap("var x = 1\nout(x)\n");
         let _ = s.diagnostics();
         let _ = s.type_of(4);
         let _ = s.analyze();
@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn an_edit_invalidates_the_snapshot() {
         let mut analyzer = Analyzer::new();
-        let mut doc = Document::new("let x = 1\n".to_string(), 1);
+        let mut doc = Document::new("var x = 1\n".to_string(), 1);
         let first = analyzer.snapshot("k", &doc);
         let again = analyzer.snapshot("k", &doc);
         assert!(
@@ -427,18 +427,18 @@ mod tests {
             &lsp_types::TextDocumentContentChangeEvent {
                 range: None,
                 range_length: None,
-                text: "let x = 2\n".to_string(),
+                text: "var x = 2\n".to_string(),
             },
             crate::position::Encoding::Utf16,
         );
         let after = analyzer.snapshot("k", &doc);
         assert!(!Rc::ptr_eq(&first, &after), "an edit builds a new snapshot");
-        assert_eq!(after.source_text(), "let x = 2\n");
+        assert_eq!(after.source_text(), "var x = 2\n");
     }
 
     #[test]
     fn diagnostics_are_sorted_by_span() {
-        let s = snap("let a: Int = \"x\"\nlet b: Text = 1\n");
+        let s = snap("var a: Int = \"x\"\nvar b: Text = 1\n");
         let diags = s.diagnostics();
         assert!(diags.len() >= 2, "two mismatches, got {}", diags.len());
         let mut starts: Vec<u32> = diags
@@ -458,7 +458,7 @@ mod tests {
     /// tree usable, and the editor must not go blank on one stray character.
     #[test]
     fn analysis_runs_even_when_parsing_reported() {
-        let s = snap("let x = 1\n@\nlet y: Int = \"t\"\n");
+        let s = snap("var x = 1\n@\nvar y: Int = \"t\"\n");
         let diags = s.diagnostics();
         assert!(
             diags.iter().any(|d| d.code().to_string().starts_with('T')),
@@ -479,7 +479,7 @@ mod tests {
     /// callee, and on the call it is the call.
     #[test]
     fn type_of_answers_the_innermost_expression() {
-        let src = "let v = Vec[Int]()\n";
+        let src = "var v = Vec[Int]()\n";
         let s = snap(src);
         let db = &s.analyze().db;
 
@@ -498,10 +498,10 @@ mod tests {
 
     #[test]
     fn input_parser_at_finds_the_read_body() {
-        let src = "let v = read lines(int)\n";
+        let src = "var v = read lines(int)\n";
         let s = snap(src);
         let at = u32::try_from(src.find("lines").unwrap()).unwrap();
         assert!(s.input_parser_at(at).is_some());
-        assert!(s.input_parser_at(0).is_none(), "`let` is outside the body");
+        assert!(s.input_parser_at(0).is_none(), "`var` is outside the body");
     }
 }

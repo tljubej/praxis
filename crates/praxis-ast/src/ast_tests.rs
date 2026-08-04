@@ -19,21 +19,21 @@ fn root(text: &str) -> praxis_syntax::SyntaxNode {
 
 #[test]
 fn cast_rejects_wrong_kind() {
-    // The root is a SOURCE_FILE; casting it as a LetStmt must fail.
-    let tree = root("let x = 1");
-    assert!(crate::LetStmt::cast(tree.clone()).is_none());
+    // The root is a SOURCE_FILE; casting it as a VarStmt must fail.
+    let tree = root("var x = 1");
+    assert!(crate::VarStmt::cast(tree.clone()).is_none());
     assert!(SourceFile::cast(tree).is_some());
 }
 
 #[test]
 fn let_stmt_exposes_name_and_init() {
-    let tree = root("let x = 1");
+    let tree = root("var x = 1");
     let file = SourceFile::cast(tree).unwrap();
     let stmt = file.stmts().next().unwrap();
-    let let_stmt = crate::LetStmt::cast(stmt).unwrap();
-    assert_eq!(let_stmt.name().unwrap().text(), "x");
+    let var_binding = crate::VarStmt::cast(stmt).unwrap();
+    assert_eq!(var_binding.name().unwrap().text(), "x");
     // The initializer is a LITERAL expression.
-    match let_stmt.init() {
+    match var_binding.init() {
         Some(Expr::Literal(lit)) => {
             assert_eq!(lit.token().unwrap().kind(), SyntaxKind::IntLit);
         }
@@ -125,11 +125,11 @@ fn if_expr_exposes_cond_then_else() {
 
 #[test]
 fn span_round_trips_via_bridge() {
-    let tree = root("let x = 1");
+    let tree = root("var x = 1");
     let file = SourceFile::cast(tree).unwrap();
-    let let_stmt = crate::LetStmt::cast(file.stmts().next().unwrap()).unwrap();
+    let var_binding = crate::VarStmt::cast(file.stmts().next().unwrap()).unwrap();
     assert_eq!(
-        let_stmt.span(),
+        var_binding.span(),
         Span::new(BytePos::from(0), BytePos::from(9))
     );
 }
@@ -146,7 +146,7 @@ fn every_annotation_position_sees_a_tuple_or_function_type() {
     let src = "struct Boxed { f: (Int) -> Int }\n\
                enum Wrapped { Fn((Int) -> Int), Pair((Int, Text)) }\n\
                fn takes(x: (Int, Text), g: (Int) -> Int) -> (Int, Text) { x }\n\
-               let pair: (Int, Text) = (1, \"a\")\n\
+               var pair: (Int, Text) = (1, \"a\")\n\
                var f: (Int) -> Int = |n| n";
     let file = SourceFile::cast(root(src)).unwrap();
     let mut stmts = file.stmts();
@@ -193,13 +193,16 @@ fn every_annotation_position_sees_a_tuple_or_function_type() {
         "a tuple return type"
     );
 
-    let let_stmt = crate::LetStmt::cast(stmts.next().unwrap()).unwrap();
+    let var_binding = crate::VarStmt::cast(stmts.next().unwrap()).unwrap();
     assert_eq!(
-        let_stmt.ty().map(|t| t.syntax().kind()),
+        var_binding.ty().map(|t| t.syntax().kind()),
         Some(SyntaxKind::TUPLE_TYPE),
-        "a tuple-annotated `let`"
+        "a tuple-annotated `var`"
     );
-    assert!(let_stmt.init().is_some(), "…and its initializer survives");
+    assert!(
+        var_binding.init().is_some(),
+        "…and its initializer survives"
+    );
 
     let var_stmt = crate::VarStmt::cast(stmts.next().unwrap()).unwrap();
     assert_eq!(
@@ -231,10 +234,10 @@ fn only_the_three_type_node_kinds_are_annotations() {
     }
     // The expression `(1, 2)` is a TUPLE_EXPR, and casting it as an annotation
     // must fail — the wrapper is kind-checked, not shape-guessed.
-    let file = SourceFile::cast(root("let x = (1, 2)")).unwrap();
-    let let_stmt = crate::LetStmt::cast(file.stmts().next().unwrap()).unwrap();
+    let file = SourceFile::cast(root("var x = (1, 2)")).unwrap();
+    let var_binding = crate::VarStmt::cast(file.stmts().next().unwrap()).unwrap();
     assert!(
-        let_stmt.ty().is_none(),
+        var_binding.ty().is_none(),
         "an initializer is not an annotation"
     );
 }
@@ -258,7 +261,7 @@ fn a_patterns_brace_is_what_makes_it_a_record_pattern() {
     use crate::{Pattern, PatternKind};
 
     fn kind_of(arm: &str) -> PatternKind {
-        let tree = root(&format!("let r = match s {{ {arm} => 1 }}"));
+        let tree = root(&format!("var r = match s {{ {arm} => 1 }}"));
         tree.descendants()
             .find_map(Pattern::cast)
             .unwrap_or_else(|| panic!("`{arm}` produced no PATTERN node"))
@@ -278,7 +281,7 @@ fn a_patterns_brace_is_what_makes_it_a_record_pattern() {
 
     // A headless pattern has no head token to read, which is what the `Option`
     // in `Record` records — resolution must not go looking for one.
-    let tree = root("let r = match s { {a, b} => 1 }");
+    let tree = root("var r = match s { {a, b} => 1 }");
     let pat = tree.descendants().find_map(Pattern::cast).unwrap();
     assert!(
         pat.name_token().is_none(),
@@ -309,20 +312,20 @@ fn a_list_literals_elements_are_its_arg_lists() {
             .collect()
     }
 
-    assert_eq!(elements("let v = [1, 2, 3]"), ["1", "2", "3"]);
-    assert_eq!(elements("let v = [1]"), ["1"]);
-    assert!(elements("let v = []").is_empty());
+    assert_eq!(elements("var v = [1, 2, 3]"), ["1", "2", "3"]);
+    assert_eq!(elements("var v = [1]"), ["1"]);
+    assert!(elements("var v = []").is_empty());
     // A trailing comma adds no element (REP-17).
-    assert_eq!(elements("let v = [1, 2,]"), ["1", "2"]);
+    assert_eq!(elements("var v = [1, 2,]"), ["1", "2"]);
     // Order is source order, and an element is a whole expression.
-    assert_eq!(elements("let v = [a + 1, f(2)]"), ["a + 1", "f(2)"]);
+    assert_eq!(elements("var v = [a + 1, f(2)]"), ["a + 1", "f(2)"]);
 
     // The outer list of a nested one holds the inner lists, not their elements.
-    assert_eq!(elements("let v = [[1, 2], [3]]"), ["[1, 2]", "[3]"]);
+    assert_eq!(elements("var v = [[1, 2], [3]]"), ["[1, 2]", "[3]"]);
 
     // And the enum casts to the right variant, which is what every walk
     // dispatches on.
-    let tree = root("let v = [1]");
+    let tree = root("var v = [1]");
     let list = tree.descendants().find_map(crate::ListExpr::cast).unwrap();
     assert!(matches!(
         Expr::cast(list.syntax().clone()),

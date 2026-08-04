@@ -80,7 +80,6 @@ pub fn document_symbols(snapshot: &Snapshot, enc: Encoding) -> Vec<DocumentSymbo
                     enc,
                 ),
             ),
-            SyntaxKind::LET_STMT => (LspSymbolKind::CONSTANT, Vec::new()),
             SyntaxKind::VAR_STMT => (LspSymbolKind::VARIABLE, Vec::new()),
             _ => continue,
         };

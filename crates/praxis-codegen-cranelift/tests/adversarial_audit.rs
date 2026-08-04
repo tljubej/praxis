@@ -164,7 +164,7 @@ fn enumerate_materializes_index_and_element_tuple_payloads() {
     // The older enumerate test only counted results. Inspect the claimed
     // `(index, element)` values themselves so an empty TupleSchema cannot pass.
     let (runtime, result) =
-        run_main("fn main() {\n  let v = Vec()\n  v.push(10)\n  v.push(20)\n  v.enumerate()\n}\n");
+        run_main("fn main() {\n  var v = Vec()\n  v.push(10)\n  v.push(20)\n  v.enumerate()\n}\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     let values = result.as_vec();
     assert_eq!(values.len(), 2);
@@ -192,7 +192,7 @@ fn a_fused_pairs_schema_names_its_element_types() {
 
     // `enumerate` on a Vec[Int] is Vec[(Int, Int)].
     let (runtime, result) =
-        run_main("fn main() {\n  let v = Vec()\n  v.push(10)\n  v.enumerate()\n}\n");
+        run_main("fn main() {\n  var v = Vec()\n  v.push(10)\n  v.enumerate()\n}\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(
         tuple_element_descriptor_slots(result.as_vec()[0]),
@@ -203,7 +203,7 @@ fn a_fused_pairs_schema_names_its_element_types() {
     // `zip` pairs two *different* element types, so a schema that echoed the
     // receiver's element type for both slots would fail here and not above.
     let (runtime, result) = run_main(
-        "fn main() {\n  let a = Vec()\n  a.push(1)\n  let b = Vec()\n  b.push(\"s\")\n  a.zip(b)\n}\n",
+        "fn main() {\n  var a = Vec()\n  a.push(1)\n  var b = Vec()\n  b.push(\"s\")\n  a.zip(b)\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(
@@ -218,7 +218,7 @@ fn a_fused_pairs_schema_names_its_element_types() {
     // the verifier's `OpaqueAtDescriptorSite` rule stays off — turning it on
     // would refuse a program that works.
     let (runtime, result) =
-        run_main("fn main() -> Int {\n  let v = Vec()\n  v.enumerate().count()\n}\n");
+        run_main("fn main() -> Int {\n  var v = Vec()\n  v.enumerate().count()\n}\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(
         result.as_int(),
@@ -232,7 +232,7 @@ fn zip_materializes_both_tuple_elements() {
     // Counting zipped values does not prove that either tuple element was
     // stored. Read both payload slots.
     let (runtime, result) = run_main(
-        "fn main() {\n  let a = Vec()\n  a.push(1)\n  a.push(2)\n  let b = Vec()\n  b.push(10)\n  b.push(20)\n  a.zip(b)\n}\n",
+        "fn main() {\n  var a = Vec()\n  a.push(1)\n  a.push(2)\n  var b = Vec()\n  b.push(10)\n  b.push(20)\n  a.zip(b)\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     let values = result.as_vec();
@@ -248,7 +248,7 @@ fn zip_materializes_both_tuple_elements() {
 #[test]
 fn take_after_filter_counts_filtered_elements_not_source_indices() {
     let (runtime, result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter(|x| x % 2 == 0).take(2).sum()\n}\n",
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter(|x| x % 2 == 0).take(2).sum()\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 6, "take(2) applies after filter");
@@ -257,7 +257,7 @@ fn take_after_filter_counts_filtered_elements_not_source_indices() {
 #[test]
 fn skip_after_filter_counts_filtered_elements_not_source_indices() {
     let (runtime, result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(6)\n  v.filter(|x| x % 2 == 0).skip(1).sum()\n}\n",
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(6)\n  v.filter(|x| x % 2 == 0).skip(1).sum()\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 10, "skip(1) drops the first filtered item");
@@ -266,7 +266,7 @@ fn skip_after_filter_counts_filtered_elements_not_source_indices() {
 #[test]
 fn zip_after_filter_uses_dense_filtered_positions() {
     let (runtime, result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  let rhs = Vec()\n  rhs.push(10)\n  rhs.push(20)\n  v.filter(|x| x % 2 == 0).zip(rhs).count()\n}\n",
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  var rhs = Vec()\n  rhs.push(10)\n  rhs.push(20)\n  v.filter(|x| x % 2 == 0).zip(rhs).count()\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(
@@ -282,7 +282,7 @@ fn position_after_filter_reports_the_filtered_sequence_index() {
         // The `match` is REP-39: `position` answers `Option[Int]` now, so the
         // index this test is about arrives inside a `Some`. The measurement is
         // unchanged.
-        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  match v.filter(|x| x % 2 == 0).position(|x| x == 4) { Some(i) => i, None => -1 }\n}\n",
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  match v.filter(|x| x % 2 == 0).position(|x| x == 4) { Some(i) => i, None => -1 }\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(
@@ -295,7 +295,7 @@ fn position_after_filter_reports_the_filtered_sequence_index() {
 #[test]
 fn two_flat_map_stages_compose_without_a_compiler_panic() {
     let (runtime, result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let a = Vec()\n    a.push(x)\n    a\n  }).flat_map(|x| {\n    let b = Vec()\n    b.push(x)\n    b\n  }).count()\n}\n",
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    var a = Vec()\n    a.push(x)\n    a\n  }).flat_map(|x| {\n    var b = Vec()\n    b.push(x)\n    b\n  }).count()\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 2);
@@ -304,7 +304,7 @@ fn two_flat_map_stages_compose_without_a_compiler_panic() {
 #[test]
 fn take_after_flat_map_counts_the_global_flattened_stream() {
     let (runtime, result) = run_main(
-        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    let inner = Vec()\n    inner.push(x)\n    inner\n  }).take(1).count()\n}\n",
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.flat_map(|x| {\n    var inner = Vec()\n    inner.push(x)\n    inner\n  }).take(1).count()\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 1);
@@ -314,7 +314,7 @@ fn take_after_flat_map_counts_the_global_flattened_stream() {
 fn position_after_flat_map_uses_the_global_flattened_index() {
     let (runtime, result) = run_main(
         // As above: the index is inside a `Some` (REP-39).
-        "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  match v.flat_map(|x| {\n    let inner = Vec()\n    inner.push(x)\n    inner\n  }).position(|x| x == 2) { Some(i) => i, None => -1 }\n}\n",
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  match v.flat_map(|x| {\n    var inner = Vec()\n    inner.push(x)\n    inner\n  }).position(|x| x == 2) { Some(i) => i, None => -1 }\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 1);
@@ -323,7 +323,7 @@ fn position_after_flat_map_uses_the_global_flattened_index() {
 #[test]
 fn any_after_flat_map_short_circuits_the_whole_pipeline() {
     let (runtime, result) = run_main(
-        "fn main() -> Bool {\n  let v = Vec()\n  v.push(1)\n  v.push(0)\n  v.flat_map(|x| {\n    let inner = Vec()\n    inner.push(x)\n    inner\n  }).any(|x| x == 1 || 10 / x > 0)\n}\n",
+        "fn main() -> Bool {\n  var v = Vec()\n  v.push(1)\n  v.push(0)\n  v.flat_map(|x| {\n    var inner = Vec()\n    inner.push(x)\n    inner\n  }).any(|x| x == 1 || 10 / x > 0)\n}\n",
     );
     assert!(
         !runtime.has_pending_fault(),
@@ -340,7 +340,7 @@ fn nested_record_inequality_dispatches_to_the_record_descriptor() {
     // compares the RecordPayload's first machine word (the shared schema
     // pointer) and declares every same-shaped record equal.
     let (runtime, result) = run_main(
-        "struct P { x: Int }\nfn main() -> Int {\n  let a = (P { x: 1 }, 0)\n  let b = (P { x: 2 }, 0)\n  if a == b { 1 } else { 0 }\n}\n",
+        "struct P { x: Int }\nfn main() -> Int {\n  var a = (P { x: 1 }, 0)\n  var b = (P { x: 2 }, 0)\n  if a == b { 1 } else { 0 }\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 0);
@@ -353,7 +353,7 @@ fn vec_float_push_adopts_float_descriptor_and_preserves_signed_zero_semantics() 
     // the first pushed value's descriptor. Keep the signed-zero behavior
     // covered while the direct empty-Vec regression below exposes codegen.
     let (runtime, result) = run_main(
-        "fn main() -> Int {\n  let a = Vec()\n  a.push(0.0)\n  let b = Vec()\n  b.push(-0.0)\n  if a == b { 1 } else { 0 }\n}\n",
+        "fn main() -> Int {\n  var a = Vec()\n  a.push(0.0)\n  var b = Vec()\n  b.push(-0.0)\n  if a == b { 1 } else { 0 }\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 1, "+0.0 and -0.0 are equal Floats");
@@ -362,7 +362,7 @@ fn vec_float_push_adopts_float_descriptor_and_preserves_signed_zero_semantics() 
 #[test]
 fn empty_vec_float_has_the_float_element_descriptor_before_any_push() {
     let (runtime, result) =
-        run_main("fn main() -> Vec[Float] {\n  let values: Vec[Float] = Vec()\n  values\n}\n");
+        run_main("fn main() -> Vec[Float] {\n  var values: Vec[Float] = Vec()\n  values\n}\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     let payload = result.payload::<VecPayload>();
     // SAFETY: result is a Vec. The descriptor may be null ("never told its
@@ -388,7 +388,7 @@ fn record_schema_cache_is_scoped_by_type_database_not_bare_def_id() {
     }
     writeln!(
         &mut seed,
-        "fn main() -> Int {{ let x = Seed{TARGET} {{ value: 7 }}; x.value }}"
+        "fn main() -> Int {{ var x = Seed{TARGET} {{ value: 7 }}; x.value }}"
     )
     .unwrap();
     let (seed_runtime, seed_result) = run_main(&seed);
@@ -401,7 +401,7 @@ fn record_schema_cache_is_scoped_by_type_database_not_bare_def_id() {
     }
     writeln!(
         &mut probe,
-        "fn main() -> Int {{\n  let a = Probe{TARGET} {{ value: \"left\" }}\n  let b = Probe{TARGET} {{ value: \"right\" }}\n  if a == b {{ 1 }} else {{ 0 }}\n}}"
+        "fn main() -> Int {{\n  var a = Probe{TARGET} {{ value: \"left\" }}\n  var b = Probe{TARGET} {{ value: \"right\" }}\n  if a == b {{ 1 }} else {{ 0 }}\n}}"
     )
     .unwrap();
     let (probe_runtime, probe_result) = run_main(&probe);
@@ -429,7 +429,7 @@ fn record_schema_cache_is_scoped_by_type_database_not_bare_def_id() {
 /// which would have exposed Rust's mutated-key failure never reaches the JIT.
 #[test]
 fn a_mutable_collection_key_is_refused_before_it_can_be_mutated() {
-    let src = "fn main() -> Int {\n  let key = Vec()\n  key.push(1)\n  let m = Map()\n  m.insert(key, 42)\n  key.push(2)\n  if m.contains(key) { 1 } else { 0 }\n}\n";
+    let src = "fn main() -> Int {\n  var key = Vec()\n  key.push(1)\n  var m = Map()\n  m.insert(key, 42)\n  key.push(2)\n  if m.contains(key) { 1 } else { 0 }\n}\n";
     let map = SourceMap::new();
     let file = map.intern("adversarial_audit.px", src);
     let parsed = parse(file, src);
@@ -523,7 +523,7 @@ fn choice_backtracking_under_allocation_pressure_keeps_every_live_intermediate()
     }
 
     let src = "fn main() -> Int {\n  \
-               let ms = read scan(choice(\n    \
+               var ms = read scan(choice(\n    \
                M: `mul({a:int},{b:int})`,\n    \
                D: `dbl({int})`,\n    \
                T: `tpl({int})`,\n  ))\n  \
@@ -553,7 +553,7 @@ fn choice_backtracking_under_allocation_pressure_keeps_every_live_intermediate()
 
 #[test]
 fn sections_preserve_text_offsets_into_the_original_input() {
-    let src = "fn main() -> Text {\n  let groups = read sections(lines(word))\n  groups.get(1).get(0)\n}\n";
+    let src = "fn main() -> Text {\n  var groups = read sections(lines(word))\n  groups.get(1).get(0)\n}\n";
     let (runtime, result) = run_main_with_input(src, "alpha\n\nbeta\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_text(), "beta");
@@ -564,7 +564,7 @@ fn lines_require_each_child_parser_to_consume_the_whole_line() {
     // `int` may consume the `12` prefix, but the trailing `junk` makes the line
     // invalid under §7.5 full-consumption semantics.
     let (runtime, _raw, _unit) = run_main_raw_with_input(
-        "fn main() -> Int {\n  let values = read lines(int)\n  values.len()\n}\n",
+        "fn main() -> Int {\n  var values = read lines(int)\n  values.len()\n}\n",
         "12junk\n",
     );
     assert_eq!(
@@ -576,7 +576,7 @@ fn lines_require_each_child_parser_to_consume_the_whole_line() {
 
 #[test]
 fn lines_rest_is_bounded_to_each_line() {
-    let src = "fn main() -> Text {\n  let values = read lines(rest)\n  values.get(1)\n}\n";
+    let src = "fn main() -> Text {\n  var values = read lines(rest)\n  values.get(1)\n}\n";
     let (runtime, result) = run_main_with_input(src, "alpha\nbeta\ngamma\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_text(), "beta");
@@ -604,7 +604,7 @@ fn anonymous_word_template_vec_uses_the_text_element_descriptor() {
 
 #[test]
 fn template_text_capture_stops_before_the_following_literal() {
-    let src = "fn main() -> Text {\n  let parsed = read `pre{body:text}post`\n  parsed.body\n}\n";
+    let src = "fn main() -> Text {\n  var parsed = read `pre{body:text}post`\n  parsed.body\n}\n";
     let (runtime, result) = run_main_with_input(src, "premiddlepost");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_text(), "middle");
@@ -629,19 +629,19 @@ fn template_text_capture_stops_before_the_following_literal() {
 #[test]
 fn a_grid_of_char_is_positional_so_a_space_is_a_cell() {
     // A space occupies its own column.
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  g.width() * 10 + g.height()\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  g.width() * 10 + g.height()\n}\n";
     let (runtime, result) = run_main_with_input(src, "a b\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 31, "\"a b\" is three columns, not two");
 
     // And it is readable at the column it occupies.
-    let src = "fn main() -> Char {\n  let g = read grid(char)\n  g.get(1, 0)\n}\n";
+    let src = "fn main() -> Char {\n  var g = read grid(char)\n  g.get(1, 0)\n}\n";
     let (runtime, result) = run_main_with_input(src, "a b\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_char(), ' ');
 
     // Trailing and leading spaces are cells too, for the same reason.
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  g.width() * 10 + g.height()\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  g.width() * 10 + g.height()\n}\n";
     let (runtime, result) = run_main_with_input(src, "ab \n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 31);
@@ -652,7 +652,7 @@ fn a_grid_of_char_is_positional_so_a_space_is_a_cell() {
     // A genuinely ragged grid is rejected again, which is the point: §7.5 says
     // every row has the same cell count, and this input does not.
     let (runtime, _raw, _unit) = run_main_raw_with_input(
-        "fn main() -> Int {\n  let g = read grid(char)\n  g.width()\n}\n",
+        "fn main() -> Int {\n  var g = read grid(char)\n  g.width()\n}\n",
         "ab\na b\n",
     );
     assert_eq!(
@@ -671,14 +671,14 @@ fn a_grid_of_char_is_positional_so_a_space_is_a_cell() {
 #[test]
 fn a_grid_row_may_end_in_horizontal_whitespace() {
     let src =
-        "fn main() -> Int {\n  let g = read grid(int)\n  g.width() * 100 + g.height() * 10 + g[1, 1]\n}\n";
+        "fn main() -> Int {\n  var g = read grid(int)\n  g.width() * 100 + g.height() * 10 + g[1, 1]\n}\n";
     let (runtime, result) = run_main_with_input(src, "12 34 \n56 78 \n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 2 * 100 + 2 * 10 + 78);
 
     // The same file through `matrix`, which never had the defect: the two
     // constructors agree now, and that agreement is the assertion.
-    let src = "fn main() -> Int {\n  let g = read matrix(int)\n  g.width() * 100 + g.height() * 10 + g[1, 1]\n}\n";
+    let src = "fn main() -> Int {\n  var g = read matrix(int)\n  g.width() * 100 + g.height() * 10 + g[1, 1]\n}\n";
     let (runtime, result) = run_main_with_input(src, "12 34 \n56 78 \n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 2 * 100 + 2 * 10 + 78);
@@ -786,7 +786,7 @@ fn every_root_parser_reads_every_file_ending() {
             "sep(\" -> \", word)" => "v.len() * 10 + v.get(2).len()",
             _ => "v.len() * 10 + v.get(2)",
         };
-        let src = format!("fn main() -> Int {{\n  let v = {parser}\n  {tail}\n}}\n");
+        let src = format!("fn main() -> Int {{\n  var v = {parser}\n  {tail}\n}}\n");
         for ending in ENDINGS {
             let input = format!("{body}{ending}");
             let (runtime, result) = run_main_with_input(&src, &input);
@@ -807,7 +807,7 @@ fn every_root_parser_reads_every_file_ending() {
     // spelling both earlier rounds broke. Its elements are `Char`s, so the
     // measure is the count — enough here, because a terminator read as an
     // element or a value dropped both change it.
-    let src = "fn main() -> Int {\n  let v = read chars(one_of(\"^v<>\"), skip: whitespace)\n  v.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = read chars(one_of(\"^v<>\"), skip: whitespace)\n  v.len()\n}\n";
     for ending in ENDINGS {
         let input = format!("^v<>{ending}");
         let (runtime, result) = run_main_with_input(src, &input);
@@ -826,7 +826,7 @@ fn every_root_parser_reads_every_file_ending() {
     // is the buffer. So it reads the terminator, which is what makes
     // `parse(t, rest)` the identity on `t` — the property the round-two trim
     // broke, and the reason the trim is gone rather than merely smaller.
-    let src = "fn main() -> Int {\n  let t = read rest\n  t.len()\n}\n";
+    let src = "fn main() -> Int {\n  var t = read rest\n  t.len()\n}\n";
     for ending in ENDINGS {
         let input = format!("abc{ending}");
         let (runtime, result) = run_main_with_input(src, &input);
@@ -845,7 +845,7 @@ fn every_root_parser_reads_every_file_ending() {
     //
     // An ending with no bytes for `char` to read is nobody's, so it is the same
     // 2x2 grid…
-    let src = "fn main() -> Int {\n  let g = read grid(char)\n  g.width() * 10 + g.height()\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(char)\n  g.width() * 10 + g.height()\n}\n";
     for ending in ["", "\n", "\r\n", "\n\n", "\n\n\n", "\r\n\r\n"] {
         let input = format!("ab\ncd{ending}");
         let (runtime, result) = run_main_with_input(src, &input);
@@ -889,7 +889,7 @@ fn every_root_parser_reads_every_file_ending() {
     // `lines(int)` are unmoved by it. That difference is the rule working, not
     // the constructors disagreeing.
     let digits =
-        "fn main() -> Int {\n  let g = read grid(digit)\n  g.width() * 10 + g.height()\n}\n";
+        "fn main() -> Int {\n  var g = read grid(digit)\n  g.width() * 10 + g.height()\n}\n";
     let (runtime, result) = run_main_with_input(digits, "12\n34\n  \n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 22, "`digit` reads no cell in \"  \"");
@@ -924,7 +924,7 @@ fn every_root_parser_reads_every_file_ending() {
     // up: round three's extent trim deleted the third line for every child,
     // including the children that read it.
     let src =
-        "fn main() -> Int {\n  let v = read lines(rest)\n  v.len() * 10 + v.get(1).len()\n}\n";
+        "fn main() -> Int {\n  var v = read lines(rest)\n  v.len() * 10 + v.get(1).len()\n}\n";
     let (runtime, result) = run_main_with_input(src, "ab\ncd\n  \n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 32, "`rest` reads \"  \", so it is a line");
@@ -983,7 +983,7 @@ fn every_root_parser_reads_every_file_ending() {
             (bare, bare_tail, "bare"),
             (capture, capture_tail, "capture"),
         ] {
-            let src = format!("fn main() -> Int {{\n  let v = {parser}\n  {tail}\n}}\n");
+            let src = format!("fn main() -> Int {{\n  var v = {parser}\n  {tail}\n}}\n");
             let (runtime, result) = run_main_with_input(&src, input);
             assert!(
                 !runtime.has_pending_fault(),
@@ -1001,9 +1001,9 @@ fn every_root_parser_reads_every_file_ending() {
     // read their leading whitespace, and wrapping them in a capture does not
     // take it away.
     for parser in ["rest", "text"] {
-        let bare = format!("fn main() -> Int {{\n  let t = read {parser}\n  t.len()\n}}\n");
+        let bare = format!("fn main() -> Int {{\n  var t = read {parser}\n  t.len()\n}}\n");
         let capture =
-            format!("fn main() -> Int {{\n  let r = read `{{a:{parser}}}`\n  r.a.len()\n}}\n");
+            format!("fn main() -> Int {{\n  var r = read `{{a:{parser}}}`\n  r.a.len()\n}}\n");
         for (src, which) in [(&bare, "bare"), (&capture, "capture")] {
             let (runtime, result) = run_main_with_input(src, " ab\n");
             assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
@@ -1019,7 +1019,7 @@ fn every_root_parser_reads_every_file_ending() {
     // offset the following literal run — `SpaceRun` plus empty text — matches
     // the indent itself, `n` is bounded at byte 0 and `int` is handed the word.
     let src =
-        "fn main() -> Int {\n  let v = read lines(`{n:int} x`)\n  v.len() * 10 + v.get(2).n\n}\n";
+        "fn main() -> Int {\n  var v = read lines(`{n:int} x`)\n  v.len() * 10 + v.get(2).n\n}\n";
     let (runtime, result) = run_main_with_input(src, " 1 x\n 2 x\n 3 x\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 33, "an indented template still matches");
@@ -1060,9 +1060,9 @@ fn every_root_parser_reads_every_file_ending() {
             33,
         ),
     ] {
-        let csv = format!("fn main() -> Int {{\n  let v = read csv({child})\n  {tail}\n}}\n");
+        let csv = format!("fn main() -> Int {{\n  var v = read csv({child})\n  {tail}\n}}\n");
         let sep =
-            format!("fn main() -> Int {{\n  let v = read sep(\",\", {child})\n  {tail}\n}}\n");
+            format!("fn main() -> Int {{\n  var v = read sep(\",\", {child})\n  {tail}\n}}\n");
         for (src, which) in [(&csv, "csv"), (&sep, "sep(\",\", …)")] {
             let (runtime, result) = run_main_with_input(src, input);
             assert!(
@@ -1095,9 +1095,9 @@ fn every_root_parser_reads_every_file_ending() {
 #[test]
 fn an_interior_blank_line_is_a_row_and_a_trailing_one_is_nobodys() {
     let matrix =
-        "fn main() -> Int {\n  let g = read matrix(int)\n  g.width() * 10 + g.height()\n}\n";
-    let lines = "fn main() -> Int {\n  let v = read lines(int)\n  v.len()\n}\n";
-    let grid = "fn main() -> Int {\n  let g = read grid(digit)\n  g.width() * 10 + g.height()\n}\n";
+        "fn main() -> Int {\n  var g = read matrix(int)\n  g.width() * 10 + g.height()\n}\n";
+    let lines = "fn main() -> Int {\n  var v = read lines(int)\n  v.len()\n}\n";
+    let grid = "fn main() -> Int {\n  var g = read grid(digit)\n  g.width() * 10 + g.height()\n}\n";
 
     // Interior: all three complain, none silently deletes a line.
     let (runtime, _raw, _unit) = run_main_raw_with_input(matrix, "1 2\n  \n3 4\n");
@@ -1132,7 +1132,7 @@ fn an_interior_blank_line_is_a_row_and_a_trailing_one_is_nobodys() {
     // and §7.5 says so rather than leaving a reader to find it: `matrix` is
     // "lines containing whitespace-separated elements" and that is not a
     // definition of `lines(ws(...))`.
-    let lines_ws = "fn main() -> Int {\n  let v = read lines(ws(int))\n  \
+    let lines_ws = "fn main() -> Int {\n  var v = read lines(ws(int))\n  \
                     v.len() * 10 + v.get(v.len() - 1).len()\n}\n";
     let (runtime, result) = run_main_with_input(lines_ws, "1 2\n3 4\n  \n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
@@ -1156,7 +1156,7 @@ fn an_interior_blank_line_is_a_row_and_a_trailing_one_is_nobodys() {
     );
     // `csv` is not in the vacuous-success list: it always makes at least one
     // field, so `csv(int)` fails on a blank line and the line is dropped.
-    let lines_csv = "fn main() -> Int {\n  let v = read lines(csv(int))\n  v.len()\n}\n";
+    let lines_csv = "fn main() -> Int {\n  var v = read lines(csv(int))\n  v.len()\n}\n";
     let (runtime, result) = run_main_with_input(lines_csv, "1,2\n3,4\n  \n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 2, "`csv(int)` made nothing of \"  \"");
@@ -1181,9 +1181,9 @@ fn an_interior_blank_line_is_a_row_and_a_trailing_one_is_nobodys() {
 /// half is unchanged.
 #[test]
 fn the_same_template_reads_the_same_bytes_under_lines_and_under_block() {
-    let lines = "fn main() -> Int {\n  let v = read lines(`items: {items:csv(int)}`)\n  \
+    let lines = "fn main() -> Int {\n  var v = read lines(`items: {items:csv(int)}`)\n  \
                  v.get(0).items.len()\n}\n";
-    let block = "fn main() -> Int {\n  let b = read block(`items: {items:csv(int)}`, \
+    let block = "fn main() -> Int {\n  var b = read block(`items: {items:csv(int)}`, \
                  `op: {op:word}`)\n  b.items.len()\n}\n";
 
     let (runtime, from_lines) =
@@ -1226,19 +1226,19 @@ fn a_capture_is_bounded_by_a_whitespace_only_template_part() {
     // A plain space run. `text` is non-greedy, so the bound is the *earliest*
     // position the space run can match — the same rule a literal bound follows.
     let src =
-        "fn main() -> Text {\n  let r = read lines(`{name:text} {v:int}`)\n  r.get(1).name\n}\n";
+        "fn main() -> Text {\n  var r = read lines(`{name:text} {v:int}`)\n  r.get(1).name\n}\n";
     let (runtime, result) = run_main_with_input(src, "foo 3\nbar 12\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_text(), "bar");
 
     // `\s+`.
-    let src = "fn main() -> Int {\n  let r = read lines(`{name:text}\\s+{v:int}`)\n  var t = 0\n  for x in r { t = t + x.v }\n  t\n}\n";
+    let src = "fn main() -> Int {\n  var r = read lines(`{name:text}\\s+{v:int}`)\n  var t = 0\n  for x in r { t = t + x.v }\n  t\n}\n";
     let (runtime, result) = run_main_with_input(src, "foo 3\nbar 12\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 15);
 
     // `\n`, which bounds a capture across a line ending.
-    let src = "fn main() -> Int {\n  let r = read `{name:text}\\n{v:int}`\n  r.v\n}\n";
+    let src = "fn main() -> Int {\n  var r = read `{name:text}\\n{v:int}`\n  r.v\n}\n";
     let (runtime, result) = run_main_with_input(src, "foo\n3\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 3);
@@ -1247,7 +1247,7 @@ fn a_capture_is_bounded_by_a_whitespace_only_template_part() {
     // past it for something that does. Nothing does here, so the capture is
     // unbounded and `text` takes the line — which is the documented answer for
     // a template that asks for zero-or-more.
-    let src = "fn main() -> Text {\n  let r = read lines(`{name:text}\\s*`)\n  r.get(0).name\n}\n";
+    let src = "fn main() -> Text {\n  var r = read lines(`{name:text}\\s*`)\n  r.get(0).name\n}\n";
     let (runtime, result) = run_main_with_input(src, "foo 3\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_text(), "foo 3");
@@ -1257,7 +1257,7 @@ fn a_capture_is_bounded_by_a_whitespace_only_template_part() {
     // are pinned here because ADR-079 Decision 2 and `capture_bound`'s doc
     // comment used to explain this case by crediting "the comma's `SpaceRun`"
     // with eating the space, a mechanism two later decisions removed.
-    let src = "fn main() -> Int {\n  let r = read `{a:int},{b:int}`\n  r.a * 100 + r.b\n}\n";
+    let src = "fn main() -> Int {\n  var r = read `{a:int},{b:int}`\n  r.a * 100 + r.b\n}\n";
     // No space at all — which a one-or-more `SpaceRun` could not match.
     let (runtime, result) = run_main_with_input(src, "12,34\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
@@ -1289,10 +1289,10 @@ fn a_capture_is_bounded_by_a_whitespace_only_template_part() {
 #[test]
 fn a_parse_is_the_identity_on_the_text_it_was_given() {
     let src = "fn main() -> Int {\n  \
-               let a = parse(\"abc\\n\", rest)\n  \
-               let b = parse(\"abc\", rest)\n  \
-               let c = parse(\"abc\\r\\n\", rest)\n  \
-               let d = parse(\"abc\\n\\n\", rest)\n  \
+               var a = parse(\"abc\\n\", rest)\n  \
+               var b = parse(\"abc\", rest)\n  \
+               var c = parse(\"abc\\r\\n\", rest)\n  \
+               var d = parse(\"abc\\n\\n\", rest)\n  \
                a.len() * 1000 + b.len() * 100 + c.len() * 10 + d.len()\n}\n";
     let (runtime, result) = run_main_with_input(src, "unrelated stdin\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
@@ -1304,7 +1304,7 @@ fn a_parse_is_the_identity_on_the_text_it_was_given() {
 
     // The same at the `read` end, so the two callers are visibly one function:
     // a root `rest` takes the whole input file, terminator included.
-    let src = "fn main() -> Int {\n  let t = read rest\n  t.len()\n}\n";
+    let src = "fn main() -> Int {\n  var t = read rest\n  t.len()\n}\n";
     let (runtime, result) = run_main_with_input(src, "abc\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 4);
@@ -1326,8 +1326,8 @@ fn a_parse_is_the_identity_on_the_text_it_was_given() {
 /// right must stay right.
 #[test]
 fn two_spellings_of_one_whitespace_policy_bound_a_capture_alike() {
-    let escaped = "fn main() -> Text {\n  let r = read lines(`{a:text}\\s+bar`)\n  r.get(0).a\n}\n";
-    let plain = "fn main() -> Text {\n  let r = read lines(`{a:text} bar`)\n  r.get(0).a\n}\n";
+    let escaped = "fn main() -> Text {\n  var r = read lines(`{a:text}\\s+bar`)\n  r.get(0).a\n}\n";
+    let plain = "fn main() -> Text {\n  var r = read lines(`{a:text} bar`)\n  r.get(0).a\n}\n";
 
     // Past an interior space — the half that faulted.
     for src in [escaped, plain] {
@@ -1345,7 +1345,7 @@ fn two_spellings_of_one_whitespace_policy_bound_a_capture_alike() {
     // The run is matched as a run, so a leading `\s*` that constrains nothing
     // on its own still keeps the whitespace out of the capture: the bound is
     // the earliest position where `\s*bar` matches, which is before the spaces.
-    let src = "fn main() -> Text {\n  let r = read lines(`{a:text}\\s*bar`)\n  r.get(0).a\n}\n";
+    let src = "fn main() -> Text {\n  var r = read lines(`{a:text}\\s*bar`)\n  r.get(0).a\n}\n";
     let (runtime, result) = run_main_with_input(src, "x  bar\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_text(), "x");
@@ -1366,7 +1366,7 @@ fn two_spellings_of_one_whitespace_policy_bound_a_capture_alike() {
 #[test]
 fn a_bounded_word_capture_stops_at_its_region_end() {
     // The shape from tests/aoc-corpus/m9_almanac.px.
-    let src = "fn main() -> Text {\n  let r = read `{w:word}-to-{x:word} map:`\n  \
+    let src = "fn main() -> Text {\n  var r = read `{w:word}-to-{x:word} map:`\n  \
                r.w\n}\n";
     let (runtime, result) = run_main_with_input(src, "seed-to-soil map:");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
@@ -1376,14 +1376,14 @@ fn a_bounded_word_capture_stops_at_its_region_end() {
         "the following literal is the bound; `-` is not a word delimiter"
     );
 
-    let src = "fn main() -> Text {\n  let r = read `{w:word}-to-{x:word} map:`\n  \
+    let src = "fn main() -> Text {\n  var r = read `{w:word}-to-{x:word} map:`\n  \
                r.x\n}\n";
     let (runtime, result) = run_main_with_input(src, "seed-to-soil map:");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_text(), "soil");
 
     // Unbounded, `-` is an ordinary word character and must stay one.
-    let src = "fn main() -> Text {\n  let v = read ws(word)\n  v.get(0)\n}\n";
+    let src = "fn main() -> Text {\n  var v = read ws(word)\n  v.get(0)\n}\n";
     let (runtime, result) = run_main_with_input(src, "a-b c");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(
@@ -1426,7 +1426,7 @@ fn one_generic_function_is_instantiated_at_int_and_text_in_one_program() {
     // The pre-existing test named "two clones" calls `id` twice at Int and
     // therefore proves clone reuse, not distinct monomorphic instantiations.
     let (runtime, result) = run_main(
-        "fn id(x) { x }\nfn main() -> Int {\n  let word = id(\"four\")\n  id(38) + word.len()\n}\n",
+        "fn id(x) { x }\nfn main() -> Int {\n  var word = id(\"four\")\n  id(38) + word.len()\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 42);
@@ -1444,7 +1444,7 @@ fn tuple_schema_uses_the_unit_descriptor_for_unit_elements() {
     // grammar accepts today: a `{ ... }` block in statement position is read as
     // a call of the following parenthesized expression until FE-04 lands (S12).
     let (runtime, result) = run_main(
-        "fn main() {\n  let xs = Vec()\n  let nothing = xs.push(1)\n  let pair = (nothing, 7)\n  pair\n}\n",
+        "fn main() {\n  var xs = Vec()\n  var nothing = xs.push(1)\n  var pair = (nothing, 7)\n  pair\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(
@@ -1474,7 +1474,7 @@ fn tuple_schema_uses_the_enum_descriptor_for_enum_elements() {
 #[test]
 fn grid_positions_vec_uses_the_point_tuple_descriptor() {
     let (runtime, result) = run_main_with_input(
-        "fn main() {\n  let g = read grid(char)\n  g.positions()\n}\n",
+        "fn main() {\n  var g = read grid(char)\n  g.positions()\n}\n",
         "ab\ncd\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
@@ -1492,7 +1492,7 @@ fn grid_positions_vec_uses_the_point_tuple_descriptor() {
 #[test]
 fn grid_text_row_preserves_the_grid_cell_descriptor() {
     let (runtime, result) = run_main_with_input(
-        "fn main() {\n  let g = read matrix(word)\n  g.row(0)\n}\n",
+        "fn main() {\n  var g = read matrix(word)\n  g.row(0)\n}\n",
         "alpha beta\ngamma delta\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
@@ -1519,7 +1519,7 @@ fn grid_text_row_preserves_the_grid_cell_descriptor() {
 #[test]
 fn absent_grid_find_has_no_unit_under_a_tuple_type() {
     let src = "fn main() -> Int {\n\
-               \x20 let g = read matrix(int)\n\
+               \x20 var g = read matrix(int)\n\
                \x20 match g.find(99) {\n    Some(p) => 1,\n    None => 0,\n  }\n\
                }\n";
     let (runtime, result) = run_main_with_input(src, "1 2\n3 4\n");
@@ -1531,7 +1531,7 @@ fn absent_grid_find_has_no_unit_under_a_tuple_type() {
     );
 
     let src = "fn main() -> Int {\n\
-               \x20 let g = read matrix(int)\n\
+               \x20 var g = read matrix(int)\n\
                \x20 match g.find(4) {\n    Some(p) => 1,\n    None => 0,\n  }\n\
                }\n";
     let (runtime, result) = run_main_with_input(src, "1 2\n3 4\n");
@@ -1541,7 +1541,7 @@ fn absent_grid_find_has_no_unit_under_a_tuple_type() {
     // And the `Option` really is an enum value, not a tuple that happens to
     // answer: the descriptor is what `format`/`equals`/`hash` dispatch through.
     let (runtime, result) = run_main_with_input(
-        "fn main() {\n  let g = read matrix(int)\n  g.find(99)\n}\n",
+        "fn main() {\n  var g = read matrix(int)\n  g.find(99)\n}\n",
         "1 2\n3 4\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
@@ -1562,18 +1562,18 @@ fn absent_grid_find_has_no_unit_under_a_tuple_type() {
 fn absent_map_get_has_no_unit_under_the_value_type() {
     let unwrap = "fn unwrap(o: Option[Int]) -> Int {\n  match o {\n    Some(v) => v,\n    None => 0 - 1,\n  }\n}\n";
     let (runtime, result) = run_main(&format!(
-        "{unwrap}fn main() -> Int {{\n  let m = Map()\n  m.insert(1, 10)\n  unwrap(m.get(2))\n}}\n"
+        "{unwrap}fn main() -> Int {{\n  var m = Map()\n  m.insert(1, 10)\n  unwrap(m.get(2))\n}}\n"
     ));
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), -1);
     let (runtime, result) = run_main(&format!(
-        "{unwrap}fn main() -> Int {{\n  let m = Map()\n  m.insert(1, 10)\n  unwrap(m.get(1))\n}}\n"
+        "{unwrap}fn main() -> Int {{\n  var m = Map()\n  m.insert(1, 10)\n  unwrap(m.get(1))\n}}\n"
     ));
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 10);
 
     let (runtime, result) =
-        run_main("fn main() {\n  let m = Map()\n  m.insert(1, 10)\n  m.get(2)\n}\n");
+        run_main("fn main() {\n  var m = Map()\n  m.insert(1, 10)\n  m.get(2)\n}\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(
         result.descriptor().id(),
@@ -1587,15 +1587,15 @@ fn empty_element_returning_sinks_fault_instead_of_returning_uninitialized_gc_ref
     let cases = [
         (
             "reduce",
-            "fn main() -> Int {\n  let v = Vec()\n  v.reduce(|a, x| a + x)\n}\n",
+            "fn main() -> Int {\n  var v = Vec()\n  v.reduce(|a, x| a + x)\n}\n",
         ),
         (
             "min_by",
-            "fn main() -> Int {\n  let v = Vec()\n  v.min_by(|a, b| a < b)\n}\n",
+            "fn main() -> Int {\n  var v = Vec()\n  v.min_by(|a, b| a < b)\n}\n",
         ),
         (
             "max_by",
-            "fn main() -> Int {\n  let v = Vec()\n  v.max_by(|a, b| a < b)\n}\n",
+            "fn main() -> Int {\n  var v = Vec()\n  v.max_by(|a, b| a < b)\n}\n",
         ),
     ];
 
@@ -1667,7 +1667,7 @@ fn text_equality_compares_bytes_not_the_payload_discriminant() {
 #[test]
 fn char_ordering_uses_unicode_scalar_values_without_out_of_bounds_reads() {
     let (runtime, result) = run_main_with_input(
-        "fn main() -> Bool {\n  let g = read grid(char)\n  g.get(0, 0) < g.get(1, 0)\n}\n",
+        "fn main() -> Bool {\n  var g = read grid(char)\n  g.get(0, 0) < g.get(1, 0)\n}\n",
         "ab\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
@@ -1747,8 +1747,8 @@ fn native_arithmetic_faults_match_the_runtime_wrappers() {
 fn an_overflow_diverts_before_the_next_statement_runs() {
     let (runtime, _) = run_main(
         "fn main() -> Int {\n  \
-           let x = 9223372036854775807 + 1\n  \
-           let y = 1 / 0\n  \
+           var x = 9223372036854775807 + 1\n  \
+           var y = 1 / 0\n  \
            x + y\n\
          }\n",
     );
@@ -1771,9 +1771,9 @@ fn an_overflow_diverts_before_the_next_statement_runs() {
 fn a_fault_in_a_wrapper_is_observed_by_the_inline_check() {
     let (runtime, _) = run_main(
         "fn main() -> Int {\n  \
-           let v = Vec()\n  \
-           let x = v.get(0)\n  \
-           let y = 1 / 0\n  \
+           var v = Vec()\n  \
+           var x = v.get(0)\n  \
+           var y = 1 / 0\n  \
            x + y\n\
          }\n",
     );
@@ -1980,7 +1980,7 @@ fn small_scalars_are_extracted_at_their_own_width() {
     // property under test is unaffected either way — this reads a grid because
     // that is what it read when P0-12 was measured.
     let chars = comparison_shapes_for(
-        "fn main() -> Bool {\n  let g = read grid(char)\n  g.get(0, 0) < g.get(1, 0)\n}\n",
+        "fn main() -> Bool {\n  var g = read grid(char)\n  g.get(0, 0) < g.get(1, 0)\n}\n",
     );
     assert!(
         !chars.contains("extract:Int"),
@@ -1993,7 +1993,7 @@ fn small_scalars_are_extracted_at_their_own_width() {
     );
 
     let bools = comparison_shapes_for(
-        "fn main() -> Bool {\n  let a = 1 == 1\n  let b = 2 == 2\n  a == b\n}\n",
+        "fn main() -> Bool {\n  var a = 1 == 1\n  var b = 2 == 2\n  a == b\n}\n",
     );
     assert!(
         bools.contains("extract:Bool"),
@@ -2021,7 +2021,7 @@ fn small_scalars_are_extracted_at_their_own_width() {
 fn a_dead_local_stops_being_reachable_from_its_frame() {
     const FILL_AND_LOOP: &str = "\
 fn main() -> Int {
-  let xs = Vec()
+  var xs = Vec()
   var i = 0
   while i < 3000 {
     xs.push(i + 2000)

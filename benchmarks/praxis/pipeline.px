@@ -7,16 +7,17 @@
 // Praxis pipeline, a Rust iterator chain, and a Python generator expression.
 //
 // A second chain adds `enumerate` and `fold` so the measurement is not one
-// combinator triple. The rep counter is copied into a `let` before the closure
-// captures it: capturing the `var` itself would put the loop counter in a
-// GC-managed cell (§4.10) and measure that instead.
+// combinator triple. The rep counter is copied into a fresh binding before the
+// closure captures it, and the copy is never assigned: capturing the counter
+// itself would capture a *reassigned* binding, which is what puts a value in a
+// GC-managed cell (§4.10, ADR-125) and would measure that instead.
 //
 // Input: the source vector's length, as one integer on stdin.
 // Output: the source length, the fused chain's checksum, then the folded one's.
 
-let n = read int
+var n = read int
 
-let v = Vec()
+var v = Vec()
 var i = 0
 while i < n {
     v.push((i * 7919 + 13) % 1000003)
@@ -26,7 +27,7 @@ while i < n {
 var acc = 0
 var r = 0
 while r < 12 {
-    let salt = r
+    var salt = r
     acc = (acc + v.map(|x| (x * 3 + salt) % 1000003).filter(|x| x % 5 != 0).sum()) % 1000003
     r = r + 1
 }
@@ -34,7 +35,7 @@ while r < 12 {
 var folded = 0
 var s = 0
 while s < 12 {
-    let salt = s
+    var salt = s
     folded = (folded
         + v.enumerate().map(|p| match p { (idx, x) => (x + idx * salt) % 1000003 })
             .fold(0, |a, x| (a * 2 + x) % 1000003)) % 1000003

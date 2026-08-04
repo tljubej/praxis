@@ -82,7 +82,6 @@ pub enum SyntaxKind {
     UnterminatedBacktickTemplate,
 
     // ---- Keywords (§4). All are lexed; only a subset is parsed in M1. ----
-    KW_LET,      // `let`
     KW_VAR,      // `var`
     KW_FN,       // `fn`
     KW_IF,       // `if`
@@ -200,9 +199,7 @@ pub enum SyntaxKind {
     // ---- Tree nodes (produced by the parser; added incrementally in Slice 4) ----
     /// The root node of a parsed file.
     SOURCE_FILE,
-    /// A `let name = expr` binding.
-    LET_STMT,
-    /// A `var name = expr` binding.
+    /// A `var name = expr` binding — the language's one binding form (ADR-125).
     VAR_STMT,
     /// A bare expression used as a statement.
     EXPR_STMT,
@@ -488,7 +485,6 @@ impl SyntaxKind {
     #[must_use]
     pub fn from_keyword(text: &str) -> Option<SyntaxKind> {
         Some(match text {
-            "let" => Self::KW_LET,
             "var" => Self::KW_VAR,
             "fn" => Self::KW_FN,
             "if" => Self::KW_IF,
@@ -515,7 +511,6 @@ impl SyntaxKind {
     #[must_use]
     pub fn keyword_text(self) -> Option<&'static str> {
         Some(match self {
-            Self::KW_LET => "let",
             Self::KW_VAR => "var",
             Self::KW_FN => "fn",
             Self::KW_IF => "if",
@@ -557,11 +552,11 @@ mod tests {
         // Tokens and trivia are not nodes; everything from SOURCE_FILE up is.
         assert!(SyntaxKind::Ident.is_token());
         assert!(SyntaxKind::IntLit.is_token());
-        assert!(SyntaxKind::KW_LET.is_token());
+        assert!(SyntaxKind::KW_VAR.is_token());
         assert!(SyntaxKind::PLUS.is_token());
         assert!(SyntaxKind::EOF.is_token());
         assert!(!SyntaxKind::Whitespace.is_token()); // trivia, not a token
-        assert!(!SyntaxKind::LET_STMT.is_token()); // node
+        assert!(!SyntaxKind::VAR_STMT.is_token()); // node
         assert!(SyntaxKind::SOURCE_FILE.is_node());
         assert!(SyntaxKind::PARSE_ERROR.is_node());
         assert!(!SyntaxKind::Ident.is_node());
@@ -572,7 +567,6 @@ mod tests {
     fn keyword_round_trip() {
         // Every keyword round-trips through from_keyword/keyword_text.
         let all = [
-            SyntaxKind::KW_LET,
             SyntaxKind::KW_VAR,
             SyntaxKind::KW_FN,
             SyntaxKind::KW_IF,

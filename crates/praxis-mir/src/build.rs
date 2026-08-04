@@ -35,12 +35,15 @@ use crate::ir::{
 /// from `AllocKind::Closure` at the allocation site.
 #[must_use]
 pub fn lower_module(module: &TypedModule, db: &mut TypeDb) -> Vec<Function> {
-    let escaping = &module.escaping_vars;
+    let bindings = Bindings {
+        escaping: &module.escaping_vars,
+        reassigned: &module.reassigned_vars,
+    };
     let mut funcs: Vec<Function> = module
         .items
         .iter()
         .map(|item| match item {
-            TypedItem::Fn(f) => lower_fn(f, db, escaping),
+            TypedItem::Fn(f) => lower_fn(f, db, bindings),
         })
         .collect();
     // Collect every closure literal in the module (across all fn bodies) and
@@ -48,11 +51,11 @@ pub fn lower_module(module: &TypedModule, db: &mut TypeDb) -> Vec<Function> {
     for item in &module.items {
         let TypedItem::Fn(tfn) = item;
         for closure in collect_closures(&tfn.body) {
-            funcs.push(lower_closure_fn(&closure, db, escaping));
+            funcs.push(lower_closure_fn(&closure, db, bindings));
         }
     }
     // …and one adapter per *function value* (REP-01, ADR-061). Deduplicated by
-    // name: every `let f = double` in the module shares `double`'s one adapter.
+    // name: every `var f = double` in the module shares `double`'s one adapter.
     let mut adapted: Vec<FnValueAdapter> = Vec::new();
     for item in &module.items {
         let TypedItem::Fn(tfn) = item;
@@ -209,6 +212,29 @@ fn collect_fn_values_expr(e: &TypedExpr, out: &mut Vec<FnValueAdapter>) {
     }
 }
 
+/// How the module's bindings must be given storage. Two module-wide facts, read
+/// at every site that binds a name to a slot.
+///
+/// They are a pair because they answer one question in two steps: *can* anything
+/// write this binding (§4.2 — since ADR-125 any of them may be written), and if
+/// so, does a closure see the writes too.
+#[derive(Clone, Copy)]
+struct Bindings<'a> {
+    /// The bindings captured by some closure **and** written somewhere (escape
+    /// analysis, M7-WS7b). These are boxed into a `VarCell` at their binding
+    /// site, and reads/writes route through the cell so the closure shares the
+    /// storage. A subset of [`reassigned`](Self::reassigned).
+    escaping: &'a std::collections::HashSet<praxis_hir::SymbolId>,
+    /// Every binding some `name = …` statement writes.
+    ///
+    /// Needed wherever a binding would otherwise **alias** a local rather than
+    /// own one. A match arm's `Bind` pattern binds the scrutinee's local
+    /// directly, which is free and correct for a name that is only read — but a
+    /// write through it would land in the scrutinee, and for `match v { n => … }`
+    /// the scrutinee's local *is* `v`'s.
+    reassigned: &'a std::collections::HashSet<praxis_hir::SymbolId>,
+}
+
 /// The (function-local) symbol id → local id map for the current frame, plus
 /// the block we are currently appending to.
 struct Builder<'a> {
@@ -227,11 +253,8 @@ struct Builder<'a> {
     text_ty: Type,
     char_ty: Type,
     unit_ty: Type,
-    /// The set of `var` symbols captured by some closure in the module (escape
-    /// analysis, M7-WS7b). These are boxed into a `VarCell` at their binding
-    /// site, and reads/writes route through the cell so a closure shares the
-    /// mutable storage. Empty when there are no captured `var`s.
-    escaping_vars: &'a std::collections::HashSet<praxis_hir::SymbolId>,
+    /// How each binding must be stored — see [`Bindings`].
+    bindings: Bindings<'a>,
     /// The stack of enclosing loops (M8-WS6, §4.11). `break` jumps to the top's
     /// `break_target`; `continue` jumps to the `continue_target` (the header for
     /// `while`/`for`, the body top for `loop`). Empty at the function's top level.
@@ -266,11 +289,7 @@ struct LoopCtx {
     result: Option<LocalId>,
 }
 
-fn lower_fn(
-    f: &TypedFn,
-    db: &mut TypeDb,
-    escaping_vars: &std::collections::HashSet<praxis_hir::SymbolId>,
-) -> Function {
+fn lower_fn(f: &TypedFn, db: &mut TypeDb, bindings: Bindings<'_>) -> Function {
     // Cache scalar handles once.
     let int_ty = db.int();
     let float_ty = db.float();
@@ -307,7 +326,7 @@ fn lower_fn(
         text_ty,
         char_ty,
         unit_ty,
-        escaping_vars,
+        bindings,
         loop_stack: Vec::new(),
         loop_preheaders: Vec::new(),
     };
@@ -322,7 +341,13 @@ fn lower_fn(
             Some(f.span),
         );
         b.locals.insert(p.symbol, id);
+        // The ABI slot is the param's own local either way — the cell, if one is
+        // needed, is built *from* it. Push before boxing so the signature keeps
+        // the incoming value's slot and not the cell's.
         b.func.params.push(id);
+        if b.bindings.escaping.contains(&p.symbol) {
+            bind_cell(&mut b, p.symbol, id, Some(&p.name), Some(f.span));
+        }
     }
 
     // The return slot. A compiler temp; span-less.
@@ -356,11 +381,7 @@ fn lower_fn(
 /// This is Approach B (the closure value is passed as a hidden first arg; the
 /// synthetic function loads its captures at entry). The call site reads `fn_ptr`
 /// and emits a `call_indirect` with the matching signature.
-fn lower_closure_fn(
-    closure: &LiftedClosure,
-    db: &mut TypeDb,
-    escaping_vars: &std::collections::HashSet<praxis_hir::SymbolId>,
-) -> Function {
+fn lower_closure_fn(closure: &LiftedClosure, db: &mut TypeDb, bindings: Bindings<'_>) -> Function {
     let int_ty = db.int();
     let float_ty = db.float();
     let bool_ty = db.bool();
@@ -400,7 +421,7 @@ fn lower_closure_fn(
         text_ty,
         char_ty,
         unit_ty,
-        escaping_vars,
+        bindings,
         loop_stack: Vec::new(),
         loop_preheaders: Vec::new(),
     };
@@ -428,6 +449,11 @@ fn lower_closure_fn(
         );
         b.locals.insert(p.symbol, id);
         b.func.params.push(id);
+        // A closure parameter is a binding like any other: writable, and
+        // capturable by a *nested* closure, which together is what needs a cell.
+        if b.bindings.escaping.contains(&p.symbol) {
+            bind_cell(&mut b, p.symbol, id, Some(&p.name), None);
+        }
     }
 
     // Prologue: load each captured value from the closure's env and bind it to
@@ -521,7 +547,13 @@ fn lower_fn_value_adapter(adapter: &FnValueAdapter, db: &mut TypeDb) -> Function
     let fault = func.new_block();
     func.blocks[fault.0 as usize].term = Terminator::Fault;
 
-    let escaping = std::collections::HashSet::new();
+    // The adapter's body is one call forwarding its own params; it declares no
+    // binding of its own, so neither set can have a member here.
+    let none = std::collections::HashSet::new();
+    let bindings = Bindings {
+        escaping: &none,
+        reassigned: &none,
+    };
     let mut b = Builder {
         func,
         locals: std::collections::HashMap::new(),
@@ -534,7 +566,7 @@ fn lower_fn_value_adapter(adapter: &FnValueAdapter, db: &mut TypeDb) -> Function
         text_ty,
         char_ty,
         unit_ty,
-        escaping_vars: &escaping,
+        bindings,
         loop_stack: Vec::new(),
         loop_preheaders: Vec::new(),
     };
@@ -739,25 +771,39 @@ fn lower_block_body(b: &mut Builder<'_>, block: &praxis_hir::TypedBlock) -> Loca
     lower_expr_gc(b, &block.tail)
 }
 
+/// Box `value` into a fresh `VarCell` and bind `symbol` to the cell.
+///
+/// The one place a cell is created, because every binding form can now need one
+/// (ADR-125): a `var` statement, a function or closure parameter, a `for`
+/// variable, and a name a pattern introduces are all writable and all
+/// capturable, so any of them can be in
+/// [`Bindings::escaping`](Bindings::escaping).
+///
+/// It allocates **per binding event**, not per symbol, and that is the point for
+/// the two sites inside a loop or a match arm: a `for` variable is a fresh
+/// binding each iteration, so a closure made on step *i* must keep step *i*'s
+/// cell. Overwriting the slot with a new cell each time leaves the previous cell
+/// alive in whatever captured it, which is exactly that rule.
+fn bind_cell(
+    b: &mut Builder<'_>,
+    symbol: praxis_hir::SymbolId,
+    value: LocalId,
+    name: Option<&str>,
+    span: Option<(u32, u32)>,
+) -> LocalId {
+    let cell = b.alloc_gc(
+        MirType::Opaque,
+        name.map(|n| format!("__cell_{n}")),
+        LocalDebugKind::User,
+        span,
+    );
+    b.call_runtime(cell, RuntimeSymbol::AllocVarCell, vec![value]);
+    b.locals.insert(symbol, cell);
+    cell
+}
+
 fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
     match stmt {
-        TypedStmt::Let {
-            symbol,
-            name,
-            init,
-            span,
-            ..
-        } => {
-            let v = lower_expr_gc(b, init);
-            let slot = b.alloc_gc(
-                MirType::Known(expr_static_type(init)),
-                Some(name.clone()),
-                LocalDebugKind::User,
-                Some(*span),
-            );
-            b.push(Inst::MoveGc { dst: slot, src: v });
-            b.locals.insert(*symbol, slot);
-        }
         TypedStmt::Var {
             symbol,
             name,
@@ -766,19 +812,13 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
             ..
         } => {
             let v = lower_expr_gc(b, init);
-            if b.escaping_vars.contains(symbol) {
-                // A captured `var` is boxed into a `VarCell` at its binding site
-                // (M7-WS7b, §4.10). The local holds the cell; reads/writes route
-                // through `praxis_var_cell_get`/`praxis_var_cell_set` so a
-                // closure sharing the cell sees mutations.
-                let cell = b.alloc_gc(
-                    MirType::Opaque,
-                    Some(format!("__cell_{name}")),
-                    LocalDebugKind::User,
-                    Some(*span),
-                );
-                b.call_runtime(cell, RuntimeSymbol::AllocVarCell, vec![v]);
-                b.locals.insert(*symbol, cell);
+            if b.bindings.escaping.contains(symbol) {
+                // A captured, written binding is boxed into a `VarCell` at its
+                // binding site (M7-WS7b, §4.10). The local holds the cell;
+                // reads/writes route through
+                // `praxis_var_cell_get`/`praxis_var_cell_set` so a closure
+                // sharing the cell sees mutations.
+                bind_cell(b, *symbol, v, Some(name), Some(*span));
             } else {
                 let slot = b.alloc_gc(
                     MirType::Known(expr_static_type(init)),
@@ -805,7 +845,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
             // For an escaping `var`, the slot holds a `VarCell`; a plain Assign
             // stores into the cell via `praxis_var_cell_set`. Compound assigns
             // read the cell first (get), compute, then write back (set).
-            let escaping = b.escaping_vars.contains(symbol);
+            let escaping = b.bindings.escaping.contains(symbol);
             if *op == AssignOp::Assign {
                 let v = lower_expr_gc(b, value);
                 if escaping {
@@ -958,7 +998,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             match b.locals.get(symbol).copied() {
                 Some(slot) => {
                     // An escaping `var`'s slot holds a `VarCell`; deref it.
-                    if b.escaping_vars.contains(symbol) {
+                    if b.bindings.escaping.contains(symbol) {
                         let value = b.alloc_temp(MirType::Known(*ty), e);
                         b.call_runtime(value, RuntimeSymbol::VarCellGet, vec![slot]);
                         value
@@ -1326,7 +1366,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             }
             let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
             // Indirect call dispatch (M7, §4.10): if the callee resolves to a
-            // local binding (a `let`/`var`/`param` holding a closure value), the
+            // local binding (a `var`/`param` holding a closure value), the
             // call is indirect — read the closure's `fn_ptr` and call through it.
             // Top-level `fn`s are never in `b.locals`, so this distinguishes the
             // two soundly.
@@ -2489,22 +2529,34 @@ fn lower_for(
         }
     };
     // The loop variable's slot: allocate one if the `for` binding has no slot
-    // yet (it is introduced by the loop, not a `let` statement). Reads of the
+    // yet (it is introduced by the loop, not a `var` statement). Reads of the
     // binding inside the body resolve to this slot via `b.locals`.
     let named = match binding {
         praxis_hir::TypedPattern::Bind { symbol, .. } => Some(*symbol),
         _ => None,
     };
+    // A loop variable that escapes is boxed *below*, per iteration, so its slot
+    // is never the cell and the reuse lookup must not find one.
+    let escapes = named.is_some_and(|s| b.bindings.escaping.contains(&s));
     let slot = named
+        .filter(|_| !escapes)
         .and_then(|s| b.locals.get(&s).copied())
         .unwrap_or_else(|| b.alloc_gc(MirType::Known(item_ty), None, LocalDebugKind::User, None));
-    if let Some(symbol) = named {
+    if let Some(symbol) = named.filter(|_| !escapes) {
         b.locals.insert(symbol, slot);
     }
     b.push(Inst::MoveGc {
         dst: slot,
         src: item_gc,
     });
+    // Each step of a `for` is a *fresh* binding of the loop variable, so a
+    // closure made on step `i` must keep step `i`'s value. The cell is therefore
+    // allocated here, inside the body, rather than once before the header: the
+    // next step overwrites the slot with a new cell and leaves the old one alive
+    // in whatever captured it.
+    if let Some(symbol) = named.filter(|_| escapes) {
+        bind_cell(b, symbol, slot, None, None);
+    }
     // A destructuring binding reads its components out of that same slot
     // (REP-25). The pattern is irrefutable — HIR reported one that can fail — so
     // there is no test and no branch: this is the binding half of
@@ -2908,7 +2960,7 @@ fn recognize_pipeline(db: &praxis_types::TypeDb, expr: &TypedExpr) -> Option<Pip
         return None;
     };
     // The outermost call is either a terminal sink, or a streaming stage that
-    // needs an implicit collect to produce a Vec (e.g. `let out = v.map(f)`).
+    // needs an implicit collect to produce a Vec (e.g. `var out = v.map(f)`).
     //
     // `count(pred)` is the one call that is **both** (REP-18, §3.3's
     // `counts.values().count(|n| n >= 2)`): it is exactly `filter(pred).count()`,
@@ -4639,7 +4691,7 @@ fn lower_list_lit(b: &mut Builder<'_>, elements: &[TypedExpr], ty: Type, e: &Typ
     use praxis_types::data::TypeData;
     use praxis_types::CollectionCtor;
     // The element type, from the literal's own `Vec[T]`. An element type that is
-    // still an inference variable — `let v = []`, whose use decides it — reaches
+    // still an inference variable — `var v = []`, whose use decides it — reaches
     // the backend as a null descriptor, which is what `praxis_vec_new`'s
     // "unknown element" contract already means (H10).
     let args: Vec<MirType> = match b.db.data(b.db.follow(ty)) {
@@ -4838,9 +4890,24 @@ fn emit_pattern_test(
             b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
             b.cur = on_fail;
         }
-        TypedPattern::Bind { symbol, .. } => {
-            // Always matches; bind the scrutinee value to the symbol.
-            b.locals.insert(*symbol, scrut);
+        TypedPattern::Bind { symbol, ty } => {
+            // Always matches. A name that is only ever *read* can alias the
+            // scrutinee's local outright — no slot, no copy. One that is written
+            // cannot: since ADR-125 every binding is assignable, and for a plain
+            // `match v { n => … }` the scrutinee's local is `v`'s own, so a write
+            // through `n` would land in `v`.
+            if b.bindings.escaping.contains(symbol) {
+                bind_cell(b, *symbol, scrut, None, None);
+            } else if b.bindings.reassigned.contains(symbol) {
+                let slot = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::User, None);
+                b.push(Inst::MoveGc {
+                    dst: slot,
+                    src: scrut,
+                });
+                b.locals.insert(*symbol, slot);
+            } else {
+                b.locals.insert(*symbol, scrut);
+            }
             b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
             b.cur = on_fail;
         }
@@ -5065,6 +5132,14 @@ fn bind_components(b: &mut Builder<'_>, src: LocalId, pat: &praxis_hir::TypedPat
             // A name the loop body reads: its own slot, so the debugger shows it
             // as the user local it is.
             TypedPattern::Bind { symbol, .. } => {
+                // Already its own slot, so a write through the name is fine as
+                // it stands; only a captured-and-written one needs the cell, and
+                // it is allocated here for the same per-binding-event reason the
+                // loop variable's is.
+                if b.bindings.escaping.contains(symbol) {
+                    bind_cell(b, *symbol, component_local, None, None);
+                    continue;
+                }
                 let slot = b.locals.get(symbol).copied().unwrap_or_else(|| {
                     b.alloc_gc(MirType::Opaque, None, LocalDebugKind::User, None)
                 });
@@ -5181,7 +5256,7 @@ mod tests {
     #[test]
     fn a_closure_and_its_indirect_call_carry_their_types() {
         let (funcs, analysis) =
-            lower_src_to_mir("fn f() -> Int {\n  let g = |n| n + 1\n  g(41)\n}");
+            lower_src_to_mir("fn f() -> Int {\n  var g = |n| n + 1\n  g(41)\n}");
         let rendered: Vec<String> = funcs[0]
             .locals
             .iter()
@@ -5207,7 +5282,7 @@ mod tests {
     fn a_fn_used_as_a_value_gets_one_adapter_per_function() {
         let (funcs, analysis) = lower_src_to_mir(
             "fn double(n: Int) -> Int { n * 2 }\n\
-             fn main() -> Int {\n  let f = double\n  let g = double\n  f(1) + g(2)\n}",
+             fn main() -> Int {\n  var f = double\n  var g = double\n  f(1) + g(2)\n}",
         );
         let adapters: Vec<&Function> = funcs
             .iter()
@@ -5483,7 +5558,7 @@ mod tests {
             (praxis_runtime::SMALL_INT_MAX + 1, false),
         ] {
             // A negative literal is unary negation of a positive one, which is
-            // not a `Lit::Int` — so the negative cases go through a `let` whose
+            // not a `Lit::Int` — so the negative cases go through a `var` whose
             // initializer is the positive magnitude and are checked for the
             // *positive* value's treatment. Only the two positive rows below
             // exercise the ceiling; the floor is covered by `small_int`'s own
@@ -5519,7 +5594,7 @@ mod tests {
         // frame, because `is_gc_safepoint` matches `Inst::Alloc` unconditionally.
         // It is an `Inst::ConstGc` now. What this test is about — the *type* of
         // the slot — is unchanged.
-        let (funcs, analysis) = lower_src_to_mir("fn main() -> Unit { let x = 1 }");
+        let (funcs, analysis) = lower_src_to_mir("fn main() -> Unit { var x = 1 }");
         let f = &funcs[0];
 
         let const_unit = f.blocks.iter().find_map(|b| {
@@ -5559,8 +5634,8 @@ mod tests {
         // index, and the pipeline's `praxis_vec_new` null element descriptor
         // (the integer `0` moved into a `Gc` slot to ride the argument list).
         for src in [
-            "fn main() -> Int {\n  let a = 10\n  let b = 20\n  let f = |x| x + a + b\n  f(12)\n}\n",
-            "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.map(|x| x * 2).sum()\n}\n",
+            "fn main() -> Int {\n  var a = 10\n  var b = 20\n  var f = |x| x + a + b\n  f(12)\n}\n",
+            "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.map(|x| x * 2).sum()\n}\n",
         ] {
             let (funcs, _analysis) = lower_src_to_mir(src);
 
@@ -5598,7 +5673,7 @@ mod tests {
         // is what makes P0-03's illegal state unconstructible rather than
         // merely absent: there is no longer a slot for the index to live in.
         let (funcs, _analysis) = lower_src_to_mir(
-            "fn main() -> Int {\n  let a = 10\n  let b = 20\n  let f = |x| x + a + b\n  f(12)\n}\n",
+            "fn main() -> Int {\n  var a = 10\n  var b = 20\n  var f = |x| x + a + b\n  f(12)\n}\n",
         );
         let closure_fn = funcs
             .iter()
@@ -5659,7 +5734,7 @@ mod tests {
         // intrinsic fallback must preserve that contract instead of returning
         // Unit and letting the outer pipeline reinterpret Unit as a Vec.
         let (funcs, _analysis) = lower_src_to_mir(
-            "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let n = 2\n  v.take(n).sum()\n}\n",
+            "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var n = 2\n  v.take(n).sum()\n}\n",
         );
         let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
         let unit_fallbacks: Vec<_> = main
@@ -5678,7 +5753,7 @@ mod tests {
     #[test]
     fn dynamic_skip_argument_does_not_silently_lower_to_unit() {
         let (funcs, _analysis) = lower_src_to_mir(
-            "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  let n = 2\n  v.skip(n).sum()\n}\n",
+            "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var n = 2\n  v.skip(n).sum()\n}\n",
         );
         let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
         let unit_fallbacks: Vec<_> = main
@@ -5702,7 +5777,7 @@ mod tests {
     /// program that *does* contain a `Lit::Unit` is what pins it.
     #[test]
     fn the_unit_predicate_recognizes_what_lowering_emits() {
-        let (funcs, _analysis) = lower_src_to_mir("fn main() -> Unit { let x = 1 }");
+        let (funcs, _analysis) = lower_src_to_mir("fn main() -> Unit { var x = 1 }");
         assert!(
             funcs[0]
                 .blocks
@@ -5725,7 +5800,7 @@ mod tests {
     fn a_take_bound_is_evaluated_once_before_the_loop() {
         for method in ["take", "skip"] {
             let (funcs, _analysis) = lower_src_to_mir(&format!(
-                "fn bound() -> Int {{ 2 }}\nfn main() -> Int {{\n  let v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.{method}(bound()).sum()\n}}\n"
+                "fn bound() -> Int {{ 2 }}\nfn main() -> Int {{\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.{method}(bound()).sum()\n}}\n"
             ));
             let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
             // Blocks are appended in emission order, and so are the instructions
@@ -5763,7 +5838,7 @@ mod tests {
     #[test]
     fn call_result_locals_retain_their_inferred_static_types() {
         let (funcs, analysis) = lower_src_to_mir(
-            "fn id(n: Int) -> Int { n }\nfn main() -> Int {\n  let v = Vec()\n  let n = v.len()\n  id(n)\n}\n",
+            "fn id(n: Int) -> Int { n }\nfn main() -> Int {\n  var v = Vec()\n  var n = v.len()\n  id(n)\n}\n",
         );
         let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
         let call_results: Vec<_> = main
@@ -5803,7 +5878,7 @@ mod tests {
         // integer from its `Gc` argument slot, so the assertion covers the
         // allocation form rather than the call form.
         let (funcs, analysis) =
-            lower_src_to_mir("fn main() {\n  let v = Vec()\n  v.push(1)\n  v.map(|x| x)\n}\n");
+            lower_src_to_mir("fn main() {\n  var v = Vec()\n  v.push(1)\n  v.map(|x| x)\n}\n");
         let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
 
         let mut saw_vec = false;
@@ -5866,7 +5941,7 @@ mod tests {
     /// makes the loop's own liveness root it.
     #[test]
     fn a_list_literal_allocates_a_vec_then_pushes_each_element() {
-        let (funcs, analysis) = lower_src_to_mir("fn main() {\n  let v = [1, 2, 3]\n}\n");
+        let (funcs, analysis) = lower_src_to_mir("fn main() {\n  var v = [1, 2, 3]\n}\n");
         let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
 
         // The instruction sequence, in order: the allocation first, then one
@@ -5940,7 +6015,7 @@ mod tests {
         );
 
         // The empty literal is the allocation and nothing else.
-        let (funcs, _) = lower_src_to_mir("fn main() {\n  let v: Vec[Int] = []\n}\n");
+        let (funcs, _) = lower_src_to_mir("fn main() {\n  var v: Vec[Int] = []\n}\n");
         let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
         assert_eq!(
             main.blocks
@@ -5970,7 +6045,7 @@ mod tests {
     #[test]
     fn a_for_over_a_text_names_the_text_accessors_and_takes_no_snapshot() {
         let (funcs, _analysis) =
-            lower_src_to_mir("fn main() {\n  let t = \"ab\"\n  for c in t { out(c) }\n}\n");
+            lower_src_to_mir("fn main() {\n  var t = \"ab\"\n  for c in t { out(c) }\n}\n");
         let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
         let called: Vec<RuntimeSymbol> = main
             .blocks
@@ -6001,7 +6076,7 @@ mod tests {
     #[test]
     fn for_continue_targets_the_increment_block_not_the_header() {
         let (funcs, _analysis) = lower_src_to_mir(
-            "fn main() -> Int {\n  let v = Vec()\n  v.push(1)\n  for x in v { continue }\n  0\n}\n",
+            "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  for x in v { continue }\n  0\n}\n",
         );
         let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
         let (header, body) = main
@@ -6051,7 +6126,7 @@ mod tests {
         // zero-field tuple and all tuple_set calls become no-ops. Assert the
         // MIR/codegen boundary carries the actual shape.
         let (funcs, analysis) =
-            lower_src_to_mir("fn main() {\n  let v = Vec()\n  v.push(10)\n  v.enumerate()\n}\n");
+            lower_src_to_mir("fn main() {\n  var v = Vec()\n  v.push(10)\n  v.enumerate()\n}\n");
         let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
         let tuple_ty = main
             .blocks
@@ -6081,7 +6156,7 @@ mod tests {
     #[test]
     fn zip_tuple_allocation_carries_a_real_two_element_type() {
         let (funcs, analysis) = lower_src_to_mir(
-            "fn main() {\n  let lhs = Vec()\n  lhs.push(10)\n  let rhs = Vec()\n  rhs.push(20)\n  lhs.zip(rhs)\n}\n",
+            "fn main() {\n  var lhs = Vec()\n  lhs.push(10)\n  var rhs = Vec()\n  rhs.push(20)\n  lhs.zip(rhs)\n}\n",
         );
         let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
         let tuple_ty = main
@@ -6117,7 +6192,7 @@ mod tests {
     #[test]
     fn a_compound_store_through_a_subscript_reads_once_and_writes_once() {
         let (funcs, _) = lower_src_to_mir(
-            "fn main() -> Int {\n  let c = Counter()\n  c[\"k\"] += 1\n  c[\"k\"]\n}",
+            "fn main() -> Int {\n  var c = Counter()\n  c[\"k\"] += 1\n  c[\"k\"]\n}",
         );
         let main = funcs.iter().find(|f| f.name == "main").expect("main");
         let runtime_calls = |sym: RuntimeSymbol| -> usize {
@@ -6145,7 +6220,7 @@ mod tests {
 
         // A plain store reads nothing.
         let (funcs, _) =
-            lower_src_to_mir("fn main() -> Int {\n  let m = Map()\n  m[\"k\"] = 1\n  m.len()\n}");
+            lower_src_to_mir("fn main() -> Int {\n  var m = Map()\n  m[\"k\"] = 1\n  m.len()\n}");
         let main = funcs.iter().find(|f| f.name == "main").expect("main");
         let map_index = main
             .blocks
@@ -6203,14 +6278,14 @@ mod tests {
         // read at all. Slot 1 rather than 0 is the point — a store that always
         // wrote the first field would pass with `x`.
         let (reads, writes) = field_ops(&format!(
-            "{decl}fn main() -> Int {{\n  let p = P {{ x: 1, y: 2 }}\n  p.y = 5\n  0\n}}"
+            "{decl}fn main() -> Int {{\n  var p = P {{ x: 1, y: 2 }}\n  p.y = 5\n  0\n}}"
         ));
         assert_eq!(writes, vec![1], "`p.y = 5` is one store, at `y`'s slot");
         assert!(reads.is_empty(), "`p.y = 5` reads nothing: {reads:?}");
 
         // The compound form reads the slot it writes, once each.
         let (reads, writes) = field_ops(&format!(
-            "{decl}fn main() -> Int {{\n  let p = P {{ x: 1, y: 2 }}\n  p.y += 5\n  0\n}}"
+            "{decl}fn main() -> Int {{\n  var p = P {{ x: 1, y: 2 }}\n  p.y += 5\n  0\n}}"
         ));
         assert_eq!(reads, vec![1], "one read, at the slot being written");
         assert_eq!(writes, vec![1], "one write");
@@ -6219,7 +6294,7 @@ mod tests {
         // the counterpart of the subscript store's evaluation rule.
         let (funcs, _) = lower_src_to_mir(&format!(
             "{decl}fn pick(v: Vec[P]) -> P {{ v[0] }}\n\
-             fn main() -> Int {{\n  let v = [P {{ x: 1, y: 2 }}]\n  pick(v).x += 1\n  0\n}}"
+             fn main() -> Int {{\n  var v = [P {{ x: 1, y: 2 }}]\n  pick(v).x += 1\n  0\n}}"
         ));
         let main = funcs.iter().find(|f| f.name == "main").expect("main");
         let picks = main
@@ -6256,7 +6331,7 @@ mod tests {
         let shapes = [
             ("var f = 1.0\nf {}= 2.0\nout(f)", "a binding"),
             (
-                "var f = 1.0\nlet c = || {{ f {}= 2.0 }}\nc()\nout(f)",
+                "var f = 1.0\nvar c = || {{ f {}= 2.0 }}\nc()\nout(f)",
                 "a captured binding (VarCell)",
             ),
             (
@@ -6264,7 +6339,7 @@ mod tests {
                 "a subscript store",
             ),
             (
-                "struct F { v: Float }\nlet f = F { v: 1.0 }\nf.v {}= 2.0\nout(f.v)",
+                "struct F { v: Float }\nvar f = F { v: 1.0 }\nf.v {}= 2.0\nout(f.v)",
                 "a field store",
             ),
         ];
@@ -6381,7 +6456,7 @@ mod tests {
 
         // Six members, so "once per step" and "once" are different numbers.
         let (funcs, _) = lower_src_to_mir(
-            "fn main() -> Int {\n  let s = Set()\n  var i = 0\n  \
+            "fn main() -> Int {\n  var s = Set()\n  var i = 0\n  \
              while i < 6 { s.insert(i)\n i = i + 1 }\n  \
              var t = 0\n  for x in s { t = t + x }\n  t\n}",
         );
@@ -6440,7 +6515,7 @@ mod tests {
         // A keyed collection snapshots **twice**, and pairs the two per step —
         // one `AllocKind::Tuple` inside the body, not one per collection.
         let (funcs, _) = lower_src_to_mir(
-            "fn main() -> Int {\n  let m = Map()\n  m.insert(1, 2)\n  \
+            "fn main() -> Int {\n  var m = Map()\n  m.insert(1, 2)\n  \
              var t = 0\n  for kv in m { t = t + kv.1 }\n  t\n}",
         );
         let main = funcs.iter().find(|f| f.name == "main").expect("main");
@@ -6471,11 +6546,11 @@ mod tests {
         // must not be copied to be walked.
         for (src, snapshot_free) in [
             (
-                "let v = Vec()\n  v.push(1)\n  for x in v { t = t + x }",
+                "var v = Vec()\n  v.push(1)\n  for x in v { t = t + x }",
                 "Vec",
             ),
             (
-                "let d = Deque()\n  d.push_back(1)\n  for x in d { t = t + x }",
+                "var d = Deque()\n  d.push_back(1)\n  for x in d { t = t + x }",
                 "Deque",
             ),
             ("for x in 0..3 { t = t + x }", "Range"),
@@ -6543,7 +6618,7 @@ mod tests {
 
         let record = reads(
             "struct P { x: Int, y: Int }\n\
-             fn main() -> Int {\n  let p = P { x: 1, y: 2 }\n  \
+             fn main() -> Int {\n  var p = P { x: 1, y: 2 }\n  \
              match p { P { x, y } => x + y }\n}",
         );
         assert_eq!(
@@ -6557,7 +6632,7 @@ mod tests {
             "a record has one constructor: there is no tag to compare"
         );
 
-        let tuple = reads("fn main() -> Int {\n  let t = (1, 2)\n  match t { (a, b) => a + b }\n}");
+        let tuple = reads("fn main() -> Int {\n  var t = (1, 2)\n  match t { (a, b) => a + b }\n}");
         assert_eq!(tuple.elems, 2, "one read per element");
         assert!(tuple.fields.is_empty());
         assert_eq!(tuple.tags, 0);
@@ -6567,7 +6642,7 @@ mod tests {
         // at their own declared index.
         let partial = reads(
             "struct P { a: Int, b: Int, c: Int }\n\
-             fn main() -> Int {\n  let p = P { a: 1, b: 2, c: 3 }\n  match p { P { c } => c }\n}",
+             fn main() -> Int {\n  var p = P { a: 1, b: 2, c: 3 }\n  match p { P { c } => c }\n}",
         );
         assert_eq!(partial.fields, vec![2], "the third field, and only it");
 
@@ -6575,7 +6650,7 @@ mod tests {
         // instruction: the three readers are chosen per composite, not per depth.
         let nested = reads(
             "struct P { x: Int, y: Int }\n\
-             fn main() -> Int {\n  let o = Some((P { x: 1, y: 2 }, 3))\n  \
+             fn main() -> Int {\n  var o = Some((P { x: 1, y: 2 }, 3))\n  \
              match o { Some((P { x, y }, k)) => x + y + k, None => 0 }\n}",
         );
         assert_eq!(nested.tags, 2, "`Some` and `None` each compare a tag");
@@ -6621,7 +6696,7 @@ mod tests {
         // Two arms, two literals, four reads — scrutinee and literal per arm —
         // and every one of them at `Bool`.
         let bools =
-            extracts("fn main() -> Int {\n  let b = true\n  match b { true => 1, false => 0 }\n}");
+            extracts("fn main() -> Int {\n  var b = true\n  match b { true => 1, false => 0 }\n}");
         assert!(
             !bools.is_empty(),
             "a Bool pattern compares payloads, so it extracts them"
@@ -6633,7 +6708,7 @@ mod tests {
 
         // The `Int` half of the same arm is unchanged — the fix is a width, not
         // a rewrite of literal matching.
-        let ints = extracts("fn main() -> Int {\n  let n = 1\n  match n { 1 => 10, _ => 0 }\n}");
+        let ints = extracts("fn main() -> Int {\n  var n = 1\n  match n { 1 => 10, _ => 0 }\n}");
         assert!(
             ints.iter().all(|k| *k == ScalarKind::Int),
             "an Int pattern still reads an Int: {ints:?}"
@@ -6666,8 +6741,8 @@ mod tests {
                 })
                 .count()
         };
-        const MIN: &str = "fn main() -> Int {\n  let d = Map()\n  d[\"a\"] min= 5\n  d[\"a\"]\n}";
-        const MAX: &str = "fn main() -> Int {\n  let b = Map()\n  b[\"a\"] max= 5\n  b[\"a\"]\n}";
+        const MIN: &str = "fn main() -> Int {\n  var d = Map()\n  d[\"a\"] min= 5\n  d[\"a\"]\n}";
+        const MAX: &str = "fn main() -> Int {\n  var b = Map()\n  b[\"a\"] max= 5\n  b[\"a\"]\n}";
 
         assert_eq!(calls(MIN, RuntimeSymbol::MapUpdateMin), 1);
         assert_eq!(calls(MAX, RuntimeSymbol::MapUpdateMax), 1);
@@ -6689,7 +6764,7 @@ mod tests {
         // operators are untouched, which is the regression a shared path would
         // cause.
         let compound =
-            "fn main() -> Int {\n  let d = Map()\n  d[\"a\"] = 1\n  d[\"a\"] += 2\n  d[\"a\"]\n}";
+            "fn main() -> Int {\n  var d = Map()\n  d[\"a\"] = 1\n  d[\"a\"] += 2\n  d[\"a\"]\n}";
         assert_eq!(
             calls(compound, RuntimeSymbol::MapIndex),
             2,
@@ -7081,7 +7156,7 @@ fn f(n: Int, x0: Float) -> Float {
     #[test]
     fn a_text_literal_allocation_is_not_a_fault_check_site() {
         let (mut funcs, _analysis) =
-            lower_src_to_mir("fn f() -> Text {\n  let s = \"hello\"\n  s\n}");
+            lower_src_to_mir("fn f() -> Text {\n  var s = \"hello\"\n  s\n}");
         crate::annotate(&mut funcs[0]);
         crate::verify(&funcs[0]).expect("a non-faulting Text alloc verifies");
         let f = &funcs[0];

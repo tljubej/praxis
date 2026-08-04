@@ -12,7 +12,7 @@
 //
 // Input (on stdin): one integer per line.
 // Output: the sum, the largest, and how many are above the mean.
-let numbers = read lines(int)
+var numbers = read lines(int)
 
 fn above(values, threshold) {
     var n = 0
@@ -24,7 +24,7 @@ fn above(values, threshold) {
     n
 }
 
-let total = numbers.sum()
+var total = numbers.sum()
 out(total)
 
 var largest = 0

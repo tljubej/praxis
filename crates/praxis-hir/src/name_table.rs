@@ -73,15 +73,17 @@ mod tests {
         let a = table.insert(Symbol {
             id: SymbolId(0),
             name: "a".into(),
-            kind: SymbolKind::Let,
+            kind: SymbolKind::Var,
             decl: None,
+            reassigned: false,
             scheme: None,
         });
         let b = table.insert(Symbol {
             id: SymbolId(0),
             name: "a".into(), // same name, shadowing
-            kind: SymbolKind::Let,
+            kind: SymbolKind::Var,
             decl: None,
+            reassigned: false,
             scheme: None,
         });
         assert_ne!(a, b, "shadowed bindings must have distinct ids");

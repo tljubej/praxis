@@ -1,6 +1,6 @@
 //! Typed wrappers over lossless syntax nodes (§13.2, §14.1).
 //!
-//! Each wrapper ([`SourceFile`], [`LetStmt`], [`PathExpr`], …) is a strongly-typed
+//! Each wrapper ([`SourceFile`], [`VarStmt`], [`PathExpr`], …) is a strongly-typed
 //! view over a [`SyntaxNode`] whose [`SyntaxKind`] is fixed by construction. They
 //! avoid copying source strings: accessors borrow into the underlying green tree.
 //!
@@ -72,7 +72,7 @@ pub fn children<N: AstNode>(parent: &SyntaxNode) -> impl Iterator<Item = N> {
 
 /// The first `Ident` token child of `node` (the spelling of a name, since names
 /// are bare `Ident` tokens — see the module docs). Returns `None` if absent
-/// (e.g. a malformed `let` recovered by the parser).
+/// (e.g. a malformed `var` recovered by the parser).
 pub fn name_token(node: &SyntaxNode) -> Option<praxis_syntax::SyntaxToken> {
     node.children_with_tokens()
         .filter_map(|e| match e {

@@ -855,7 +855,7 @@ mod tests {
     #[test]
     fn a_box_read_from_two_blocks_keeps_both_reloads() {
         let lowered = lower_src_to_mir(
-            "fn f(a: Int, c: Bool) -> Int {\n  let t = a * 2\n  \
+            "fn f(a: Int, c: Bool) -> Int {\n  var t = a * 2\n  \
              if c { t + 1 } else { t + 2 }\n}",
         );
         let census = Census::of_function(lowered.function("f"));

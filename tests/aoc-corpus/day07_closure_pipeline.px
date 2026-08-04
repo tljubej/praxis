@@ -11,8 +11,8 @@
 fn id(x) { x }
 
 fn main() -> Int {
-    let offset = 10
+    var offset = 10
     // A closure capturing `offset` (immutable capture, WS7a).
-    let bump = |n| n + offset
+    var bump = |n| n + offset
     id(bump(32))
 }

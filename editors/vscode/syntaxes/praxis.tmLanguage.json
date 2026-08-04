@@ -38,7 +38,7 @@
     "keywords": {
       "comment": "Every keyword in SyntaxKind's table. Checked against SyntaxKind::all_keyword_texts() by a Rust test, because this list is a copy the compiler does not see.",
       "name": "keyword.control.praxis",
-      "match": "\\b(let|var|fn|if|else|while|for|in|loop|match|return|break|continue|read|struct|enum|true|false)\\b"
+      "match": "\\b(var|fn|if|else|while|for|in|loop|match|return|break|continue|read|struct|enum|true|false)\\b"
     },
 
     "update-operator": {

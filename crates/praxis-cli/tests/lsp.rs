@@ -165,7 +165,7 @@ fn the_handshake_completes_and_advertises_the_m11_capabilities() {
 
 /// An edit bumps the revision and the server answers about the **new** text.
 ///
-/// The observable proof is hover: the file opens with `let x = 1`, the edit
+/// The observable proof is hover: the file opens with `var x = 1`, the edit
 /// makes it `"one"`, and hover over `x` moves from `Int` to `Text`. A server
 /// that ignored `didChange` would answer `Int` twice.
 #[test]
@@ -179,7 +179,7 @@ fn an_edit_changes_what_the_server_answers() {
         "method": "textDocument/didOpen",
         "params": { "textDocument": {
             "uri": uri, "languageId": "praxis", "version": 1,
-            "text": "let x = 1\nout(x)\n"
+            "text": "var x = 1\nout(x)\n"
         }}
     }));
 
@@ -246,7 +246,7 @@ fn diagnostics_are_published_with_a_code_and_a_span() {
         "method": "textDocument/didOpen",
         "params": { "textDocument": {
             "uri": "file:///diag.px", "languageId": "praxis", "version": 1,
-            "text": "let x: Int = \"t\"\n"
+            "text": "var x: Int = \"t\"\n"
         }}
     }));
 

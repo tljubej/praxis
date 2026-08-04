@@ -27,11 +27,11 @@ enum Op {
     Halt
 }
 
-let limit = read int
+var limit = read int
 
 // The program, hand-assembled. Register 0 is the loop counter, register 1 the
 // accumulator; the loop head is instruction 4 and the exit target is 27.
-let prog = Vec()
+var prog = Vec()
 prog.push(Push(0))      //  0
 prog.push(Store(0))     //  1   i = 0
 prog.push(Push(1))      //  2
@@ -62,7 +62,7 @@ prog.push(Jmp(4))       // 26
 prog.push(Load(1))      // 27   <- exit
 prog.push(Halt)         // 28
 
-let stack = Deque()
+var stack = Deque()
 var pc = 0
 var r0 = 0
 var r1 = 0
@@ -72,7 +72,7 @@ var steps = 0
 var running = true
 
 while running {
-    let op = prog[pc]
+    var op = prog[pc]
     pc = pc + 1
     steps = steps + 1
     match op {
@@ -84,34 +84,34 @@ while running {
             else { stack.push_back(r3) }
         }
         Store(k) => {
-            let v = stack.pop_back()
+            var v = stack.pop_back()
             if k == 0 { r0 = v }
             else if k == 1 { r1 = v }
             else if k == 2 { r2 = v }
             else { r3 = v }
         }
         Add => {
-            let b = stack.pop_back()
-            let a = stack.pop_back()
+            var b = stack.pop_back()
+            var a = stack.pop_back()
             stack.push_back(a + b)
         }
         Mul => {
-            let b = stack.pop_back()
-            let a = stack.pop_back()
+            var b = stack.pop_back()
+            var a = stack.pop_back()
             stack.push_back(a * b)
         }
         Mod => {
-            let b = stack.pop_back()
-            let a = stack.pop_back()
+            var b = stack.pop_back()
+            var a = stack.pop_back()
             stack.push_back(a % b)
         }
         Lt => {
-            let b = stack.pop_back()
-            let a = stack.pop_back()
+            var b = stack.pop_back()
+            var a = stack.pop_back()
             if a < b { stack.push_back(1) } else { stack.push_back(0) }
         }
         JmpZ(t) => {
-            let v = stack.pop_back()
+            var v = stack.pop_back()
             if v == 0 { pc = t }
         }
         Jmp(t) => { pc = t }

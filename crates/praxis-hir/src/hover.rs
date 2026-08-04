@@ -62,7 +62,7 @@ impl Analysis {
         })
     }
 
-    /// Hover over a *declaration* site (a `let`/`var`/`fn`/param binding),
+    /// Hover over a *declaration* site (a `var`/`fn`/param binding),
     /// identified by its name-token range. Uses the `decls`... actually the
     /// decls map is not carried into Analysis; instead, look the symbol up
     /// directly by id among the symbols whose declaration span covers `range`.

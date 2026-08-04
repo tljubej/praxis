@@ -13,21 +13,21 @@
 // Input: the side length of the sample square, as one integer on stdin.
 // Output: the summed iteration count over every sample.
 
-let size = read int
-let max_iter = 400
+var size = read int
+var max_iter = 400
 
 var total = 0
 var py = 0
 while py < size {
-    let y0 = py.to_float() / size.to_float() * 2.0 - 1.0
+    var y0 = py.to_float() / size.to_float() * 2.0 - 1.0
     var px = 0
     while px < size {
-        let x0 = px.to_float() / size.to_float() * 3.0 - 2.0
+        var x0 = px.to_float() / size.to_float() * 3.0 - 2.0
         var x = 0.0
         var y = 0.0
         var i = 0
         while i < max_iter && x * x + y * y <= 4.0 {
-            let xt = x * x - y * y + x0
+            var xt = x * x - y * y + x0
             y = 2.0 * x * y + y0
             x = xt
             i = i + 1

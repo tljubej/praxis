@@ -74,7 +74,7 @@ pub struct Function {
 
 /// How a local appears in the crash debugger (§9.4 `locals`).
 ///
-/// `User` locals are bindings the programmer wrote (`let x`, params, captures);
+/// `User` locals are bindings the programmer wrote (`var x`, params, captures);
 /// they render as `name: Type = value`. `Temp` locals are compiler-generated
 /// intermediates (the hidden slot holding `a+b` in `a+b+c`); they render as
 /// `<tmp#N: Type> @ "expr" = value`. This replaces the old `"<tmp>"` string

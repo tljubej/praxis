@@ -13,7 +13,7 @@
 // different reason), fails at 9458fd5 with 221. A regression fixture for a
 // defect this branch introduced and closed, not a gate for an audit finding.
 fn main() -> Int {
-    let g = read grid(char);
-    let middle = g.get(1, 0);
+    var g = read grid(char);
+    var middle = g.get(1, 0);
     g.width() * 100 + g.height() * 10 + g.find_all(middle).len()
 }

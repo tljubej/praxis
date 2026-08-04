@@ -103,7 +103,7 @@ fn the_alternation_reader_rejects_a_word_that_is_only_a_substring() {
 #[test]
 fn the_grammar_patterns_are_alternations_the_reader_can_see() {
     let grammar = grammar();
-    for (rule, expected_at_least) in [("keywords", 18), ("capture-type", 10), ("parser-call", 14)] {
+    for (rule, expected_at_least) in [("keywords", 17), ("capture-type", 10), ("parser-call", 14)] {
         let alts = alternatives(&rule_pattern(&grammar, rule));
         assert!(
             alts.len() >= expected_at_least,
@@ -125,7 +125,7 @@ fn every_keyword_is_in_the_grammars_keyword_pattern() {
     let pattern = rule_pattern(&grammar, "keywords");
     let keywords = praxis_syntax::SyntaxKind::all_keyword_texts();
     assert!(
-        keywords.len() >= 18,
+        keywords.len() >= 17,
         "the sweep found only {} keywords, which means it is not sweeping",
         keywords.len()
     );

@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn ascii_agrees_in_both_encodings() {
-        let text = "let x = 1\nout(x)\n";
+        let text = "var x = 1\nout(x)\n";
         let lines = map(text);
         let pm = PositionMap::new(text, &lines);
         for offset in 0..=text.len() as u32 {
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn a_multibyte_line_counts_differently_per_encoding() {
         // "é" is 2 bytes / 1 UTF-16 unit; "𝄞" is 4 bytes / 2 UTF-16 units.
-        let text = "let é = \"𝄞\"\n";
+        let text = "var é = \"𝄞\"\n";
         let lines = map(text);
         let pm = PositionMap::new(text, &lines);
         let end_of_line = u32::try_from(text.find('\n').unwrap()).unwrap();
@@ -256,8 +256,8 @@ mod tests {
     #[test]
     fn round_trips_at_every_character_boundary() {
         for text in [
-            "let x = 1\nout(x)\n",
-            "let é = 1\r\nout(é)\r\n",
+            "var x = 1\nout(x)\n",
+            "var é = 1\r\nout(é)\r\n",
             "read lines(`{n:int} 𝄞 {m:int}`)\n",
             "",
             "\n\n\n",

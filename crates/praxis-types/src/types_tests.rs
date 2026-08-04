@@ -569,7 +569,7 @@ fn a_collection_with_no_type_arguments_renders_without_brackets() {
 /// was one and fell off the end when there was not — so every diagnostic about a
 /// `choice(...)` type named a type that looked absent.
 ///
-/// **Observed red before the arm was written**: `let x: Int = read choice(A:
+/// **Observed red before the arm was written**: `var x: Int = read choice(A:
 /// `{a:int}`, B: int)` reported "error[Y001]: expected Int, found " with the
 /// message stopping mid-sentence, and a misspelled variant reported "error[Y122]:
 /// `` has no variant `Bogus`". The rendering is *total* — every variant, every

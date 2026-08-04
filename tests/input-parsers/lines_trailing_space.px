@@ -13,6 +13,6 @@
 // regression fixture for a defect this branch introduced and closed, not a gate
 // for an audit finding.
 fn main() -> Int {
-    let v = read lines(int)
+    var v = read lines(int)
     v.len() * 10 + v.get(2)
 }

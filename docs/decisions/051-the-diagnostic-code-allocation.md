@@ -3,8 +3,9 @@
 **Date:** 2026-07-29
 **Status:** Accepted — amended 2026-07-29 for `Y017` (S14/TY-21) and 2026-07-30
 for `Y018`, `Y124`, `N006`, `Y019`, `Y020`, `Y021` and `N007` (S24/REP-01, S26/REP-05,
-S26/REP-14, S25/REP-08, S25/REP-16) and 2026-07-31 for `N008` (REP-26); see the
-amendment notes under each table
+S26/REP-14, S25/REP-08, S25/REP-16) and 2026-07-31 for `N008` (REP-26) and
+2026-08-04 to **retire `Y009`** (ADR-125); see the amendment notes under each
+table
 **Milestone:** Repair (answers the plan's **D13**, which binds before S13)
 
 ## Context
@@ -63,7 +64,7 @@ shape). **`N009` is the next free Name code.**
 
 | Code | Finding | Stage | Meaning |
 |---|---|---|---|
-| `Y009` | TY-14 | S13 | assignment to something that is not a `var` |
+| ~~`Y009`~~ | TY-14 | S13 | ~~assignment to something that is not a `var`~~ — **retired**, ADR-125 |
 | `Y010` | TY-15 | S13 | a compound assignment whose operands are not numeric |
 | `Y011` | TY-20 | S14 | `return` outside a function |
 | `Y012` | TY-20 | S14 | `break`/`continue` outside a loop |
@@ -112,10 +113,18 @@ indexed" would be false about it. It also covers the right receiver at the wrong
 arity (`grid[x]`, where §6.4 spells it `grid[x, y]`), since arity is part of what
 selects the operation.
 
-`Y021` is *not* `Y009` ("assignment to something that is not a `var`"). `Y009` is
+`Y021` is *not* `Y009` ("assignment to something that is not a `var`"). `Y009` was
 about a binding that exists and may not be written; `Y021` is about a left side
-that is not a place at all — `f() = 1`, `p.x = 1`. Both are in inference, for
-`Y019`'s reason.
+that is not a place at all — `f() = 1`, `p.x = 1`. Both were in inference, for
+`Y019`'s reason. `Y009` has since been retired (see the amendment below), which
+leaves `Y021` as the only thing an assignment's *left side* can be reported for.
+
+**Amendment (2026-08-04, ADR-125).** **`Y009` is retired.** The language no
+longer has a binding that cannot be written, so the report has nothing left to
+describe. The number is **not** reissued: a code is a permanent user-facing
+identifier, and re-spending one is how an old message and a new one come to
+answer to the same name. `DiagCode` carries a comment at the hole saying so, and
+the `Y0xx` block continues from `Y022` as before.
 
 **Amendment (2026-07-31, REP-47).** `Y023` — a backtick parser template written
 where a value is expected. §7.1 says the parser-expression sublanguage is entered

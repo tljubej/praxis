@@ -6,11 +6,11 @@
 // → parses as Vec[{ id: Int, items: Vec[Int] }].
 // Acceptance: "Parse repeated labeled blocks."
 fn main() -> Int {
-    let monkeys = read sections(block(
+    var monkeys = read sections(block(
         `Monkey {id:int}:`,
         items: lines(int),
     ));
-    let m0 = monkeys.get(0);
-    let m1 = monkeys.get(1);
+    var m0 = monkeys.get(0);
+    var m1 = monkeys.get(1);
     m0.id + m0.items.len() + m1.id + m1.items.len()
 }

@@ -542,7 +542,7 @@ mod tests {
     /// any pessimistic start — reports `Bottom` for both, because `Bottom` is
     /// absorbing and nothing climbs back out of it.
     ///
-    /// The shape is `var a = 0; var b = 1; while … { let t = a; a = b; b = t }`,
+    /// The shape is `var a = 0; var b = 1; while … { var t = a; a = b; b = t }`,
     /// with the two `MoveGc`s on the back edge that a loop-carried assignment
     /// lowers to.
     #[test]

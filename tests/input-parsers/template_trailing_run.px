@@ -7,7 +7,7 @@
 // stripped the trailing one out of the text, so it was represented nowhere:
 // `body` came back as `" 41 48 83"` and this program printed 0.
 fn main() -> Int {
-    let rows = read lines(`Card {id:int}: {body:rest}`);
+    var rows = read lines(`Card {id:int}: {body:rest}`);
     var total = 0;
     for row in rows {
         if row.body == "41 48 83" {

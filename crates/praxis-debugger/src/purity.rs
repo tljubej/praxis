@@ -180,18 +180,22 @@ fn walk_expr(e: &TypedExpr) -> Result<(), String> {
     }
 }
 
-/// Walk a block's statements + tail. Statement-level `Let`/`Var`/`Assign` can
-/// appear inside a `Block` or `If` arm; `Assign`, `IndexAssign`, `FieldAssign`
-/// and `Var` (reassignable) are mutations and must reject. (`Let` is a pure
-/// binding; allowed.)
+/// Walk a block's statements + tail. Statement-level `Var`/`Assign` can appear
+/// inside a `Block` or `If` arm; `Assign`, `IndexAssign` and `FieldAssign` are
+/// mutations and must reject.
+///
+/// A `var` **declaration** is not one of them. It used to be refused on the
+/// grounds that `var` announced an intent to mutate, which was the only thing
+/// the keyword meant — and since ADR-125 it is the one binding form, so refusing
+/// it would refuse every `p` expression that names an intermediate value.
+/// Declaring a fresh local mutates nothing; the write that would is
+/// [`Assign`](praxis_hir::TypedStmt::Assign), and that is rejected on its own
+/// account two arms down.
 fn walk_block(b: &TypedBlock) -> Result<(), String> {
     for stmt in &b.stmts {
         use praxis_hir::TypedStmt;
         match stmt {
-            TypedStmt::Let { init, .. } => walk_expr(init)?,
-            TypedStmt::Var { .. } => {
-                return Err("`var` declares a mutable binding — `p` rejects mutation".to_string());
-            }
+            TypedStmt::Var { init, .. } => walk_expr(init)?,
             TypedStmt::Assign { .. } => {
                 return Err("assignment mutates — `p` rejects mutating expressions".to_string());
             }

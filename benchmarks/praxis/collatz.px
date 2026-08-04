@@ -10,7 +10,7 @@
 // Input: the inclusive upper limit, as one integer on stdin.
 // Output: the starting value with the longest chain, then that chain's length.
 
-let limit = read int
+var limit = read int
 
 var best_n = 0
 var best_len = 0

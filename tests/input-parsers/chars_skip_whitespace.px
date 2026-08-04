@@ -13,6 +13,6 @@
 // at 9458fd5. The defect it pins was introduced and closed inside this branch,
 // so it is a regression fixture and not a gate for an audit finding.
 fn main() -> Int {
-    let moves = read chars(one_of("^v<>"), skip: whitespace);
+    var moves = read chars(one_of("^v<>"), skip: whitespace);
     moves.len()
 }

@@ -1,11 +1,11 @@
 // A clean, M1-valid Praxis snippet for the `check` happy-path test.
-// Covers let/var bindings, a fn, arithmetic, if, while, and an out call —
+// Covers `var` bindings, a fn, arithmetic, if, while, and an out call —
 // the full Milestone 1 grammar subset.
 fn manhattan(a: Int, b: Int) -> Int {
     abs(a - b)
 }
 
-let width = 3
+var width = 3
 var score = 0
 
 while score < width {

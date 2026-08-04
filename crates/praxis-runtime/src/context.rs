@@ -502,7 +502,7 @@ impl Default for Fault {
 /// One local variable in a debug frame snapshot (§9.3, M5).
 ///
 /// Carries the source name, the compiler-assigned `symbol_id` (which
-/// disambiguates shadowed bindings — two `let a` in the same scope get distinct
+/// disambiguates shadowed bindings — two `var a` in the same scope get distinct
 /// ids, §4.2), the local's type descriptor, and the current `GcRef` value. The
 /// crash debugger (M10) reads these to display locals; M5 only *registers* them
 /// (the prologue/epilogue push/pop frames and the spill updates the values).

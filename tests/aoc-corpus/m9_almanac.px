@@ -7,7 +7,7 @@
 //   via sections(head: lines(word), maps: repeated(block(...))).
 // Acceptance: "Parse almanac-style repeated mapping sections."
 fn main() -> Int {
-    let almanac = read sections(
+    var almanac = read sections(
         head: lines(word),
         maps: repeated(block(
             `map {name:word}`,

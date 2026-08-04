@@ -421,13 +421,13 @@ mod tests {
     /// the caret used to be drawn at column 15, two past the `n`.
     #[test]
     fn a_caret_counts_characters_and_not_bytes() {
-        let src = "let y = λλ + name\n";
+        let src = "var y = λλ + name\n";
         let start = src.find("name").expect("the needle") as u32;
         assert_eq!(start, 15, "the byte offset is what a span carries");
         let out = render(src, start, start + 4, CaretLabel::Plain);
         insta::assert_snapshot!(out, @r#"
   f.px:1:14
-  1 | let y = λλ + name
+  1 | var y = λλ + name
     |              ^^^^
 "#);
 
@@ -435,7 +435,7 @@ mod tests {
         let out = render(src, 8, 12, CaretLabel::Plain);
         insta::assert_snapshot!(out, @r#"
   f.px:1:9
-  1 | let y = λλ + name
+  1 | var y = λλ + name
     |         ^^
 "#);
     }
@@ -471,7 +471,7 @@ mod tests {
             ("total += line\n", 9, 4, 'l'),
             // A multi-byte character earlier on the line: the column counts
             // characters (REP-35), so the `+ 1` must not be applied to bytes.
-            ("let y = λλ + name\n", 15, 4, 'n'),
+            ("var y = λλ + name\n", 15, 4, 'n'),
         ] {
             let out = render(src, start, start + len, CaretLabel::Plain);
             let header = out.lines().find(|l| l.contains("f.px:")).expect("header");

@@ -22,7 +22,7 @@ fn analyze(text: &str) -> crate::Analysis {
 #[test]
 fn hover_over_shadowed_occurrences_returns_distinct_symbols() {
     // Two `a` bindings (Int then Text) and a use of the second.
-    let src = "let a = 4\nlet a = \"Foo\"\nout(a)";
+    let src = "var a = 4\nvar a = \"Foo\"\nout(a)";
     let analysis = analyze(src);
     // Find the reference ranges for the two `a` *declarations* are in decls, but
     // hover works over references. The single `a` reference (in `out(a)`)
@@ -47,8 +47,8 @@ fn hover_over_shadowed_occurrences_returns_distinct_symbols() {
 
 #[test]
 fn hover_over_declaration_shows_its_scheme() {
-    // Hover at the declaration site of a `let` shows its inferred type.
-    let src = "let x = 1";
+    // Hover at the declaration site of a `var` shows its inferred type.
+    let src = "var x = 1";
     let analysis = analyze(src);
     // The declaration `x` is at range 4..5 ("let x").
     let decl_range = TextRange::new(4u32.into(), 5u32.into());
@@ -59,7 +59,7 @@ fn hover_over_declaration_shows_its_scheme() {
 
 #[test]
 fn hover_distinguishes_two_shadowed_declarations() {
-    let src = "let a = 4\nlet a = \"Foo\"";
+    let src = "var a = 4\nvar a = \"Foo\"";
     let analysis = analyze(src);
     // First `a` decl at 4..5, second at 14..15.
     let first = analysis
@@ -102,7 +102,7 @@ fn hover_over_out_shows_polymorphic_scheme() {
 
 #[test]
 fn hover_at_empty_range_returns_none() {
-    let analysis = analyze("let x = 1");
+    let analysis = analyze("var x = 1");
     assert!(analysis
         .hover(TextRange::new(100u32.into(), 101u32.into()))
         .is_none());

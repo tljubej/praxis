@@ -6,7 +6,7 @@
 // item, faulting `at input offset 13..23: expected the rest of the field`.
 // `lines` had narrowed to a line and `block` had narrowed to nothing, so the
 // same template over the same bytes had two answers. A gate that measured only
-// one side is what let that survive, so both sides are measured here and
+// one side is what var that survive, so both sides are measured here and
 // compared to each other rather than to a constant.
 //
 // The rest of the file covers the parts of the rule the pair does not reach:
@@ -15,8 +15,8 @@
 // no longer keeps the line terminator it used to.
 fn main() {
     // The pair. Same template, same bytes, same answer.
-    let under_lines = parse("items: 79, 98\nitems: 54, 65, 75, 74\n", lines(`items: {items:csv(int)}`))
-    let under_block = parse("items: 79, 98\nop: plus\n", block(
+    var under_lines = parse("items: 79, 98\nitems: 54, 65, 75, 74\n", lines(`items: {items:csv(int)}`))
+    var under_block = parse("items: 79, 98\nop: plus\n", block(
         `items: {items:csv(int)}`,
         `op: {op:word}`,
     ))
@@ -31,7 +31,7 @@ fn main() {
     // window is exactly that many. With the `\n` count dropped this faults at
     // `expected whitespace`: the template's own `\n` part has no terminator
     // left inside a one-line window.
-    let spans = parse("1,2\n3\nabcd\n", block(`{x:int},{y:int}\n{z:int}`, `{w:rest}`))
+    var spans = parse("1,2\n3\nabcd\n", block(`{x:int},{y:int}\n{z:int}`, `{w:rest}`))
     out(spans.x + spans.y + spans.z)
     // 4 and not 5: a final `rest` is bounded to its own line and no longer
     // keeps the terminator, which is the answer ``lines(`{w:rest}`)`` already
@@ -43,7 +43,7 @@ fn main() {
     // rest of the region and keeps it — §7.5's own `block` example, and the
     // half of the rule that goes red if someone "simplifies" the window into
     // line-bounding every item.
-    let named = parse("map seed\n50\n52\n7\n", block(`map {name:word}`, ranges: lines(int)))
+    var named = parse("map seed\n50\n52\n7\n", block(`map {name:word}`, ranges: lines(int)))
     out(named.name)
     out(named.ranges.len())
 }

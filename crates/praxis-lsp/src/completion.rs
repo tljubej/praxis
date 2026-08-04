@@ -387,7 +387,7 @@ fn lexical_items(snapshot: &Snapshot) -> Vec<CompletionItem> {
             SymbolKind::EnumVariant => CompletionItemKind::ENUM_MEMBER,
             SymbolKind::Param => CompletionItemKind::VARIABLE,
             SymbolKind::Builtin => CompletionItemKind::FUNCTION,
-            SymbolKind::Let | SymbolKind::Var => CompletionItemKind::VARIABLE,
+            SymbolKind::Var => CompletionItemKind::VARIABLE,
         };
         // One entry per name: two shadowed bindings offer the same word, and a
         // list that repeats it says nothing the first entry did not.

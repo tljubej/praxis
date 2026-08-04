@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn an_incremental_edit_splices_and_bumps_the_revision() {
         let mut store = DocumentStore::new();
-        store.open(uri(), "let x = 1\n".to_string(), 1);
+        store.open(uri(), "var x = 1\n".to_string(), 1);
         let doc = store.get_mut(&uri()).expect("open");
         let before = doc.revision();
 
@@ -201,7 +201,7 @@ mod tests {
             ),
             Encoding::Utf16,
         );
-        assert_eq!(doc.text(), "let x = 42\n");
+        assert_eq!(doc.text(), "var x = 42\n");
         assert!(doc.revision() > before, "an edit bumps the revision");
     }
 
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn an_edit_after_a_multibyte_character_splices_correctly() {
         let mut store = DocumentStore::new();
-        store.open(uri(), "let é = 1\n".to_string(), 1);
+        store.open(uri(), "var é = 1\n".to_string(), 1);
         let doc = store.get_mut(&uri()).expect("open");
         // `é` is one UTF-16 unit, so the `1` is at character 8.
         doc.apply(
@@ -238,7 +238,7 @@ mod tests {
             ),
             Encoding::Utf16,
         );
-        assert_eq!(doc.text(), "let é = 2\n");
+        assert_eq!(doc.text(), "var é = 2\n");
     }
 
     #[test]
@@ -272,9 +272,9 @@ mod tests {
     #[test]
     fn reopening_a_uri_is_a_new_revision() {
         let mut store = DocumentStore::new();
-        store.open(uri(), "let x = 1\n".to_string(), 1);
+        store.open(uri(), "var x = 1\n".to_string(), 1);
         let first = store.get(&uri()).expect("open").revision();
-        store.open(uri(), "let x = 2\n".to_string(), 1);
+        store.open(uri(), "var x = 2\n".to_string(), 1);
         let second = store.get(&uri()).expect("open").revision();
         assert_ne!(first, second);
     }

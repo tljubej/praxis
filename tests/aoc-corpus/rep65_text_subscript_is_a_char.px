@@ -12,7 +12,7 @@
 // and `100.to_char() == b[4]` catches the mirror case.
 fn main() {
     var b = "sddddd"
-    let c: Char = b[4]
+    var c: Char = b[4]
     out(c)
     out(b[4] == b[3])
     out(b[4].to_int())

@@ -15,12 +15,12 @@
 // small numbers would exercise the same wrappers and prove only that a name
 // resolves.
 fn main() {
-    let max = 9223372036854775807
+    var max = 9223372036854775807
     // `9223372036854775808` is not an Int literal, and unary minus binds after
     // the literal, so Int::MIN is spelled as a subtraction.
-    let min = -9223372036854775807 - 1
+    var min = -9223372036854775807 - 1
     // 2^62, whose product with 4 is exactly 2^64 — i.e. 0 when it wraps.
-    let big = 4611686018427387904
+    var big = 4611686018427387904
 
     out(max.wrapping_add(1) == min)
     out(max.saturating_add(1) == max)

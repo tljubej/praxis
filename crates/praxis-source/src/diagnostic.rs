@@ -219,8 +219,11 @@ pub enum DiagCode {
     WrongTypeArgumentCount,
     /// `Y008` — a `struct`/`enum` declaring one field or variant twice.
     DuplicateMember,
-    /// `Y009` — assignment to something that is not a `var` (TY-14).
-    AssignToImmutable,
+    // `Y009` is **retired** (ADR-125). It reported an assignment to something
+    // that was not a `var`, and the language no longer has a binding that
+    // cannot be written. The number stays spent: a code is a permanent
+    // user-facing identifier, and re-issuing one is how an old message and a new
+    // one come to share a name.
     /// `Y010` — a compound assignment whose operands are not numeric (TY-15).
     CompoundAssignNonNumeric,
     /// `Y011` — `return` outside a function (TY-20).
@@ -268,9 +271,9 @@ pub enum DiagCode {
     /// `f() = 1`, `a + b[0] = 1`. A **field** is a place and no longer among
     /// them: `p.x = 5` stores (§4.5).
     ///
-    /// Distinct from `Y009` ("assignment to something that is not a `var`"),
-    /// which is about a *binding* that exists and may not be written. This one is
-    /// about a left side that is not a place at all.
+    /// It is about a left side that is not a place at all. (It used to be
+    /// distinguished from `Y009`, "assignment to something that is not a `var`";
+    /// that code is retired and every binding is now writable — ADR-125.)
     NotAnAssignmentTarget,
     /// `Y023` — a backtick parser template written where a value is expected
     /// (REP-47, ADR-084). §7.1 says the parser-expression sublanguage is entered
@@ -412,7 +415,7 @@ impl DiagCode {
             NotOrderable => DiagnosticCode::new(Type, 6),
             WrongTypeArgumentCount => DiagnosticCode::new(Type, 7),
             DuplicateMember => DiagnosticCode::new(Type, 8),
-            AssignToImmutable => DiagnosticCode::new(Type, 9),
+            // 9 is retired (ADR-125) and deliberately not reissued.
             CompoundAssignNonNumeric => DiagnosticCode::new(Type, 10),
             ReturnOutsideFunction => DiagnosticCode::new(Type, 11),
             BreakOutsideLoop => DiagnosticCode::new(Type, 12),
@@ -491,7 +494,6 @@ impl DiagCode {
             NotOrderable,
             WrongTypeArgumentCount,
             DuplicateMember,
-            AssignToImmutable,
             CompoundAssignNonNumeric,
             ReturnOutsideFunction,
             BreakOutsideLoop,
@@ -893,7 +895,7 @@ mod tests {
         // `ALL` holds each variant once, so its length is the variant count.
         // Update both together; the exhaustive match in `code()` is what makes
         // adding a variant a compile error in the first place.
-        assert_eq!(DiagCode::ALL.len(), 67);
+        assert_eq!(DiagCode::ALL.len(), 66);
         let unique: std::collections::HashSet<_> = DiagCode::ALL.iter().collect();
         assert_eq!(
             unique.len(),
@@ -983,7 +985,7 @@ help: parse it with the input parser
     #[test]
     fn render_snapshot_two_lines_with_note() {
         let map = SourceMap::new();
-        let id = map.intern("f.px", "let a = value\nlet b = a + 1\n");
+        let id = map.intern("f.px", "var a = value\nvar b = a + 1\n");
         // Primary: "value" at 8..13 on line 1.
         let primary = span(id, 8, 13);
         let d = Diagnostic::build(
@@ -999,13 +1001,13 @@ help: parse it with the input parser
 error[N001]: undefined name `value`
 
   f.px:1:9
-  1 | let a = value
+  1 | var a = value
     |         ^^^^^ undefined name `value`
 
 note: the name `a` is defined here
 
   f.px:2:10
-  2 | let b = a + 1
+  2 | var b = a + 1
     |          ^
 ");
     }

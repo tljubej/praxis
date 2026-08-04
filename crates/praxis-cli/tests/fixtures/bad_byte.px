@@ -1,4 +1,4 @@
 // A Praxis snippet containing a byte the lexer does not recognize.
 // The `@` triggers a real `T003` diagnostic, proving the check pipeline reports
 // lex problems end to end. Kept minimal so the bad byte is the sole error.
-let first = @
+var first = @

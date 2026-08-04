@@ -23,7 +23,7 @@ const ALPHABET: &[&str] = &[
     "→", "中",
     // Four bytes, **two** UTF-16 units — the case that separates the encodings.
     "𝄞", "😀", // Fragments of the shapes the language actually contains.
-    "read ", "lines(", "int", "{n:int}", "let x = ",
+    "read ", "lines(", "int", "{n:int}", "var x = ",
 ];
 
 fn text() -> impl Strategy<Value = String> {
@@ -118,7 +118,7 @@ proptest! {
 /// the editor has to be told about them in code units.
 #[test]
 fn a_multibyte_template_interior_converts_per_encoding() {
-    let source = "let v = read lines(`{ключ:word} 𝄞 {n:int}`)\n";
+    let source = "var v = read lines(`{ключ:word} 𝄞 {n:int}`)\n";
     let lines = LineMap::new(source);
     let map = PositionMap::new(source, &lines);
 

@@ -8,32 +8,32 @@
 //
 // Everything below the comment is the design doc's own text, including the
 // template, the explicit `Counter[(Int, Int)]()`, the trailing comma in `max(…)`,
-// `counts[point] += 1`, `counts.values()` — and the top-level `let` and two
+// `counts[point] += 1`, `counts.values()` — and the top-level `var` and two
 // `out(…)` calls.
 //
 // Input (on stdin): AoC-2021-day-5-shaped line segments.
 // Output: the number of points covered by two or more segments, first ignoring
 // diagonals and then including them.
-let segments = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)
+var segments = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)
 
 fn overlaps(segments, diagonals) {
-    let counts = Counter[(Int, Int)]()
+    var counts = Counter[(Int, Int)]()
 
     for segment in segments {
-        let dx = sign(segment.x2 - segment.x1)
-        let dy = sign(segment.y2 - segment.y1)
+        var dx = sign(segment.x2 - segment.x1)
+        var dy = sign(segment.y2 - segment.y1)
 
         if !diagonals && dx != 0 && dy != 0 {
             continue
         }
 
-        let distance = max(
+        var distance = max(
             abs(segment.x2 - segment.x1),
             abs(segment.y2 - segment.y1),
         )
 
         for step in 0..=distance {
-            let point = (
+            var point = (
                 segment.x1 + dx * step,
                 segment.y1 + dy * step,
             )

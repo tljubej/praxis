@@ -5,7 +5,7 @@
 // → parses as { draws: Vec[Int], boards: Vec[Grid[Int]] }.
 // Acceptance: "Parse bingo-style input."
 fn main() -> Int {
-    let bingo = read sections(
+    var bingo = read sections(
         draws: csv(int),
         boards: repeated(matrix(int)),
     );

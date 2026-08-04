@@ -5,7 +5,7 @@
 // → parses as Vec of choice matches (Multiply variants) in source order.
 // Acceptance: "Parse noisy embedded instructions."
 fn main() -> Int {
-    let instructions = read scan(choice(
+    var instructions = read scan(choice(
         Mul: `mul({a:int},{b:int})`,
         Do: `do()`,
         Dont: `don't()`,

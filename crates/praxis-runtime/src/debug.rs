@@ -616,7 +616,7 @@ impl DebugLocal {
         }
     }
 
-    /// True iff this local is a user-written binding (a `let`/`var`/param/
+    /// True iff this local is a user-written binding (a `var`/param/
     /// capture), as opposed to a compiler-generated temporary.
     pub fn is_user(&self) -> bool {
         self.kind == LOCAL_KIND_USER
@@ -812,7 +812,7 @@ mod tests {
         }
     }
 
-    /// Two shadowed `a` bindings, as `let a = ...; let a = ...` produces.
+    /// Two shadowed `a` bindings, as `var a = ...; var a = ...` produces.
     fn shadowed_a_metas() -> [DebugLocalMeta; 2] {
         let name_a = b"a";
         [

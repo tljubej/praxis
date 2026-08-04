@@ -23,7 +23,7 @@ enum Move {
     Stay
 }
 
-let points = read lines(`{x:int},{y:int}`)
+var points = read lines(`{x:int},{y:int}`)
 
 // A record pattern binds each field at that field's own type. The first two arms
 // name a literal for `x`, so the arm a point takes depends on its components and
@@ -53,7 +53,7 @@ fn advance(here: (Int, Int), m: Move) -> (Int, Int) {
     }
 }
 
-let moves = Vec()
+var moves = Vec()
 moves.push(Step(1, 0))
 moves.push(Step(0, 2))
 moves.push(Stay)
@@ -66,7 +66,7 @@ for m in moves {
 out(match at { (x, y) => x * 100 + y })
 
 // A `for` binding is a pattern too (REP-25), so a pair comes apart in the header.
-let steps = Vec()
+var steps = Vec()
 steps.push((1, 10))
 steps.push((2, 20))
 var sum = 0
@@ -82,5 +82,5 @@ struct Span {
     ends: (Int, Int)
 }
 
-let s = Span { label: "ab", ends: (3, 9) }
+var s = Span { label: "ab", ends: (3, 9) }
 out(match s { Span { label, ends: (lo, hi) } => label.len() * 100 + (hi - lo) })

@@ -26,14 +26,14 @@ fn build(ns: Vec[Node], depth: Int, v: Int) -> Int {
         ns.push(Node { l: -1, r: -1, v: v })
         return ns.len() - 1
     }
-    let li = build(ns, depth - 1, (v * 2 + 1) % 1000003)
-    let ri = build(ns, depth - 1, (v * 2 + 2) % 1000003)
+    var li = build(ns, depth - 1, (v * 2 + 1) % 1000003)
+    var ri = build(ns, depth - 1, (v * 2 + 2) % 1000003)
     ns.push(Node { l: li, r: ri, v: v })
     ns.len() - 1
 }
 
 fn walk(ns: Vec[Node], i: Int, salt: Int) -> Int {
-    let node = ns[i]
+    var node = ns[i]
     if node.l < 0 {
         (node.v + salt) % 1000003
     } else {
@@ -41,11 +41,11 @@ fn walk(ns: Vec[Node], i: Int, salt: Int) -> Int {
     }
 }
 
-let reps = read int
-let depth = 16
+var reps = read int
+var depth = 16
 
-let nodes = Vec()
-let root = build(nodes, depth, 1)
+var nodes = Vec()
+var root = build(nodes, depth, 1)
 
 var acc = 0
 var r = 0

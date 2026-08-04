@@ -4,7 +4,7 @@
 //
 // There is no `fn main` here at all, which is how §3.2, §3.3 and §4.2 are written.
 out(1)
-let x = 2
+var x = 2
 out(x)
 var y = x
 y = y + 1

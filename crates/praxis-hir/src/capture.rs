@@ -9,10 +9,11 @@
 //! ## Detection
 //!
 //! The analysis walks the closure's body subtree and collects every name
-//! reference whose symbol is a value binding (`let`/`var`/`param`) **declared
-//! outside** the closure body. "Outside" is decided by the declaration range:
-//! the closure's own params and any `let`/`var` it introduces are declared at
-//! ranges *inside* the body's text range, so they are locals, not captures.
+//! reference whose symbol is a value binding (a `var`, a `for` variable, a
+//! pattern name, or a param) **declared outside** the closure body. "Outside"
+//! is decided by the declaration range: the closure's own params and any `var`
+//! it introduces are declared at ranges *inside* the body's text range, so they
+//! are locals, not captures.
 //! `fn`/`struct`/`enum`/`builtin` references are never captures (a `fn` call is
 //! a static call; the others are type names).
 //!
@@ -22,9 +23,10 @@
 //! The result preserves first-seen order, which becomes the env slot index
 //! shared across lowering, the synthetic function prologue, and the allocation.
 //!
-//! For M7-WS7a (this module) only immutable captures (`let`/`param`) are
-//! supported; a `var` capture is reported as a `Y130` diagnostic until WS7b
-//! lands the `VarCell` runtime cell.
+//! Whether a capture is a copy or a shared cell is *not* decided here: this
+//! module answers which symbols are captured, and lowering pairs each with the
+//! binding's [`reassigned`](crate::Symbol::reassigned) flag to pick a
+//! [`CaptureKind`] (ADR-125).
 
 use std::collections::HashMap;
 
@@ -37,13 +39,15 @@ use crate::symbol::{SymbolId, SymbolKind};
 /// How a single captured variable is represented in the closure's environment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureKind {
-    /// An immutable capture (`let` binding or `param`): the value is copied into
+    /// A capture of a binding nothing ever reassigns: the value is copied into
     /// the closure's env at allocation time and bound to a fresh local in the
-    /// synthetic function's prologue.
+    /// synthetic function's prologue. Nothing can write it on either side, so
+    /// the copy can never be observed to be one.
     ByValue,
-    /// A mutable capture (`var` binding): the env slot holds a `VarCell` GC cell
-    /// shared between the binding site and the closure. Reads/writes in the body
-    /// go through the cell (WS7b).
+    /// A capture of a **reassigned** binding: the env slot holds a `VarCell` GC
+    /// cell shared between the binding site and the closure. Reads/writes in the
+    /// body go through the cell (WS7b), so a write on either side is seen by
+    /// both.
     ByCell,
 }
 
@@ -86,7 +90,7 @@ pub struct CaptureAnalysis {
 /// - `refs`: the resolved-reference map (range → `ResolvedRef`).
 /// - `closure_range`: the text range of the *whole closure node* (params +
 ///   body). A binding whose declaration range is *inside* this range is a local
-///   of the closure (a param or a closure-local `let`/`var`), not a capture.
+///   of the closure (a param or a closure-local `var`), not a capture.
 /// - `decl_range(symbol) -> Option<TextRange>`: looks up a symbol's declaration
 ///   range (from the analysis `decls` map). `None` (builtins have no source site)
 ///   means "not a capture".
@@ -178,15 +182,12 @@ fn record_free_var<R, K>(
     let kind = kind_of(rref.symbol);
     // Only value bindings are captures; `fn`/`struct`/`enum`/`builtin` references
     // are static (a direct call or a type name), not captured.
-    let is_value = matches!(
-        kind,
-        Some(SymbolKind::Let) | Some(SymbolKind::Var) | Some(SymbolKind::Param)
-    );
+    let is_value = matches!(kind, Some(SymbolKind::Var) | Some(SymbolKind::Param));
     if !is_value {
         return;
     }
     // A capture must be declared *outside* the closure body. Params and
-    // closure-local `let`/`var` are declared at ranges inside `closure_range`;
+    // closure-local `var`s are declared at ranges inside `closure_range`;
     // outer bindings are declared outside. Builtins have no decl range (None) —
     // they are not captures.
     let Some(decl) = decl_range(rref.symbol) else {
@@ -200,7 +201,7 @@ fn record_free_var<R, K>(
         return;
     }
     seen.push(rref.symbol);
-    let kind = kind.unwrap_or(SymbolKind::Let);
+    let kind = kind.unwrap_or(SymbolKind::Var);
     out.captures.push(FreeVar {
         symbol: rref.symbol,
         kind,
@@ -271,26 +272,26 @@ mod tests {
 
     #[test]
     fn no_captures_for_pure_closure() {
-        let names = capture_names("fn main() { let f = |x| x + 1; f(2) }");
+        let names = capture_names("fn main() { var f = |x| x + 1; f(2) }");
         assert!(names.is_empty(), "expected no captures, got {names:?}");
     }
 
     #[test]
     fn captures_outer_let() {
-        let names = capture_names("fn main() { let o = 10; let f = |x| x + o; f(2) }");
+        let names = capture_names("fn main() { var o = 10; var f = |x| x + o; f(2) }");
         assert_eq!(names, vec!["o"]);
     }
 
     #[test]
     fn captures_multiple_in_first_seen_order() {
         let names =
-            capture_names("fn main() { let a = 1; let b = 2; let f = |x| x + a * b; f(2) }");
+            capture_names("fn main() { var a = 1; var b = 2; var f = |x| x + a * b; f(2) }");
         assert_eq!(names, vec!["a", "b"]);
     }
 
     #[test]
     fn dedups_repeated_captures() {
-        let names = capture_names("fn main() { let o = 10; let f = |x| o + o; f(2) }");
+        let names = capture_names("fn main() { var o = 10; var f = |x| o + o; f(2) }");
         assert_eq!(names, vec!["o"]);
     }
 
@@ -298,7 +299,7 @@ mod tests {
     fn closure_param_is_not_a_capture() {
         // The closure's own param `x` is declared inside the body; it must not be
         // captured.
-        let names = capture_names("fn main() { let f = |x| x + x; f(2) }");
+        let names = capture_names("fn main() { var f = |x| x + x; f(2) }");
         assert!(
             names.is_empty(),
             "param should not be captured, got {names:?}"
@@ -312,7 +313,7 @@ mod tests {
         // captures should be just `o` (and `x` must NOT appear, since it is the
         // outer's own param).
         let names = capture_names(
-            "fn main() { let o = 10; let f = |x| { let g = |y| x + y; g(o) }; f(2) }",
+            "fn main() { var o = 10; var f = |x| { var g = |y| x + y; g(o) }; f(2) }",
         );
         assert!(
             !names.contains(&"x".to_string()),
@@ -326,18 +327,32 @@ mod tests {
 
     /// **Inverted** from `mutable_capture_records_error`, which asserted the
     /// WS7a refusal — "a closure may not capture a `var`" — that WS7b lifted
-    /// (HIR-09, plan §8.2). The property that replaced it: a captured `var` is
-    /// an ordinary capture, classified `Var` so the lowerer makes it `ByCell`.
+    /// (HIR-09, plan §8.2). The property that replaced it: a captured binding is
+    /// an ordinary capture, whatever declared it.
+    ///
+    /// Note that the *kind* no longer selects `ByCell`, and this test no longer
+    /// claims it does: since ADR-125 the kind is `Var` for every binding, and
+    /// what picks a cell is whether something reassigns it — a fact this module
+    /// deliberately does not read (it is `Symbol::reassigned`, applied in
+    /// lowering).
     #[test]
     fn a_mutable_capture_is_an_ordinary_capture() {
         // Note: `|| c` would parse as `PIPE2` (logical or), so the closure takes
         // a dummy `_` param to be a real closure literal.
-        let analysis = analyze_closures("fn main() { var c = 0; let f = |_| c; f(0) }");
+        let analysis = analyze_closures("fn main() { var c = 0; var f = |_| c; f(0) }");
         assert_eq!(analysis.captures.len(), 1, "the var is captured");
-        assert_eq!(
-            analysis.captures[0].kind,
-            SymbolKind::Var,
-            "and it is classified as the `var` it is, which is what selects ByCell"
+        assert_eq!(analysis.captures[0].kind, SymbolKind::Var);
+    }
+
+    /// A parameter, a `for` variable and a pattern name are captured on the same
+    /// terms as a `var` — which matters more since ADR-125, because each of them
+    /// can now be written and so can be the one that needs a shared cell.
+    #[test]
+    fn a_for_variable_is_captured_like_any_other_binding() {
+        let names = capture_names("fn main() { for i in 0..3 { var f = |_| i; f(0) } }");
+        assert!(
+            names.contains(&"i".to_string()),
+            "expected the loop variable captured, got {names:?}"
         );
     }
 
@@ -346,7 +361,7 @@ mod tests {
         // A `var` assigned inside the closure body (the lhs of `+=` is a bare
         // NAME token, not a PathExpr) is a capture.
         let names = capture_names(
-            "fn main() { var total = 100; let add = |n| { total += n }; add(5); total }",
+            "fn main() { var total = 100; var add = |n| { total += n }; add(5); total }",
         );
         assert!(
             names.contains(&"total".to_string()),

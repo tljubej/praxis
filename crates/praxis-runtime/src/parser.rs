@@ -600,7 +600,7 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
 /// whitespace-delimited token, a matrix cell). The predecessor computed those
 /// bounds and then walked the child against everything from the bound's start
 /// to the end of the buffer, discarding the child's cursor — five separate
-/// `let (value, _consumed) = …` and one explicit `let _ = token_end;`. So
+/// `var (value, _consumed) = …` and one explicit `var _ = token_end;`. So
 /// `lines(int)` accepted `12junk` and `csv(rest)` returned the whole remainder
 /// for its first field.
 ///
@@ -1670,7 +1670,7 @@ fn walk_csv(
     for token in csv_tokens(region, text) {
         // The field's own region. `csv` used to hand the child everything from
         // the field's start to the end of the input and discard the cursor —
-        // the discard was even written out, `let _ = token_end;` (IPR-04).
+        // the discard was even written out, `var _ = token_end;` (IPR-04).
         // SAFETY: ctx is valid.
         let value = unsafe { walk_exact(rt, i, plan, child, token, "the rest of the field")? };
         scope.root(value);

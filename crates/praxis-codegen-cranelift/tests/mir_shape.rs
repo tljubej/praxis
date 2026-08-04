@@ -85,7 +85,7 @@ fn the_sample_loop_proves_a_scalars_descriptor_five_times_per_iteration() {
     let lowered = lower_src_to_mir(
         "var i = 0\n\
          var acc = 0\n\
-         let limit = 10\n\
+         var limit = 10\n\
          while i < limit {\n\
          \x20   acc = acc + i * 3\n\
          \x20   i = i + 1\n\

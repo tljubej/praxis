@@ -411,7 +411,7 @@ fn map_index_set() -> MethodEntry {
 ///
 /// A **bound** rather than a literal `Int` argument, for TY-31's reason: the
 /// bound *pins* an unresolved value type instead of merely permitting it, so
-/// `let d = Map()` followed by `d[k] min= 1` gives `d` an `Int` value type rather
+/// `var d = Map()` followed by `d[k] min= 1` gives `d` an `Int` value type rather
 /// than reporting. The bound is what the wrapper needs — `praxis_map_update_min`
 /// compares through `int_payload`, so a `Map[Text, Text]` would read its values
 /// as `i64`s.

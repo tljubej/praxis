@@ -1,8 +1,8 @@
 // A program that *does* read, so the lazy read is measured in both
 // directions: reading twice reuses the one buffer (§7.10).
 fn main() {
-    let ns = read lines(int)
+    var ns = read lines(int)
     out(ns.len())
-    let again = read lines(int)
+    var again = read lines(int)
     out(again.len())
 }

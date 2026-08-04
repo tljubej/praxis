@@ -20,9 +20,9 @@ use std::collections::HashMap;
 
 use praxis_ast::{
     ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, BreakExpr, CallExpr, ContinueExpr,
-    ElseBranch, EnumItem, Expr, ExprStmt, FieldExpr, FnItem, ForExpr, IfExpr, LetStmt, Literal,
-    LoopExpr, MethodCallExpr, Param, ParamList, PathExpr, RecordLitExpr, ReturnExpr, SourceFile,
-    StructItem, TupleExpr, UnaryExpr, VarStmt, WhileExpr,
+    ElseBranch, EnumItem, Expr, ExprStmt, FieldExpr, FnItem, ForExpr, IfExpr, Literal, LoopExpr,
+    MethodCallExpr, Param, ParamList, PathExpr, RecordLitExpr, ReturnExpr, SourceFile, StructItem,
+    TupleExpr, UnaryExpr, VarStmt, WhileExpr,
 };
 use praxis_source::{DiagCode, Diagnostic, FileSpan, Severity, Span};
 use praxis_stdlib::type_pattern::ScalarType as PatternScalar;
@@ -45,11 +45,23 @@ pub struct TypedModule {
     /// `Y1xx` diagnostics emitted during lowering (generic-fn rejection,
     /// unsupported construct, …). Empty for a fully lowerable module.
     pub diagnostics: Vec<Diagnostic>,
-    /// The `var` symbols captured by some closure in the module (escape
+    /// The reassigned symbols captured by some closure in the module (escape
     /// analysis, M7-WS7b). The MIR builder boxes these into a `VarCell` at
     /// their binding site and routes reads/writes through the cell, so a
     /// mutation in one frame is visible to every closure sharing the cell.
+    ///
+    /// A subset of [`reassigned_vars`](Self::reassigned_vars): a capture that is
+    /// never written needs no shared cell, only a copy.
     pub escaping_vars: std::collections::HashSet<SymbolId>,
+    /// Every symbol some `name = …` statement writes (see
+    /// [`Symbol::reassigned`](crate::Symbol::reassigned)).
+    ///
+    /// The MIR builder needs it wherever a binding would otherwise be an
+    /// *alias* rather than a slot of its own — a match arm's `Bind` binds the
+    /// scrutinee's local directly, and since every binding is assignable
+    /// (ADR-125) a write through that name would land in whatever the
+    /// scrutinee's local belongs to, which for a plain `match v { … }` is `v`.
+    pub reassigned_vars: std::collections::HashSet<SymbolId>,
 }
 
 /// A top-level item.
@@ -104,15 +116,7 @@ pub struct TypedBlock {
 /// lowering. `TypedStmt::Expr` carries the span on its inner expression.
 #[derive(Clone, Debug)]
 pub enum TypedStmt {
-    /// `let name = expr` (immutable binding).
-    Let {
-        symbol: SymbolId,
-        name: String,
-        ty: Type,
-        init: TypedExpr,
-        span: (u32, u32),
-    },
-    /// `var name = expr` (mutable binding).
+    /// `var name = expr` — the language's one binding form (ADR-125).
     Var {
         symbol: SymbolId,
         name: String,
@@ -205,7 +209,7 @@ pub enum TypedExpr {
         span: (u32, u32),
     },
     /// A top-level `fn` name used in **value** position (REP-01, ADR-061):
-    /// `let f = double`, or `double` passed where a `Func` is expected.
+    /// `var f = double`, or `double` passed where a `Func` is expected.
     ///
     /// Distinct from [`Path`](Self::Path) because a `fn` is not a binding: it has
     /// no local slot, so a `Path` to one lowered to `Unit` and `Inst::CallIndirect`
@@ -755,7 +759,7 @@ pub fn entry_point<'n>(defines: impl Fn(&str) -> bool) -> Option<&'n str> {
 /// The three declaration kinds are the exceptions and they are named positively:
 /// a `fn` is lowered as its own item, and `struct`/`enum` are type-only and
 /// produce no runtime item at all. Anything else at the top level is a
-/// `let`/`var`/assignment/expression, which is a statement (REP-19).
+/// `var`/assignment/expression, which is a statement (REP-19).
 fn is_top_level_stmt(node: &SyntaxNode) -> bool {
     FnItem::cast(node.clone()).is_none()
         && StructItem::cast(node.clone()).is_none()
@@ -811,6 +815,7 @@ pub fn lower(
             name: ENTRY_NAME.to_string(),
             kind: crate::SymbolKind::Fn,
             decl: None,
+            reassigned: false,
             scheme: None,
         })
     });
@@ -857,7 +862,7 @@ pub fn lower(
         if EnumItem::cast(node.clone()).is_some() {
             // No codegen for the declaration itself.
         }
-        // A top-level `let`/`var`/`expr`/`assign` **executes** (REP-19): it goes
+        // A top-level `var`/`expr`/`assign` **executes** (REP-19): it goes
         // into the entry point, in the order it is written. It used to be
         // analyzed and then dropped, so `out(1)` at top level passed
         // `praxis check` and printed nothing — which silenced §3.3 and §4.2,
@@ -895,14 +900,25 @@ pub fn lower(
             span,
         }));
     }
+    // Every binding some assignment writes. Read off the symbol table rather
+    // than walked for, because name resolution already answered it at the one
+    // point where the answer is decidable — see `Symbol::reassigned`.
+    let reassigned_vars = l
+        .names
+        .all()
+        .iter()
+        .filter(|s| s.reassigned)
+        .map(|s| s.id)
+        .collect();
     TypedModule {
         items,
         diagnostics: l.diagnostics,
-        // Escape analysis (M7-WS7b): every `var` captured by cell, recorded as
-        // each closure was lowered rather than re-derived by a walk afterwards
-        // (HIR-08). These are boxed into a `VarCell` at their binding site so
-        // the closure shares the cell.
+        // Escape analysis (M7-WS7b): every reassigned binding captured by cell,
+        // recorded as each closure was lowered rather than re-derived by a walk
+        // afterwards (HIR-08). These are boxed into a `VarCell` at their binding
+        // site so the closure shares the cell.
         escaping_vars: l.escaping_vars,
+        reassigned_vars,
     }
 }
 
@@ -1197,7 +1213,7 @@ impl<'a> Lowerer<'a> {
                     continue;
                 }
             }
-            // A non-ExprStmt (let/var/assign) after a pending tail demotes the
+            // A non-ExprStmt (var/assign) after a pending tail demotes the
             // tail to an effect statement — the tail was not the block's value
             // after all, since more statements follow. This preserves source
             // order: `{ v.push(i); i = i + 1 }` must push *before* incrementing.
@@ -1218,9 +1234,6 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_stmt(&mut self, node: &SyntaxNode) -> Option<TypedStmt> {
-        if let Some(let_) = LetStmt::cast(node.clone()) {
-            return self.lower_let(&let_);
-        }
         if let Some(var_) = VarStmt::cast(node.clone()) {
             return self.lower_var(&var_);
         }
@@ -1238,26 +1251,7 @@ impl<'a> Lowerer<'a> {
         None
     }
 
-    fn lower_let(&mut self, stmt: &LetStmt) -> Option<TypedStmt> {
-        let Some(name_tok) = stmt.name() else {
-            return self.lower_discarding_binding(stmt.init());
-        };
-        let name = name_tok.text().to_string();
-        let range = name_tok.text_range();
-        let symbol = self.resolve_decl_at(range)?;
-        let init = stmt.init()?;
-        let init = self.lower_expr(&init);
-        let ty = expr_ty(&init);
-        Some(TypedStmt::Let {
-            symbol,
-            name,
-            ty,
-            init,
-            span: self.node_span(stmt.syntax()),
-        })
-    }
-
-    /// A binding with no name — `let _ = f()` (D7) — still runs its
+    /// A binding with no name — `var _ = f()` (D7) — still runs its
     /// initializer; it just keeps nothing. Lowering it to a statement
     /// expression is what makes the discard idiom a *discard* rather than a
     /// deletion: dropping the whole statement (which is what returning `None`
@@ -1472,7 +1466,7 @@ impl<'a> Lowerer<'a> {
     /// function name. The closure's *type* (`fn_type`) is the inferred `Func`.
     ///
     /// The capture environment is a runtime concern (§4.10): the type system does
-    /// not model it. Immutable (`let`/`param`) captures copy the value into the
+    /// not model it. Immutable (`var`/`param`) captures copy the value into the
     /// env; mutable (`var`) captures share a `VarCell` (WS7b) — the env holds the
     /// cell, and the binding site boxes the `var` so writes are visible across
     /// frames.
@@ -1581,7 +1575,14 @@ impl<'a> Lowerer<'a> {
                         .unwrap_or(self.unit),
                 };
                 let ty = self.deep(recorded);
-                let kind = if matches!(fv.kind, crate::symbol::SymbolKind::Var) {
+                // A cell is what makes a *write* visible on both sides of the
+                // capture, so only a binding something writes needs one
+                // (ADR-125). This used to ask whether the binding was a `var`,
+                // which over-approximated in one direction — a `var` nothing
+                // reassigns paid for a cell and two runtime calls per access —
+                // and under-approximated in the other, because a parameter or a
+                // `for` variable could not be a `var` and is now assignable.
+                let kind = if self.names.get(fv.symbol).is_some_and(|s| s.reassigned) {
                     crate::capture::CaptureKind::ByCell
                 } else {
                     crate::capture::CaptureKind::ByValue
@@ -1830,7 +1831,7 @@ impl<'a> Lowerer<'a> {
         // A top-level `fn` in value position is a function value, not a binding
         // reference (REP-01, ADR-061). It reaches here only in value position —
         // `lower_call` resolves a named callee itself and never comes through
-        // `lower_path` — so this is exactly the `let f = double` case, which used
+        // `lower_path` — so this is exactly the `var f = double` case, which used
         // to lower to `Unit` and take the host down when the value was called.
         if self.symbol_kind(symbol) == Some(crate::SymbolKind::Fn) {
             return TypedExpr::FnValue {
@@ -2140,7 +2141,7 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_default();
         // The call's result type is the one inference gave **this call site**
         // (MONO-01). It used to be a fresh instantiation of the callee's scheme,
-        // so `id(1.5)` lowered as an unbound variable and `let v: Vec[Float] =
+        // so `id(1.5)` lowered as an unbound variable and `var v: Vec[Float] =
         // Vec()` reached codegen with no element type — the annotation had
         // arrived, at the call site inference recorded and lowering ignored.
         let ty = self.node_ty(c.syntax());
@@ -2186,12 +2187,12 @@ impl<'a> Lowerer<'a> {
     ///
     /// It used to look the *text* up in the root scope, before consulting the
     /// symbol resolution had already bound the name to — so `enum E { A }`
-    /// followed by `let A = 7` lowered the local `A` as the constructor, and
+    /// followed by `var A = 7` lowered the local `A` as the constructor, and
     /// the binding's value was discarded. Resolution answers which `A` a
     /// reference means; this asks it.
     ///
     /// The kind check is load-bearing on its own: the scheme cannot distinguish
-    /// a constructor from a binding that *holds* one, because `let A = Empty`
+    /// a constructor from a binding that *holds* one, because `var A = Empty`
     /// has the enum type too.
     ///
     /// Unlike inference's counterpart this does **not** instantiate: lowering
@@ -2958,7 +2959,7 @@ impl<'a> Lowerer<'a> {
 
     // --- helpers -----------------------------------------------------------
 
-    /// Resolve the symbol *declared* at `range` (a `let`/`var`/`fn`/param name
+    /// Resolve the symbol *declared* at `range` (a `var`/`fn`/param name
     /// token), via the resolution `decls` map. Unambiguous under shadowing.
     fn resolve_decl_at(&self, range: TextRange) -> Option<SymbolId> {
         self.decls.get(&range).copied()
@@ -3037,7 +3038,7 @@ pub fn expr_span(e: &TypedExpr) -> (u32, u32) {
 pub fn stmt_exprs(s: &TypedStmt) -> impl Iterator<Item = &TypedExpr> {
     let mut out: Vec<&TypedExpr> = Vec::new();
     match s {
-        TypedStmt::Let { init, .. } | TypedStmt::Var { init, .. } => out.push(init),
+        TypedStmt::Var { init, .. } => out.push(init),
         TypedStmt::Assign { value, .. } => out.push(value),
         TypedStmt::IndexAssign {
             receiver,
@@ -3064,8 +3065,7 @@ pub fn stmt_exprs(s: &TypedStmt) -> impl Iterator<Item = &TypedExpr> {
 /// `TypedStmt::Expr` carries the span on its inner expression.
 pub fn stmt_span(s: &TypedStmt) -> (u32, u32) {
     match s {
-        TypedStmt::Let { span, .. }
-        | TypedStmt::Var { span, .. }
+        TypedStmt::Var { span, .. }
         | TypedStmt::Assign { span, .. }
         | TypedStmt::IndexAssign { span, .. }
         | TypedStmt::FieldAssign { span, .. } => *span,

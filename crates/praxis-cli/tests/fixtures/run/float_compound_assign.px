@@ -63,7 +63,7 @@ out(1.0 / g)            // was -inf (integer `i64::MIN + 0`)
 // written once. Subtracting keeps the integer result inside `i64`; adding twice
 // overflows, and a fault is the answer this gate is written to look past.
 var h = 1.0
-let bump = || { h -= 0.5 }
+var bump = || { h -= 0.5 }
 bump()
 bump()
 out(h)                  // was -4598175219545276416

@@ -10,7 +10,7 @@
 // Input (on stdin): lines of `from,to,weight` edges over nodes 0..4.
 // Output: the relaxed distance to each node, the best single edge weight, and
 // the count of nodes reached.
-let edges = read lines(`{from:int},{to:int},{weight:int}`)
+var edges = read lines(`{from:int},{to:int},{weight:int}`)
 
 // Relax through a helper, so the receiver is an unannotated parameter and the
 // row is answered at the call site (TY-30's deferral).
@@ -18,7 +18,7 @@ fn relax(distance, key, candidate) {
     distance[key] min= candidate
 }
 
-let distance = Map()
+var distance = Map()
 distance[0] = 0
 
 // Three passes is enough for this graph; a node with no edge into it stays
@@ -39,7 +39,7 @@ while pass < 3 {
 out(distance[4])
 
 // `max=` is the dual, and the first score for a key is accepted the same way.
-let best = Map()
+var best = Map()
 for e in edges {
     best["any"] max= e.weight
 }

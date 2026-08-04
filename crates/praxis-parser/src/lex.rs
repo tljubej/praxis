@@ -203,7 +203,7 @@ impl<'a> Lexer<'a> {
             }
             self.pos += len;
         }
-        // Look up the keyword table: `let`/`if`/… become their own kinds; the
+        // Look up the keyword table: `var`/`if`/… become their own kinds; the
         // rest stay identifiers. Builtins (`out`, `panic`, type names) are
         // intentionally not keywords.
         //
@@ -618,9 +618,9 @@ mod tests {
 
     #[test]
     fn clean_trivial_input_has_no_diagnostics() {
-        let (kinds, diags) = lex_text("let x = 42 // hi\n");
+        let (kinds, diags) = lex_text("var x = 42 // hi\n");
         assert!(diags.is_empty(), "got diagnostics: {diags:?}");
-        assert!(kinds.contains(&SyntaxKind::KW_LET)); // keyword split out
+        assert!(kinds.contains(&SyntaxKind::KW_VAR)); // keyword split out
         assert!(kinds.contains(&SyntaxKind::Ident));
         assert!(kinds.contains(&SyntaxKind::IntLit));
         assert!(kinds.contains(&SyntaxKind::Whitespace));
@@ -630,7 +630,7 @@ mod tests {
 
     #[test]
     fn unknown_byte_emits_one_diagnostic() {
-        let (kinds, diags) = lex_text("let @ = 1");
+        let (kinds, diags) = lex_text("var @ = 1");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].kind(), DiagCode::UnexpectedCharacter);
         // The `@` becomes an ERROR token and lexing continues. It must not be
@@ -639,7 +639,7 @@ mod tests {
         // asserted the opposite, contradicting both ADR-003 and the doc on
         // `SyntaxKind::ERROR`.
         assert!(kinds.contains(&SyntaxKind::ERROR));
-        assert!(kinds.contains(&SyntaxKind::KW_LET));
+        assert!(kinds.contains(&SyntaxKind::KW_VAR));
         assert!(kinds.contains(&SyntaxKind::IntLit));
     }
 
@@ -647,7 +647,7 @@ mod tests {
     /// including bytes the lexer cannot classify.
     #[test]
     fn tokens_tile_the_source_even_across_unknown_characters() {
-        let src = "let x = 1 @ \u{2192} 2";
+        let src = "var x = 1 @ \u{2192} 2";
         let out = lex(FileId::SYNTHETIC, src);
         let mut at = 0usize;
         for token in &out.tokens {
@@ -678,14 +678,14 @@ mod tests {
 
     #[test]
     fn backtick_template_terminated() {
-        let (kinds, diags) = lex_text("let p = `{x:int}`");
+        let (kinds, diags) = lex_text("var p = `{x:int}`");
         assert!(diags.is_empty());
         assert!(kinds.contains(&SyntaxKind::BacktickTemplate));
     }
 
     #[test]
     fn unterminated_template_faults() {
-        let (_, diags) = lex_text("let p = `never closes");
+        let (_, diags) = lex_text("var p = `never closes");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].kind(), DiagCode::UnterminatedTemplate);
     }
@@ -699,7 +699,7 @@ mod tests {
     /// nested run.
     #[test]
     fn a_nested_backtick_template_is_one_token() {
-        let src = "let p = `{g:choice(A: `{x:int}`, B: word)}`";
+        let src = "var p = `{g:choice(A: `{x:int}`, B: word)}`";
         let (kinds, diags) = lex_text(src);
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(
@@ -713,8 +713,8 @@ mod tests {
 
         // Two levels deep, and two nested templates side by side.
         for src in [
-            "let p = `{a:choice(A: `{b:choice(C: `{c:int}`)}`)}`",
-            "let p = `{a:choice(A: `{x:int}`, B: `{y:word}`)}`",
+            "var p = `{a:choice(A: `{b:choice(C: `{c:int}`)}`)}`",
+            "var p = `{a:choice(A: `{x:int}`, B: `{y:word}`)}`",
         ] {
             let (kinds, diags) = lex_text(src);
             assert!(diags.is_empty(), "{src}: {diags:?}");
@@ -729,11 +729,11 @@ mod tests {
         }
 
         // An escaped backtick still cannot terminate anything, at either depth.
-        let (_, diags) = lex_text(r"let p = `a\`b`");
+        let (_, diags) = lex_text(r"var p = `a\`b`");
         assert!(diags.is_empty(), "{diags:?}");
 
         // And an outer template that never closes still faults.
-        let (_, diags) = lex_text("let p = `{g:choice(A: `{x:int}`)}");
+        let (_, diags) = lex_text("var p = `{g:choice(A: `{x:int}`)}");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].kind(), DiagCode::UnterminatedTemplate);
     }
@@ -753,7 +753,7 @@ mod tests {
             r#"`{s:sep("{", int)}`"#,
             r#"`{c:one_of("`")}`"#,
         ] {
-            let src = format!("let p = {template}\nlet q = 1\n");
+            let src = format!("var p = {template}\nvar q = 1\n");
             let out = lex(FileId::SYNTHETIC, &src);
             assert!(
                 out.diagnostics.is_empty(),
@@ -805,7 +805,7 @@ mod tests {
         }
 
         let at_the_bound = nested(MAX_TEMPLATE_NESTING);
-        let (kinds, diags) = lex_text(&format!("let p = {at_the_bound}\nlet q = 1\n"));
+        let (kinds, diags) = lex_text(&format!("var p = {at_the_bound}\nvar q = 1\n"));
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(
             kinds
@@ -817,7 +817,7 @@ mod tests {
         );
 
         let past = nested(MAX_TEMPLATE_NESTING + 1);
-        let (_, diags) = lex_text(&format!("let p = {past}\nlet q = 1\n"));
+        let (_, diags) = lex_text(&format!("var p = {past}\nvar q = 1\n"));
         assert!(
             diags
                 .iter()
@@ -827,7 +827,7 @@ mod tests {
         );
 
         // And the pathological case reports rather than overflowing the stack.
-        let (_, diags) = lex_text(&format!("let p = {}", "`{a:".repeat(5_000)));
+        let (_, diags) = lex_text(&format!("var p = {}", "`{a:".repeat(5_000)));
         assert!(
             diags
                 .iter()
@@ -839,14 +839,14 @@ mod tests {
     #[test]
     fn diagnostic_renders_for_unknown_byte() {
         let map = SourceMap::new();
-        let id = map.intern("day.px", "let @ = 1");
-        let out = lex(id, "let @ = 1");
+        let id = map.intern("day.px", "var @ = 1");
+        let out = lex(id, "var @ = 1");
         let rendered = praxis_source::render_one(&map, &out.diagnostics[0]);
         insta::assert_snapshot!(rendered, @r"
 error[T003]: unexpected character in source
 
   day.px:1:5
-  1 | let @ = 1
+  1 | var @ = 1
     |     ^ unexpected character in source
 ");
     }
@@ -856,11 +856,10 @@ error[T003]: unexpected character in source
     #[test]
     fn keywords_split_from_identifiers() {
         let (kinds, diags) = lex_text(
-            "let var fn if else while for in loop match return break continue read struct enum true false",
+            "var fn if else while for in loop match return break continue read struct enum true false",
         );
         assert!(diags.is_empty());
         for keyword in [
-            SyntaxKind::KW_LET,
             SyntaxKind::KW_VAR,
             SyntaxKind::KW_FN,
             SyntaxKind::KW_IF,
@@ -922,7 +921,7 @@ error[T003]: unexpected character in source
 
     #[test]
     fn regression_unicode_identifier_may_start_with_a_unicode_scalar() {
-        let (kinds, diags) = lex_text("let λ = 1");
+        let (kinds, diags) = lex_text("var λ = 1");
         assert!(diags.is_empty(), "Unicode identifier faulted: {diags:?}");
         assert_eq!(
             kinds
@@ -976,11 +975,11 @@ error[T003]: unexpected character in source
     fn only_the_first_token_on_a_line_is_preceded_by_a_newline() {
         use SyntaxKind::*;
         assert_eq!(
-            newline_flags("let a\nlet b"),
+            newline_flags("var a\nvar b"),
             vec![
-                (KW_LET, false),
+                (KW_VAR, false),
                 (Ident, false),
-                (KW_LET, true),
+                (KW_VAR, true),
                 (Ident, false),
                 (EOF, false),
             ]
@@ -991,7 +990,7 @@ error[T003]: unexpected character in source
     /// exactly what FE-04's separator check has to be able to see.
     #[test]
     fn same_line_tokens_report_no_newline() {
-        assert!(newline_flags("let a = 1 let b = 2")
+        assert!(newline_flags("var a = 1 var b = 2")
             .iter()
             .all(|(_, newline)| !newline));
     }
@@ -1000,8 +999,8 @@ error[T003]: unexpected character in source
     /// comment after the break must not hide it.
     #[test]
     fn a_line_break_anywhere_in_the_trivia_run_counts() {
-        let flags = newline_flags("let a\n  // why\n  let b");
-        assert_eq!(flags[2], (SyntaxKind::KW_LET, true));
+        let flags = newline_flags("var a\n  // why\n  var b");
+        assert_eq!(flags[2], (SyntaxKind::KW_VAR, true));
 
         let commented = newline_flags("1 /* over\ntwo lines */ + 2");
         assert_eq!(commented[1], (SyntaxKind::PLUS, true));
@@ -1011,7 +1010,7 @@ error[T003]: unexpected character in source
     /// when EOF eats the `\n` that would otherwise follow.
     #[test]
     fn a_line_comment_ends_the_line_it_is_on() {
-        let flags = newline_flags("let a // trailing");
+        let flags = newline_flags("var a // trailing");
         assert_eq!(flags.last().copied(), Some((SyntaxKind::EOF, true)));
     }
 
@@ -1328,7 +1327,7 @@ error[T003]: unexpected character in source
         }
 
         // …and every float that is *not* in that position still lexes as one.
-        for src in ["3.0", "1.5", "let x = 0.25", "1.5e3", "3.141_592"] {
+        for src in ["3.0", "1.5", "var x = 0.25", "1.5e3", "3.141_592"] {
             let (kinds, diags) = lex_text(src);
             assert!(diags.is_empty(), "{src}: {diags:?}");
             assert!(kinds.contains(&SyntaxKind::FloatLit), "{src}: {kinds:?}");

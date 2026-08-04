@@ -18,7 +18,7 @@
 // Input (on stdin): C.9's corrupted memory, one line.
 // Output: the enabled products' sum, then the same sum computed by
 // destructuring, then the instruction count `m9_noisy_scan.px` already claims.
-let instructions = read scan(choice(
+var instructions = read scan(choice(
     Mul: `mul({a:int},{b:int})`,
     Do: `do()`,
     Dont: `don't()`,

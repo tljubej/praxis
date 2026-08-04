@@ -44,7 +44,7 @@ pub struct TypeDb {
     /// `pub(crate)` so the `unify`/`generalize` modules can mutate slots in place
     /// (link vars, lower levels). External callers go through the methods below.
     pub(crate) slots: Vec<Slot>,
-    /// The current binding level, raised on each `let`/`fn` and lowered on exit.
+    /// The current binding level, raised on each `var`/`fn` and lowered on exit.
     /// See ADR-008.
     level: Level,
     /// Record definitions, indexed by [`RecordDefId`] (M7, ADR-025). Each
@@ -156,7 +156,7 @@ impl TypeDb {
     }
 
     /// Convenience: run `f` with the level raised one step, then restore. Use this
-    /// around every `let`/`fn` binding so their variables are created at the inner
+    /// around every `var`/`fn` binding so their variables are created at the inner
     /// level (and so generalization quantifies exactly the right set).
     pub fn scoped(&mut self, f: impl FnOnce(&mut Self)) {
         let prev = self.enter_level();
@@ -387,7 +387,7 @@ impl TypeDb {
         while i < self.pending_constraints.len() {
             // Through `follow`, and it matters: the constraint was made about
             // the variable that existed *then*, and unification may since have
-            // linked it to another. `let m = Map(); m.insert(k, 1)` requires the
+            // linked it to another. `var m = Map(); m.insert(k, 1)` requires the
             // map's own key variable, which `insert` then links to `k`'s — and
             // `k`'s is what generalization quantifies. Comparing the unfollowed
             // ids would leave the constraint pending forever.

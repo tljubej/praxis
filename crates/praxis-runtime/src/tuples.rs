@@ -27,7 +27,7 @@ use crate::GcRef;
 ///
 /// A slot may be **null**, meaning the compiler had no static type for that
 /// element — the same honest encoding a `Vec`'s element descriptor already uses
-/// (HIR-01/MONO-01: `let m = Map()` generalizes at the `let`, so a use whose
+/// (HIR-01/MONO-01: `var m = Map()` generalizes at the `var`, so a use whose
 /// program never inspects the elements leaves them unresolved). The arity is
 /// still exact, so nothing is lost; the *value's own* descriptor answers for a
 /// null slot, and it is read from the object's header, so it is never wrong.
@@ -47,7 +47,7 @@ impl TupleSchema {
     ///
     /// Falling back to the header is what makes a null slot safe rather than
     /// merely tolerated — the alternative that was there first, refusing to
-    /// compile, rejected `let m = Map()` followed by a `for` that never looks
+    /// compile, rejected `var m = Map()` followed by a `for` that never looks
     /// inside the pair (REP-15).
     fn descriptor_at(&self, i: usize, value: GcRef) -> &'static TypeDescriptor {
         match self.descriptors.get(i).copied() {
@@ -277,7 +277,7 @@ mod tests {
     /// no static type for that element — and the value's own descriptor answers
     /// for it.
     ///
-    /// `let m = Map()` followed by a `for kv in m` whose body never opens the
+    /// `var m = Map()` followed by a `for kv in m` whose body never opens the
     /// pair is the program that produces one: nothing ever resolves K or V, and
     /// refusing to compile it (which is what happened first) rejects a working
     /// program. It is the same answer `collection_arg_descriptor` already gives

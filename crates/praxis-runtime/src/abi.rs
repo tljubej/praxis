@@ -1355,7 +1355,7 @@ pub unsafe extern "C" fn praxis_float_load(_ctx: *mut RuntimeContext, r: GcRef) 
         // the caller's word alone. It slipped past
         // `every_scalar_payload_read_goes_through_the_bounded_reader` on a
         // spelling: that gate forbids the literal `*r.payload::<f64>()`, and
-        // this bound the pointer to a `let` first. REP-56's lesson is the read
+        // this bound the pointer to a `var` first. REP-56's lesson is the read
         // must prove its own width, not that one phrasing of it must.
         //
         // It matters more since ADR-102: generated code now reads a `Float`
@@ -6443,9 +6443,9 @@ mod tests {
         //
         //    The patterns are the *bare* calls, not the dereferenced ones, and
         //    that is the second thing this gate has now been widened for.
-        //    `praxis_float_load` read `let p: *mut f64 = r.payload::<f64>();`
+        //    `praxis_float_load` read `var p: *mut f64 = r.payload::<f64>();`
         //    and dereferenced `p` on the next line — unchecked, and green here,
-        //    because the list named `*r.payload::<f64>()` and a `let` breaks the
+        //    because the list named `*r.payload::<f64>()` and a `var` breaks the
         //    spelling without breaking the defect. Forbidding the call means no
         //    phrasing of it passes. `payload::<u8>()` stays legal: it is how
         //    `read_scalar` itself reaches the bytes, and how every *compound*
@@ -9160,7 +9160,7 @@ mod tests {
     /// **REP-41.** A collection built with no static element type must not
     /// claim to hold `Int`s, and what it holds must render as what it is.
     ///
-    /// The codegen passes a **null** descriptor for `let c = Counter()` — its
+    /// The codegen passes a **null** descriptor for `var c = Counter()` — its
     /// contract above `collection_element_descriptor_for` says so, and says
     /// every `praxis_*_new` wrapper reads it that way. Five did not: `Set`,
     /// `Counter`, `Map`'s key and the two heaps each replaced the null with

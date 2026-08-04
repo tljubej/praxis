@@ -28,10 +28,10 @@ It does not produce standalone binaries. The compiler and runtime live in one Ru
 Input parsing is a first-class language feature. `read PARSER` is an ordinary expression that lazily reads the process input into an immutable source buffer, applies a compile-time parser expression to the entire buffer, and returns the inferred typed value. Parser structure is written outside backtick templates, where whitespace is insignificant. Literal input syntax is written inside backticks, where punctuation and whitespace describe the input and typed captures extract values.
 
 ```praxis
-let segments = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)
+var segments = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)
 ```
 
-Because `read` is an expression, its result may be bound with either `let` or `var`, passed directly to a function, or used in another expression.
+Because `read` is an expression, its result may be bound with `var`, passed directly to a function, or used in another expression.
 
 Runtime failures are not handled manually. Bounds errors, parse mismatches, missing keys, overflow, failed assertions, and explicit panics stop normal execution and enter an interactive crash REPL. The user can inspect the stack, select frames, print local variables, evaluate expressions against captured state, edit the program, and reload it with the same input.
 
@@ -118,7 +118,7 @@ Use `.px` as the source extension.
 A single file is the normal program unit. Top-level statements are wrapped in a generated entry function.
 
 ```praxis
-let numbers = read lines(int)
+var numbers = read lines(int)
 
 out(numbers.sum())
 ```
@@ -126,26 +126,26 @@ out(numbers.sum())
 ### 3.3 Complete representative program
 
 ```praxis
-let segments = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)
+var segments = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)
 
 fn overlaps(segments, diagonals) {
-    let counts = Counter[(Int, Int)]()
+    var counts = Counter[(Int, Int)]()
 
     for segment in segments {
-        let dx = sign(segment.x2 - segment.x1)
-        let dy = sign(segment.y2 - segment.y1)
+        var dx = sign(segment.x2 - segment.x1)
+        var dy = sign(segment.y2 - segment.y1)
 
         if !diagonals && dx != 0 && dy != 0 {
             continue
         }
 
-        let distance = max(
+        var distance = max(
             abs(segment.x2 - segment.x1),
             abs(segment.y2 - segment.y1),
         )
 
         for step in 0..=distance {
-            let point = (
+            var point = (
                 segment.x1 + dx * step,
                 segment.y1 + dy * step,
             )
@@ -179,18 +179,24 @@ out(overlaps(segments, true))
 
 Every binding stores a `GcRef`, but bindings still have static source-language types.
 
-`let` creates a binding that cannot be reassigned:
-
-```praxis
-let width = grid.width()
-```
-
-`var` creates a binding that may be reassigned to another value of the same inferred static type:
+`var` is the language's one binding form (ADR-125). It introduces a name, and that
+name may be reassigned to another value of the same inferred static type:
 
 ```praxis
 var score = 0
 score += 10
 score = 25
+```
+
+There is **no immutable binding**. A function parameter, a `for` loop's variable and
+a name a pattern introduces are all bindings in exactly this sense, and all of them
+may be assigned:
+
+```praxis
+fn clamp_low(n) {
+    if n < 0 { n = 0 }
+    n
+}
 ```
 
 This is invalid because reassignment does not change a binding's type:
@@ -200,48 +206,54 @@ var score = 0
 score = "high" // error: expected Int, found Text
 ```
 
-A `let` binding may still point to a mutable object:
+Rebinding the *name* and mutating the *object* remain separate things:
 
 ```praxis
-let values = Vec[Int]()
+var values = Vec[Int]()
 values.push(42)
 ```
 
-The reference stored in `values` is stable, while the referenced vector is mutated.
+The reference stored in `values` is unchanged by the `push`; the referenced vector is
+what is mutated. `values[0] = 7` and `p.x = 7` are likewise writes to an object, not
+to the binding.
 
 #### Rust-style shadowing
 
-A later `let` declaration may shadow an earlier binding with the same name in the same lexical scope. The new binding is a distinct symbol and may have a different type:
+A later `var` declaration may shadow an earlier binding with the same name in the same
+lexical scope. The new binding is a distinct symbol and may have a different type:
 
 ```praxis
-let a = 4
-let a = "Foo"
+var a = 4
+var a = "Foo"
 out(a) // Text
 ```
 
-This is not reassignment. The compiler allocates a new binding and gives it a new symbol ID. Name lookup after the declaration resolves to the new binding.
+This is not reassignment. The compiler allocates a new binding and gives it a new
+symbol ID. Name lookup after the declaration resolves to the new binding.
 
-The initializer of a shadowing declaration is resolved before the new binding enters scope, matching Rust behavior:
+The initializer of a shadowing declaration is resolved before the new binding enters
+scope, matching Rust behavior:
 
 ```praxis
-let a = 4
-let a = a + 1 // the right-hand a is the previous Int binding
+var a = 4
+var a = a + 1 // the right-hand a is the previous Int binding
 ```
 
-Closures created before a shadowing declaration retain the binding they originally captured:
+Closures created before a shadowing declaration retain the binding they originally
+captured:
 
 ```praxis
-let a = 4
-let show_old = || out(a)
-let a = "Foo"
+var a = 4
+var show_old = || out(a)
+var a = "Foo"
 show_old() // prints 4
 ```
 
-Shadowing and `var` therefore serve different purposes:
+Shadowing and assignment therefore serve different purposes:
 
-- `let name = ...` followed by another `let name = ...` creates a new binding and may change type.
-- `var name = ...` followed by `name = ...` updates the existing binding and must preserve type.
-- A captured `var` is represented by a GC-managed cell so closures observe later reassignment.
+- `var name = ...` followed by another `var name = ...` creates a new binding and may change type.
+- `name = ...` updates the existing binding and must preserve its type.
+- A captured binding that something reassigns is represented by a GC-managed cell so closures observe later reassignment. One nothing reassigns is copied into the closure's environment, which is why the distinction is the compiler's to make and not the programmer's.
 - Passing an argument copies its `GcRef`. Mutating the referenced object is shared; rebinding a local variable never rebinds the caller's variable.
 
 ### 4.3 Built-in scalar types and uniform object representation
@@ -287,26 +299,26 @@ struct Point {
     y: Int
 }
 
-let p = Point { x: 3, y: 4 }
+var p = Point { x: 3, y: 4 }
 ```
 
 Field punning is supported:
 
 ```praxis
-let p = Point { x, y }
+var p = Point { x, y }
 ```
 
 **A field is an assignable place**, in every spelling an assignment has:
 
 ```praxis
 struct Point { x: Int, y: Int }
-let p = Point { x: 3, y: 4 }
+var p = Point { x: 3, y: 4 }
 p.x = 5
 p.y += 1
 ```
 
-The binding is not what is written — the *object* is — so a `let` receiver is
-fine, exactly as `let values = Vec[Int]()` followed by `values.push(42)` is
+The binding is not what is written — the *object* is — so the receiver need not be
+reassigned anywhere, exactly as `var values = Vec[Int]()` followed by `values.push(42)` is
 (§4.2), and every reference to that record observes the write. A compound
 operator reads and writes one place: `nodes(i).count += 1` evaluates `nodes(i)`
 once.
@@ -331,7 +343,7 @@ enum Tile {
 Pattern matches are exhaustive:
 
 ```praxis
-let cost = match tile {
+var cost = match tile {
     Empty => 1
     Wall => panic("wall has no traversal cost")
     Number(n) => n
@@ -353,7 +365,7 @@ match map.get(key) {
 Indexing a missing map key faults instead of returning an option:
 
 ```praxis
-let value = map[key]
+var value = map[key]
 ```
 
 The user chooses between explicit absence with `.get` and assertion-like access with indexing.
@@ -407,8 +419,8 @@ does: `min`/`min_by`, `max`/`max_by`, `find`/`position`.
 ### 4.10 Closures
 
 ```praxis
-let offset = 10
-let adjusted = values.map(|x| x + offset)
+var offset = 10
+var adjusted = values.map(|x| x + offset)
 ```
 
 Closures capture values automatically. Mutable captures use GC-managed environment cells. There are no move closures, borrow captures, or lifetime rules.
@@ -468,8 +480,8 @@ operation Float, an Int operand makes it Int. There is **no implicit widening**;
 mixing the two is a type error. Cross-type conversion is explicit:
 
 ```praxis
-let f: Float = 5.to_float()    // Int -> Float (always exact)
-let n: Int   = 3.9.to_int()    // Float -> Int, truncates toward zero
+var f: Float = 5.to_float()    // Int -> Float (always exact)
+var n: Int   = 3.9.to_int()    // Float -> Int, truncates toward zero
 ```
 
 Float arithmetic **never faults** — per IEEE-754, `1.0 / 0.0` is `inf`,
@@ -519,9 +531,9 @@ as their bit pattern, bit-casting to `f64` at arithmetic/comparison points.
 immutable `Text` — §4.3 makes `Text` immutable, so neither operand is touched.
 
 ```praxis
-let a = "asd"
-let b = "qwe"
-let c = a + b        // "asdqwe"
+var a = "asd"
+var b = "qwe"
+var c = a + b        // "asdqwe"
 
 var s = ""
 s += "one "          // `s = s + "one "`, the same operator
@@ -533,7 +545,7 @@ operand makes the operation `Text`**, exactly as a `Float` operand makes it
 `Float`. So the mixed forms are type errors and not coercions:
 
 ```praxis
-let bad = "count: " + 3    // error: expected Text, found Int
+var bad = "count: " + 3    // error: expected Text, found Int
 ```
 
 There is **no implicit conversion to `Text`**. A language whose `+` stringifies
@@ -605,7 +617,7 @@ fn total(values) {
     values.sum()
 }
 
-let values = Vec[Int]()
+var values = Vec[Int]()
 values.push(1)
 values.push(2)
 out(total(values))
@@ -620,8 +632,11 @@ values: Vec[Int]
 
 ### 5.3 Generalization and shadowed bindings
 
-- Immutable `let` bindings may be generalized.
-- Mutable `var` bindings are not generalized.
+- A binding nothing reassigns may be generalized, under the value restriction.
+- A binding some assignment writes is **not** generalized: assignment instantiates a
+  scheme rather than constraining it, so a generalized reassigned binding would keep
+  its old scheme and var a later use pick any instance of it.
+- Which of the two a binding is, is inferred, not declared (ADR-125).
 - Every shadowing declaration is inferred independently and receives a new symbol ID.
 - A shadowing initializer resolves names in the preceding environment; the new symbol becomes visible only after its initializer is checked.
 - Shadowed bindings may have unrelated types.
@@ -716,8 +731,8 @@ The language server uses the same table for completion and signature help.
 literal *is* an allocation followed by one `push` per element:
 
 ```praxis
-let v = [1, 2, 3]        // Vec[Int]
-let empty: Vec[Text] = []
+var v = [1, 2, 3]        // Vec[Int]
+var empty: Vec[Text] = []
 v.push(4)                // a literal is a Vec, so it is mutable afterwards
 for x in [1, 2, 3] { out(x) }
 ```
@@ -761,7 +776,7 @@ var v = [1, 2, 3]
 v[0] = 100
 v[2] += 10
 
-let counts = Map[Text, Int]()
+var counts = Map[Text, Int]()
 counts["a"] = 1
 counts["a"] += 2
 ```
@@ -776,7 +791,7 @@ and a compound operator evaluates its receiver and every index once.
 The language exposes lazy, compiler-known sequence pipelines without a user-visible iterator type.
 
 ```praxis
-let answer = values
+var answer = values
     .filter(|x| x > 0)
     .map(|x| x * x)
     .sum()
@@ -846,7 +861,7 @@ grid.rotate_right()
 Provide closure-based algorithms that do not require materializing a graph object:
 
 ```praxis
-let distance = bfs_distance(
+var distance = bfs_distance(
     start,
     |state| neighbors(state),
     |state| state == goal,
@@ -873,7 +888,7 @@ Initial algorithms:
 `read PARSER` is an ordinary prefix expression. It applies `PARSER` to the complete process-input source and returns the parser's statically synthesized result type.
 
 ```praxis
-let segments = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)
+var segments = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)
 ```
 
 Because it is an expression, the result may be stored in a rebindable variable:
@@ -894,7 +909,7 @@ The runtime lazily reads standard input once into an immutable, GC-managed sourc
 Parsing an existing `Text` object uses a separate expression:
 
 ```praxis
-let sample_values = parse(sample, lines(int))
+var sample_values = parse(sample, lines(int))
 ```
 
 A parser expression has two visual modes:
@@ -905,7 +920,7 @@ A parser expression has two visual modes:
 This boundary is normative.
 
 ```praxis
-let segments = read lines(
+var segments = read lines(
     `{x1:int},{y1:int} -> {x2:int},{y2:int}`
 )
 ```
@@ -1090,7 +1105,7 @@ Result: `Vec[Vec[Int]]`.
 Named arguments parse fixed sections in order:
 
 ```praxis
-let data = read sections(
+var data = read sections(
     rules: lines(`{before:int}|{after:int}`),
     updates: lines(csv(int)),
 )
@@ -1108,7 +1123,7 @@ Result:
 `repeated(parser)` may appear only as the final named argument and consumes all remaining sections:
 
 ```praxis
-let bingo = read sections(
+var bingo = read sections(
     draws: csv(int),
     boards: repeated(matrix(int)),
 )
@@ -1282,7 +1297,7 @@ read scan(choice(
 The previously ambiguous structure is written:
 
 ```praxis
-let groups = read sections(lines(csv(int)))
+var groups = read sections(lines(csv(int)))
 ```
 
 Its result type is:
@@ -1296,7 +1311,7 @@ All whitespace in the parser expression is ignored. No indentation or line break
 ### 7.7 Repeated labeled blocks
 
 ```praxis
-let monkeys = read sections(
+var monkeys = read sections(
     block(
         `Monkey {id:int}:`,
         `  Starting items: {items:csv(int)}`,
@@ -1417,7 +1432,7 @@ out("Part 2: {part2}")
 `dbg(value)` prints to standard error and returns the value.
 
 ```praxis
-let next = dbg(candidates).first()
+var next = dbg(candidates).first()
 ```
 
 ### 8.2 Compile diagnostics
@@ -1525,7 +1540,7 @@ When attached to a terminal, a fault enters:
 runtime fault: map key was not present
 
   day05.px:47:22
-  let next = graph[current]
+  var next = graph[current]
                    ^^^^^^^^^
 
 Praxis crash>
@@ -2095,7 +2110,7 @@ Token classes should distinguish:
 Optional inferred-type hints for:
 
 - Function parameters.
-- `let` bindings with non-obvious anonymous record types.
+- Bindings with non-obvious anonymous record types.
 - Closure parameters.
 - Input parser roots.
 
@@ -2422,14 +2437,14 @@ Each milestone is a gate. Do not begin large work from a later milestone until t
 - Built-in static types.
 - Function inference.
 - Tuples.
-- `let`, `var`, assignment, and Rust-style shadowing.
+- `var`, assignment, and Rust-style shadowing.
 - Basic method catalog lookup.
 - User-facing type diagnostics.
 
 **Acceptance criteria**
 
 - Infer non-recursive function parameters and return values from use.
-- Accept `let a = 4; let a = "Foo"` and resolve each occurrence to the correct symbol.
+- Accept `var a = 4; var a = "Foo"` and resolve each occurrence to the correct symbol.
 - Resolve a shadowing initializer against the previous binding.
 - Reject cross-type `var` reassignment.
 - Hover query returns the inferred type and symbol identity for each shadowed occurrence.
@@ -2483,7 +2498,7 @@ Each milestone is a gate. Do not begin large work from a later milestone until t
 **Acceptance criteria**
 
 - Vector growth and nested vectors survive collection.
-- `let` object mutation, `var` reassignment, and closure-shared `var` cells follow the specified semantics.
+- Object mutation through a binding, reassignment, and closure-shared cells follow the specified semantics.
 - Shadowed locals are distinguishable in debugger frames by source name and symbol ID.
 - Missing/index faults preserve collection locals in snapshots.
 
@@ -2504,7 +2519,7 @@ Each milestone is a gate. Do not begin large work from a later milestone until t
 **Acceptance criteria**
 
 - Parse all simple corpus fixtures without user string manipulation.
-- Bind `read` results with both `let` and `var`.
+- Bind `read` results with `var`.
 - Multiple `read` expressions deterministically parse the same complete source buffer.
 - Hover over a `read` result binding displays the synthesized nested type.
 - Whitespace outside backticks never affects parsing.
@@ -2829,31 +2844,31 @@ All arguments and return values are object references. Wrappers validate descrip
 ### C.1 One number per line
 
 ```praxis
-let values = read lines(int)
+var values = read lines(int)
 ```
 
 ### C.2 Two columns
 
 ```praxis
-let rows = read lines(`{left:int} {right:int}`)
+var rows = read lines(`{left:int} {right:int}`)
 ```
 
 ### C.3 CSV program
 
 ```praxis
-let program = read csv(int)
+var program = read csv(int)
 ```
 
 ### C.4 Blank-line groups
 
 ```praxis
-let groups = read sections(lines(int))
+var groups = read sections(lines(int))
 ```
 
 ### C.5 Rules and updates
 
 ```praxis
-let data = read sections(
+var data = read sections(
     rules: lines(`{before:int}|{after:int}`),
     updates: lines(csv(int)),
 )
@@ -2862,7 +2877,7 @@ let data = read sections(
 ### C.6 Bingo
 
 ```praxis
-let bingo = read sections(
+var bingo = read sections(
     draws: csv(int),
     boards: repeated(matrix(int)),
 )
@@ -2871,7 +2886,7 @@ let bingo = read sections(
 ### C.7 Grid and commands
 
 ```praxis
-let data = read sections(
+var data = read sections(
     map: grid(char),
     moves: chars(one_of("^v<>"), skip: whitespace),
 )
@@ -2880,7 +2895,7 @@ let data = read sections(
 ### C.8 Repeated map sections
 
 ```praxis
-let almanac = read sections(
+var almanac = read sections(
     seeds: block(`seeds: {values:ws(int)}`),
     maps: repeated(block(
         `{source:word}-to-{destination:word} map:`,
@@ -2892,7 +2907,7 @@ let almanac = read sections(
 ### C.9 Noisy instruction scanning
 
 ```praxis
-let instructions = read scan(choice(
+var instructions = read scan(choice(
     Multiply: `mul({left:int},{right:int})`,
     Enable: `do()`,
     Disable: `don't()`,
@@ -2906,18 +2921,18 @@ let instructions = read scan(choice(
 The first public demo should support this program:
 
 ```praxis
-let pairs = read lines(`{left:int} {right:int}`)
+var pairs = read lines(`{left:int} {right:int}`)
 
-let left = pairs.map(|p| p.left).sorted()
-let right = pairs.map(|p| p.right).sorted()
+var left = pairs.map(|p| p.left).sorted()
+var right = pairs.map(|p| p.right).sorted()
 
-let distance = left
+var distance = left
     .zip(right)
     .map(|(a, b)| abs(a - b))
     .sum()
 
-let counts = right.frequencies()
-let similarity = left
+var counts = right.frequencies()
+var similarity = left
     .map(|value| value * counts[value])
     .sum()
 

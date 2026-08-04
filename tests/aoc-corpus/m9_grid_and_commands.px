@@ -5,7 +5,7 @@
 // → parses as { map: Grid[Char], moves: Vec[Char] }.
 // Acceptance: "Parse grid plus folded command stream."
 fn main() -> Int {
-    let data = read sections(
+    var data = read sections(
         map: grid(char),
         moves: chars(one_of("^v<>"), skip: whitespace),
     );

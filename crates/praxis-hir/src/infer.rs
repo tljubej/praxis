@@ -4,8 +4,8 @@
 //! a [`Scheme`] to every binding. Uses the level-based let-generalization from
 //! `praxis-types` (ADR-008):
 //!
-//! - `let` RHS is inferred at an inner level, then **generalized** at the outer
-//!   level (so `let id = fn(x){x}` becomes `forall T. (T) -> T`).
+//! - `var` RHS is inferred at an inner level, then **generalized** at the outer
+//!   level (so `var id = fn(x){x}` becomes `forall T. (T) -> T`).
 //! - `var` RHS is inferred but **never generalized** (§5.3 soundness — a `var`
 //!   could be reassigned to a differently-shaped value).
 //! - A `fn` is given a monomorphic placeholder var first (so the body can refer
@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use praxis_ast::{
     ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, BreakExpr, CallExpr, ContinueExpr,
-    ElseBranch, Expr, ExprStmt, FieldExpr, FnItem, ForExpr, IfExpr, LetStmt, Literal, LoopExpr,
+    ElseBranch, Expr, ExprStmt, FieldExpr, FnItem, ForExpr, IfExpr, Literal, LoopExpr,
     MethodCallExpr, Param, PathExpr, RecordLitExpr, ReturnExpr, SourceFile, UnaryExpr, VarStmt,
     WhileExpr,
 };
@@ -51,7 +51,7 @@ pub struct Inference {
     pub refs: HashMap<TextRange, ResolvedRef>,
     pub ref_types: HashMap<TextRange, Type>,
     /// Declaration-site ranges → SymbolId. Carried from resolution so downstream
-    /// passes (M4 lowering) can map a `let`/`var`/`fn`/param name to its symbol
+    /// passes (M4 lowering) can map a `var`/`fn`/param name to its symbol
     /// via the declaration range (unambiguous under shadowing).
     pub decls: HashMap<TextRange, SymbolId>,
     /// Each call site, keyed by the callee name token's range → the callee
@@ -673,7 +673,7 @@ impl Inferer {
                 }
                 // Through `require_cap`, not through `capability::check`
                 // directly, and that is the whole difference between the two
-                // arms. `let v = Vec()` mints `Vec[?T]` — a *concrete* receiver
+                // arms. `var v = Vec()` mints `Vec[?T]` — a *concrete* receiver
                 // with an *open* element — so `v.sorted()` resolves its row and
                 // reaches here before any `push` has said what `?T` is.
                 // `capability::check` answers **yes** to every unresolved
@@ -700,7 +700,7 @@ impl Inferer {
     ///   `MinHeap[fn(Int) -> Int]` has no comparison to make.
     ///
     /// A still-unresolved argument goes on the channel and is checked when the
-    /// program pins it — which is the common shape, since `let m = Map()` mints
+    /// program pins it — which is the common shape, since `var m = Map()` mints
     /// two variables and the first `insert` is what says what they are.
     fn require_collection_invariants(&mut self, t: Type, at: TextRange) {
         use praxis_types::{data::TypeData, CollectionCtor};
@@ -1102,9 +1102,7 @@ impl Inferer {
     /// types were registered by the declaration pass, before any expression was
     /// inferred, which is the whole of TY-10.
     fn infer_top_stmt(&mut self, node: &praxis_syntax::SyntaxNode) {
-        if let Some(let_) = LetStmt::cast(node.clone()) {
-            self.infer_let(&let_);
-        } else if let Some(var_) = VarStmt::cast(node.clone()) {
+        if let Some(var_) = VarStmt::cast(node.clone()) {
             self.infer_var(&var_);
         } else if let Some(fn_) = FnItem::cast(node.clone()) {
             self.infer_fn(&fn_);
@@ -1153,7 +1151,7 @@ impl Inferer {
         Some((enum_ty, idx, payload))
     }
 
-    fn infer_let(&mut self, stmt: &LetStmt) {
+    fn infer_var(&mut self, stmt: &VarStmt) {
         // Infer the RHS at an inner level so its vars can be generalized. Manage
         // the level explicitly (not via db.scoped) because the inference borrows
         // `self` mutably alongside `self.db`.
@@ -1175,16 +1173,28 @@ impl Inferer {
         }
         let body_ty = annot.or(rhs_ty).unwrap_or_else(|| self.db.fresh_var());
         self.db.exit_level(prev);
-        // Generalize `let` bindings (§5.3), but only when the RHS is a syntactic
-        // value — the HM value restriction. An expansive RHS (a call like
-        // `Vec()`, a method call, a block, `read`, …) is left monomorphic so its
-        // type variables are shared across uses rather than instantiated fresh
-        // per reference. Without this, `let v = Vec(); v.push(inner); v.map(...)`
-        // gives `v : forall T. Vec[T]`, and the push's element-type pinning never
-        // reaches the map (Gap B). An explicit type annotation overrides the
-        // restriction (the user has pinned the type by writing it).
+        // Generalize the binding (§5.3) under **two** restrictions.
+        //
+        // The first is the HM value restriction: only a syntactic value
+        // generalizes. An expansive RHS (a call like `Vec()`, a method call, a
+        // block, `read`, …) is left monomorphic so its type variables are shared
+        // across uses rather than instantiated fresh per reference. Without
+        // this, `var v = Vec(); v.push(inner); v.map(...)` gives
+        // `v : forall T. Vec[T]`, and the push's element-type pinning never
+        // reaches the map (Gap B). An explicit type annotation overrides it (the
+        // user has pinned the type by writing it).
+        //
+        // The second is [`Symbol::reassigned`] (ADR-125), which is what the
+        // `var` split used to decide. Assignment *instantiates* a scheme
+        // and unifies the copy, so a generalized scheme is not constrained by
+        // being written: `var f = |x| x` is a syntactic value and generalizes to
+        // `forall T. T -> T`, and `f = |n| n + 1` would leave it there — so
+        // `f("s")` would type-check and call the `Int` closure. A binding
+        // nothing writes cannot reach that state, which is exactly the set the
+        // old `var` named.
         let expansive = rhs.as_ref().is_some_and(|e| !is_syntactic_value(e));
-        let scheme = if expansive && annot.is_none() {
+        let reassigned = self.binding_is_reassigned(stmt.name());
+        let scheme = if reassigned || (expansive && annot.is_none()) {
             Scheme::monotype(body_ty)
         } else {
             self.db.generalize(body_ty)
@@ -1192,26 +1202,15 @@ impl Inferer {
         self.attach_scheme(stmt.name(), scheme);
     }
 
-    fn infer_var(&mut self, stmt: &VarStmt) {
-        // `var` RHS is inferred but NOT generalized (§5.3).
-        let prev = self.db.enter_level();
-        let rhs_ty = stmt.init().map(|e| self.infer_expr(&e));
-        let annot = stmt.ty().and_then(|t| self.resolve_type(&t));
-        if let (Some(a), Some(r)) = (annot, rhs_ty) {
-            // Point at the RHS initializer, not the whole `var` statement.
-            let at = stmt
-                .init()
-                .map(|e| e.syntax().text_range())
-                .unwrap_or_else(|| stmt.syntax().text_range());
-            if let Err(e) = self.db.unify(a, r) {
-                self.diag_unify_hinted(self.file_span(at), e, "the binding's type annotation");
-            }
-        }
-        let body_ty = annot.or(rhs_ty).unwrap_or_else(|| self.db.fresh_var());
-        self.db.exit_level(prev);
-        // No generalization for var.
-        let scheme = Scheme::monotype(body_ty);
-        self.attach_scheme(stmt.name(), scheme);
+    /// Whether the declaration at `name_tok` is one that something reassigns.
+    /// Reads the flag name resolution set (see [`crate::Symbol::reassigned`]).
+    /// A malformed binding with no name token has no symbol, and nothing can
+    /// write what has no name.
+    fn binding_is_reassigned(&self, name_tok: Option<praxis_syntax::SyntaxToken>) -> bool {
+        name_tok
+            .and_then(|t| self.decls.get(&t.text_range()).copied())
+            .and_then(|id| self.names.get(id))
+            .is_some_and(|sym| sym.reassigned)
     }
 
     /// Infer one declaration group: every top-level statement in `root`.
@@ -1303,7 +1302,7 @@ impl Inferer {
         // It used to happen afterwards, so a recursive call inside the body
         // unified a bare variable with `(args) -> ?r` and the result stayed
         // unknown until the whole function was done: `fn build(n: Int) ->
-        // Vec[Int] { … let v = build(n - 1); v.push(n) … }` could not resolve
+        // Vec[Int] { … var v = build(n - 1); v.push(n) … }` could not resolve
         // `push`, because at that point `v` had no type but a variable. Lowering
         // hid this by re-resolving the method later, against types inference had
         // since pinned — the re-derivation F15 removes, so the ordering has to
@@ -1416,18 +1415,11 @@ impl Inferer {
         let Some(sym) = self.names.get(target.symbol) else {
             return;
         };
-        // Only a `var` may be reassigned (§4.2). A `let`, a parameter, a `for`
-        // binding and a pattern binding are all immutable, and nothing checked
-        // (TY-14) — `let x = 1; x = 2` compiled and the backend wrote the slot.
-        if sym.kind != SymbolKind::Var {
-            let kind = describe_binding(sym.kind);
-            self.diagnostics
-                .push(crate::diagnostics::assign_to_immutable(
-                    self.file_span(at),
-                    &sym.name,
-                    kind,
-                ));
-        }
+        // Every binding is assignable (ADR-125): a `var`, a parameter, a `for`
+        // binding and a pattern binding are all just names bound to values, and
+        // the only thing assignment has to respect is the binding's *type*. What
+        // an assignment used to be checked for — being a `var` — was the whole
+        // of `Y009`, and that code is retired.
         let Some(scheme) = sym.scheme.as_ref() else {
             return;
         };
@@ -1691,7 +1683,7 @@ impl Inferer {
     ///
     /// **The head has to be a `struct`, and nothing asked (REP-26).** A head that
     /// resolved to anything else kept that thing's type and lowered to nothing:
-    /// `let x = 1` / `let p = x { a: 1 }` passed `praxis check`, printed `Unit`,
+    /// `var x = 1` / `var p = x { a: 1 }` passed `praxis check`, printed `Unit`,
     /// and `p + 1` printed a raw pointer. That is REP-01's shape — a program the
     /// checker accepts whose value has no representation — so the report is made
     /// **here**, in inference, where `praxis check` sees it (REP-12).
@@ -2076,7 +2068,7 @@ impl Inferer {
     /// `p.x = 5`, `p.x += 1` — a store into a record field (§4.5).
     ///
     /// **A field is a place**, which §4.2 already implies and nothing in the
-    /// language could spell: a `let` binding "may still point to a mutable
+    /// language could spell: a `var` binding "may still point to a mutable
     /// object", and every record was one you could only rebuild. `p.x = 5` was
     /// `Y021` and `Point { x: 5, y: p.y }` was the whole workaround.
     ///
@@ -2379,7 +2371,7 @@ impl Inferer {
     /// own shape — and it is reported when the scrutinee is still open (ADR-091
     /// Decision 2). Staying silent there, the way `infer_field_get` stays silent
     /// about an unpinned receiver (REP-28), was measured and is *not* the same
-    /// trade: `let f = |{x, y}| x + y` passed `praxis check` and then aborted the
+    /// trade: `var f = |{x, y}| x + y` passed `praxis check` and then aborted the
     /// runtime with "int_payload wants a `Int` payload; this value is a `Unit`",
     /// because inference had bound `x` and `y` to fresh variables while lowering
     /// — which reads the record off the scrutinee and by then knows it — stored
@@ -2614,7 +2606,7 @@ impl Inferer {
     /// Whether `symbol` is a `fn` whose scheme quantifies anything — the case a
     /// function *value* cannot represent (REP-01).
     ///
-    /// The kind is what makes this answerable: a `let` bound to a closure also
+    /// The kind is what makes this answerable: a `var` bound to a closure also
     /// has a `Func` scheme, and a generalized one at that, so the scheme alone
     /// cannot tell a declaration from a binding that holds a value (the same
     /// reason `SymbolKind::EnumVariant` exists — HIR-03).
@@ -2920,7 +2912,7 @@ impl Inferer {
     fn infer_block_inner(&mut self, block: &BlockExpr) -> (Type, Option<TextRange>) {
         // Only the **last** statement can be the block's value, and only if it
         // is an expression statement. Every expression statement used to
-        // overwrite `last`, so `{ 1; let x = 2 }` was inferred `Int` while
+        // overwrite `last`, so `{ 1; var x = 2 }` was inferred `Int` while
         // lowering demoted the `1` to an effect and gave the block a `Unit`
         // tail — inference and execution disagreed about the result type
         // (TY-16). `lower_block` is the shape this mirrors: a *pending* tail
@@ -3378,7 +3370,7 @@ impl Inferer {
     /// result's arguments are this call's own variables — the ones a later use
     /// would otherwise be the only thing to pin. Unifying rather than substituting
     /// is what makes a disagreement a `Y001` at the use that disagrees:
-    /// `let c = Counter[Text]()\n c.inc(1)` reports about `Int` and `Text` rather
+    /// `var c = Counter[Text]()\n c.inc(1)` reports about `Int` and `Text` rather
     /// than silently preferring one.
     ///
     /// The arity check is `Y007`, the code a written `Vec[Int, Text]` annotation
@@ -3659,12 +3651,12 @@ impl Inferer {
 }
 
 /// Whether an expression is a *syntactic value* for the HM value restriction
-/// (§5.3). `let x = <value>` may generalize `x`'s type; `let x = <expansive>`
+/// (§5.3). `var x = <value>` may generalize `x`'s type; `var x = <expansive>`
 /// (a call, method call, block, `read`, …) is left monomorphic so its type
 /// variables are shared across uses instead of instantiated fresh per reference
-/// — the standard fix for the `let r = ref []` / `let v = Vec()` generalization
+/// — the standard fix for the `var r = ref []` / `var v = Vec()` generalization
 /// gap. Recurses through `Paren` (a transparent wrapper) and `Tuple` of values
-/// (a value iff every element is). An explicit type annotation on the `let`
+/// (a value iff every element is). An explicit type annotation on the `var`
 /// overrides the restriction, handled by the caller.
 fn is_syntactic_value(e: &Expr) -> bool {
     match e {
@@ -3727,10 +3719,13 @@ fn is_text_scalar(db: &TypeDb, t: Type) -> bool {
 }
 
 /// How to name a binding kind in a diagnostic, in the words the source uses.
+///
+/// [`SymbolKind::Var`] is spelled "a binding" rather than "a `var` binding":
+/// since ADR-125 it covers a `for` variable and a pattern name as well as a
+/// `var` statement, and naming the keyword would be wrong for two of the three.
 fn describe_binding(kind: SymbolKind) -> &'static str {
     match kind {
-        SymbolKind::Let => "a `let` binding",
-        SymbolKind::Var => "a `var` binding",
+        SymbolKind::Var => "a binding",
         SymbolKind::Fn => "a function",
         SymbolKind::Param => "a parameter",
         SymbolKind::Builtin | SymbolKind::BuiltinType => "a built-in name",

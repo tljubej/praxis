@@ -154,7 +154,7 @@ pub fn heap(
 /// [`praxis_repr::type_for_value`]), which is always concrete — the static
 /// `type_id` (WS1) is only a fallback. This is necessary because Praxis's
 /// inference leaves collection element types as unbound vars when a `Vec()` is
-/// filled by later `push` calls (`let xs = Vec(); xs.push(11)` types `xs` as
+/// filled by later `push` calls (`var xs = Vec(); xs.push(11)` types `xs` as
 /// `Vec[?T]`, not `Vec[Int]`); the payload carries the real element type, so
 /// `p xs.len()` / `p xs.get(0)` type-check correctly.
 ///

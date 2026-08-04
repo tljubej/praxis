@@ -31,10 +31,10 @@ fn scheme_of(text: &str, name: &str) -> Option<String> {
         .find_map(|s| s.scheme.as_ref().map(|sc| analysis.db.render_scheme(sc)))
 }
 
-/// The type of an expression, observed by binding it: `let _probe = <expr>`
+/// The type of an expression, observed by binding it: `var _probe = <expr>`
 /// and reading `_probe`'s scheme. Returns the rendered type.
 fn expr_type(expr: &str) -> String {
-    let src = format!("let _probe = {expr}");
+    let src = format!("var _probe = {expr}");
     scheme_of(&src, "_probe").unwrap_or_else(|| panic!("no scheme for expr `{expr}`"))
 }
 
@@ -205,14 +205,14 @@ fn infers_annotated_return_from_body() {
 
 #[test]
 fn shadowed_let_changes_type() {
-    // `let a = 4` then `let a = "Foo"`: each binding keeps its own type.
-    let src = "let a = 4\nlet a = \"Foo\"";
+    // `var a = 4` then `var a = "Foo"`: each binding keeps its own type.
+    let src = "var a = 4\nvar a = \"Foo\"";
     let analysis = analyze(src);
     let a_schemes: Vec<_> = analysis
         .names
         .all()
         .iter()
-        .filter(|s| s.name == "a" && s.kind == SymbolKind::Let)
+        .filter(|s| s.name == "a" && s.kind == SymbolKind::Var)
         .filter_map(|s| s.scheme.as_ref())
         .map(|sc| analysis.db.render_scheme(sc))
         .collect();
@@ -255,7 +255,7 @@ fn compound_assignment_type_checked() {
 /// program wrote as `found` — at every site that reports one.
 ///
 /// `TypeDb::unify` builds `Mismatch { expected, found }` in argument order, and
-/// five call sites passed the operand first. So `let c = a + b` over two `Text`
+/// five call sites passed the operand first. So `var c = a + b` over two `Text`
 /// bindings read `expected Text, found Int` **twice**: the operand named as the
 /// requirement, and `Int` — a type nobody wrote and no binding had — named as
 /// the mistake. Each row below reports its halves the other way round before the
@@ -270,14 +270,14 @@ fn a_mismatch_names_the_requirement_as_expected_and_the_program_as_found() {
         // Binary arithmetic: the operator requires Int, the operand is a Bool.
         // Deliberately not a `Text` operand — a `Text` beside `+` is
         // concatenation now (ADR-085), so it is no longer a mismatch at all.
-        ("let a = 1 + true", "expected Int, found Bool"),
+        ("var a = 1 + true", "expected Int, found Bool"),
         // Range bounds are Int only (ADR-059).
-        ("let r = \"a\"..2", "expected Int, found Text"),
+        ("var r = \"a\"..2", "expected Int, found Text"),
         // Unary `!` requires Bool, unary `-` requires a number.
-        ("let c = !1", "expected Bool, found Int"),
-        ("let c = -\"x\"", "expected Int, found Text"),
+        ("var c = !1", "expected Bool, found Int"),
+        ("var c = -\"x\"", "expected Int, found Text"),
         // `parse(text, parser)` requires Text in its first argument.
-        ("let v = parse(1, int)", "expected Text, found Int"),
+        ("var v = parse(1, int)", "expected Text, found Int"),
         // The control — already correct before the fix.
         ("var x = 0\nx = \"hi\"", "expected Int, found Text"),
     ] {
@@ -320,17 +320,17 @@ fn a_call_with_the_wrong_argument_count_names_the_counts() {
         ),
         // A user function, both directions.
         (
-            "fn add(a, b) { a + b }\nlet n = add(1)",
+            "fn add(a, b) { a + b }\nvar n = add(1)",
             "this function takes 2 argument(s), but 1 were given",
         ),
         (
-            "fn one(a) { a }\nlet n = one(1, 2)",
+            "fn one(a) { a }\nvar n = one(1, 2)",
             "this function takes 1 argument(s), but 2 were given",
         ),
         // A closure, which reaches the same `Func`-vs-`Func` unification — the
         // reason the error is raised in `unify` and not in `infer_call`.
         (
-            "let f = |a, b| a + b\nlet n = f(1)",
+            "var f = |a, b| a + b\nvar n = f(1)",
             "this function takes 2 argument(s), but 1 were given",
         ),
     ] {
@@ -355,11 +355,11 @@ fn a_text_operand_makes_plus_concatenation_and_nothing_else_legal() {
     assert_eq!(expr_type("\"a\" + \"b\""), "Text");
     assert_eq!(expr_type("\"a\" + \"b\" + \"c\""), "Text");
     assert!(!has_type_error(
-        "let a = \"x\"\nlet b = \"y\"\nlet c = a + b"
+        "var a = \"x\"\nvar b = \"y\"\nvar c = a + b"
     ));
     // …including through a binding whose type inference derived rather than read.
     assert_eq!(
-        scheme_of("let a = \"x\"\nlet b = \"y\"\nlet c = a + b", "c").as_deref(),
+        scheme_of("var a = \"x\"\nvar b = \"y\"\nvar c = a + b", "c").as_deref(),
         Some("Text")
     );
     // `+=` is the same operator, so a Text target needs no number (the
@@ -371,13 +371,13 @@ fn a_text_operand_makes_plus_concatenation_and_nothing_else_legal() {
     // Nothing else is defined for Text. `Y016` is the code TY-27 added for
     // `%` on `Float`: both operands agree and the operation has no meaning.
     for src in [
-        "let x = \"a\" - \"b\"",
-        "let x = \"a\" * \"b\"",
-        "let x = \"a\" / \"b\"",
-        "let x = \"a\" % \"b\"",
+        "var x = \"a\" - \"b\"",
+        "var x = \"a\" * \"b\"",
+        "var x = \"a\" / \"b\"",
+        "var x = \"a\" % \"b\"",
         // The repetition spelling other languages have. It is not one here, and
         // refusing it now is what keeps it free.
-        "let x = \"ab\" * 3",
+        "var x = \"ab\" * 3",
     ] {
         let errors = errors_of(src);
         assert!(
@@ -387,10 +387,10 @@ fn a_text_operand_makes_plus_concatenation_and_nothing_else_legal() {
     }
 
     // No implicit conversion, in either direction or either position.
-    assert!(has_type_error("let x = \"a\" + 1"));
-    assert!(has_type_error("let x = 1 + \"a\""));
-    assert!(has_type_error("let x = \"a\" + 1.5"));
-    assert!(has_type_error("let x = \"a\" + true"));
+    assert!(has_type_error("var x = \"a\" + 1"));
+    assert!(has_type_error("var x = 1 + \"a\""));
+    assert!(has_type_error("var x = \"a\" + 1.5"));
+    assert!(has_type_error("var x = \"a\" + true"));
 
     // The recorded limitation (ADR-085): two unconstrained operands still
     // default to `Int`, because the target follows the operands' *known* types
@@ -465,12 +465,12 @@ fn if_branches_must_match() {
     assert!(has_type_error("if true { 1 } else { \"a\" }"));
 }
 
-// --- let-generalization ---------------------------------------------------
+// --- generalization -------------------------------------------------------
 
 #[test]
 fn let_int_binding_is_monotype() {
-    // A concrete let is monomorphic.
-    assert_eq!(scheme_of("let x = 1", "x").unwrap(), "Int");
+    // A concrete binding is monomorphic.
+    assert_eq!(scheme_of("var x = 1", "x").unwrap(), "Int");
 }
 
 #[test]
@@ -554,14 +554,14 @@ fn read_template_synthesizes_tuple() {
 #[test]
 fn parse_expression_synthesizes_type() {
     // `parse(sample, lines(int))` → Vec[Int], where sample is Text.
-    let src = "fn f(sample: Text) { let v = parse(sample, lines(int)); v }";
+    let src = "fn f(sample: Text) { var v = parse(sample, lines(int)); v }";
     assert!(!has_type_error(src));
 }
 
 #[test]
 fn read_in_fn_then_method_call_typechecks() {
     // Full pipeline: read inside a fn, then call .len() on the result.
-    let src = "fn main() -> Int {\n  let v = read lines(int)\n  v.len()\n}\n";
+    let src = "fn main() -> Int {\n  var v = read lines(int)\n  v.len()\n}\n";
     let analysis = analyze(src);
     assert!(
         !has_type_error(src),
@@ -575,7 +575,7 @@ fn read_in_fn_then_method_call_typechecks() {
 #[test]
 fn record_equality_typechecks() {
     // `==` on two records of the same type typechecks cleanly (no Y004).
-    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  let a = Point { x: 1, y: 2 }\n  let b = Point { x: 1, y: 2 }\n  if a == b { 1 } else { 0 }\n}\n";
+    let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  var a = Point { x: 1, y: 2 }\n  var b = Point { x: 1, y: 2 }\n  if a == b { 1 } else { 0 }\n}\n";
     assert!(!has_type_error(src));
 }
 
@@ -583,7 +583,7 @@ fn record_equality_typechecks() {
 fn tuple_equality_typechecks() {
     // `==` on two tuples of the same shape typechecks cleanly.
     let src =
-        "fn main() -> Int {\n  let a = (1, 2)\n  let b = (1, 2)\n  if a == b { 1 } else { 0 }\n}\n";
+        "fn main() -> Int {\n  var a = (1, 2)\n  var b = (1, 2)\n  if a == b { 1 } else { 0 }\n}\n";
     assert!(!has_type_error(src));
 }
 
@@ -600,7 +600,7 @@ fn record_with_function_field_not_equatable() {
     // A record containing a function field is not equatable (§5.5). We bind the
     // function to a name first (nested fn literals aren't supported as field
     // values), then construct the record and compare it.
-    let src = "struct Box { f: (Int) -> Int }\nfn id(x: Int) -> Int { x }\nfn main() -> Int {\n  let a = Box { f: id }\n  let b = Box { f: id }\n  if a == b { 1 } else { 0 }\n}\n";
+    let src = "struct Box { f: (Int) -> Int }\nfn id(x: Int) -> Int { x }\nfn main() -> Int {\n  var a = Box { f: id }\n  var b = Box { f: id }\n  if a == b { 1 } else { 0 }\n}\n";
     assert!(has_type_error(src));
 }
 
@@ -617,42 +617,42 @@ fn int_equality_still_typechecks() {
 #[test]
 fn non_exhaustive_enum_match_is_rejected() {
     // Missing the Wall variant → Y120.
-    let src = "enum Tile { Empty, Wall, Number(Int) }\nfn main() -> Int {\n  let t = Empty\n  match t {\n    Empty => 1\n    Number(n) => n\n  }\n}\n";
+    let src = "enum Tile { Empty, Wall, Number(Int) }\nfn main() -> Int {\n  var t = Empty\n  match t {\n    Empty => 1\n    Number(n) => n\n  }\n}\n";
     assert!(has_type_error_with_lower(src));
 }
 
 #[test]
 fn exhaustive_enum_match_is_ok() {
     // All three variants covered → no error.
-    let src = "enum Tile { Empty, Wall, Number(Int) }\nfn main() -> Int {\n  let t = Empty\n  match t {\n    Empty => 1\n    Wall => 2\n    Number(n) => n\n  }\n}\n";
+    let src = "enum Tile { Empty, Wall, Number(Int) }\nfn main() -> Int {\n  var t = Empty\n  match t {\n    Empty => 1\n    Wall => 2\n    Number(n) => n\n  }\n}\n";
     assert!(!has_type_error_with_lower(src));
 }
 
 #[test]
 fn enum_match_with_wildcard_is_ok() {
     // Wildcard catches remaining variants → exhaustive.
-    let src = "enum Tile { Empty, Wall, Number(Int) }\nfn main() -> Int {\n  let t = Empty\n  match t {\n    Empty => 1\n    _ => 0\n  }\n}\n";
+    let src = "enum Tile { Empty, Wall, Number(Int) }\nfn main() -> Int {\n  var t = Empty\n  match t {\n    Empty => 1\n    _ => 0\n  }\n}\n";
     assert!(!has_type_error_with_lower(src));
 }
 
 #[test]
 fn int_match_without_wildcard_is_rejected() {
     // Int has infinitely many values; a literal-only match needs `_` → Y120.
-    let src = "fn main() -> Int {\n  let n = 1\n  match n {\n    1 => 10\n    2 => 20\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var n = 1\n  match n {\n    1 => 10\n    2 => 20\n  }\n}\n";
     assert!(has_type_error_with_lower(src));
 }
 
 #[test]
 fn int_match_with_wildcard_is_ok() {
     // Int match with `_` → exhaustive.
-    let src = "fn main() -> Int {\n  let n = 1\n  match n {\n    1 => 10\n    2 => 20\n    _ => 0\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var n = 1\n  match n {\n    1 => 10\n    2 => 20\n    _ => 0\n  }\n}\n";
     assert!(!has_type_error_with_lower(src));
 }
 
 #[test]
 fn bool_match_without_both_cases_is_rejected() {
     // Bool match missing `false` → Y120.
-    let src = "fn main() -> Int {\n  let b = true\n  match b {\n    true => 1\n  }\n}\n";
+    let src = "fn main() -> Int {\n  var b = true\n  match b {\n    true => 1\n  }\n}\n";
     assert!(has_type_error_with_lower(src));
 }
 
@@ -660,14 +660,14 @@ fn bool_match_without_both_cases_is_rejected() {
 fn bool_match_both_cases_is_ok() {
     // Both true and false covered → exhaustive.
     let src =
-        "fn main() -> Int {\n  let b = true\n  match b {\n    true => 1\n    false => 0\n  }\n}\n";
+        "fn main() -> Int {\n  var b = true\n  match b {\n    true => 1\n    false => 0\n  }\n}\n";
     assert!(!has_type_error_with_lower(src));
 }
 
 #[test]
 fn arm_after_wildcard_is_unreachable() {
     // An arm after `_` is unreachable → Y121 (a type-category diagnostic).
-    let src = "enum Tile { Empty, Wall }\nfn main() -> Int {\n  let t = Empty\n  match t {\n    _ => 0\n    Empty => 1\n  }\n}\n";
+    let src = "enum Tile { Empty, Wall }\nfn main() -> Int {\n  var t = Empty\n  match t {\n    _ => 0\n    Empty => 1\n  }\n}\n";
     assert!(has_type_error_with_lower(src));
 }
 
@@ -686,30 +686,31 @@ fn closure_infers_identity_type() {
 
 #[test]
 fn closure_typechecks() {
-    // A closure that captures an outer variable: `let o = 10; let f = |x| x + o`.
-    let src = "fn main() -> Int {\n  let o = 10\n  let f = |x| x + o\n  0\n}\n";
+    // A closure that captures an outer variable: `var o = 10; var f = |x| x + o`.
+    let src = "fn main() -> Int {\n  var o = 10\n  var f = |x| x + o\n  0\n}\n";
     assert!(!has_type_error(src));
 }
 
 #[test]
 fn closure_with_typed_param_typechecks() {
     // `|x: Int| x + 1` with an explicit param type.
-    let src = "fn main() -> Int {\n  let f = |x: Int| x + 1\n  0\n}\n";
+    let src = "fn main() -> Int {\n  var f = |x: Int| x + 1\n  0\n}\n";
     assert!(!has_type_error(src));
 }
 
 #[test]
-fn closure_immutable_capture_lowers_clean() {
-    // The headline immutable-capture pipeline lowers without diagnostics.
-    let src = "fn main() -> Int {\n  let o = 10\n  let f = |x| x + o\n  f(5)\n}\n";
+fn closure_by_value_capture_lowers_clean() {
+    // The headline by-value-capture pipeline lowers without diagnostics. Nothing
+    // reassigns `o`, so it is copied into the environment (ADR-125).
+    let src = "fn main() -> Int {\n  var o = 10\n  var f = |x| x + o\n  f(5)\n}\n";
     assert!(!has_type_error_with_lower(src));
 }
 
 #[test]
 fn mutable_capture_now_supported() {
-    // WS7b: a `var` capture is now supported (boxed into a `VarCell`). It lowers
-    // without diagnostics.
-    let src = "fn main() -> Int {\n  var c = 0\n  let f = |_| c\n  f(0)\n}\n";
+    // WS7b: a capture of a reassigned binding is supported (boxed into a
+    // `VarCell`). It lowers without diagnostics.
+    let src = "fn main() -> Int {\n  var c = 0\n  var f = |_| c\n  f(0)\n}\n";
     assert!(
         !has_type_error_with_lower(src),
         "mutable capture should be supported (WS7b)"
@@ -751,7 +752,7 @@ fn return_type_mismatch_points_at_tail_expression() {
     // The user's original example: `out("kurac")` returns `Unit` but `main` is
     // declared `-> Int`. The error must underline `out("kurac")`, not the whole
     // `fn main() -> Int { … }`.
-    let src = "fn main() -> Int {\n    let depths = read lines(int)\n    out(\"kurac\")\n}\n";
+    let src = "fn main() -> Int {\n    var depths = read lines(int)\n    out(\"kurac\")\n}\n";
     let expected = span_of(src, "out(\"kurac\")");
     let actual = first_mismatch_span(src).expect("expected a Y001 mismatch");
     assert_eq!(
@@ -762,13 +763,13 @@ fn return_type_mismatch_points_at_tail_expression() {
 
 #[test]
 fn let_annotation_mismatch_points_at_initializer() {
-    // `let x: Int = "hello"` — the error underlines `"hello"`, not the whole let.
-    let src = "fn main() -> Int {\n    let x: Int = \"hello\"\n    0\n}\n";
+    // `var x: Int = "hello"` — the error underlines `"hello"`, not the whole binding.
+    let src = "fn main() -> Int {\n    var x: Int = \"hello\"\n    0\n}\n";
     let expected = span_of(src, "\"hello\"");
     let actual = first_mismatch_span(src).expect("expected a Y001 mismatch");
     assert_eq!(
         actual, expected,
-        "let-annotation mismatch should point at the initializer, got {actual:?}",
+        "var-annotation mismatch should point at the initializer, got {actual:?}",
     );
 }
 
@@ -788,7 +789,7 @@ fn arithmetic_operand_mismatch_points_at_bad_operand() {
     // function's return type too, and `-> Int` over a `Text` concatenation adds
     // a *second* mismatch at the whole `s + 1`. That one is correct and is not
     // this test's subject.
-    let src = "fn main() -> Int {\n    let s = \"hi\"\n    let t = s + 1\n    0\n}\n";
+    let src = "fn main() -> Int {\n    var s = \"hi\"\n    var t = s + 1\n    0\n}\n";
     let expected = span_of(src, "1\n    0");
     let expected = (expected.0, expected.0 + 1);
     let actual = first_mismatch_span(src).expect("expected a Y001 mismatch");
@@ -799,7 +800,7 @@ fn arithmetic_operand_mismatch_points_at_bad_operand() {
 
     // A shape no rule reinterprets: `+` on an Int and a Bool is Int arithmetic
     // either way, and `true` is the operand at fault.
-    let src = "fn main() -> Int {\n    let n = 1\n    let t = n + true\n    0\n}\n";
+    let src = "fn main() -> Int {\n    var n = 1\n    var t = n + true\n    0\n}\n";
     let expected = span_of(src, "true");
     let actual = first_mismatch_span(src).expect("expected a Y001 mismatch");
     assert_eq!(
@@ -900,7 +901,7 @@ fn function_typed_record_field_annotation_is_enforced() {
     // accidentally pins the dropped annotation and therefore cannot detect the
     // accessor bug. An Int initializer distinguishes the two paths.
     let src = "struct Box { f: (Int) -> Int }\n\
-               fn main() -> Int { let value = Box { f: 1 }; 0 }";
+               fn main() -> Int { var value = Box { f: 1 }; 0 }";
     assert!(
         has_type_error(src),
         "a function-typed record field cannot be initialized with Int"
@@ -934,9 +935,9 @@ fn a_tuple_or_function_annotation_is_the_type_it_writes() {
         "a function-annotated parameter"
     );
     assert_eq!(
-        scheme_of("let p: (Int, Text) = (1, \"a\")", "p").as_deref(),
+        scheme_of("var p: (Int, Text) = (1, \"a\")", "p").as_deref(),
         Some("(Int, Text)"),
-        "a tuple-annotated `let`"
+        "a tuple-annotated `var`"
     );
     assert!(
         !has_type_error("fn apply(g: (Int) -> Text) -> Text { g(1) }"),
@@ -1093,28 +1094,28 @@ fn a_type_declaration_cycle_still_analyzes() {
 
 #[test]
 fn value_binding_name_is_not_accepted_as_a_type() {
-    let src = "let Alias = 1\nlet value: Alias = \"text\"";
+    let src = "var Alias = 1\nvar value: Alias = \"text\"";
     assert!(
         has_name_error(src),
         "ordinary value bindings are not type declarations"
     );
 }
 
-/// The exit test uses a `let`; every other value kind must be rejected the same
+/// The exit test uses a `var`; every other value kind must be rejected the same
 /// way, and the report must be `N003` — the name *is* known, so `N002 unknown
 /// type` would be a lie about which mistake was made.
 #[test]
 fn a_value_in_type_position_is_reported_as_a_value() {
     for src in [
-        "let Alias = 1\nlet value: Alias = 1",
-        "var Alias = 1\nlet value: Alias = 1",
-        "fn Alias() -> Int { 1 }\nlet value: Alias = 1",
+        "var Alias = 1\nvar value: Alias = 1",
+        "var Alias = 1\nvar value: Alias = 1",
+        "fn Alias() -> Int { 1 }\nvar value: Alias = 1",
         // A prelude value builtin: `out` resolves, and used to be a legal
         // annotation on that basis alone.
-        "let value: out = 1",
+        "var value: out = 1",
         // …at any depth inside a structural annotation.
-        "let Alias = 1\nfn f(x: (Int, Alias)) -> Int { 0 }",
-        "let Alias = 1\nfn f(x: Vec[Alias]) -> Int { 0 }",
+        "var Alias = 1\nfn f(x: (Int, Alias)) -> Int { 0 }",
+        "var Alias = 1\nfn f(x: Vec[Alias]) -> Int { 0 }",
     ] {
         let codes: Vec<String> = analyze(src)
             .diagnostics
@@ -1133,13 +1134,13 @@ fn a_value_in_type_position_is_reported_as_a_value() {
 #[test]
 fn every_kind_of_type_name_is_still_accepted_in_type_position() {
     for src in [
-        "let value: Int = 1",
-        "let value: Text = \"a\"",
-        "struct Point { x: Int }\nlet value: Point = Point { x: 1 }",
-        "enum Tile { Empty }\nlet value: Tile = Empty",
-        "let value: Vec[Int] = Vec()",
-        "let value: Map[Text, Int] = Map()",
-        "let value: Option[Int] = Some(1)",
+        "var value: Int = 1",
+        "var value: Text = \"a\"",
+        "struct Point { x: Int }\nvar value: Point = Point { x: 1 }",
+        "enum Tile { Empty }\nvar value: Tile = Empty",
+        "var value: Vec[Int] = Vec()",
+        "var value: Map[Text, Int] = Map()",
+        "var value: Option[Int] = Some(1)",
     ] {
         assert!(
             !has_name_error(src),
@@ -1173,12 +1174,41 @@ fn local_var_reassignment_preserves_its_type() {
     );
 }
 
+/// **Inverted** from `reassignment_to_let_is_rejected`, which asserted TY-14's
+/// rule that only a `var` may be written. ADR-125 removed the immutable binding
+/// the rule existed to protect, so what is left to assert is that an ordinary
+/// reassignment goes through — and that it is still *checked*, which is
+/// `local_var_reassignment_preserves_its_type` directly above.
 #[test]
-fn reassignment_to_let_is_rejected() {
-    let src = "fn main() -> Int { let x = 1; x = 2; x }";
+fn a_binding_is_assignable() {
+    assert!(is_clean_with_lower(
+        "fn main() -> Int { var x = 1; x = 2; x }"
+    ));
+}
+
+/// **ADR-125's soundness gate.** The `let`/`var` split carried §5.3's
+/// generalization rule, and removing the keyword had to keep the rule — so it
+/// moved onto `Symbol::reassigned`.
+///
+/// The failure it prevents is not a lost error message. Assignment
+/// *instantiates* the target's scheme and unifies the copy, so a generalized
+/// binding is not constrained by being written: `var f = |x| x` is a syntactic
+/// value and generalizes to `forall T. T -> T`, and `f = |n| n + 1` would leave
+/// it there — after which `f("s")` type-checks and calls the `Int` closure with
+/// a `Text`. That is a wrong-type call the backend emits, not a diagnostic that
+/// went missing.
+#[test]
+fn a_reassigned_binding_is_not_generalized() {
     assert!(
-        !is_clean_with_lower(src),
-        "`let` is immutable; only `var` may be reassigned"
+        has_type_error("var f = |x| x\nf = |n| n + 1\nout(f(\"s\"))\n"),
+        "a reassigned binding must stay monomorphic, or the second use picks its own instance"
+    );
+    // …and the binding nothing writes is still generalized, which is the half
+    // that would silently regress every polymorphic binding if the gate were
+    // simply "never generalize".
+    assert!(
+        is_clean_with_lower("var id = |x| x\nout(id(1))\nout(id(\"two\"))\n"),
+        "a binding nothing writes is used at two types, exactly as a `let` was"
     );
 }
 
@@ -1226,40 +1256,55 @@ fn an_assignment_constrains_the_local_it_names_and_no_other() {
     // A captured `var` is assignable through the closure, and checked there.
     assert!(
         !has_type_error(
-            "fn f() -> Int { var total = 0; let add = |n| { total += n }; add(1); total }"
+            "fn f() -> Int { var total = 0; var add = |n| { total += n }; add(1); total }"
         ),
         "a captured var may be assigned"
     );
     assert!(
-        has_type_error("fn f() -> Int { var total = 0; let add = |n| { total = \"x\" }; 0 }"),
+        has_type_error("fn f() -> Int { var total = 0; var add = |n| { total = \"x\" }; 0 }"),
         "…and the capture is checked"
     );
 }
 
-/// TY-14 past the exit test's `let`: every immutable binding kind, and the
-/// report is `Y009` rather than a type mismatch about the value.
+/// **Inverted** from `only_a_var_may_be_assigned`, which swept the four binding
+/// kinds TY-14 made immutable and required `Y009` of each. ADR-125 retired the
+/// code and the concept: a `var`, a parameter, a `for` variable and a name a
+/// pattern introduces are one thing, and all four are writable.
+///
+/// The paired negative is the point of the test, not an afterthought — "it is
+/// accepted" alone would also pass if assignment had stopped being checked at
+/// all. Each source is asserted clean **and** its type-violating twin rejected,
+/// so the property is "the type is what constrains a write", not "nothing does".
 #[test]
-fn only_a_var_may_be_assigned() {
-    for src in [
-        "fn f() -> Int { let x = 1; x = 2; x }",
-        "fn f(p: Int) -> Int { p = 2; p }",
-        "fn f(v: Vec[Int]) -> Int { for x in v { x = 1 }; 0 }",
-        "enum E { N(Int) }\nfn f(e: E) -> Int { match e { N(n) => { n = 1; n } } }",
+fn every_binding_kind_is_assignable_and_still_type_checked() {
+    for (ok, bad) in [
+        (
+            "fn f() -> Int { var x = 1; x = 2; x }",
+            "fn f() -> Int { var x = 1; x = \"two\"; x }",
+        ),
+        (
+            "fn f(p: Int) -> Int { p = 2; p }",
+            "fn f(p: Int) -> Int { p = \"two\"; p }",
+        ),
+        (
+            "fn f(v: Vec[Int]) -> Int { for x in v { x = 1 }; 0 }",
+            "fn f(v: Vec[Int]) -> Int { for x in v { x = \"one\" }; 0 }",
+        ),
+        (
+            "enum E { N(Int) }\nfn f(e: E) -> Int { match e { N(n) => { n = 1; n } } }",
+            "enum E { N(Int) }\nfn f(e: E) -> Int { match e { N(n) => { n = \"one\"; n } } }",
+        ),
     ] {
-        let codes: Vec<String> = analyze(src)
-            .diagnostics
-            .iter()
-            .map(|d| d.code().to_string())
-            .collect();
         assert!(
-            codes.iter().any(|c| c == "Y009"),
-            "expected Y009 for `{src}`, got {codes:?}"
+            is_clean_with_lower(ok),
+            "every binding is assignable: `{ok}` reported {:?}",
+            analyze_and_lower_diags(ok)
+        );
+        assert!(
+            has_type_error(bad),
+            "assignment still has to preserve the type: `{bad}` was accepted"
         );
     }
-    assert!(
-        !has_type_error("fn f() -> Int { var x = 1; x = 2; x }"),
-        "a `var` is still assignable"
-    );
 }
 
 /// TY-15 past the exit test's `Bool`: the rule is "numeric", not "not Bool",
@@ -1390,11 +1435,11 @@ fn a_return_is_checked_against_the_function_it_leaves() {
     // A `return` inside a closure leaves the *closure*: `|n| { return n }` is
     // Int -> Int inside a function returning Text, and that is not an error.
     assert!(
-        !has_type_error("fn f() -> Text { let g = |n| { return n }\n  g(\"a\") }"),
+        !has_type_error("fn f() -> Text { var g = |n| { return n }\n  g(\"a\") }"),
         "a closure's return is checked against the closure"
     );
     assert!(
-        has_type_error("fn f() -> Text { let g = |n| { if true { return 1 }\n  \"t\" }\n  \"a\" }"),
+        has_type_error("fn f() -> Text { var g = |n| { if true { return 1 }\n  \"t\" }\n  \"a\" }"),
         "…and it is still checked there"
     );
 }
@@ -1426,7 +1471,7 @@ fn a_function_whose_body_diverges_matches_any_declared_result() {
 fn expression_before_trailing_statement_is_not_the_block_value() {
     // Lowering correctly demotes `1` to an effect statement and gives this
     // block a Unit tail. Inference must make the same choice.
-    let src = "fn bad() -> Int { 1; let x = 2 }";
+    let src = "fn bad() -> Int { 1; var x = 2 }";
     assert!(
         has_type_error(src),
         "inference and lowering must agree on the actual trailing expression"
@@ -1439,15 +1484,15 @@ fn expression_before_trailing_statement_is_not_the_block_value() {
 #[test]
 fn a_blocks_value_is_its_last_statement_and_only_if_it_is_an_expression() {
     // A trailing expression is the value.
-    assert_eq!(scheme_of("let b = { 1 }", "b").as_deref(), Some("Int"));
+    assert_eq!(scheme_of("var b = { 1 }", "b").as_deref(), Some("Int"));
     assert_eq!(
-        scheme_of("let b = { let x = 1; 2 }", "b").as_deref(),
+        scheme_of("var b = { var x = 1; 2 }", "b").as_deref(),
         Some("Int")
     );
     // Every non-expression kind demotes a pending tail.
     for src in [
-        "let b = { 1; let x = 2 }",
-        "let b = { 1; var x = 2 }",
+        "var b = { 1; var x = 2 }",
+        "var b = { 1; var x = 2 }",
         "fn f() -> Unit { var x = 0; { 1; x = 2 } }",
     ] {
         assert!(
@@ -1461,17 +1506,17 @@ fn a_blocks_value_is_its_last_statement_and_only_if_it_is_an_expression() {
         );
     }
     assert_eq!(
-        scheme_of("let b = { 1; let x = 2 }", "b").as_deref(),
+        scheme_of("var b = { 1; var x = 2 }", "b").as_deref(),
         Some("Unit"),
-        "a `let` after the expression makes the block Unit"
+        "a `var` after the expression makes the block Unit"
     );
     // Two expression statements: only the second is the value.
     assert_eq!(
-        scheme_of("let b = { 1; \"two\" }", "b").as_deref(),
+        scheme_of("var b = { 1; \"two\" }", "b").as_deref(),
         Some("Text")
     );
     // An empty block is Unit.
-    assert_eq!(scheme_of("let b = { }", "b").as_deref(), Some("Unit"));
+    assert_eq!(scheme_of("var b = { }", "b").as_deref(), Some("Unit"));
 }
 
 #[test]
@@ -1502,7 +1547,7 @@ fn a_terminator_needs_the_right_enclosing_context() {
     };
     // `return` needs a function.
     assert!(codes("return 1").contains(&"Y011".to_string()));
-    assert!(codes("let x = 1\nreturn").contains(&"Y011".to_string()));
+    assert!(codes("var x = 1\nreturn").contains(&"Y011".to_string()));
     // `break`/`continue` need a loop, in every loop-less position.
     for src in [
         "fn f() -> Int { break\n  0 }",
@@ -1518,12 +1563,12 @@ fn a_terminator_needs_the_right_enclosing_context() {
     }
     // A closure is a function boundary in both directions.
     assert!(
-        codes("fn f(v: Vec[Int]) -> Int { for x in v { let g = |n| { break }\n  0 }\n  0 }")
+        codes("fn f(v: Vec[Int]) -> Int { for x in v { var g = |n| { break }\n  0 }\n  0 }")
             .contains(&"Y012".to_string()),
         "a `break` inside a closure cannot leave a loop outside it"
     );
     assert!(
-        !codes("fn f() -> Int { let g = |n| { return n }\n  g(1) }").contains(&"Y011".to_string()),
+        !codes("fn f() -> Int { var g = |n| { return n }\n  g(1) }").contains(&"Y011".to_string()),
         "a `return` inside a closure leaves the closure"
     );
     // …and every legal position is still legal.
@@ -1560,17 +1605,17 @@ fn expression_loop_uses_its_break_value_type() {
 fn a_loop_is_the_join_of_the_values_its_breaks_carry() {
     // The value is the break's, not the body's: the body here is `Unit`.
     assert_eq!(
-        scheme_of("let x = loop { break 42 }", "x").as_deref(),
+        scheme_of("var x = loop { break 42 }", "x").as_deref(),
         Some("Int")
     );
     assert_eq!(
-        scheme_of("let x = loop { break \"done\" }", "x").as_deref(),
+        scheme_of("var x = loop { break \"done\" }", "x").as_deref(),
         Some("Text")
     );
     // Two `break`s that agree; and a `break` nested inside the body still counts.
     assert_eq!(
         scheme_of(
-            "fn f(c: Bool) -> Int { let x = loop { if c { break 1 } else { break 2 } }\n  x }",
+            "fn f(c: Bool) -> Int { var x = loop { if c { break 1 } else { break 2 } }\n  x }",
             "x"
         )
         .as_deref(),
@@ -1578,17 +1623,17 @@ fn a_loop_is_the_join_of_the_values_its_breaks_carry() {
     );
     // A bare `break` leaves the loop with nothing, so the loop is `Unit`…
     assert_eq!(
-        scheme_of("let x = loop { break }", "x").as_deref(),
+        scheme_of("var x = loop { break }", "x").as_deref(),
         Some("Unit")
     );
     // …and mixing the two spellings is a mismatch, not a coincidence.
     assert!(
-        has_type_error("fn f(c: Bool) -> Int { let x = loop { if c { break }\n  break 1 }\n  0 }"),
+        has_type_error("fn f(c: Bool) -> Int { var x = loop { if c { break }\n  break 1 }\n  0 }"),
         "a bare `break` contributes Unit and cannot agree with `break 1`"
     );
     assert!(
         has_type_error(
-            "fn f(c: Bool) -> Int { let x = loop { if c { break 1 }\n  break \"two\" }\n  0 }"
+            "fn f(c: Bool) -> Int { var x = loop { if c { break 1 }\n  break \"two\" }\n  0 }"
         ),
         "two `break`s carrying different types disagree"
     );
@@ -1596,7 +1641,7 @@ fn a_loop_is_the_join_of_the_values_its_breaks_carry() {
     // outer one is `Text` rather than a join across both.
     assert_eq!(
         scheme_of(
-            "let x = loop { let inner = loop { break 1 }\n  break \"outer\" }",
+            "var x = loop { var inner = loop { break 1 }\n  break \"outer\" }",
             "x"
         )
         .as_deref(),
@@ -1604,7 +1649,7 @@ fn a_loop_is_the_join_of_the_values_its_breaks_carry() {
     );
     assert_eq!(
         scheme_of(
-            "let x = loop { let inner = loop { break 1 }\n  break \"outer\" }",
+            "var x = loop { var inner = loop { break 1 }\n  break \"outer\" }",
             "inner"
         )
         .as_deref(),
@@ -1636,7 +1681,7 @@ fn a_loop_no_break_leaves_is_never() {
     }
     assert_eq!(
         scheme_of(
-            "fn f(c: Bool) -> Int { let x = loop { if c { return 1 } }\n  x }",
+            "fn f(c: Bool) -> Int { var x = loop { if c { return 1 } }\n  x }",
             "x"
         )
         .as_deref(),
@@ -1761,7 +1806,7 @@ fn a_divergent_branch_is_absorbed_wherever_branches_meet() {
     // fresh variable would have made it silently agree with any use.
     assert_eq!(
         scheme_of(
-            "enum E { A, B }\nfn f(e: E) -> Int { let m = match e { A => panic(\"x\"), B => panic(\"y\") }; 0 }",
+            "enum E { A, B }\nfn f(e: E) -> Int { var m = match e { A => panic(\"x\"), B => panic(\"y\") }; 0 }",
             "m"
         )
         .as_deref(),
@@ -2014,7 +2059,7 @@ fn a_ranges_bounds_are_ints_and_a_range_is_a_collection_of_them() {
 #[test]
 fn a_range_is_an_ordinary_value() {
     assert!(!has_type_error(
-        "fn f() -> Unit { let r = 0..5\n for i in r { out(i) } }"
+        "fn f() -> Unit { var r = 0..5\n for i in r { out(i) } }"
     ));
     assert!(!has_type_error(
         "fn widen(r: Range) -> Range { r }\n\
@@ -2023,10 +2068,10 @@ fn a_range_is_an_ordinary_value() {
     // A `Range` is hashable *and* immutable, so it is a key — the distinction
     // TY-32/D4 turned on.
     assert!(!has_type_error(
-        "fn main() -> Unit { let m = Map()\n m.insert(0..3, 1) }"
+        "fn main() -> Unit { var m = Map()\n m.insert(0..3, 1) }"
     ));
     assert!(!has_type_error(
-        "fn main() -> Unit { let s = Set()\n s.insert(0..3) }"
+        "fn main() -> Unit { var s = Set()\n s.insert(0..3) }"
     ));
     // …and it is equatable, so two ranges compare.
     assert!(!has_type_error("fn f() -> Bool { (0..3) == (0..3) }"));
@@ -2056,7 +2101,7 @@ fn a_bare_nullary_collection_name_is_the_type_it_names() {
     // Nested inside another collection, and as a local's annotation.
     assert!(!has_type_error("fn f(v: Vec[Range]) -> Vec[Range] { v }"));
     assert!(has_type_error(
-        "fn f() -> Unit { let r: Range = 5\n out(r) }"
+        "fn f() -> Unit { var r: Range = 5\n out(r) }"
     ));
 
     // …and a ctor that *does* take arguments, written bare, is the `Y007` it has
@@ -2309,7 +2354,7 @@ fn collection_method_constrains_unannotated_receiver_parameter() {
     // unannotated parameter to a numeric iterable shape, then the call site
     // pins its element type to Int.
     let src = "fn total(values) { values.sum() }\n\
-               fn main() -> Int { let values = Vec(); values.push(1); total(values) }";
+               fn main() -> Int { var values = Vec(); values.push(1); total(values) }";
     assert!(
         !has_type_error_with_lower(src),
         "method use plus the call site should infer a concrete collection receiver"
@@ -2327,7 +2372,7 @@ fn collection_method_constrains_unannotated_receiver_parameter() {
 fn a_method_on_an_unannotated_receiver_is_resolved_by_the_use_site() {
     // §5.2's own answer, written down.
     let sum = "fn total(values) { values.sum() }\n\
-               fn main() -> Int { let values = Vec(); values.push(1); total(values) }";
+               fn main() -> Int { var values = Vec(); values.push(1); total(values) }";
     assert_eq!(
         scheme_of(sum, "total").as_deref(),
         Some("(Vec[Int]) -> Int")
@@ -2336,7 +2381,7 @@ fn a_method_on_an_unannotated_receiver_is_resolved_by_the_use_site() {
     // Not a special case of `sum`: any catalog entry, on any receiver shape the
     // catalog models — including a scalar one.
     let len = "fn size(v) { v.len() }\n\
-               fn main() -> Int { let v = Vec(); v.push(1); size(v) }";
+               fn main() -> Int { var v = Vec(); v.push(1); size(v) }";
     assert_eq!(scheme_of(len, "size").as_deref(), Some("(Vec[Int]) -> Int"));
     let text = "fn size(t) { t.len() }\nfn main() -> Int { size(\"abc\") }";
     assert_eq!(scheme_of(text, "size").as_deref(), Some("(Text) -> Int"));
@@ -2344,7 +2389,7 @@ fn a_method_on_an_unannotated_receiver_is_resolved_by_the_use_site() {
     // The deferred entry pins the *arguments* too. `x` has no annotation and no
     // use of its own; `push`'s parameter is what says it is an `Int`.
     let arg = "fn add(v, x) { v.push(x) }\n\
-               fn main() -> Unit { let v = Vec(); v.push(1); add(v, 2) }";
+               fn main() -> Unit { var v = Vec(); v.push(1); add(v, 2) }";
     assert_eq!(
         scheme_of(arg, "add").as_deref(),
         Some("(Vec[Int], Int) -> Unit")
@@ -2354,13 +2399,13 @@ fn a_method_on_an_unannotated_receiver_is_resolved_by_the_use_site() {
     // …so an argument that disagrees with it is reported, which is the half a
     // "the program is accepted" test cannot reach.
     let bad = "fn add(v, x) { v.push(x) }\n\
-               fn main() -> Unit { let v = Vec(); v.push(1); add(v, \"s\") }";
+               fn main() -> Unit { var v = Vec(); v.push(1); add(v, \"s\") }";
     assert!(has_type_error_with_lower(bad));
 
     // And the result is checked against the annotation the deferred function
     // wrote, rather than being whatever the annotation says.
     let wrong = "fn total(values) -> Text { values.sum() }\n\
-                 fn main() -> Text { let v = Vec(); v.push(1); total(v) }";
+                 fn main() -> Text { var v = Vec(); v.push(1); total(v) }";
     assert!(has_type_error_with_lower(wrong));
 }
 
@@ -2378,9 +2423,9 @@ fn a_method_on_an_unannotated_receiver_is_resolved_by_the_use_site() {
 fn a_receiver_a_method_was_called_on_is_not_quantified() {
     let two = "fn total(values) { values.sum() }\n\
                fn main() -> Int {\n\
-                 let a = Vec()\n\
+                 var a = Vec()\n\
                  a.push(1)\n\
-                 let b = Vec()\n\
+                 var b = Vec()\n\
                  b.push(1.0)\n\
                  total(b)\n\
                  total(a)\n\
@@ -2393,7 +2438,7 @@ fn a_receiver_a_method_was_called_on_is_not_quantified() {
     // A parameter with no method call on it still generalizes — `id` is used at
     // two types in one program and neither pins the other.
     let generic = "fn id(x) { x }\n\
-                   fn main() -> Int { let t = id(\"s\"); id(1) }";
+                   fn main() -> Int { var t = id(\"s\"); id(1) }";
     assert_eq!(
         scheme_of(generic, "id").as_deref(),
         Some("forall T. (T) -> T")
@@ -2412,8 +2457,8 @@ fn a_receiver_a_method_was_called_on_is_not_quantified() {
 fn a_deferred_method_still_carries_its_receivers_own_requirements() {
     let src = "fn store(m, k) -> Unit { m.insert(k, 1) }\n\
                fn main() -> Unit {\n\
-                 let m = Map()\n\
-                 let key = Vec()\n\
+                 var m = Map()\n\
+                 var key = Vec()\n\
                  key.push(1)\n\
                  store(m, key)\n\
                }";
@@ -2430,7 +2475,7 @@ fn a_deferred_method_still_carries_its_receivers_own_requirements() {
     // The same shape with an immutable key is accepted, so the refusal is the
     // key rule and not "a deferred insert cannot resolve".
     let ok = "fn store(m, k) -> Unit { m.insert(k, 1) }\n\
-              fn main() -> Unit { let m = Map(); store(m, \"k\") }";
+              fn main() -> Unit { var m = Map(); store(m, \"k\") }";
     assert!(!has_type_error_with_lower(ok));
 }
 
@@ -2461,7 +2506,7 @@ fn a_deferred_method_still_carries_its_receivers_own_requirements() {
 fn a_method_that_cannot_resolve_is_reported_by_inference_and_only_once() {
     for src in [
         // Concrete receiver, no such row — the call-site door.
-        "let v = Vec[Int]()\nv.push(1)\nout(v.nope())",
+        "var v = Vec[Int]()\nv.push(1)\nout(v.nope())",
         // Receiver a parameter the call site pins. `nope` is in no catalog row
         // at any receiver, so the call-site door refuses it without waiting.
         "fn f(x) { x.nope() }\nfn main() -> Unit { f(1) }",
@@ -2509,7 +2554,7 @@ fn a_method_that_cannot_resolve_is_reported_by_inference_and_only_once() {
 /// type taking 0 argument(s)``, and it arrived from `lower`, not from `analyze`.
 #[test]
 fn the_report_names_the_receiver_type() {
-    let diags = analyze("let v = Vec[Int]()\nv.push(1)\nout(v.nope())").diagnostics;
+    let diags = analyze("var v = Vec[Int]()\nv.push(1)\nout(v.nope())").diagnostics;
     assert_eq!(
         diags.iter().map(|d| d.message()).collect::<Vec<_>>(),
         vec!["no method `nope` on type `Vec[Int]` taking 0 argument(s)"],
@@ -2571,7 +2616,7 @@ fn a_name_the_catalog_holds_is_still_deferred() {
     assert_eq!(scheme_of(src, "total").as_deref(), Some("(?T) -> ?U"));
     // With a call site, the deferred requirement resolves exactly as before.
     let called = "fn total(values) { values.sum() }\n\
-                  fn main() -> Unit { let v = Vec[Int]()\nv.push(1)\nout(total(v)) }";
+                  fn main() -> Unit { var v = Vec[Int]()\nv.push(1)\nout(total(v)) }";
     assert!(is_clean_with_lower(called));
 }
 
@@ -2607,7 +2652,7 @@ fn a_name_the_catalog_holds_is_still_deferred() {
 fn a_barrier_declares_what_its_element_must_be() {
     // A closure is the canonical unorderable value (§5.5: function values have
     // no structural identity).
-    let unorderable = "let v = Vec()\nv.push(|x| x + 1)\nv.push(|x| x + 2)\nout(v.sorted())";
+    let unorderable = "var v = Vec()\nv.push(|x| x + 1)\nv.push(|x| x + 2)\nout(v.sorted())";
     let codes: Vec<String> = analyze(unorderable)
         .diagnostics
         .iter()
@@ -2621,8 +2666,8 @@ fn a_barrier_declares_what_its_element_must_be() {
 
     // A `Vec` element can change after it is stored, so it cannot be a key —
     // and `frequencies`' result is keyed on exactly it.
-    let unstable = "let inner = Vec[Int]()\ninner.push(1)\n\
-                    let v = Vec()\nv.push(inner)\nout(v.frequencies())";
+    let unstable = "var inner = Vec[Int]()\ninner.push(1)\n\
+                    var v = Vec()\nv.push(inner)\nout(v.frequencies())";
     let codes: Vec<String> = analyze(unstable)
         .diagnostics
         .iter()
@@ -2637,20 +2682,20 @@ fn a_barrier_declares_what_its_element_must_be() {
     // `unique` carries the same bound for the same reason — sameness is the
     // descriptor's `hash`/`equals`, so an element that changes is not found
     // again on the second pass.
-    let unstable_unique = "let inner = Vec[Int]()\ninner.push(1)\n\
-                           let v = Vec()\nv.push(inner)\nout(v.unique())";
+    let unstable_unique = "var inner = Vec[Int]()\ninner.push(1)\n\
+                           var v = Vec()\nv.push(inner)\nout(v.unique())";
     assert!(has_type_error(unstable_unique));
 
     // And the ordinary shapes are accepted, so the bounds refuse rather than
     // reject: a `Vec[Text]` sorts, a `Vec[Int]` counts.
     assert!(is_clean_with_lower(
-        "let v = Vec[Text]()\nv.push(\"b\")\nout(v.sorted())"
+        "var v = Vec[Text]()\nv.push(\"b\")\nout(v.sorted())"
     ));
     assert!(is_clean_with_lower(
-        "let v = Vec[Int]()\nv.push(1)\nout(v.frequencies()[1])"
+        "var v = Vec[Int]()\nv.push(1)\nout(v.frequencies()[1])"
     ));
     assert!(is_clean_with_lower(
-        "let v = Vec[Int]()\nv.push(1)\nout(v.unique())"
+        "var v = Vec[Int]()\nv.push(1)\nout(v.unique())"
     ));
 }
 
@@ -2659,7 +2704,7 @@ fn a_barrier_declares_what_its_element_must_be() {
 ///
 /// This is why `Bound::Kind` goes through `require_cap` rather than calling
 /// `capability::check` directly, and the difference is only visible in one
-/// shape: `let v = Vec()` mints `Vec[?T]`, which is a *concrete* receiver with
+/// shape: `var v = Vec()` mints `Vec[?T]`, which is a *concrete* receiver with
 /// an *open* element, so `v.sorted()` resolves its row immediately and asks
 /// about `?T` before any `push` has said what `?T` is. `capability::check`
 /// answers **yes** to every unresolved variable by design — deciding otherwise
@@ -2676,7 +2721,7 @@ fn a_barrier_declares_what_its_element_must_be() {
 fn a_barrier_bound_is_checked_at_the_call_site_that_pins_it() {
     // Ordered before it is populated: the bound is asked about `?T` and has to
     // wait for the `push` two lines later.
-    let later = "let v = Vec()\nlet s = v.sorted()\nv.push(|x| x + 1)\nout(1)";
+    let later = "var v = Vec()\nvar s = v.sorted()\nv.push(|x| x + 1)\nout(1)";
     let codes: Vec<String> = analyze(later)
         .diagnostics
         .iter()
@@ -2691,18 +2736,18 @@ fn a_barrier_bound_is_checked_at_the_call_site_that_pins_it() {
     // The same shape with an orderable element is clean, so the refusal is the
     // bound and not "an open element cannot be sorted".
     assert!(is_clean_with_lower(
-        "let v = Vec()\nlet s = v.sorted()\nv.push(7)\nout(s.len())"
+        "var v = Vec()\nvar s = v.sorted()\nv.push(7)\nout(s.len())"
     ));
 
     // And through a generic function, where the receiver itself is deferred.
     let ok = "fn top(v) { v.sorted() }\n\
-              fn main() -> Unit { let v = Vec[Int]()\nv.push(2)\nout(top(v)) }";
+              fn main() -> Unit { var v = Vec[Int]()\nv.push(2)\nout(top(v)) }";
     assert!(
         is_clean_with_lower(ok),
         "an orderable instantiation is fine"
     );
     let bad = "fn top(v) { v.sorted() }\n\
-               fn main() -> Unit { let v = Vec()\nv.push(|x| x + 1)\nout(top(v)) }";
+               fn main() -> Unit { var v = Vec()\nv.push(|x| x + 1)\nout(top(v)) }";
     assert!(
         has_type_error(bad),
         "the bound has to be answered where the call site pins the element"
@@ -2712,7 +2757,7 @@ fn a_barrier_bound_is_checked_at_the_call_site_that_pins_it() {
 #[test]
 fn sum_requires_int_elements() {
     let src = "fn main() -> Int {\n\
-                 let values = Vec()\n\
+                 var values = Vec()\n\
                  values.push(true)\n\
                  values.sum()\n\
                }";
@@ -2735,7 +2780,7 @@ fn sum_requires_int_elements() {
 fn the_int_sinks_require_int_elements() {
     for sink in ["sum", "product", "min", "max"] {
         for (elem, push) in [("Bool", "true"), ("Float", "1.5"), ("Text", "\"a\"")] {
-            let src = format!("fn main() -> Int {{ let v = Vec(); v.push({push}); v.{sink}() }}");
+            let src = format!("fn main() -> Int {{ var v = Vec(); v.push({push}); v.{sink}() }}");
             assert!(
                 has_type_error_with_lower(&src),
                 "`{sink}` on a Vec[{elem}] must be rejected"
@@ -2743,7 +2788,7 @@ fn the_int_sinks_require_int_elements() {
         }
         // …and Int is accepted, so the bound is the element type and not the
         // sink.
-        let ok = format!("fn main() -> Int {{ let v = Vec(); v.push(1); v.{sink}() }}");
+        let ok = format!("fn main() -> Int {{ var v = Vec(); v.push(1); v.{sink}() }}");
         assert!(!has_type_error_with_lower(&ok), "`{sink}` on Vec[Int]");
     }
 }
@@ -2760,18 +2805,18 @@ fn a_sinks_element_bound_pins_an_unresolved_pipeline_stage() {
     // `map`'s result element is a variable when `.sum()` is resolved; the bound
     // pins it, so the closure's own body is what fails.
     assert!(has_type_error_with_lower(
-        "fn main() -> Int { let v = Vec(); v.push(1); v.map(|x| \"s\").sum() }"
+        "fn main() -> Int { var v = Vec(); v.push(1); v.map(|x| \"s\").sum() }"
     ));
     // The same chain with an Int-returning closure is clean, so the rejection is
     // the element type and not the fusion.
     assert!(!has_type_error_with_lower(
-        "fn main() -> Int { let v = Vec(); v.push(1); v.map(|x| x * 2).sum() }"
+        "fn main() -> Int { var v = Vec(); v.push(1); v.map(|x| x * 2).sum() }"
     ));
     // And through TY-30's deferred resolution, where the receiver itself was a
     // variable when the method was written.
     assert!(has_type_error_with_lower(
         "fn total(values) { values.sum() }\n\
-         fn main() -> Int { let v = Vec(); v.push(true); total(v) }"
+         fn main() -> Int { var v = Vec(); v.push(true); total(v) }"
     ));
 }
 
@@ -2787,13 +2832,13 @@ fn a_sinks_element_bound_pins_an_unresolved_pipeline_stage() {
 /// recorded there as a finding the register does not have.
 #[test]
 fn enumerate_and_zip_report_the_pairs_they_build() {
-    let e = "fn main() -> Unit { let v = Vec(); v.push(1); let pairs = v.enumerate(); out(pairs) }";
+    let e = "fn main() -> Unit { var v = Vec(); v.push(1); var pairs = v.enumerate(); out(pairs) }";
     assert_eq!(scheme_of(e, "pairs").as_deref(), Some("Vec[(Int, Int)]"));
 
     // A non-Int element, so "the index is an Int" is visible as a *separate*
     // fact from the element type.
     let text =
-        "fn main() -> Unit { let v = Vec(); v.push(\"a\"); let pairs = v.enumerate(); out(pairs) }";
+        "fn main() -> Unit { var v = Vec(); v.push(\"a\"); var pairs = v.enumerate(); out(pairs) }";
     assert_eq!(
         scheme_of(text, "pairs").as_deref(),
         Some("Vec[(Int, Text)]")
@@ -2802,11 +2847,11 @@ fn enumerate_and_zip_report_the_pairs_they_build() {
     // `zip` pairs two *different* element types — which the old row made
     // impossible to write.
     let z = "fn main() -> Unit {\n\
-               let a = Vec()\n\
+               var a = Vec()\n\
                a.push(1)\n\
-               let b = Vec()\n\
+               var b = Vec()\n\
                b.push(\"s\")\n\
-               let pairs = a.zip(b)\n\
+               var pairs = a.zip(b)\n\
                out(pairs)\n\
              }";
     assert_eq!(scheme_of(z, "pairs").as_deref(), Some("Vec[(Int, Text)]"));
@@ -2861,7 +2906,7 @@ fn a_compound_assignments_numeric_requirement_survives_generalization() {
 #[test]
 fn map_key_must_be_hashable() {
     let src = "fn id(x: Int) -> Int { x }\n\
-               fn main() -> Unit { let map = Map(); map.insert(id, 1) }";
+               fn main() -> Unit { var map = Map(); map.insert(id, 1) }";
     assert!(
         has_type_error_with_lower(src),
         "function values cannot be structural map keys"
@@ -2875,9 +2920,9 @@ fn mutable_collection_cannot_be_used_as_a_map_key() {
     // so mutable collection identities must be rejected as keys even when
     // their elements are otherwise hashable.
     let src = "fn main() -> Unit {\n\
-                 let key = Vec()\n\
+                 var key = Vec()\n\
                  key.push(1)\n\
-                 let table = Map()\n\
+                 var table = Map()\n\
                  table.insert(key, \"stored\")\n\
                  key.push(2)\n\
                }";
@@ -2892,9 +2937,9 @@ fn mutable_collection_cannot_be_used_as_a_set_element() {
     // Set elements are hash keys too and have the same hash-stability
     // requirement as Map keys.
     let src = "fn main() -> Unit {\n\
-                 let key = Vec()\n\
+                 var key = Vec()\n\
                  key.push(1)\n\
-                 let values = Set()\n\
+                 var values = Set()\n\
                  values.insert(key)\n\
                  key.push(2)\n\
                }";
@@ -2907,7 +2952,7 @@ fn mutable_collection_cannot_be_used_as_a_set_element() {
 #[test]
 fn heap_element_must_be_orderable() {
     let src = "fn id(x: Int) -> Int { x }\n\
-               fn main() -> Unit { let heap = MinHeap(); heap.push(id) }";
+               fn main() -> Unit { var heap = MinHeap(); heap.push(id) }";
     assert!(
         has_type_error_with_lower(src),
         "function values cannot be ordered by a heap"
@@ -2928,7 +2973,7 @@ fn heap_element_must_be_orderable() {
 #[test]
 fn heap_element_orderability_agrees_with_the_runtime() {
     let src = "fn main() -> Unit {\n\
-                 let heap = MinHeap()\n\
+                 var heap = MinHeap()\n\
                  heap.push(\"z\")\n\
                  heap.push(\"a\")\n\
                }";
@@ -2981,7 +3026,7 @@ fn lowered_polymorphic_call_result_uses_the_callsite_instantiation() {
 fn lowered_generic_method_result_uses_the_receiver_instantiation() {
     use praxis_ast::AstNode;
 
-    let src = "fn main() -> Float { let values = Vec(); values.push(1.5); values.get(0) }";
+    let src = "fn main() -> Float { var values = Vec(); values.push(1.5); values.get(0) }";
     let map = SourceMap::new();
     let id = map.intern("lower_method_type_test.px", src);
     let parsed = parse(id, src);
@@ -3011,7 +3056,7 @@ fn lowered_generic_method_result_uses_the_receiver_instantiation() {
 fn lowering_respects_a_local_that_shadows_an_enum_variant() {
     use praxis_ast::AstNode;
 
-    let src = "enum E { A }\nfn main() -> Int { let A = 7; A }";
+    let src = "enum E { A }\nfn main() -> Int { var A = 7; A }";
     let map = SourceMap::new();
     let id = map.intern("variant_shadow_test.px", src);
     let parsed = parse(id, src);
@@ -3111,12 +3156,12 @@ fn a_duplicate_function_is_reported_once_and_the_first_one_survives() {
 }
 
 /// A `fn` of one name in two *different* scopes is not a redeclaration, and a
-/// `let` shadowing a prelude name never was — `is_bound_here` is what keeps the
+/// `var` shadowing a prelude name never was — `is_bound_here` is what keeps the
 /// check from firing on either.
 #[test]
 fn shadowing_an_outer_name_is_not_a_redeclaration() {
     for src in [
-        "fn main() -> Int { let out = 1\n out }",
+        "fn main() -> Int { var out = 1\n out }",
         "fn f(duplicate: Int) -> Int { duplicate }\nfn duplicate() -> Int { 1 }\nfn main() -> Int { f(2) }",
     ] {
         let analysis = analyze(src);
@@ -3136,7 +3181,7 @@ fn shadowing_an_outer_name_is_not_a_redeclaration() {
 #[test]
 fn record_literal_requires_every_declared_field() {
     let src = "struct Pair { left: Int, right: Int }\n\
-               fn main() -> Int { let pair = Pair { left: 1 }; pair.right }";
+               fn main() -> Int { var pair = Pair { left: 1 }; pair.right }";
     assert!(
         !is_clean_with_lower(src),
         "allocating a record with fewer payloads than its schema is invalid"
@@ -3147,7 +3192,7 @@ fn record_literal_requires_every_declared_field() {
 fn record_literal_rejects_unknown_fields() {
     let src = "struct Point { x: Int }\n\
                fn side_effect() -> Int { out(\"must not disappear\"); 2 }\n\
-               fn main() -> Int { let point = Point { x: 1, typo: side_effect() }; point.x }";
+               fn main() -> Int { var point = Point { x: 1, typo: side_effect() }; point.x }";
     assert!(
         !is_clean_with_lower(src),
         "an unknown field must be diagnosed instead of deleting its initializer"
@@ -3157,7 +3202,7 @@ fn record_literal_rejects_unknown_fields() {
 #[test]
 fn record_literal_rejects_duplicate_fields() {
     let src = "struct Point { x: Int }\n\
-               fn main() -> Int { let point = Point { x: 1, x: 2 }; point.x }";
+               fn main() -> Int { var point = Point { x: 1, x: 2 }; point.x }";
     assert!(
         !is_clean_with_lower(src),
         "each record field must be initialized exactly once"
@@ -3206,9 +3251,9 @@ fn wildcard_pattern_does_not_bind_a_value_named_underscore() {
 #[test]
 fn a_wildcard_binder_is_legal_and_declares_nothing() {
     for src in [
-        "fn main() -> Int { let _ = 1; 0 }",
+        "fn main() -> Int { var _ = 1; 0 }",
         "fn g(_) -> Int { 0 }\nfn main() -> Int { g(1) }",
-        "fn main() -> Int { let f = |_| 0; f(1) }",
+        "fn main() -> Int { var f = |_| 0; f(1) }",
     ] {
         assert!(is_clean_with_lower(src), "`{src}` should compile clean");
         let analysis = analyze(src);
@@ -3234,7 +3279,7 @@ fn nested_enum_pattern_must_cover_payload_constructors() {
     let src = "enum Flag { On, Off }\n\
                enum Wrapped { Wrap(Flag) }\n\
                fn main() -> Int {\n\
-                 let value = Wrap(On)\n\
+                 var value = Wrap(On)\n\
                  match value { Wrap(On) => 1 }\n\
                }";
     assert!(
@@ -3247,7 +3292,7 @@ fn nested_enum_pattern_must_cover_payload_constructors() {
 fn duplicate_enum_arm_is_unreachable() {
     let src = "enum E { A, B }\n\
                fn main() -> Int {\n\
-                 let value = A\n\
+                 var value = A\n\
                  match value { A => 1, A => 2, B => 3 }\n\
                }";
     assert!(
@@ -3259,7 +3304,7 @@ fn duplicate_enum_arm_is_unreachable() {
 #[test]
 fn unknown_enum_variant_pattern_is_rejected() {
     let src = "enum E { A }\n\
-               fn main() -> Int { let value = A; match value { Typo(payload) => 1 } }";
+               fn main() -> Int { var value = A; match value { Typo(payload) => 1 } }";
     assert!(
         !is_clean_with_lower(src),
         "a misspelled variant cannot silently become an exhaustive wildcard"
@@ -3271,7 +3316,7 @@ fn unknown_enum_variant_pattern_is_rejected() {
 #[test]
 fn mixed_template_capture_kinds_are_preserved() {
     let src = "fn main() -> Int {\n\
-                 let row = read `{name:word},{port:int}`\n\
+                 var row = read `{name:word},{port:int}`\n\
                  row.port + 1\n\
                }";
     assert!(
@@ -3283,7 +3328,7 @@ fn mixed_template_capture_kinds_are_preserved() {
     // `{ name: Text, port: Text }` and `row.port + 1` was the only thing that
     // noticed.
     assert_eq!(
-        scheme_of("let row = read `{name:word},{port:int}`", "row").as_deref(),
+        scheme_of("var row = read `{name:word},{port:int}`", "row").as_deref(),
         Some("{ name: Text, port: Int }")
     );
 }
@@ -3295,17 +3340,17 @@ fn mixed_template_capture_kinds_are_preserved() {
 fn a_capture_body_is_a_full_parser_expression() {
     for (src, expected) in [
         (
-            "let m = read `Starting items: {items:csv(int)}`",
+            "var m = read `Starting items: {items:csv(int)}`",
             "{ items: Vec[Int] }",
         ),
-        ("let m = read `{x:optional(int)}`", "{ x: Option[Int] }"),
-        ("let m = read `{s:sep(\"-\", word)}`", "{ s: Vec[Text] }"),
-        ("let m = read `{c:one_of(\"^v<>\")}`", "{ c: Char }"),
+        ("var m = read `{x:optional(int)}`", "{ x: Option[Int] }"),
+        ("var m = read `{s:sep(\"-\", word)}`", "{ s: Vec[Text] }"),
+        ("var m = read `{c:one_of(\"^v<>\")}`", "{ c: Char }"),
         // Anonymous captures keep §7.3's scalar/tuple rule, and the body's own
         // type is what fills it.
-        ("let m = read `{csv(int)}`", "Vec[Int]"),
+        ("var m = read `{csv(int)}`", "Vec[Int]"),
         (
-            "let m = read `{a:int} {b:csv(word)}`",
+            "var m = read `{a:int} {b:csv(word)}`",
             "{ a: Int, b: Vec[Text] }",
         ),
     ] {
@@ -3324,7 +3369,7 @@ fn a_capture_body_is_a_full_parser_expression() {
     // display gap that belongs to whoever owns `TypeDb::render`.
     {
         use praxis_input_parser::{ParserAst, TemplatePart};
-        let src = "let m = read `{g:choice(Pt: `{x:int},{y:int}`, Name: word)}`";
+        let src = "var m = read `{g:choice(Pt: `{x:int},{y:int}`, Name: word)}`";
         assert!(!has_input_error(src), "a nested template is a parser body");
         match parser_ast_of(src) {
             ParserAst::Template { parts, .. } => match &parts[0] {
@@ -3348,9 +3393,9 @@ fn a_capture_body_is_a_full_parser_expression() {
 
     // And a malformed body reports rather than being read as something else.
     for src in [
-        "let m = read `{x:csv(int, int)}`",
-        "let m = read `{x:frobnicate(int)}`",
-        "let m = read `{x:sep(\"\", int)}`",
+        "var m = read `{x:csv(int, int)}`",
+        "var m = read `{x:frobnicate(int)}`",
+        "var m = read `{x:sep(\"\", int)}`",
     ] {
         assert!(has_input_error(src), "{src} must report");
     }
@@ -3358,7 +3403,7 @@ fn a_capture_body_is_a_full_parser_expression() {
 
 #[test]
 fn unknown_template_capture_parser_is_diagnosed() {
-    let src = "let value = read `{value:intr}`";
+    let src = "var value = read `{value:intr}`";
     assert!(
         has_input_error(src),
         "a misspelled capture parser must not silently default to Int"
@@ -3381,14 +3426,14 @@ fn a_template_scan_error_reports_the_code_its_own_rule_was_given() {
     use praxis_source::DiagCode;
 
     for (src, code) in [
-        ("let v = read `{9x:int}`", DiagCode::InvalidCaptureName),
-        ("let v = read `{value:intr}`", DiagCode::UnknownCaptureKind),
+        ("var v = read `{9x:int}`", DiagCode::InvalidCaptureName),
+        ("var v = read `{value:intr}`", DiagCode::UnknownCaptureKind),
         (
-            "let v = read `{x:frobnicate(int)}`",
+            "var v = read `{x:frobnicate(int)}`",
             DiagCode::UnknownConstructor,
         ),
         (
-            "let v = read `{x:csv(int, int)}`",
+            "var v = read `{x:csv(int, int)}`",
             DiagCode::ConstructorArity,
         ),
         // The `I030` rows are the ones with no code of their own, which is what
@@ -3402,8 +3447,8 @@ fn a_template_scan_error_reports_the_code_its_own_rule_was_given() {
         // — that a `ScanError` with no allocated code still reports `I030`
         // rather than being flattened with the four that do — is unchanged, and
         // these two reach it through a *closed* template.
-        ("let v = read `{}`", DiagCode::TemplateScan),
-        ("let v = read `bad\\q escape`", DiagCode::TemplateScan),
+        ("var v = read `{}`", DiagCode::TemplateScan),
+        ("var v = read `bad\\q escape`", DiagCode::TemplateScan),
     ] {
         assert!(
             reports_input_code(src, code),
@@ -3414,7 +3459,7 @@ fn a_template_scan_error_reports_the_code_its_own_rule_was_given() {
 
 #[test]
 fn unknown_parser_constructor_is_diagnosed() {
-    let src = "let value = read frobnicate(int)";
+    let src = "var value = read frobnicate(int)";
     assert!(
         has_input_error(src),
         "unknown constructor conversion must emit I010-style feedback"
@@ -3423,7 +3468,7 @@ fn unknown_parser_constructor_is_diagnosed() {
 
 #[test]
 fn optional_rejects_extra_arguments() {
-    let src = "let value = read optional(int, word)";
+    let src = "var value = read optional(int, word)";
     assert!(
         has_input_error(src),
         "special constructors must validate source arity before discarding arguments"
@@ -3463,7 +3508,7 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
             "{ id: Int, items: Vec[Int] }",
         ),
     ] {
-        let src = format!("let value = read {call}");
+        let src = format!("var value = read {call}");
         // **Every** error, not just the `Input` category: `fill: 0` failed at
         // the grammar with `P001`, which an Input-only filter cannot see.
         assert_eq!(
@@ -3497,10 +3542,10 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
     ] {
         let call = format!("grid(char, ragged, fill: {fill_src})");
         for src in [
-            format!("let value = read {call}"),
+            format!("var value = read {call}"),
             // The capture-body front end reaches the same builder through a
             // template, so identical text goes down both front ends.
-            format!("let value = read `{{v:{call}}}`"),
+            format!("var value = read `{{v:{call}}}`"),
         ] {
             assert_eq!(
                 errors_of(&src),
@@ -3518,7 +3563,7 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
     // A name with no row: `Constructor::from_keyword(&name)?` used to swallow
     // this whole.
     assert!(
-        reports_input_code("let v = read frobnicate(int)", DiagCode::UnknownConstructor),
+        reports_input_code("var v = read frobnicate(int)", DiagCode::UnknownConstructor),
         "an unknown constructor is I013"
     );
 
@@ -3531,7 +3576,7 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
         "sep(\",\")",
         "one_of(\"a\", \"b\")",
     ] {
-        let src = format!("let v = read {call}");
+        let src = format!("var v = read {call}");
         assert!(
             has_input_error(&src),
             "`{call}` has the wrong number of arguments"
@@ -3563,13 +3608,13 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
             "a skip policy that does not exist",
         ),
     ] {
-        let src = format!("let v = read {call}");
+        let src = format!("var v = read {call}");
         assert!(has_input_error(&src), "`{call}` is {why}");
     }
 
     // `block()` with nothing in it has no fields and consumes nothing.
     assert!(
-        has_input_error("let v = read block()"),
+        has_input_error("var v = read block()"),
         "a `block` needs at least one item"
     );
 
@@ -3578,9 +3623,9 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
     // colon. The capture-body front end accepted this with *zero* diagnostics
     // and built a ragged grid padded with `""`.
     for src in [
-        "let v = read grid(char, ragged, fill:)",
-        "let v = read `{g:grid(char, ragged, fill:)}`",
-        "let v = read `{g:grid(char, ragged, fill: \"\")}`",
+        "var v = read grid(char, ragged, fill:)",
+        "var v = read `{g:grid(char, ragged, fill:)}`",
+        "var v = read `{g:grid(char, ragged, fill: \"\")}`",
     ] {
         assert!(
             !errors_of(src).is_empty(),
@@ -3613,8 +3658,8 @@ fn a_caret_under_a_nested_template_names_the_text_it_points_at() {
     // own span, which is the span the rebase has to reach.
     let bad = "choice(P: int, P: word)";
     for src in [
-        format!("let v = read `{{a:`{{b:{bad}}}`}}`"),
-        format!("let v = read `{{a:`{{b:`{{c:{bad}}}`}}`}}`"),
+        format!("var v = read `{{a:`{{b:{bad}}}`}}`"),
+        format!("var v = read `{{a:`{{b:`{{c:{bad}}}`}}`}}`"),
     ] {
         let d = analyze(&src)
             .diagnostics
@@ -3640,13 +3685,13 @@ fn a_parser_string_literal_is_decoded_once_like_every_other_literal() {
 
     // `\t` is one tab, not the two characters `\` and `t`. This is the whole
     // finding: `sep("\t", int)` split on a backslash.
-    match parser_ast_of(r#"let v = read sep("\t", int)"#) {
+    match parser_ast_of(r#"var v = read sep("\t", int)"#) {
         ParserAst::Sep { separator, .. } => assert_eq!(separator.as_str(), "\t"),
         other => panic!("expected Sep, got {other:?}"),
     }
 
     // One quote, not zero: `trim_end_matches('"')` ate the escaped quote too.
-    match parser_ast_of(r#"let v = read one_of("\"")"#) {
+    match parser_ast_of(r#"var v = read one_of("\"")"#) {
         ParserAst::OneOf { chars, .. } => assert_eq!(chars, "\""),
         other => panic!("expected OneOf, got {other:?}"),
     }
@@ -3654,14 +3699,14 @@ fn a_parser_string_literal_is_decoded_once_like_every_other_literal() {
     // Both real quotes survive. `trim_start_matches`/`trim_end_matches` strip a
     // *run*, so this used to decode to the empty separator — the one IP-10 says
     // cannot exist.
-    match parser_ast_of(r#"let v = read sep("\"\"", int)"#) {
+    match parser_ast_of(r#"var v = read sep("\"\"", int)"#) {
         ParserAst::Sep { separator, .. } => assert_eq!(separator.as_str(), "\"\""),
         other => panic!("expected Sep, got {other:?}"),
     }
 
     // And an escape neither decoder knows is preserved exactly as
     // `unquote_text` preserves it — which is how the two are shown to be one.
-    match parser_ast_of(r#"let v = read sep("\q", int)"#) {
+    match parser_ast_of(r#"var v = read sep("\q", int)"#) {
         ParserAst::Sep { separator, .. } => assert_eq!(separator.as_str(), r"\q"),
         other => panic!("expected Sep, got {other:?}"),
     }
@@ -3679,7 +3724,7 @@ fn a_repeated_tail_is_last_and_singular() {
     // it can never match. This used to compile into the *reordered* parser.
     assert!(
         reports_input_code(
-            "let b = read sections(boards: repeated(matrix(int)), draws: csv(int))",
+            "var b = read sections(boards: repeated(matrix(int)), draws: csv(int))",
             DiagCode::MisplacedRepeatedTail
         ),
         "a tail before another field silently reordered the call"
@@ -3688,7 +3733,7 @@ fn a_repeated_tail_is_last_and_singular() {
     // Two tails: the second used to overwrite the first, so `a` vanished.
     assert!(
         reports_input_code(
-            "let b = read sections(a: repeated(int), b: repeated(int))",
+            "var b = read sections(a: repeated(int), b: repeated(int))",
             DiagCode::MisplacedRepeatedTail
         ),
         "`sections` takes at most one tail"
@@ -3698,7 +3743,7 @@ fn a_repeated_tail_is_last_and_singular() {
     // through `Constructor::from_keyword`'s `?` and produce no diagnostic.
     assert!(
         reports_input_code(
-            "let b = read repeated(int)",
+            "var b = read repeated(int)",
             DiagCode::MisplacedRepeatedTail
         ),
         "a bare `repeated(...)` is not a parser"
@@ -3706,7 +3751,7 @@ fn a_repeated_tail_is_last_and_singular() {
 
     // And the legal shape is still clean and still builds the tail last —
     // `tests/aoc-corpus/m9_bingo.px`'s own call.
-    let legal = "let b = read sections(draws: csv(int), boards: repeated(matrix(int)))";
+    let legal = "var b = read sections(draws: csv(int), boards: repeated(matrix(int)))";
     assert!(!has_input_error(legal), "the ordered form is legal");
     assert_eq!(
         scheme_of(legal, "b").as_deref(),
@@ -3731,7 +3776,7 @@ fn a_field_named_fill_or_skip_is_a_field_and_not_a_dropped_keyword() {
 
     // `sections` has no keyword argument, so `fill:` is a field. This used to
     // build `SectionsNamed { fields: [rules] }` and report nothing.
-    let src = "let v = read sections(rules: lines(int), fill: lines(int))";
+    let src = "var v = read sections(rules: lines(int), fill: lines(int))";
     assert!(!has_input_error(src), "`fill` is a section name here");
     assert_eq!(
         scheme_of(src, "v").as_deref(),
@@ -3740,7 +3785,7 @@ fn a_field_named_fill_or_skip_is_a_field_and_not_a_dropped_keyword() {
     );
 
     // Same for a `block` item…
-    let src = "let v = read block(`{id:int}`, fill: lines(int))";
+    let src = "var v = read block(`{id:int}`, fill: lines(int))";
     assert!(!has_input_error(src));
     match parser_ast_of(src) {
         ParserAst::Block { items, .. } => {
@@ -3751,7 +3796,7 @@ fn a_field_named_fill_or_skip_is_a_field_and_not_a_dropped_keyword() {
     }
 
     // …and for a `choice` case.
-    match parser_ast_of("let v = read choice(A: int, skip: word)") {
+    match parser_ast_of("var v = read choice(A: int, skip: word)") {
         ParserAst::Choice { cases, .. } => {
             assert_eq!(cases.len(), 2, "the `skip` case must survive");
             assert_eq!(cases[1].0, "skip");
@@ -3761,14 +3806,14 @@ fn a_field_named_fill_or_skip_is_a_field_and_not_a_dropped_keyword() {
 
     // And a keyword the constructor really does have still works, still
     // reaches the builder, and a wrong one is still refused.
-    match parser_ast_of(r#"let v = read chars(one_of("ab"), skip: newlines)"#) {
+    match parser_ast_of(r#"var v = read chars(one_of("ab"), skip: newlines)"#) {
         ParserAst::Characters { skip, .. } => {
             assert_eq!(skip, praxis_input_parser::SkipPolicy::Newlines);
         }
         other => panic!("expected Characters, got {other:?}"),
     }
     assert!(
-        has_input_error(r#"let v = read chars(one_of("ab"), fill: 0)"#),
+        has_input_error(r#"var v = read chars(one_of("ab"), fill: 0)"#),
         "`chars` has no `fill:`"
     );
 }
@@ -3810,11 +3855,11 @@ fn both_front_ends_apply_one_repeated_tail_rule() {
         ),
     ] {
         assert!(
-            reports_input_code(&format!("let v = read {call}"), code),
+            reports_input_code(&format!("var v = read {call}"), code),
             "rowan front end: `{call}` — {why}"
         );
         assert!(
-            reports_input_code(&format!("let v = read `{{b:{call}}}`"), code),
+            reports_input_code(&format!("var v = read `{{b:{call}}}`"), code),
             "capture-body front end: `{call}` — {why}"
         );
     }
@@ -3823,8 +3868,8 @@ fn both_front_ends_apply_one_repeated_tail_rule() {
     // so "reject the bad one" was not bought by rejecting the good one.
     let legal = "sections(draws: csv(int), boards: repeated(matrix(int)))";
     for src in [
-        format!("let v = read {legal}"),
-        format!("let v = read `{{b:{legal}}}`"),
+        format!("var v = read {legal}"),
+        format!("var v = read `{{b:{legal}}}`"),
     ] {
         let ast = parser_ast_of(&src);
         let sections = match &ast {
@@ -3886,7 +3931,7 @@ fn the_lexer_and_the_scanner_agree_on_where_a_template_ends() {
         r#"`He said "hi": {x:int}`"#,
     ] {
         // 1. The lexer: one token, covering exactly the template, no complaint.
-        let src = format!("let p = {template}\nlet q = 1\n");
+        let src = format!("var p = {template}\nvar q = 1\n");
         let lexed = praxis_parser::lex(FileId::SYNTHETIC, &src);
         assert!(
             lexed.diagnostics.is_empty(),
@@ -3917,7 +3962,7 @@ fn the_lexer_and_the_scanner_agree_on_where_a_template_ends() {
 
         // 3. And end to end, which is what a user sees.
         assert!(
-            !has_input_error(&format!("let v = read lines({template})")),
+            !has_input_error(&format!("var v = read lines({template})")),
             "{template}: rejected by the pipeline"
         );
     }
@@ -3959,7 +4004,7 @@ fn a_capture_first_seen_as_an_assignment_target_keeps_its_type() {
     use praxis_ast::AstNode;
 
     let src =
-        "fn main() -> Int { var total = 0\n  let add = |n| { total = n }\n  add(5)\n  total }";
+        "fn main() -> Int { var total = 0\n  var add = |n| { total = n }\n  add(5)\n  total }";
     let map = SourceMap::new();
     let id = map.intern("capture_assign_test.px", src);
     let parsed = parse(id, src);
@@ -4022,24 +4067,24 @@ fn the_child_walker_reaches_every_expression_position() {
         "struct R { f: Int }\n",
         "enum E { V(Int) }\n",
         "fn main(c: Bool, v: Vec[Int], k: Int) -> Int {\n",
-        "  let a = |n| 1\n",                // Let init
+        "  var a = |n| 1\n",                // Let init
         "  var b = |n| 2\n",                // Var init
         "  b = |n| 3\n",                    // Assign value
-        "  let d = (|n| 4)(0)\n",           // Call.callee_expr (HIR-08)
+        "  var d = (|n| 4)(0)\n",           // Call.callee_expr (HIR-08)
         "  out(|n| 5)\n",                   // Call.args
-        "  let w = v.map(|n| 6)\n",         // MethodCall.args
-        "  let y = v.map(|n| 7).len()\n",   // MethodCall.receiver
-        "  let t = (|n| 8, |n| 9)\n",       // Tuple.elements
-        "  let p = (|n| 10)\n",             // Paren.inner
-        "  let u = !(|n| 11)\n",            // Unary.operand
-        "  let z = (|n| 12) == (|n| 13)\n", // Bin.lhs / Bin.rhs
-        "  let g = R { f: |n| 14 }.f\n",    // RecordLit.fields, FieldGet.receiver
-        "  let e = V(|n| 15)\n",            // EnumVariant.args
-        "  if (|n| 16)(0) { let h = |n| 17 } else { let i = |n| 18 }\n", // If cond + branches
-        "  while c { let j = |n| 19 }\n",   // While.body
-        "  for x in v { let l = |n| 20 }\n", // For.body
-        "  let m = loop { let o = |n| 21\n  break |n| 22 }\n", // Loop.body, Break.value
-        "  let q = match (|n| 23)(0) { _ => |n| 24 }\n", // Match.scrutinee + arms
+        "  var w = v.map(|n| 6)\n",         // MethodCall.args
+        "  var y = v.map(|n| 7).len()\n",   // MethodCall.receiver
+        "  var t = (|n| 8, |n| 9)\n",       // Tuple.elements
+        "  var p = (|n| 10)\n",             // Paren.inner
+        "  var u = !(|n| 11)\n",            // Unary.operand
+        "  var z = (|n| 12) == (|n| 13)\n", // Bin.lhs / Bin.rhs
+        "  var g = R { f: |n| 14 }.f\n",    // RecordLit.fields, FieldGet.receiver
+        "  var e = V(|n| 15)\n",            // EnumVariant.args
+        "  if (|n| 16)(0) { var h = |n| 17 } else { var i = |n| 18 }\n", // If cond + branches
+        "  while c { var j = |n| 19 }\n",   // While.body
+        "  for x in v { var l = |n| 20 }\n", // For.body
+        "  var m = loop { var o = |n| 21\n  break |n| 22 }\n", // Loop.body, Break.value
+        "  var q = match (|n| 23)(0) { _ => |n| 24 }\n", // Match.scrutinee + arms
         "  return |n| 25\n",                // Return.value
         "}\n"
     );
@@ -4098,11 +4143,11 @@ fn the_child_walker_reaches_every_expression_position() {
 #[test]
 fn a_wrong_type_argument_count_is_reported_at_the_annotation() {
     for src in [
-        "fn main() -> Int { let m: Map[Text] = Map(); 0 }",
-        "fn main() -> Int { let v: Vec[Int, Text] = Vec(); 0 }",
+        "fn main() -> Int { var m: Map[Text] = Map(); 0 }",
+        "fn main() -> Int { var v: Vec[Int, Text] = Vec(); 0 }",
         // A nominal def has a parameter count too, since F12 — `Option` is one
         // definition applied to arguments rather than a name stamped per site.
-        "fn main() -> Int { let o: Option[Int, Text] = None; 0 }",
+        "fn main() -> Int { var o: Option[Int, Text] = None; 0 }",
     ] {
         let codes: Vec<u32> = analyze(src)
             .diagnostics
@@ -4117,7 +4162,7 @@ fn a_wrong_type_argument_count_is_reported_at_the_annotation() {
     }
     // The right count still type-checks clean.
     assert!(!has_type_error(
-        "fn main() -> Int { let m: Map[Text, Int] = Map(); 0 }"
+        "fn main() -> Int { var m: Map[Text, Int] = Map(); 0 }"
     ));
 }
 
@@ -4154,24 +4199,24 @@ const EVERY_EXPRESSION_POSITION: &str = concat!(
     "struct R { f: Int }\n",
     "enum E { V(Int) }\n",
     "fn main(c: Bool, v: Vec[Int], k: Int) -> Int {\n",
-    "  let a = |n| 1\n",
+    "  var a = |n| 1\n",
     "  var b = |n| 2\n",
     "  b = |n| 3\n",
-    "  let d = (|n| 4)(0)\n",
+    "  var d = (|n| 4)(0)\n",
     "  out(|n| 5)\n",
-    "  let w = v.map(|n| 6)\n",
-    "  let y = v.map(|n| 7).len()\n",
-    "  let t = (|n| 8, |n| 9)\n",
-    "  let p = (|n| 10)\n",
-    "  let u = !(|n| 11)\n",
-    "  let z = (|n| 12) == (|n| 13)\n",
-    "  let g = R { f: |n| 14 }.f\n",
-    "  let e = V(|n| 15)\n",
-    "  if (|n| 16)(0) { let h = |n| 17 } else { let i = |n| 18 }\n",
-    "  while c { let j = |n| 19 }\n",
-    "  for x in v { let l = |n| 20 }\n",
-    "  let m = loop { let o = |n| 21\n  break |n| 22 }\n",
-    "  let q = match (|n| 23)(0) { _ => |n| 24 }\n",
+    "  var w = v.map(|n| 6)\n",
+    "  var y = v.map(|n| 7).len()\n",
+    "  var t = (|n| 8, |n| 9)\n",
+    "  var p = (|n| 10)\n",
+    "  var u = !(|n| 11)\n",
+    "  var z = (|n| 12) == (|n| 13)\n",
+    "  var g = R { f: |n| 14 }.f\n",
+    "  var e = V(|n| 15)\n",
+    "  if (|n| 16)(0) { var h = |n| 17 } else { var i = |n| 18 }\n",
+    "  while c { var j = |n| 19 }\n",
+    "  for x in v { var l = |n| 20 }\n",
+    "  var m = loop { var o = |n| 21\n  break |n| 22 }\n",
+    "  var q = match (|n| 23)(0) { _ => |n| 24 }\n",
     "  return |n| 25\n",
     "}\n"
 );
@@ -4248,7 +4293,7 @@ fn lowering_invents_no_type_for_any_expression_position() {
 fn a_node_key_separates_an_expression_from_the_name_inside_it() {
     use praxis_ast::AstNode;
 
-    let src = "fn main() -> Int { let x = 1\n  x }\n";
+    let src = "fn main() -> Int { var x = 1\n  x }\n";
     let map = SourceMap::new();
     let id = map.intern("node_key.px", src);
     let parsed = parse(id, src);
@@ -4288,8 +4333,8 @@ fn a_lowered_branch_carries_the_join_not_its_first_arm() {
 
     let src = concat!(
         "fn main(c: Bool, n: Int) -> Int {\n",
-        "  let a = if c { panic(\"x\") } else { 1 }\n",
-        "  let b = match n { 0 => panic(\"y\"), _ => 2 }\n",
+        "  var a = if c { panic(\"x\") } else { 1 }\n",
+        "  var b = match n { 0 => panic(\"y\"), _ => 2 }\n",
         "  a + b\n",
         "}\n"
     );
@@ -4314,7 +4359,7 @@ fn a_lowered_branch_carries_the_join_not_its_first_arm() {
         .expect("main");
     let mut rendered = Vec::new();
     for stmt in &main.body.stmts {
-        if let crate::TypedStmt::Let { name, init, .. } = stmt {
+        if let crate::TypedStmt::Var { name, init, .. } = stmt {
             rendered.push((name.clone(), analysis.db.render(crate::expr_ty(init))));
         }
     }
@@ -4394,7 +4439,7 @@ fn a_constructor_is_a_symbol_kind_not_a_spelling() {
 fn a_local_holding_a_variant_is_not_a_constructor() {
     use praxis_ast::AstNode;
 
-    let src = "enum E { A }\nfn main() -> Int {\n  let A = 7\n  A\n}\n";
+    let src = "enum E { A }\nfn main() -> Int {\n  var A = 7\n  A\n}\n";
     let map = SourceMap::new();
     let id = map.intern("variant_value.px", src);
     let parsed = parse(id, src);
@@ -4414,7 +4459,7 @@ fn a_local_holding_a_variant_is_not_a_constructor() {
         "the local shadows the constructor: {:?}",
         main.body.tail
     );
-    // The `let A = 7` must survive too — lowering the tail as a constructor
+    // The `var A = 7` must survive too — lowering the tail as a constructor
     // also discarded the binding's value.
     assert_eq!(main.body.stmts.len(), 1, "the binding is still there");
 }
@@ -4452,7 +4497,7 @@ fn a_pattern_that_names_no_variant_is_reported_not_widened() {
 /// named neither.
 #[test]
 fn a_non_exhaustive_match_is_reported_where_it_is_written() {
-    let src = "enum E { A, B }\nfn main() -> Int {\n  let x = A\n  match x { A => 1 }\n}\n";
+    let src = "enum E { A, B }\nfn main() -> Int {\n  var x = A\n  match x { A => 1 }\n}\n";
     let diags = analyze_and_lower_diags(src);
     let y120 = diags
         .iter()
@@ -4472,7 +4517,7 @@ fn a_non_exhaustive_match_is_reported_where_it_is_written() {
 #[test]
 fn a_record_literal_names_every_field_exactly_once() {
     let missing = analyze_and_lower_diags(
-        "struct P { x: Int, y: Int }\nfn main() -> Int { let p = P { x: 1 }\n  p.x }",
+        "struct P { x: Int, y: Int }\nfn main() -> Int { var p = P { x: 1 }\n  p.x }",
     );
     assert!(
         missing.iter().any(|d| d.code().number() == 113),
@@ -4480,7 +4525,7 @@ fn a_record_literal_names_every_field_exactly_once() {
     );
 
     let unknown = analyze_and_lower_diags(
-        "struct P { x: Int }\nfn main() -> Int { let p = P { x: 1, typo: 2 }\n  p.x }",
+        "struct P { x: Int }\nfn main() -> Int { var p = P { x: 1, typo: 2 }\n  p.x }",
     );
     assert!(
         unknown.iter().any(|d| d.code().number() == 114),
@@ -4488,7 +4533,7 @@ fn a_record_literal_names_every_field_exactly_once() {
     );
 
     let duplicate = analyze_and_lower_diags(
-        "struct P { x: Int }\nfn main() -> Int { let p = P { x: 1, x: 2 }\n  p.x }",
+        "struct P { x: Int }\nfn main() -> Int { var p = P { x: 1, x: 2 }\n  p.x }",
     );
     assert!(
         duplicate.iter().any(|d| d.code().number() == 115),
@@ -4496,7 +4541,7 @@ fn a_record_literal_names_every_field_exactly_once() {
     );
 
     let good = analyze_and_lower_diags(
-        "struct P { x: Int, y: Int }\nfn main() -> Int { let p = P { y: 2, x: 1 }\n  p.x }",
+        "struct P { x: Int, y: Int }\nfn main() -> Int { var p = P { y: 2, x: 1 }\n  p.x }",
     );
     assert!(
         good.is_empty(),
@@ -4511,7 +4556,7 @@ fn a_record_literal_names_every_field_exactly_once() {
 fn an_unknown_fields_initializer_is_still_checked() {
     let diags = analyze_and_lower_diags(
         "struct P { x: Int }\n\
-         fn main() -> Int { let p = P { x: 1, typo: \"text\" + 1 }\n  p.x }",
+         fn main() -> Int { var p = P { x: 1, typo: \"text\" + 1 }\n  p.x }",
     );
     assert!(
         diags.iter().any(|d| d.code().number() == 114),
@@ -4534,7 +4579,7 @@ fn a_match_covers_every_payload_position_not_just_the_outer_constructor() {
     // `Wrap` is the *only* variant of `Wrapped`, so a top-level check calls
     // this exhaustive. `Wrap(Off)` is a value it does not match.
     let one = analyze_and_lower_diags(&format!(
-        "{enums}fn main() -> Int {{ let v = Wrap(On)\n  match v {{ Wrap(On) => 1 }} }}"
+        "{enums}fn main() -> Int {{ var v = Wrap(On)\n  match v {{ Wrap(On) => 1 }} }}"
     ));
     assert!(
         one.iter().any(|d| d.code().number() == 120),
@@ -4544,28 +4589,28 @@ fn a_match_covers_every_payload_position_not_just_the_outer_constructor() {
     // …and covering both closes it, which is the half a blanket rejection of
     // nested patterns would also satisfy.
     let both = analyze_and_lower_diags(&format!(
-        "{enums}fn main() -> Int {{ let v = Wrap(On)\n  \
+        "{enums}fn main() -> Int {{ var v = Wrap(On)\n  \
          match v {{ Wrap(On) => 1, Wrap(Off) => 2 }} }}"
     ));
     assert!(both.is_empty(), "both payload cases are covered: {both:?}");
 
     // A wildcard payload covers every constructor under it, at any depth.
     let wild = analyze_and_lower_diags(&format!(
-        "{enums}fn main() -> Int {{ let v = Wrap(On)\n  match v {{ Wrap(_) => 1 }} }}"
+        "{enums}fn main() -> Int {{ var v = Wrap(On)\n  match v {{ Wrap(_) => 1 }} }}"
     ));
     assert!(wild.is_empty(), "`Wrap(_)` is all of Wrapped: {wild:?}");
 
     // …and so does a binding, which is the same constructor set by a different
     // pattern form.
     let bound = analyze_and_lower_diags(&format!(
-        "{enums}fn main() -> Int {{ let v = Wrap(On)\n  match v {{ Wrap(f) => 1 }} }}"
+        "{enums}fn main() -> Int {{ var v = Wrap(On)\n  match v {{ Wrap(f) => 1 }} }}"
     ));
     assert!(bound.is_empty(), "`Wrap(f)` is all of Wrapped: {bound:?}");
 
     // Two levels down, to show the recursion is not one special case.
     let deep = "enum Flag { On, Off }\nenum Inner { In(Flag) }\nenum Outer { Out(Inner) }\n";
     let nested = analyze_and_lower_diags(&format!(
-        "{deep}fn main() -> Int {{ let v = Out(In(On))\n  match v {{ Out(In(On)) => 1 }} }}"
+        "{deep}fn main() -> Int {{ var v = Out(In(On))\n  match v {{ Out(In(On)) => 1 }} }}"
     ));
     assert!(
         nested.iter().any(|d| d.code().number() == 120),
@@ -4588,7 +4633,7 @@ fn an_arm_is_unreachable_exactly_when_it_adds_no_coverage() {
     // A repeated constructor: the old scan saw no catch-all and said nothing.
     assert_eq!(
         y121(
-            "enum E { A, B }\nfn main() -> Int { let v = A\n  match v { A => 1, A => 2, B => 3 } }"
+            "enum E { A, B }\nfn main() -> Int { var v = A\n  match v { A => 1, A => 2, B => 3 } }"
         ),
         1,
         "the second `A` is dead, and only it"
@@ -4596,7 +4641,7 @@ fn an_arm_is_unreachable_exactly_when_it_adds_no_coverage() {
 
     // The case the old scan *did* catch still works.
     assert_eq!(
-        y121("enum E { A, B }\nfn main() -> Int { let v = A\n  match v { _ => 1, A => 2 } }"),
+        y121("enum E { A, B }\nfn main() -> Int { var v = A\n  match v { _ => 1, A => 2 } }"),
         1,
         "an arm after a catch-all"
     );
@@ -4606,7 +4651,7 @@ fn an_arm_is_unreachable_exactly_when_it_adds_no_coverage() {
     assert_eq!(
         y121(
             "enum Flag { On, Off }\nenum Wrapped { Wrap(Flag) }\n\
-             fn main() -> Int { let v = Wrap(On)\n  match v { Wrap(_) => 1, Wrap(On) => 2 } }"
+             fn main() -> Int { var v = Wrap(On)\n  match v { Wrap(_) => 1, Wrap(On) => 2 } }"
         ),
         1,
         "`Wrap(On)` is inside `Wrap(_)`"
@@ -4617,7 +4662,7 @@ fn an_arm_is_unreachable_exactly_when_it_adds_no_coverage() {
     assert_eq!(
         y121(
             "enum Flag { On, Off }\nenum Wrapped { Wrap(Flag) }\n\
-             fn main() -> Int { let v = Wrap(On)\n  match v { Wrap(On) => 1, Wrap(Off) => 2 } }"
+             fn main() -> Int { var v = Wrap(On)\n  match v { Wrap(On) => 1, Wrap(Off) => 2 } }"
         ),
         0,
         "two distinct payload constructors are two live arms"
@@ -4639,7 +4684,7 @@ fn an_arm_is_unreachable_exactly_when_it_adds_no_coverage() {
 fn a_missing_case_is_named_by_the_value_that_is_missing() {
     let diags = analyze_and_lower_diags(
         "enum Flag { On, Off }\nenum Wrapped { Wrap(Flag) }\n\
-         fn main() -> Int { let v = Wrap(On)\n  match v { Wrap(On) => 1 } }",
+         fn main() -> Int { var v = Wrap(On)\n  match v { Wrap(On) => 1 } }",
     );
     let y120 = diags
         .iter()
@@ -4673,7 +4718,7 @@ fn a_missing_case_is_named_by_the_value_that_is_missing() {
 fn a_bare_constructor_name_is_that_constructor_at_any_payload() {
     for arm in ["Some", "Some(_)", "Some(n)"] {
         let src = format!(
-            "fn main() -> Int {{ let o = Some(1)\n  match o {{ {arm} => 1, None => 0 }} }}"
+            "fn main() -> Int {{ var o = Some(1)\n  match o {{ {arm} => 1, None => 0 }} }}"
         );
         assert!(
             is_clean_with_lower(&src),
@@ -4682,7 +4727,7 @@ fn a_bare_constructor_name_is_that_constructor_at_any_payload() {
     }
     // …and without the `None` arm none of them is.
     for arm in ["Some", "Some(_)", "Some(n)"] {
-        let src = format!("fn main() -> Int {{ let o = Some(1)\n  match o {{ {arm} => 1 }} }}");
+        let src = format!("fn main() -> Int {{ var o = Some(1)\n  match o {{ {arm} => 1 }} }}");
         let diags = analyze_and_lower_diags(&src);
         assert!(
             diags.iter().any(|d| d.code().number() == 120),
@@ -4701,7 +4746,7 @@ fn a_mutable_collection_is_not_a_key() {
     // Every mutable collection, in a `Map` key position.
     for ctor in ["Vec", "Set", "Deque", "MinHeap", "MaxHeap"] {
         let src = format!(
-            "fn main() -> Unit {{\n  let key = {ctor}()\n  key.push(1)\n  let m = Map()\n  m.insert(key, 1)\n}}"
+            "fn main() -> Unit {{\n  var key = {ctor}()\n  key.push(1)\n  var m = Map()\n  m.insert(key, 1)\n}}"
         );
         assert!(
             has_type_error(&src),
@@ -4710,10 +4755,10 @@ fn a_mutable_collection_is_not_a_key() {
     }
     // A `Set` element is a key too, and so is a `Counter`'s.
     assert!(has_type_error(
-        "fn main() -> Unit {\n  let key = Vec()\n  key.push(1)\n  let s = Set()\n  s.insert(key)\n}"
+        "fn main() -> Unit {\n  var key = Vec()\n  key.push(1)\n  var s = Set()\n  s.insert(key)\n}"
     ));
     assert!(has_type_error(
-        "fn main() -> Unit {\n  let key = Vec()\n  key.push(1)\n  let c = Counter()\n  c.inc(key)\n}"
+        "fn main() -> Unit {\n  var key = Vec()\n  key.push(1)\n  var c = Counter()\n  c.inc(key)\n}"
     ));
 }
 
@@ -4723,22 +4768,22 @@ fn a_mutable_collection_is_not_a_key() {
 #[test]
 fn an_immutable_value_is_still_a_key() {
     assert!(!has_type_error(
-        "fn main() -> Unit { let m = Map(); m.insert(1, 2) }"
+        "fn main() -> Unit { var m = Map(); m.insert(1, 2) }"
     ));
     assert!(!has_type_error(
-        "fn main() -> Unit { let m = Map(); m.insert(\"k\", 2) }"
+        "fn main() -> Unit { var m = Map(); m.insert(\"k\", 2) }"
     ));
     // A tuple of scalars — the shape every grid-position map uses.
     assert!(!has_type_error(
-        "fn main() -> Unit { let m = Map(); m.insert((1, 2), 3) }"
+        "fn main() -> Unit { var m = Map(); m.insert((1, 2), 3) }"
     ));
     // An enum, including the prelude's Option.
     assert!(!has_type_error(
-        "enum Dir { N, S }\nfn main() -> Unit { let s = Set(); s.insert(N) }"
+        "enum Dir { N, S }\nfn main() -> Unit { var s = Set(); s.insert(N) }"
     ));
     // A tuple with a mutable component is not, though: one is enough.
     assert!(has_type_error(
-        "fn main() -> Unit {\n  let v = Vec()\n  v.push(1)\n  let m = Map()\n  m.insert((1, v), 3)\n}"
+        "fn main() -> Unit {\n  var v = Vec()\n  v.push(1)\n  var m = Map()\n  m.insert((1, v), 3)\n}"
     ));
 }
 
@@ -4748,17 +4793,17 @@ fn an_immutable_value_is_still_a_key() {
 #[test]
 fn a_heap_element_must_be_orderable() {
     assert!(has_type_error(
-        "fn id(x: Int) -> Int { x }\nfn main() -> Unit { let h = MinHeap(); h.push(id) }"
+        "fn id(x: Int) -> Int { x }\nfn main() -> Unit { var h = MinHeap(); h.push(id) }"
     ));
     assert!(has_type_error(
-        "fn main() -> Unit { let h = MaxHeap(); h.push((1, 2)) }"
+        "fn main() -> Unit { var h = MaxHeap(); h.push((1, 2)) }"
     ));
     // Int and Text both have a runtime `compare`, so both are legal elements.
     assert!(!has_type_error(
-        "fn main() -> Unit { let h = MinHeap(); h.push(1) }"
+        "fn main() -> Unit { var h = MinHeap(); h.push(1) }"
     ));
     assert!(!has_type_error(
-        "fn main() -> Unit { let h = MinHeap(); h.push(\"a\") }"
+        "fn main() -> Unit { var h = MinHeap(); h.push(\"a\") }"
     ));
 }
 
@@ -4772,9 +4817,9 @@ fn a_heap_element_must_be_orderable() {
 /// stage's own exit test still covers separately.
 #[test]
 fn a_key_requirement_reaches_through_a_generic_function() {
-    let src = "fn store(k) -> Unit { let m = Map(); m.insert(k, 1) }\n\
+    let src = "fn store(k) -> Unit { var m = Map(); m.insert(k, 1) }\n\
                fn main() -> Unit {\n\
-                 let key = Vec()\n\
+                 var key = Vec()\n\
                  key.push(1)\n\
                  store(key)\n\
                }";
@@ -4783,7 +4828,7 @@ fn a_key_requirement_reaches_through_a_generic_function() {
         "the constraint must travel with `store`'s scheme to its call site"
     );
     // …and the same function is fine at a key type that is one.
-    let ok = "fn store(k) -> Unit { let m = Map(); m.insert(k, 1) }\n\
+    let ok = "fn store(k) -> Unit { var m = Map(); m.insert(k, 1) }\n\
               fn main() -> Unit { store(\"key\") }";
     assert!(!has_type_error(ok));
 }
@@ -4810,7 +4855,7 @@ fn parse_is_syntax_and_its_text_argument_is_the_one_checked() {
     assert_eq!(diags[0].code().to_string(), "Y001");
     // A `Text`-typed expression, not only a literal, is accepted.
     assert!(is_clean_with_lower(
-        "fn main() -> Int {\n  let s = \"12\"\n  parse(s, int)\n}"
+        "fn main() -> Int {\n  var s = \"12\"\n  parse(s, int)\n}"
     ));
 }
 
@@ -4925,7 +4970,7 @@ fn an_out_of_range_int_literal_is_reported_rather_than_saturated() {
 ///
 /// It used to lower to `TypedExpr::Path`, whose symbol has no local slot, so MIR
 /// answered `Unit` and `Inst::CallIndirect` read that Unit's payload as a
-/// function pointer. The distinction is the symbol's **kind**: a `let` holding a
+/// function pointer. The distinction is the symbol's **kind**: a `var` holding a
 /// closure is a `Path` and has a `Func` type too, so the scheme cannot tell them
 /// apart — the same reason `SymbolKind::EnumVariant` exists (HIR-03).
 #[test]
@@ -4933,7 +4978,7 @@ fn a_fn_name_in_value_position_is_a_function_value() {
     use praxis_ast::AstNode;
 
     let src = "fn double(n: Int) -> Int { n * 2 }\n\
-               fn main() -> Int {\n  let f = double\n  let g = |n| n * 3\n  f(1) + g(1)\n}\n";
+               fn main() -> Int {\n  var f = double\n  var g = |n| n * 3\n  f(1) + g(1)\n}\n";
     let map = SourceMap::new();
     let id = map.intern("fn_value.px", src);
     let parsed = parse(id, src);
@@ -4949,10 +4994,10 @@ fn a_fn_name_in_value_position_is_a_function_value() {
         })
         .expect("main function");
 
-    // `let f = double` — a function value naming `double`, typed as `double`'s
+    // `var f = double` — a function value naming `double`, typed as `double`'s
     // own signature.
-    let crate::TypedStmt::Let { init, .. } = &main.body.stmts[0] else {
-        panic!("expected `let f = double`, got {:?}", main.body.stmts[0]);
+    let crate::TypedStmt::Var { init, .. } = &main.body.stmts[0] else {
+        panic!("expected `var f = double`, got {:?}", main.body.stmts[0]);
     };
     let crate::TypedExpr::FnValue {
         callee_name, ty, ..
@@ -4963,10 +5008,10 @@ fn a_fn_name_in_value_position_is_a_function_value() {
     assert_eq!(callee_name, "double");
     assert_eq!(analysis.db.render(*ty), "(Int) -> Int");
 
-    // …and a `let` holding a *closure* is still a closure literal, so the new
+    // …and a `var` holding a *closure* is still a closure literal, so the new
     // arm did not swallow the case it sits next to.
-    let crate::TypedStmt::Let { init, .. } = &main.body.stmts[1] else {
-        panic!("expected `let g = |n| n * 3`");
+    let crate::TypedStmt::Var { init, .. } = &main.body.stmts[1] else {
+        panic!("expected `var g = |n| n * 3`");
     };
     assert!(
         matches!(init, crate::TypedExpr::Closure { .. }),
@@ -4985,7 +5030,7 @@ fn a_fn_name_in_value_position_is_a_function_value() {
 #[test]
 fn a_generic_fn_used_as_a_value_is_reported_rather_than_run() {
     let diags =
-        analyze_and_lower_diags("fn id(x) { x }\nfn main() -> Int {\n  let f = id\n  f(3)\n}\n");
+        analyze_and_lower_diags("fn id(x) { x }\nfn main() -> Int {\n  var f = id\n  f(3)\n}\n");
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y018"),
         "expected Y018, got {diags:?}"
@@ -4993,15 +5038,15 @@ fn a_generic_fn_used_as_a_value_is_reported_rather_than_run() {
     // It is reported at *analysis*, so `praxis check` sees it — the asymmetry
     // REP-12 was about.
     assert!(has_type_error(
-        "fn id(x) { x }\nfn main() -> Int {\n  let f = id\n  f(3)\n}\n"
+        "fn id(x) { x }\nfn main() -> Int {\n  var f = id\n  f(3)\n}\n"
     ));
 
     // The remedy compiles, and so does a monomorphic function used as a value.
     assert!(is_clean_with_lower(
-        "fn id(x) { x }\nfn main() -> Int {\n  let f = |n| id(n)\n  f(3)\n}\n"
+        "fn id(x) { x }\nfn main() -> Int {\n  var f = |n| id(n)\n  f(3)\n}\n"
     ));
     assert!(is_clean_with_lower(
-        "fn double(n: Int) -> Int { n * 2 }\nfn main() -> Int {\n  let f = double\n  f(3)\n}\n"
+        "fn double(n: Int) -> Int { n * 2 }\nfn main() -> Int {\n  var f = double\n  f(3)\n}\n"
     ));
     // And *calling* the generic function directly is untouched — the report is
     // about value position only.
@@ -5046,13 +5091,13 @@ fn a_nested_type_declaration_is_reported_at_the_declaration() {
          fn get(p: Point) -> Int { p.x }\n\
          fn main() -> Int { get(Point { x: 1, y: 2 }) }\n"
     ));
-    // A top-level `let`/`var` beside them, so "top level" is the file and not
-    // "the first statement". The `let` is read by a *top-level* statement here:
+    // A top-level `var` beside them, so "top level" is the file and not
+    // "the first statement". The `var` is read by a *top-level* statement here:
     // it used to be read by `main`, which is `N007` now that a `fn` reading a
     // binding around it is reported (REP-22) — a different check, and one this
     // test is not about.
     assert!(is_clean_with_lower(
-        "let base = 1\nstruct Point { x: Int }\nvar total = base\nfn main() -> Int { 0 }\n"
+        "var base = 1\nstruct Point { x: Int }\nvar total = base\nfn main() -> Int { 0 }\n"
     ));
 }
 
@@ -5069,7 +5114,7 @@ fn a_nested_type_declaration_is_reported_at_the_declaration() {
 fn a_pattern_naming_more_values_than_the_variant_holds_is_reported() {
     let diags = analyze_and_lower_diags(
         "enum W { Wrap(Int) }\n\
-         fn main() -> Int {\n  let w = Wrap(7)\n  match w { Wrap(a, b) => a }\n}",
+         fn main() -> Int {\n  var w = Wrap(7)\n  match w { Wrap(a, b) => a }\n}",
     );
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y124"),
@@ -5079,7 +5124,7 @@ fn a_pattern_naming_more_values_than_the_variant_holds_is_reported() {
     // A payload-less variant holds nothing, so *any* sub-pattern is too many.
     let diags = analyze_and_lower_diags(
         "enum W { Empty, Wrap(Int) }\n\
-         fn main() -> Int {\n  let w = Empty\n  match w { Empty(a) => 1, Wrap(n) => n }\n}",
+         fn main() -> Int {\n  var w = Empty\n  match w { Empty(a) => 1, Wrap(n) => n }\n}",
     );
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y124"),
@@ -5089,11 +5134,11 @@ fn a_pattern_naming_more_values_than_the_variant_holds_is_reported() {
     // …and naming *fewer* is legal at every count — HIR-06's padding rule, which
     // is why the check is one-sided.
     for src in [
-        "enum W { Wrap(Int) }\nfn main() -> Int { let w = Wrap(7)\n match w { Wrap => 1 } }",
-        "enum W { Wrap(Int) }\nfn main() -> Int { let w = Wrap(7)\n match w { Wrap(_) => 1 } }",
-        "enum W { Wrap(Int) }\nfn main() -> Int { let w = Wrap(7)\n match w { Wrap(n) => n } }",
-        "enum P { Pair(Int, Int) }\nfn main() -> Int { let p = Pair(1, 2)\n match p { Pair(a) => a } }",
-        "enum P { Pair(Int, Int) }\nfn main() -> Int { let p = Pair(1, 2)\n match p { Pair(a, b) => a + b } }",
+        "enum W { Wrap(Int) }\nfn main() -> Int { var w = Wrap(7)\n match w { Wrap => 1 } }",
+        "enum W { Wrap(Int) }\nfn main() -> Int { var w = Wrap(7)\n match w { Wrap(_) => 1 } }",
+        "enum W { Wrap(Int) }\nfn main() -> Int { var w = Wrap(7)\n match w { Wrap(n) => n } }",
+        "enum P { Pair(Int, Int) }\nfn main() -> Int { var p = Pair(1, 2)\n match p { Pair(a) => a } }",
+        "enum P { Pair(Int, Int) }\nfn main() -> Int { var p = Pair(1, 2)\n match p { Pair(a, b) => a + b } }",
     ] {
         assert!(is_clean_with_lower(src), "{src} must still be accepted");
     }
@@ -5156,10 +5201,10 @@ fn an_unannotated_iterated_parameter_is_generic_in_the_iterable_not_its_element(
     // not.
     const COPY: &str = "fn copy(vs) { var o = Vec()\n for v in vs { o.push(v) }\n o }\n";
     assert!(!has_type_error(&format!(
-        "{COPY}fn main() -> Int {{ var s = Vec()\n s.push(1)\n let d: Vec[Int] = copy(s)\n d.len() }}"
+        "{COPY}fn main() -> Int {{ var s = Vec()\n s.push(1)\n var d: Vec[Int] = copy(s)\n d.len() }}"
     )));
     assert!(has_type_error(&format!(
-        "{COPY}fn main() -> Int {{ var s = Vec()\n s.push(1)\n let d: Vec[Vec[Int]] = copy(s)\n d.len() }}"
+        "{COPY}fn main() -> Int {{ var s = Vec()\n s.push(1)\n var d: Vec[Vec[Int]] = copy(s)\n d.len() }}"
     )));
 
     // An annotated parameter is untouched — the shape every existing gate uses.
@@ -5300,7 +5345,7 @@ fn a_self_referring_type_declaration_is_reported_rather_than_registered_as_a_var
     let src = "struct C { a: A }\n\
                struct A { b: B }\n\
                struct B { a: A }\n\
-               fn main() -> Unit { let c = C { a: \"not an A\" }\n out(c.a) }";
+               fn main() -> Unit { var c = C { a: \"not an A\" }\n out(c.a) }";
     assert_eq!(n006(src), 2, "only A and B are recursive");
     let diags = analyze(src);
     assert!(
@@ -5337,7 +5382,7 @@ fn a_self_referring_type_declaration_is_reported_rather_than_registered_as_a_var
     // been reported and a second report per use would say the same thing again.
     let diags = analyze(
         "struct Node { next: Node, value: Int }\n\
-         fn main() -> Int { let n = Node { next: 7, value: 1 }\n n.value }",
+         fn main() -> Int { var n = Node { next: 7, value: 1 }\n n.value }",
     )
     .diagnostics;
     assert_eq!(
@@ -5431,10 +5476,10 @@ fn a_tuple_element_is_read_by_position_and_a_bad_index_is_reported() {
     // Through a binding, a parameter and a closure body.
     assert!(!has_type_error(
         "fn fst(p: (Int, Text)) -> Int { p.0 }\n\
-         fn main() -> Int { let q = (1, \"a\")\n fst(q) }"
+         fn main() -> Int { var q = (1, \"a\")\n fst(q) }"
     ));
     assert!(!has_type_error(
-        "fn main() -> Int { let f = |p: (Int, Int)| p.0 + p.1\n f((1, 2)) }"
+        "fn main() -> Int { var f = |p: (Int, Int)| p.0 + p.1\n f((1, 2)) }"
     ));
     // The element type is enforced, not invented.
     assert!(has_type_error("fn f() -> Text { (1, 2).0 }"));
@@ -5446,8 +5491,8 @@ fn a_tuple_element_is_read_by_position_and_a_bad_index_is_reported() {
     assert!(y019("fn f() -> Int { (1, 2).99999999999999999999 }"));
     // …and off something that is not a tuple at all: a scalar, a collection, a
     // record — each of which has its own way of not having elements.
-    assert!(y019("fn f() -> Int { let n = 1\n n.0 }"));
-    assert!(y019("fn f() -> Int { let t = \"ab\"\n t.0 }"));
+    assert!(y019("fn f() -> Int { var n = 1\n n.0 }"));
+    assert!(y019("fn f() -> Int { var t = \"ab\"\n t.0 }"));
     assert!(y019("fn f(v: Vec[Int]) -> Int { v.0 }"));
     assert!(y019("struct P { x: Int }\nfn f(p: P) -> Int { p.0 }"));
 
@@ -5483,21 +5528,21 @@ fn a_subscript_reads_the_type_the_receiver_holds_at_that_key() {
     // Each of the six, at a result type that is not the receiver's own.
     assert_eq!(
         scheme_of(
-            "fn f(v: Vec[Text]) -> Text { v[0] }\nlet _p = f(Vec())",
+            "fn f(v: Vec[Text]) -> Text { v[0] }\nvar _p = f(Vec())",
             "_p"
         ),
         Some("Text".to_string())
     );
     assert_eq!(
         scheme_of(
-            "fn f(d: Deque[Text]) -> Text { d[0] }\nlet _p = f(Deque())",
+            "fn f(d: Deque[Text]) -> Text { d[0] }\nvar _p = f(Deque())",
             "_p"
         ),
         Some("Text".to_string())
     );
     assert_eq!(
         scheme_of(
-            "fn f(m: Map[Text, Float]) -> Float { m[\"a\"] }\nlet _p = f(Map())",
+            "fn f(m: Map[Text, Float]) -> Float { m[\"a\"] }\nvar _p = f(Map())",
             "_p"
         ),
         Some("Float".to_string())
@@ -5505,21 +5550,21 @@ fn a_subscript_reads_the_type_the_receiver_holds_at_that_key() {
     // A `Counter`'s value is its count, whatever its key type is (§6.2).
     assert_eq!(
         scheme_of(
-            "fn f(c: Counter[Text]) -> Int { c[\"a\"] }\nlet _p = f(Counter())",
+            "fn f(c: Counter[Text]) -> Int { c[\"a\"] }\nvar _p = f(Counter())",
             "_p"
         ),
         Some("Int".to_string())
     );
     assert_eq!(
         scheme_of(
-            "fn f(g: Grid[Text]) -> Text { g[0, 0] }\nlet _p = f(Grid())",
+            "fn f(g: Grid[Text]) -> Text { g[0, 0] }\nvar _p = f(Grid())",
             "_p"
         ),
         Some("Text".to_string())
     );
     // `Text` indexes to a char's scalar value, which is what `.get` answers too.
     assert_eq!(
-        scheme_of("fn f(t: Text) -> Int { t[0] }\nlet _p = f(\"ab\")", "_p"),
+        scheme_of("fn f(t: Text) -> Int { t[0] }\nvar _p = f(\"ab\")", "_p"),
         Some("Int".to_string())
     );
 
@@ -5562,17 +5607,17 @@ fn a_subscript_reads_the_type_the_receiver_holds_at_that_key() {
 fn a_subscript_on_an_unannotated_parameter_is_answered_by_the_call_site() {
     // The requirement rides on the scheme: `first` is generic in its receiver.
     assert!(!has_type_error(
-        "fn first(m, k) { m[k] }\nfn main() -> Int { let m = Map()\n m.insert(\"a\", 1)\n first(m, \"a\") }"
+        "fn first(m, k) { m[k] }\nfn main() -> Int { var m = Map()\n m.insert(\"a\", 1)\n first(m, \"a\") }"
     ));
     // …and the *element* type is the answer, not a fresh variable: a `Text` result
     // used as an `Int` is a mismatch.
     assert!(has_type_error(
-        "fn first(m, k) { m[k] }\nfn main() -> Int { let m = Map()\n m.insert(\"a\", \"x\")\n first(m, \"a\") }"
+        "fn first(m, k) { m[k] }\nfn main() -> Int { var m = Map()\n m.insert(\"a\", \"x\")\n first(m, \"a\") }"
     ));
     // A call site whose receiver does not index at all is reported when the
     // requirement is discharged rather than accepted in silence.
     assert!(has_type_error(
-        "fn first(m, k) { m[k] }\nfn main() -> Int { let s = Set()\n s.insert(1)\n first(s, 1) }"
+        "fn first(m, k) { m[k] }\nfn main() -> Int { var s = Set()\n s.insert(1)\n first(s, 1) }"
     ));
     // A subscript is exactly as generic as a method call and no more: the
     // requirement **pins** its receiver (`pin_to_level`, TY-30/ADR-057), so one
@@ -5582,20 +5627,20 @@ fn a_subscript_on_an_unannotated_parameter_is_answered_by_the_call_site() {
     // subscripts.
     assert!(has_type_error(
         "fn first(c, k) { c[k] }\n\
-         fn main() -> Int { let m = Map()\n m.insert(\"a\", 1)\n \
-         let v = Vec()\n v.push(2)\n first(m, \"a\") + first(v, 0) }"
+         fn main() -> Int { var m = Map()\n m.insert(\"a\", 1)\n \
+         var v = Vec()\n v.push(2)\n first(m, \"a\") + first(v, 0) }"
     ));
     assert!(has_type_error(
         "fn size(c) { c.len() }\n\
-         fn main() -> Int { let m = Map()\n m.insert(\"a\", 1)\n \
-         let v = Vec()\n v.push(2)\n size(m) + size(v) }"
+         fn main() -> Int { var m = Map()\n m.insert(\"a\", 1)\n \
+         var v = Vec()\n v.push(2)\n size(m) + size(v) }"
     ));
     // One kind at two call sites is fine, which is the half that has to keep
     // working.
     assert!(!has_type_error(
         "fn first(c, k) { c[k] }\n\
-         fn main() -> Int { let a = Vec()\n a.push(1)\n \
-         let b = Vec()\n b.push(2)\n first(a, 0) + first(b, 0) }"
+         fn main() -> Int { var a = Vec()\n a.push(1)\n \
+         var b = Vec()\n b.push(2)\n first(a, 0) + first(b, 0) }"
     ));
 }
 
@@ -5744,11 +5789,11 @@ fn a_store_through_a_field_writes_the_slot_the_read_would_have_read() {
          fn bump(q) { q.x += 1 }\nfn f(q: Q) { bump(q) }"
     ));
 
-    // A `let` binding may point at a mutable object (§4.2), so the store is
-    // legal through one — the same standing `let v = Vec[Int]()` / `v.push(1)`
+    // A `var` binding may point at a mutable object (§4.2), so the store is
+    // legal through one — the same standing `var v = Vec[Int]()` / `v.push(1)`
     // has. `Y009` is about rebinding the *name*, which this is not.
     assert!(!has_type_error(&format!(
-        "{struct_p}fn f() {{ let p = P {{ x: 1, y: \"a\" }}\n p.x = 2 }}"
+        "{struct_p}fn f() {{ var p = P {{ x: 1, y: \"a\" }}\n p.x = 2 }}"
     )));
 
     // `min=`/`max=` are §6.2's map updates, and their semantics is about an entry
@@ -5778,41 +5823,41 @@ fn a_store_through_a_field_writes_the_slot_the_read_would_have_read() {
 fn a_constructors_written_type_arguments_say_what_it_constructs() {
     // The written argument is the element type, at each arity the ctors have.
     assert_eq!(
-        scheme_of("let c = Counter[(Int, Int)]()", "c"),
+        scheme_of("var c = Counter[(Int, Int)]()", "c"),
         Some("Counter[(Int, Int)]".to_string())
     );
     assert_eq!(
-        scheme_of("let v = Vec[Text]()", "v"),
+        scheme_of("var v = Vec[Text]()", "v"),
         Some("Vec[Text]".to_string())
     );
     assert_eq!(
-        scheme_of("let m = Map[Text, Vec[Int]]()", "m"),
+        scheme_of("var m = Map[Text, Vec[Int]]()", "m"),
         Some("Map[Text, Vec[Int]]".to_string())
     );
     // Without the annotation the element stays quantified, which is the
     // difference the form exists to make.
     assert_eq!(
-        scheme_of("let v = Vec[Int]()", "v"),
+        scheme_of("var v = Vec[Int]()", "v"),
         Some("Vec[Int]".to_string())
     );
 
     // A use that agrees is clean; a use that disagrees is a `Y001`. This is the
     // pair that says the annotation *constrains* rather than decorates.
     assert!(!has_type_error(
-        "fn main() -> Int { let c = Counter[Text]()\n c.inc(\"a\")\n c.len() }"
+        "fn main() -> Int { var c = Counter[Text]()\n c.inc(\"a\")\n c.len() }"
     ));
     assert!(has_type_error(
-        "fn main() -> Int { let c = Counter[Text]()\n c.inc(1)\n c.len() }"
+        "fn main() -> Int { var c = Counter[Text]()\n c.inc(1)\n c.len() }"
     ));
     assert!(has_type_error(
-        "fn main() -> Int { let m = Map[Text, Int]()\n m.insert(\"a\", \"b\")\n m.len() }"
+        "fn main() -> Int { var m = Map[Text, Int]()\n m.insert(\"a\", \"b\")\n m.len() }"
     ));
     // …and through the subscript the same annotation now enables (REP-16).
     assert!(!has_type_error(
-        "fn main() -> Int { let c = Counter[(Int, Int)]()\n c[(1, 2)] += 1\n c[(1, 2)] }"
+        "fn main() -> Int { var c = Counter[(Int, Int)]()\n c[(1, 2)] += 1\n c[(1, 2)] }"
     ));
     assert!(has_type_error(
-        "fn main() -> Int { let c = Counter[(Int, Int)]()\n c[\"a\"] += 1\n c.len() }"
+        "fn main() -> Int { var c = Counter[(Int, Int)]()\n c[\"a\"] += 1\n c.len() }"
     ));
 
     // The wrong *number* of arguments is `Y007` — the code a written
@@ -5824,21 +5869,21 @@ fn a_constructors_written_type_arguments_say_what_it_constructs() {
             .iter()
             .any(|d| d.kind() == praxis_source::DiagCode::WrongTypeArgumentCount)
     };
-    assert!(y007("let v = Vec[Int, Text]()"));
-    assert!(y007("let m = Map[Text]()"));
-    assert!(!y007("let m = Map[Text, Int]()"));
+    assert!(y007("var v = Vec[Int, Text]()"));
+    assert!(y007("var m = Map[Text]()"));
+    assert!(!y007("var m = Map[Text, Int]()"));
 
     // A type argument is an annotation, so its own mistakes are annotation
     // mistakes: an unknown name is `N002` and a *value* in type position `N003`.
-    assert!(has_name_error("let v = Vec[Nope]()"));
+    assert!(has_name_error("var v = Vec[Nope]()"));
     assert!(has_name_error(
-        "fn f() -> Int { let n = 1\n let v = Vec[n]()\n 0 }"
+        "fn f() -> Int { var n = 1\n var v = Vec[n]()\n 0 }"
     ));
 
     // An annotated binding and an annotated constructor agree, which is the
     // property that says the two spellings are one type language.
-    assert!(!has_type_error("let c: Counter[Text] = Counter[Text]()"));
-    assert!(has_type_error("let c: Counter[Int] = Counter[Text]()"));
+    assert!(!has_type_error("var c: Counter[Text] = Counter[Text]()"));
+    assert!(has_type_error("var c: Counter[Int] = Counter[Text]()"));
 }
 
 /// The parser's closed list of type-constructor names and the compiler's are the
@@ -5900,7 +5945,7 @@ fn a_files_top_level_statements_become_one_generated_item() {
     // Three statements, one item — and the declarations between them stay their
     // own items, because a `fn` inside a `fn` is `N005`: the entry point cannot
     // be a source transformation that wraps the file.
-    let module = lowered("out(1)\nfn f() -> Int { 2 }\nlet x = f()\nout(x)\n");
+    let module = lowered("out(1)\nfn f() -> Int { 2 }\nvar x = f()\nout(x)\n");
     assert_eq!(entry_of(&module), Some(3), "the three top-level statements");
     assert!(
         module
@@ -5963,7 +6008,7 @@ fn a_files_top_level_statements_become_one_generated_item() {
 /// (`N007`, ADR-068) rather than compiling and answering wrongly.
 ///
 /// ```praxis
-/// let x = 1
+/// var x = 1
 /// fn f() { x }
 /// out(f())          // Unit
 /// ```
@@ -5985,9 +6030,9 @@ fn a_fn_that_reads_a_binding_around_it_is_reported() {
     };
 
     // Both forms, and the closure one is the one that answered with garbage.
-    assert!(reports_n007("let x = 1\nfn f() -> Int { x }\nout(f())\n"));
+    assert!(reports_n007("var x = 1\nfn f() -> Int { x }\nout(f())\n"));
     assert!(reports_n007(
-        "let x = 5\nfn g() { |n| n + x }\nout(g()(1))\n"
+        "var x = 5\nfn g() { |n| n + x }\nout(g()(1))\n"
     ));
     // A `var` and a read through an assignment target, so it is the binding kind
     // that decides and not the expression position.
@@ -5996,19 +6041,19 @@ fn a_fn_that_reads_a_binding_around_it_is_reported() {
     // Nested one level deeper than the body itself: the boundary is the
     // function, not the block.
     assert!(reports_n007(
-        "let x = 1\nfn f() -> Int { if true { x } else { 0 } }\n"
+        "var x = 1\nfn f() -> Int { if true { x } else { 0 } }\n"
     ));
 
     // A closure at the **top level** captures, and must keep doing so: after
     // ADR-067 both it and the binding are inside the generated entry, so there
     // is no boundary between them. This is §4.10's own example.
     assert!(!reports_n007(
-        "let offset = 10\nlet v = Vec()\nv.push(1)\nout(v.map(|x| x + offset).sum())\n"
+        "var offset = 10\nvar v = Vec()\nv.push(1)\nout(v.map(|x| x + offset).sum())\n"
     ));
     // …and a closure inside a `fn` capturing that `fn`'s own locals is the same
     // rule from the other side.
     assert!(!reports_n007(
-        "fn f(v) { let k = 10\n v.map(|x| x + k).sum() }\n"
+        "fn f(v) { var k = 10\n v.map(|x| x + k).sum() }\n"
     ));
 
     // Everything that is *not* a binding stays reachable from anywhere — which
@@ -6026,12 +6071,12 @@ fn a_fn_that_reads_a_binding_around_it_is_reported() {
     assert!(!reports_n007("fn f(n: Int) -> Int { abs(n) }\n"));
     // A parameter and a local of the function itself, and recursion.
     assert!(!reports_n007(
-        "fn f(n: Int) -> Int { let m = n + 1\n if n < 1 { m } else { f(n - 1) } }\n"
+        "fn f(n: Int) -> Int { var m = n + 1\n if n < 1 { m } else { f(n - 1) } }\n"
     ));
 
     // One report per use site, and no cascade: the reference is still recorded,
     // so inference types the body as written and adds nothing.
-    let diags = analyze_and_lower_diags("let x = 1\nfn f() -> Int { x + x }\n");
+    let diags = analyze_and_lower_diags("var x = 1\nfn f() -> Int { x + x }\n");
     assert_eq!(
         diags
             .iter()
@@ -6046,7 +6091,7 @@ fn a_fn_that_reads_a_binding_around_it_is_reported() {
     // `struct` and `enum` are pre-registered for forward reference, so the name
     // is genuinely not in scope yet and there is no binding to have crossed a
     // boundary. Saying which code it is keeps the two from being confused later.
-    let forward = analyze_and_lower_diags("fn f() -> Int { x }\nlet x = 1\n");
+    let forward = analyze_and_lower_diags("fn f() -> Int { x }\nvar x = 1\n");
     assert!(forward
         .iter()
         .any(|d| d.kind() == praxis_source::DiagCode::UnknownName));
@@ -6069,15 +6114,15 @@ fn a_fn_that_reads_a_binding_around_it_is_reported() {
 /// would type `tag` as `Int` here.
 #[test]
 fn a_record_pattern_binds_a_field_at_the_fields_own_type() {
-    const DECL: &str = "struct P { x: Int, tag: Text }\nlet p = P { x: 1, tag: \"a\" }\n";
+    const DECL: &str = "struct P { x: Int, tag: Text }\nvar p = P { x: 1, tag: \"a\" }\n";
 
     // Punned: `P { x }` binds `x` to the field `x`.
-    let src = format!("{DECL}let r = match p {{ P {{ x, tag }} => x }}\n");
+    let src = format!("{DECL}var r = match p {{ P {{ x, tag }} => x }}\n");
     assert_eq!(scheme_of(&src, "x").as_deref(), Some("Int"));
     assert_eq!(scheme_of(&src, "tag").as_deref(), Some("Text"));
 
     // Explicit: `P { x: n }` binds `n` to the field `x`, whatever it is called.
-    let src = format!("{DECL}let r = match p {{ P {{ tag: s, x: n }} => n }}\n");
+    let src = format!("{DECL}var r = match p {{ P {{ tag: s, x: n }} => n }}\n");
     assert_eq!(scheme_of(&src, "n").as_deref(), Some("Int"));
     assert_eq!(
         scheme_of(&src, "s").as_deref(),
@@ -6088,19 +6133,19 @@ fn a_record_pattern_binds_a_field_at_the_fields_own_type() {
     // A field the pattern does not name is simply not bound; naming fewer is
     // legal, which is HIR-06's padding rule at a second kind of composite.
     assert!(is_clean_with_lower(&format!(
-        "{DECL}let r = match p {{ P {{ x }} => x }}\n"
+        "{DECL}var r = match p {{ P {{ x }} => x }}\n"
     )));
 
     // The mistakes, each at the code the *literal* form already spends: the
     // record does not have that field, or the pattern names one twice — where
     // the second sub-pattern would silently replace the first.
-    let diags = analyze_and_lower_diags(&format!("{DECL}let r = match p {{ P {{ z }} => 1 }}\n"));
+    let diags = analyze_and_lower_diags(&format!("{DECL}var r = match p {{ P {{ z }} => 1 }}\n"));
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y114"),
         "expected Y114, got {diags:?}"
     );
     let diags = analyze_and_lower_diags(&format!(
-        "{DECL}let r = match p {{ P {{ x, x: q }} => 1 }}\n"
+        "{DECL}var r = match p {{ P {{ x, x: q }} => 1 }}\n"
     ));
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y115"),
@@ -6111,18 +6156,18 @@ fn a_record_pattern_binds_a_field_at_the_fields_own_type() {
     // scrutinee, and against being a record at all.
     let diags = analyze_and_lower_diags(
         "struct P { x: Int }\nstruct Q { y: Int }\n\
-         let p = P { x: 1 }\nlet r = match p { Q { y } => y }\n",
+         var p = P { x: 1 }\nvar r = match p { Q { y } => y }\n",
     );
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y001"),
         "a pattern for another record is a mismatch: {diags:?}"
     );
-    let diags = analyze_and_lower_diags("let n = 1\nlet r = match n { Nope { y } => y }\n");
+    let diags = analyze_and_lower_diags("var n = 1\nvar r = match n { Nope { y } => y }\n");
     assert!(
         diags.iter().any(|d| d.code().to_string() == "N001"),
         "an undefined head is an undefined name: {diags:?}"
     );
-    let diags = analyze_and_lower_diags("let n = 1\nlet r = match n { Int { y } => y }\n");
+    let diags = analyze_and_lower_diags("var n = 1\nvar r = match n { Int { y } => y }\n");
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y123"),
         "a head that is not a record has no fields to match: {diags:?}"
@@ -6135,14 +6180,14 @@ fn a_record_pattern_binds_a_field_at_the_fields_own_type() {
 fn a_tuple_pattern_binds_by_position() {
     // Two differently-typed elements, so a pattern that bound both at one type
     // — or paired them the other way round — is a different answer.
-    let src = "let t = (1, \"a\")\nlet r = match t { (n, s) => n }\n";
+    let src = "var t = (1, \"a\")\nvar r = match t { (n, s) => n }\n";
     assert_eq!(scheme_of(src, "n").as_deref(), Some("Int"));
     assert_eq!(scheme_of(src, "s").as_deref(), Some("Text"));
 
     // Nested, and mixed with the other composite forms.
     let src = "struct P { x: Int, tag: Text }\n\
-               let t = (P { x: 1, tag: \"a\" }, 2)\n\
-               let r = match t { (P { x, tag }, k) => x + k }\n";
+               var t = (P { x: 1, tag: \"a\" }, 2)\n\
+               var r = match t { (P { x, tag }, k) => x + k }\n";
     assert_eq!(scheme_of(src, "x").as_deref(), Some("Int"));
     assert_eq!(scheme_of(src, "tag").as_deref(), Some("Text"));
     assert_eq!(scheme_of(src, "k").as_deref(), Some("Int"));
@@ -6156,8 +6201,8 @@ fn a_tuple_pattern_binds_by_position() {
     // The shapes that do not fit. A non-tuple and a wrong arity are both the
     // ordinary mismatch, reported where the pattern is written.
     for src in [
-        "let n = 1\nlet r = match n { (a, b) => a }\n",
-        "let t = (1, 2)\nlet r = match t { (a, b, c) => a }\n",
+        "var n = 1\nvar r = match n { (a, b) => a }\n",
+        "var t = (1, 2)\nvar r = match t { (a, b, c) => a }\n",
     ] {
         let diags = analyze_and_lower_diags(src);
         assert!(
@@ -6169,7 +6214,7 @@ fn a_tuple_pattern_binds_by_position() {
     // `(p)` is a one-element tuple pattern and there is no such type — the
     // parser has no grouping form for it to have meant, so it reports rather
     // than quietly matching whatever is inside.
-    let diags = analyze_and_lower_diags("let n = 1\nlet r = match n { (a) => a }\n");
+    let diags = analyze_and_lower_diags("var n = 1\nvar r = match n { (a) => a }\n");
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y123"),
         "expected Y123, got {diags:?}"
@@ -6184,7 +6229,7 @@ fn a_tuple_pattern_binds_by_position() {
 /// `exhaustive.rs` needed the two `Ctor` rows and nothing else.
 #[test]
 fn a_record_or_tuple_match_is_exhaustive_without_a_catch_all() {
-    const DECL: &str = "struct P { x: Int, y: Int }\nlet p = P { x: 1, y: 2 }\nlet t = (1, 2)\n";
+    const DECL: &str = "struct P { x: Int, y: Int }\nvar p = P { x: 1, y: 2 }\nvar t = (1, 2)\n";
 
     // One arm, no `_`, and it covers everything.
     for arm in [
@@ -6195,7 +6240,7 @@ fn a_record_or_tuple_match_is_exhaustive_without_a_catch_all() {
         "match t { (a, _) => a }",
     ] {
         assert!(
-            is_clean_with_lower(&format!("{DECL}let r = {arm}\n")),
+            is_clean_with_lower(&format!("{DECL}var r = {arm}\n")),
             "{arm} must be exhaustive on its own"
         );
     }
@@ -6203,7 +6248,7 @@ fn a_record_or_tuple_match_is_exhaustive_without_a_catch_all() {
     // …so a `_` after it is now *unreachable*, which is the other half of the
     // same fact and the regression a signature that stayed `Open` would hide.
     let diags = analyze_and_lower_diags(&format!(
-        "{DECL}let r = match p {{ P {{ x, y }} => x, _ => 0 }}\n"
+        "{DECL}var r = match p {{ P {{ x, y }} => x, _ => 0 }}\n"
     ));
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y121"),
@@ -6215,11 +6260,11 @@ fn a_record_or_tuple_match_is_exhaustive_without_a_catch_all() {
     // the recursion goes through the new constructors, it does not stop at them.
     for (src, missing) in [
         (
-            format!("{DECL}let r = match p {{ P {{ x: 1, y }} => y }}\n"),
+            format!("{DECL}var r = match p {{ P {{ x: 1, y }} => y }}\n"),
             "P { x: _, y: _ }",
         ),
         (
-            format!("{DECL}let r = match t {{ (1, b) => b }}\n"),
+            format!("{DECL}var r = match t {{ (1, b) => b }}\n"),
             "(_, _)",
         ),
     ] {
@@ -6240,8 +6285,8 @@ fn a_record_or_tuple_match_is_exhaustive_without_a_catch_all() {
     // like a variant's, which is the whole of HIR-06 at a second shape.
     assert!(is_clean_with_lower(
         "struct P { x: Int, y: Int }\n\
-         let o = Some(P { x: 1, y: 2 })\n\
-         let r = match o { Some(P { x, y }) => x, None => 0 }\n"
+         var o = Some(P { x: 1, y: 2 })\n\
+         var r = match o { Some(P { x, y }) => x, None => 0 }\n"
     ));
 }
 
@@ -6258,16 +6303,16 @@ fn an_updating_store_is_a_row_on_a_map_of_ints() {
     // and the bound **pins** it rather than merely permitting it: an
     // unannotated `Map()` becomes a `Map[?K, Int]` at the first `min=`.
     assert!(is_clean_with_lower(
-        "let d = Map()\nd[\"a\"] min= 5\nd[\"a\"] min= 3\nout(d[\"a\"])\n"
+        "var d = Map()\nd[\"a\"] min= 5\nd[\"a\"] min= 3\nout(d[\"a\"])\n"
     ));
     assert_eq!(
-        expr_type("{ let d = Map()\n d[\"a\"] min= 5\n d }"),
+        expr_type("{ var d = Map()\n d[\"a\"] min= 5\n d }"),
         "Map[Text, Int]",
         "the row's bound pins the value type"
     );
 
     // A value that is not an `Int` is the ordinary mismatch.
-    let diags = analyze_and_lower_diags("let d = Map()\nd[\"a\"] = \"v\"\nd[\"a\"] min= \"w\"\n");
+    let diags = analyze_and_lower_diags("var d = Map()\nd[\"a\"] = \"v\"\nd[\"a\"] min= \"w\"\n");
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y001"),
         "expected Y001, got {diags:?}"
@@ -6278,9 +6323,9 @@ fn an_updating_store_is_a_row_on_a_map_of_ints() {
     // assigned through 1 index" would be false about the very receiver this is
     // most likely to be written for.
     for (src, op) in [
-        ("let c = Counter()\nc[\"k\"] min= 1\n", "min="),
-        ("let g = Grid()\ng[0, 0] max= 1\n", "max="),
-        ("let v = Vec()\nv.push(1)\nv[0] min= 1\n", "min="),
+        ("var c = Counter()\nc[\"k\"] min= 1\n", "min="),
+        ("var g = Grid()\ng[0, 0] max= 1\n", "max="),
+        ("var v = Vec()\nv.push(1)\nv[0] min= 1\n", "min="),
     ] {
         let diags = analyze_and_lower_diags(src);
         let y020 = diags
@@ -6307,10 +6352,10 @@ fn an_updating_store_is_a_row_on_a_map_of_ints() {
     // answers it — in both directions.
     assert!(is_clean_with_lower(
         "fn relax(d, k, v) { d[k] min= v }\n\
-         let dist = Map()\ndist[\"a\"] = 10\nrelax(dist, \"a\", 4)\nout(dist[\"a\"])\n"
+         var dist = Map()\ndist[\"a\"] = 10\nrelax(dist, \"a\", 4)\nout(dist[\"a\"])\n"
     ));
     let diags = analyze_and_lower_diags(
-        "fn relax(d, k, v) { d[k] min= v }\nlet c = Counter()\nrelax(c, \"a\", 4)\n",
+        "fn relax(d, k, v) { d[k] min= v }\nvar c = Counter()\nrelax(c, \"a\", 4)\n",
     );
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y020"),
@@ -6332,24 +6377,24 @@ fn an_updating_store_is_a_row_on_a_map_of_ints() {
 fn a_for_binding_is_a_pattern_and_must_match_every_item() {
     // Each name binds at its own component's type, which a binding that named
     // the whole item could not do.
-    let src = "let m = Map()\nm[\"a\"] = 1\nfor (k, v) in m { out(k) out(v) }\n";
+    let src = "var m = Map()\nm[\"a\"] = 1\nfor (k, v) in m { out(k) out(v) }\n";
     assert_eq!(scheme_of(src, "k").as_deref(), Some("Text"));
     assert_eq!(scheme_of(src, "v").as_deref(), Some("Int"));
 
     // A record pattern in the header, at the fields' own types.
-    let src = "struct P { x: Int, tag: Text }\nlet ps = Vec()\nps.push(P { x: 1, tag: \"a\" })\n\
+    let src = "struct P { x: Int, tag: Text }\nvar ps = Vec()\nps.push(P { x: 1, tag: \"a\" })\n\
                for P { x, tag } in ps { out(x) out(tag) }\n";
     assert_eq!(scheme_of(src, "x").as_deref(), Some("Int"));
     assert_eq!(scheme_of(src, "tag").as_deref(), Some("Text"));
 
     // A bare name still binds the whole item — the overwhelmingly common shape,
     // and the one every existing program is written with.
-    let src = "let v = Vec()\nv.push((1, 2))\nfor kv in v { out(kv.0) }\n";
+    let src = "var v = Vec()\nv.push((1, 2))\nfor kv in v { out(kv.0) }\n";
     assert_eq!(scheme_of(src, "kv").as_deref(), Some("(Int, Int)"));
 
     // The pattern is checked against the element type like any other, so a shape
     // the item cannot have is the ordinary mismatch.
-    let diags = analyze_and_lower_diags("let v = Vec()\nv.push(1)\nfor (a, b) in v { out(a) }\n");
+    let diags = analyze_and_lower_diags("var v = Vec()\nv.push(1)\nfor (a, b) in v { out(a) }\n");
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y001"),
         "expected Y001, got {diags:?}"
@@ -6358,9 +6403,9 @@ fn a_for_binding_is_a_pattern_and_must_match_every_item() {
     // **A binding has no second arm**, so a pattern that can fail is `Y125` —
     // both spellings, and at any depth.
     for src in [
-        "let v = Vec()\nv.push(Some(1))\nfor Some(n) in v { out(n) }\n",
-        "let v = Vec()\nv.push((1, 2))\nfor (1, b) in v { out(b) }\n",
-        "let v = Vec()\nv.push((1, (2, 3)))\nfor (a, (2, c)) in v { out(c) }\n",
+        "var v = Vec()\nv.push(Some(1))\nfor Some(n) in v { out(n) }\n",
+        "var v = Vec()\nv.push((1, 2))\nfor (1, b) in v { out(b) }\n",
+        "var v = Vec()\nv.push((1, (2, 3)))\nfor (a, (2, c)) in v { out(c) }\n",
     ] {
         let diags = analyze_and_lower_diags(src);
         assert!(
@@ -6372,9 +6417,9 @@ fn a_for_binding_is_a_pattern_and_must_match_every_item() {
     // …and the irrefutable shapes are all still accepted, including the wildcard
     // and a partial record pattern.
     for src in [
-        "let v = Vec()\nv.push(1)\nfor _ in v { out(0) }\n",
-        "let v = Vec()\nv.push((1, 2))\nfor (a, _) in v { out(a) }\n",
-        "struct P { x: Int, y: Int }\nlet ps = Vec()\nps.push(P { x: 1, y: 2 })\n\
+        "var v = Vec()\nv.push(1)\nfor _ in v { out(0) }\n",
+        "var v = Vec()\nv.push((1, 2))\nfor (a, _) in v { out(a) }\n",
+        "struct P { x: Int, y: Int }\nvar ps = Vec()\nps.push(P { x: 1, y: 2 })\n\
          for P { x } in ps { out(x) }\n",
     ] {
         assert!(is_clean_with_lower(src), "{src} must be accepted");
@@ -6383,7 +6428,7 @@ fn a_for_binding_is_a_pattern_and_must_match_every_item() {
 
 /// **REP-26.** A record literal's head must name a `struct`.
 ///
-/// `let x = 1` / `let p = x { a: 1 }` passed `praxis check`, printed `Unit`, and
+/// `var x = 1` / `var p = x { a: 1 }` passed `praxis check`, printed `Unit`, and
 /// `p + 1` printed a raw pointer — REP-01's shape, a program the checker accepts
 /// whose value has no representation. `infer_record_lit` read the head symbol's
 /// type and never asked what the symbol *was*.
@@ -6391,7 +6436,7 @@ fn a_for_binding_is_a_pattern_and_must_match_every_item() {
 fn a_record_literals_head_must_name_a_struct() {
     // The reproduction, and it is `N008` in **inference** — so `praxis check`
     // sees it, which is the whole point (REP-12).
-    let analysis = analyze("let x = 1\nlet p = x { a: 1 }\nout(p)\n");
+    let analysis = analyze("var x = 1\nvar p = x { a: 1 }\nout(p)\n");
     assert!(
         analysis
             .diagnostics
@@ -6405,12 +6450,15 @@ fn a_record_literals_head_must_name_a_struct() {
     // the message names the kind — an `enum` is a perfectly good *type* and still
     // has no fields to initialize, so "not a type" would be a lie about it.
     for (src, kind) in [
-        ("let x = 1\nlet p = x { a: 1 }\n", "a `let` binding"),
-        ("var x = 1\nlet p = x { a: 1 }\n", "a `var` binding"),
-        ("fn f() { 1 }\nlet p = f { a: 1 }\n", "a function"),
-        ("enum E { A }\nlet p = E { a: 1 }\n", "an enum type"),
-        ("enum E { A }\nlet p = A { a: 1 }\n", "an enum variant"),
-        ("let p = out { a: 1 }\n", "a built-in name"),
+        ("var x = 1\nvar p = x { a: 1 }\n", "a binding"),
+        (
+            "fn g(v: Vec[Int]) { for x in v { x { a: 1 } } }\n",
+            "a binding",
+        ),
+        ("fn f() { 1 }\nvar p = f { a: 1 }\n", "a function"),
+        ("enum E { A }\nvar p = E { a: 1 }\n", "an enum type"),
+        ("enum E { A }\nvar p = A { a: 1 }\n", "an enum variant"),
+        ("var p = out { a: 1 }\n", "a built-in name"),
         ("fn g(q) { q { a: 1 } }\n", "a parameter"),
     ] {
         let diags = analyze(src).diagnostics;
@@ -6429,14 +6477,14 @@ fn a_record_literals_head_must_name_a_struct() {
     // the arithmetic that used to print a pointer no longer has an `Int` to
     // pretend to be.
     assert_ne!(
-        scheme_of("let x = 1\nlet p = x { a: 1 }\n", "p").as_deref(),
+        scheme_of("var x = 1\nvar p = x { a: 1 }\n", "p").as_deref(),
         Some("Int"),
         "the literal must not keep the head's type"
     );
 
     // The initializers are still inferred, so a mistake inside one is still
     // reported rather than swallowed with the literal.
-    let diags = analyze("let x = 1\nlet p = x { a: nope }\n").diagnostics;
+    let diags = analyze("var x = 1\nvar p = x { a: nope }\n").diagnostics;
     assert!(
         diags.iter().any(|d| d.code().to_string() == "N001"),
         "an initializer's own mistake survives: {diags:?}"
@@ -6445,15 +6493,15 @@ fn a_record_literals_head_must_name_a_struct() {
     // …and an actual `struct` head is untouched, including one whose field is
     // initialized from an ordinary binding.
     for src in [
-        "struct P { x: Int, y: Int }\nlet p = P { x: 1, y: 2 }\nout(p.x)\n",
-        "struct P { x: Int }\nlet q = 5\nlet p = P { x: q }\nout(p.x)\n",
+        "struct P { x: Int, y: Int }\nvar p = P { x: 1, y: 2 }\nout(p.x)\n",
+        "struct P { x: Int }\nvar q = 5\nvar p = P { x: q }\nout(p.x)\n",
     ] {
         assert!(is_clean_with_lower(src), "{src} must be accepted");
     }
 
     // A head that resolves to *nothing* is still `N001` and only `N001`: there is
     // no symbol to have the wrong kind.
-    let diags = analyze("let p = Nope { a: 1 }\n").diagnostics;
+    let diags = analyze("var p = Nope { a: 1 }\n").diagnostics;
     assert!(
         diags.iter().any(|d| d.code().to_string() == "N001")
             && !diags.iter().any(|d| d.code().to_string() == "N008"),
@@ -6514,7 +6562,7 @@ fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
     // `crate::capability::check`, which is the only thing that ever reaches
     // `Capability::HasField`'s rejection arm from that door.
     assert!(
-        has(&check_diags("let n = 1\nout(n.x)\n"), "Y112"),
+        has(&check_diags("var n = 1\nout(n.x)\n"), "Y112"),
         "a field of an `Int` is `check`'s to report"
     );
 
@@ -6523,7 +6571,7 @@ fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
     // record rather than stopping at "is it one".
     assert!(
         has(
-            &check_diags("struct P { x: Int }\nlet p = P { x: 1 }\nout(p.z)\n"),
+            &check_diags("struct P { x: Int }\nvar p = P { x: 1 }\nout(p.z)\n"),
             "Y112"
         ),
         "a missing field of a known record is `check`'s to report"
@@ -6559,7 +6607,7 @@ fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
     // parameter defers a `HasField` and then unifies with `Int`.
     assert!(
         has(
-            &check_diags("let v = Vec[Int]()\nv.push(1)\nout(v.map(|a| a.x).sum())\n"),
+            &check_diags("var v = Vec[Int]()\nv.push(1)\nout(v.map(|a| a.x).sum())\n"),
             "Y112"
         ),
         "a closure parameter pinned to `Int` is `check`'s to report"
@@ -6603,7 +6651,7 @@ fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
     // A concrete record's own field read is untouched — the fast path is still
     // the fast path, and it never emits a requirement at all.
     assert!(is_clean_with_lower(
-        "struct P { x: Int, y: Int }\nlet p = P { x: 1, y: 2 }\nout(p.x + p.y)\n"
+        "struct P { x: Int, y: Int }\nvar p = P { x: 1, y: 2 }\nout(p.x + p.y)\n"
     ));
 
     // The requirement rides the scheme rather than being decided once: a helper
@@ -6626,33 +6674,33 @@ fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
 fn a_closure_parameter_is_a_pattern_and_must_match_every_argument() {
     // Each name binds at its own component's type, which a parameter that named
     // the whole argument could not do.
-    let src = "let v = Vec()\nv.push((1, \"a\"))\nlet s = v.map(|(n, t)| t).collect()\nout(s)\n";
+    let src = "var v = Vec()\nv.push((1, \"a\"))\nvar s = v.map(|(n, t)| t).collect()\nout(s)\n";
     assert_eq!(scheme_of(src, "n").as_deref(), Some("Int"));
     assert_eq!(scheme_of(src, "t").as_deref(), Some("Text"));
 
     // A record pattern, at the fields' own types.
     let src = "struct P { x: Int, tag: Text }\n\
-               let f = |P { x, tag }| tag\nout(f(P { x: 1, tag: \"a\" }))\n";
+               var f = |P { x, tag }| tag\nout(f(P { x: 1, tag: \"a\" }))\n";
     assert_eq!(scheme_of(src, "x").as_deref(), Some("Int"));
     assert_eq!(scheme_of(src, "tag").as_deref(), Some("Text"));
 
     // A bare name still binds the whole argument — the shape every existing
     // program is written with, and the one `Param::name` still answers for.
-    let src = "let v = Vec()\nv.push((1, 2))\nlet s = v.map(|kv| kv.0).collect()\nout(s)\n";
+    let src = "var v = Vec()\nv.push((1, 2))\nvar s = v.map(|kv| kv.0).collect()\nout(s)\n";
     assert_eq!(scheme_of(src, "kv").as_deref(), Some("(Int, Int)"));
 
     // The annotation belongs to the whole argument, and it pins the components.
-    let src = "let f = |(a, b): (Int, Text)| b\nout(f((1, \"z\")))\n";
+    let src = "var f = |(a, b): (Int, Text)| b\nout(f((1, \"z\")))\n";
     assert_eq!(scheme_of(src, "a").as_deref(), Some("Int"));
     assert_eq!(scheme_of(src, "b").as_deref(), Some("Text"));
 
     // **A parameter has no second arm**, so a pattern that can fail is `Y125` —
     // both spellings, and at any depth.
     for src in [
-        "let f = |Some(n)| n\nout(f(Some(1)))\n",
-        "let f = |(1, b)| b\nout(f((1, 2)))\n",
-        "let f = |(a, (2, c))| c\nout(f((1, (2, 3))))\n",
-        "struct P { x: Int }\nlet f = |P { x: 1 }| 0\nout(f(P { x: 1 }))\n",
+        "var f = |Some(n)| n\nout(f(Some(1)))\n",
+        "var f = |(1, b)| b\nout(f((1, 2)))\n",
+        "var f = |(a, (2, c))| c\nout(f((1, (2, 3))))\n",
+        "struct P { x: Int }\nvar f = |P { x: 1 }| 0\nout(f(P { x: 1 }))\n",
     ] {
         let diags = analyze_and_lower_diags(src);
         assert!(
@@ -6664,33 +6712,37 @@ fn a_closure_parameter_is_a_pattern_and_must_match_every_argument() {
     // …and the irrefutable shapes are all accepted, including a wildcard
     // component, a partial record pattern, several parameters and nesting.
     for src in [
-        "let f = |(a, b)| a + b\nout(f((1, 2)))\n",
-        "let f = |(a, _)| a\nout(f((1, 2)))\n",
-        "let f = |(a, b), c| a + b + c\nout(f((1, 2), 3))\n",
-        "let f = |a, (b, c)| a + b + c\nout(f(1, (2, 3)))\n",
-        "let f = |(a, (b, c))| a + b + c\nout(f((1, (2, 3))))\n",
-        "struct P { x: Int, y: Int }\nlet f = |P { x }| x\nout(f(P { x: 1, y: 2 }))\n",
+        "var f = |(a, b)| a + b\nout(f((1, 2)))\n",
+        "var f = |(a, _)| a\nout(f((1, 2)))\n",
+        "var f = |(a, b), c| a + b + c\nout(f((1, 2), 3))\n",
+        "var f = |a, (b, c)| a + b + c\nout(f(1, (2, 3)))\n",
+        "var f = |(a, (b, c))| a + b + c\nout(f((1, (2, 3))))\n",
+        "struct P { x: Int, y: Int }\nvar f = |P { x }| x\nout(f(P { x: 1, y: 2 }))\n",
     ] {
         assert!(is_clean_with_lower(src), "{src} must be accepted");
     }
 
     // The pattern is checked against the parameter's type like any other, so an
     // argument the shape cannot have is the ordinary mismatch.
-    let diags = analyze_and_lower_diags("let f = |(a, b)| a\nout(f(1))\n");
+    let diags = analyze_and_lower_diags("var f = |(a, b)| a\nout(f(1))\n");
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y001"),
         "expected Y001, got {diags:?}"
     );
 
-    // A destructured name is a binding like any other, so it captures and it
-    // cannot be assigned to.
+    // A destructured name is a binding like any other: it captures, and since
+    // ADR-125 it is assignable — at its own type, which is the component's and
+    // not the whole argument's.
     assert!(is_clean_with_lower(
-        "let g = |(a, b)| { let h = |n| n + a + b\n h(1) }\nout(g((2, 3)))\n"
+        "var g = |(a, b)| { var h = |n| n + a + b\n h(1) }\nout(g((2, 3)))\n"
     ));
-    let diags = analyze_and_lower_diags("let f = |(a, b)| { a = 5\n b }\nout(f((1, 2)))\n");
+    assert!(is_clean_with_lower(
+        "var f = |(a, b)| { a = 5\n b }\nout(f((1, 2)))\n"
+    ));
+    let diags = analyze_and_lower_diags("var f = |(a, b)| { a = \"x\"\n b }\nout(f((1, 2)))\n");
     assert!(
-        diags.iter().any(|d| d.code().to_string() == "Y009"),
-        "a destructured name is immutable: {diags:?}"
+        diags.iter().any(|d| d.code().to_string() == "Y001"),
+        "…and the component's type is what the write must match: {diags:?}"
     );
 }
 
@@ -6721,10 +6773,10 @@ fn a_zero_argument_accessor_is_a_call_and_a_bare_name_is_a_field() {
     // The call form is the one that works, on every receiver the doc writes it
     // for.
     assert!(is_clean_with_lower(
-        "let v = Vec()\nv.push(1)\nout(v.len())\n"
+        "var v = Vec()\nv.push(1)\nout(v.len())\n"
     ));
     assert!(is_clean_with_lower(
-        "let m = Map()\nm[1] = 2\nout(m.len())\n"
+        "var m = Map()\nm[1] = 2\nout(m.len())\n"
     ));
 
     // The property spelling is not a syntax this language has: it is a field read
@@ -6733,9 +6785,9 @@ fn a_zero_argument_accessor_is_a_call_and_a_bare_name_is_a_field() {
     // decides it — which is why `analyze` alone is enough here and why the message
     // now names the type.
     for src in [
-        "let v = Vec()\nv.push(1)\nout(v.len)\n",
-        "let m = Map()\nm[1] = 2\nout(m.len)\n",
-        "let t = \"abc\"\nout(t.len)\n",
+        "var v = Vec()\nv.push(1)\nout(v.len)\n",
+        "var m = Map()\nm[1] = 2\nout(m.len)\n",
+        "var t = \"abc\"\nout(t.len)\n",
     ] {
         let diags = analyze(src).diagnostics;
         assert!(
@@ -6748,13 +6800,13 @@ fn a_zero_argument_accessor_is_a_call_and_a_bare_name_is_a_field() {
     // stay apart: `p.len` reads the field, `p.len()` looks for a row a record does
     // not have.
     assert!(is_clean_with_lower(
-        "struct P { len: Int }\nlet p = P { len: 7 }\nout(p.len)\n"
+        "struct P { len: Int }\nvar p = P { len: 7 }\nout(p.len)\n"
     ));
     // Asked of `analyze` alone, not of `analyze` + `lower`. It used to be the
     // latter, which stopped proving anything the moment ADR-093 moved `Y110`
     // into inference — the point of this half is that a record carries no
     // catalog rows, and `check` is where the user finds that out.
-    let diags = analyze("struct P { len: Int }\nlet p = P { len: 7 }\nout(p.len())\n").diagnostics;
+    let diags = analyze("struct P { len: Int }\nvar p = P { len: 7 }\nout(p.len())\n").diagnostics;
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y110"),
         "a record has no rows: {diags:?}"
@@ -6770,14 +6822,14 @@ fn a_zero_argument_accessor_is_a_call_and_a_bare_name_is_a_field() {
 /// not silently reinterpreted.
 ///
 /// It used to be typed `Text` unconditionally and lowered as a text literal of
-/// the raw interior, so ``let t = `n = {int}` `` type-checked and `out(t)`
+/// the raw interior, so ``var t = `n = {int}` `` type-checked and `out(t)`
 /// printed `n = {int}` — the capture emitted as characters rather than
 /// reported. §7.1 enters the parser-expression sublanguage at `read` or
 /// `parse(text, …)` and nowhere else, which is the boundary REP-34 established
 /// from the other side for labelled arguments.
 #[test]
 fn a_parser_template_in_value_position_is_reported() {
-    let diags = analyze_and_lower_diags("let t = `n = {int}`\nout(t)\n");
+    let diags = analyze_and_lower_diags("var t = `n = {int}`\nout(t)\n");
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y023"),
         "expected Y023 for a template in value position, got {diags:?}"
@@ -6786,7 +6838,7 @@ fn a_parser_template_in_value_position_is_reported() {
     // The same template after `read` is the language, and is untouched: the
     // sublanguage is entered by the *word*, so the fix must not be about the
     // token.
-    assert!(is_clean_with_lower("let n = read `n = {int}`\nout(n)\n"));
+    assert!(is_clean_with_lower("var n = read `n = {int}`\nout(n)\n"));
 
     // One mistake, one diagnostic. The template still parses to a literal node,
     // so nothing cascades off an unconsumed token — and the type it gets is a
@@ -6820,7 +6872,7 @@ fn a_parser_template_in_value_position_is_reported() {
 /// tripped over something else.
 #[test]
 fn a_bad_field_on_a_choice_payload_is_reported_at_check() {
-    const READ: &str = "let ms = read scan(choice(Mul: `mul({a:int},{b:int})`, Do: `do()`))\n";
+    const READ: &str = "var ms = read scan(choice(Mul: `mul({a:int},{b:int})`, Do: `do()`))\n";
 
     // The reproduction: a field the payload record does not have. Reported by
     // `analyze` alone, so `praxis check` sees it (REP-12).
@@ -6864,7 +6916,7 @@ fn a_bad_field_on_a_choice_payload_is_reported_at_check() {
 fn a_record_pattern_needs_no_head_and_pins_from_the_scrutinee() {
     // Nested inside a variant pattern, over an anonymous payload record: the
     // shape the row exists for.
-    let src = "let ms = read scan(choice(Mul: `mul({a:int},{b:int})`, Do: `do()`))\n\
+    let src = "var ms = read scan(choice(Mul: `mul({a:int},{b:int})`, Do: `do()`))\n\
                for m in ms { match m { Mul({a, b}) => out(a * b), Do(_) => {} } }\n";
     assert!(
         errors_of(src).is_empty(),
@@ -6879,23 +6931,23 @@ fn a_record_pattern_needs_no_head_and_pins_from_the_scrutinee() {
     // record too — the head is optional, not forbidden.
     const DECL: &str = "struct P { x: Int, tag: Text }\n";
     let src =
-        format!("{DECL}let p = P {{ x: 1, tag: \"a\" }}\nlet r = match p {{ {{x, tag}} => x }}\n");
+        format!("{DECL}var p = P {{ x: 1, tag: \"a\" }}\nvar r = match p {{ {{x, tag}} => x }}\n");
     assert_eq!(scheme_of(&src, "x").as_deref(), Some("Int"));
     assert_eq!(scheme_of(&src, "tag").as_deref(), Some("Text"));
     let src = format!(
-        "{DECL}let ps = Vec()\nps.push(P {{ x: 1, tag: \"a\" }})\n\
+        "{DECL}var ps = Vec()\nps.push(P {{ x: 1, tag: \"a\" }})\n\
          for {{x, tag}} in ps {{ out(x) out(tag) }}\n"
     );
     assert_eq!(scheme_of(&src, "x").as_deref(), Some("Int"));
     assert_eq!(scheme_of(&src, "tag").as_deref(), Some("Text"));
-    let src = format!("{DECL}let f = |q: P| match q {{ {{x, tag}} => x }}\n");
+    let src = format!("{DECL}var f = |q: P| match q {{ {{x, tag}} => x }}\n");
     assert_eq!(scheme_of(&src, "x").as_deref(), Some("Int"));
 
     // The mistakes inside it are the headed form's, unchanged: a field the
     // record does not have, and one named twice.
     for (arm, code) in [("{x, zzz}", "Y114"), ("{x, x: q}", "Y115")] {
         let src =
-            format!("{DECL}let p = P {{ x: 1, tag: \"a\" }}\nlet r = match p {{ {arm} => 1 }}\n");
+            format!("{DECL}var p = P {{ x: 1, tag: \"a\" }}\nvar r = match p {{ {arm} => 1 }}\n");
         let diags = analyze_and_lower_diags(&src);
         assert!(
             diags.iter().any(|d| d.code().to_string() == code),
@@ -6911,7 +6963,7 @@ fn a_record_pattern_needs_no_head_and_pins_from_the_scrutinee() {
 /// analogy with `infer_field_get`'s REP-28 tolerance. It was measured and it is
 /// not the same trade. **Observed red with this arm silent** (the `Var` case
 /// falling through to `infer_record_pattern_fields_only` with no diagnostic):
-/// `let f = |{x, y}| x + y` / `out(f(Point { x: 10, y: 20 }))` passed
+/// `var f = |{x, y}| x + y` / `out(f(Point { x: 10, y: 20 }))` passed
 /// `praxis check` with rc=0 and then died under `praxis run` with
 /// `int_payload wants a `Int` payload; this value is a `Unit` (REP-56)`, rc=134.
 /// Inference had bound `x` and `y` to fresh variables while lowering — which
@@ -6927,7 +6979,7 @@ fn a_headless_record_pattern_needs_a_record_it_can_see() {
     // and field names alone cannot construct a record type — the language has no
     // row variables. Reported in **inference**, so `praxis check` sees it.
     for src in [
-        format!("{DECL}let f = |{{x, y}}| x + y\nout(f(P {{ x: 1, y: 2 }}))\n"),
+        format!("{DECL}var f = |{{x, y}}| x + y\nout(f(P {{ x: 1, y: 2 }}))\n"),
         format!(
             "{DECL}fn g(q) {{ match q {{ {{x, y}} => x + y }} }}\nout(g(P {{ x: 1, y: 2 }}))\n"
         ),
@@ -6942,9 +6994,9 @@ fn a_headless_record_pattern_needs_a_record_it_can_see() {
     // Naming the record, or annotating the value, is the answer the message
     // gives — and both are accepted.
     for src in [
-        format!("{DECL}let f = |P {{x, y}}| x + y\nout(f(P {{ x: 1, y: 2 }}))\n"),
+        format!("{DECL}var f = |P {{x, y}}| x + y\nout(f(P {{ x: 1, y: 2 }}))\n"),
         format!(
-            "{DECL}let f = |q: P| match q {{ {{x, y}} => x + y }}\nout(f(P {{ x: 1, y: 2 }}))\n"
+            "{DECL}var f = |q: P| match q {{ {{x, y}} => x + y }}\nout(f(P {{ x: 1, y: 2 }}))\n"
         ),
     ] {
         assert!(is_clean_with_lower(&src), "{src} must be accepted");
@@ -6953,7 +7005,7 @@ fn a_headless_record_pattern_needs_a_record_it_can_see() {
     // A scrutinee that is not a record at all is the shape error, `Y123`, and the
     // message spells the headless pattern as `{ … }` rather than interpolating a
     // head it does not have.
-    let diags = analyze("let n = 1\nlet r = match n { {a, b} => a + b }\n").diagnostics;
+    let diags = analyze("var n = 1\nvar r = match n { {a, b} => a + b }\n").diagnostics;
     let y123 = diags
         .iter()
         .find(|d| d.code().to_string() == "Y123")
@@ -6982,12 +7034,12 @@ fn a_headless_record_pattern_needs_a_record_it_can_see() {
 /// reach.
 #[test]
 fn a_record_pattern_with_a_head_and_no_fields_is_still_a_record_pattern() {
-    const DECL: &str = "struct Q { z: Int }\nstruct P { a: Int }\nlet q = Q { z: 1 }\n";
+    const DECL: &str = "struct Q { z: Int }\nstruct P { a: Int }\nvar q = Q { z: 1 }\n";
 
     // The reproduction: the head names another record, so it is the ordinary
     // mismatch — and it is a mismatch at all only because the pattern is read as
     // a record pattern.
-    let diags = analyze_and_lower_diags(&format!("{DECL}let r = match q {{ P {{}} => 1 }}\n"));
+    let diags = analyze_and_lower_diags(&format!("{DECL}var r = match q {{ P {{}} => 1 }}\n"));
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y001"),
         "expected Y001, got {diags:?}"
@@ -6996,12 +7048,12 @@ fn a_record_pattern_with_a_head_and_no_fields_is_still_a_record_pattern() {
     // …and against its *own* record it is legal and binds nothing: `P {}` is
     // `Some` beside `Some(_)`, one test with no names taken out of it.
     assert!(is_clean_with_lower(&format!(
-        "{DECL}let p = P {{ a: 1 }}\nlet r = match p {{ P {{}} => 1 }}\n"
+        "{DECL}var p = P {{ a: 1 }}\nvar r = match p {{ P {{}} => 1 }}\n"
     )));
 
     // The headless `{}` is a *parse* error instead (ADR-091 Decision 3): it binds
     // nothing and names no record, so it tests nothing and covers everything.
-    let errors = errors_of(&format!("{DECL}let r = match q {{ {{}} => 1 }}\n"));
+    let errors = errors_of(&format!("{DECL}var r = match q {{ {{}} => 1 }}\n"));
     assert!(
         errors.iter().any(|e| e.starts_with("P001")),
         "an empty headless record pattern is a parse error: {errors:?}"
@@ -7020,7 +7072,7 @@ fn a_record_pattern_with_a_head_and_no_fields_is_still_a_record_pattern() {
 fn an_unknown_variant_is_reported_at_check() {
     // A nominal enum…
     let diags = analyze(
-        "enum Move { Step(Int), Stay }\nlet m = Stay\nlet r = match m { Bogus(n) => n, _ => 0 }\n",
+        "enum Move { Step(Int), Stay }\nvar m = Stay\nvar r = match m { Bogus(n) => n, _ => 0 }\n",
     )
     .diagnostics;
     assert!(
@@ -7031,7 +7083,7 @@ fn an_unknown_variant_is_reported_at_check() {
     // …and an anonymous one, whose rendering is what makes the message readable
     // at all (ADR-091 Decision 4).
     let diags = analyze(
-        "let ms = read scan(choice(Mul: `mul({a:int},{b:int})`, Do: `do()`))\n\
+        "var ms = read scan(choice(Mul: `mul({a:int},{b:int})`, Do: `do()`))\n\
          for m in ms { match m { Bogus(p) => out(1), _ => {} } }\n",
     )
     .diagnostics;
@@ -7081,7 +7133,7 @@ fn a_list_literal_is_a_vec_of_one_element_type() {
     // generalized — a `Vec` is mutable, so the value restriction applies to it
     // exactly as it does to `Vec()`.
     assert!(!has_type_error(
-        "fn main() -> Int { let v: Vec[Int] = []\n v.len() }"
+        "fn main() -> Int { var v: Vec[Int] = []\n v.len() }"
     ));
     assert!(!has_type_error(
         "fn main() -> Int { var v = []\n v.push(1)\n v.len() }"
@@ -7089,10 +7141,10 @@ fn a_list_literal_is_a_vec_of_one_element_type() {
 
     // Elements that disagree are reported. The message names the type
     // established so far as `expected`, so the *offending* element is `found`.
-    assert!(has_type_error("let v = [1, \"a\"]"));
-    assert!(has_type_error("let v = [\"a\", 1]"));
-    assert!(has_type_error("let v = [[1], [\"a\"]]"));
-    let diags = analyze("let v = [1, \"a\"]").diagnostics;
+    assert!(has_type_error("var v = [1, \"a\"]"));
+    assert!(has_type_error("var v = [\"a\", 1]"));
+    assert!(has_type_error("var v = [[1], [\"a\"]]"));
+    let diags = analyze("var v = [1, \"a\"]").diagnostics;
     let y001 = diags
         .iter()
         .find(|d| d.code().to_string() == "Y001")
@@ -7106,7 +7158,7 @@ fn a_list_literal_is_a_vec_of_one_element_type() {
     // …and the literal's own type is checked against its context like any other
     // expression.
     assert!(has_type_error(
-        "fn main() -> Int { let v: Vec[Text] = [1, 2]\n v.len() }"
+        "fn main() -> Int { var v: Vec[Text] = [1, 2]\n v.len() }"
     ));
 }
 
@@ -7118,7 +7170,7 @@ fn a_list_literal_is_a_vec_everywhere_a_vec_goes() {
         "fn main() -> Unit { for x in [1, 2, 3] { out(x) } }",
         "fn main() -> Int { [1, 2, 3].len() }",
         "fn main() -> Int { [1, 2, 3][0] }",
-        "fn main() -> Int { let v: Vec[Int] = [1]\n v.len() }",
+        "fn main() -> Int { var v: Vec[Int] = [1]\n v.len() }",
         // Passed to a function that iterates an unannotated parameter (REP-03):
         // a list literal is one of the iterables that instantiates it.
         "fn total(r) { var t = 0\n for i in r { t = t + i }\n t }\n\
@@ -7130,7 +7182,7 @@ fn a_list_literal_is_a_vec_everywhere_a_vec_goes() {
     // The element type reaches the loop variable, so a body that uses it at the
     // wrong type is reported.
     assert!(has_type_error(
-        "fn main() -> Unit { for x in [1, 2] { let t: Text = x\n out(t) } }"
+        "fn main() -> Unit { for x in [1, 2] { var t: Text = x\n out(t) } }"
     ));
 }
 
@@ -7152,12 +7204,12 @@ fn a_text_is_iterable_and_yields_char() {
     ));
     // …and it is not a `Text`.
     assert!(has_type_error(
-        "fn main() -> Unit { for c in \"abc\" { let t: Text = c\n out(t) } }"
+        "fn main() -> Unit { for c in \"abc\" { var t: Text = c\n out(t) } }"
     ));
     // The same answer through a binding and through a parameter, so it is the
     // type that is iterable and not the literal.
     assert!(!has_type_error(
-        "fn main() -> Unit { let s = \"abc\"\n for c in s { out(c) } }"
+        "fn main() -> Unit { var s = \"abc\"\n for c in s { out(c) } }"
     ));
     assert!(!has_type_error(
         "fn each(t: Text) -> Unit { for c in t { out(c) } }\nfn main() -> Unit { each(\"ab\") }"

@@ -27,7 +27,7 @@
 //!    set.
 //! 4. **Debug slots** ([`DebugSlots`]) — deliberately the old, over-approximate
 //!    forward walk: `live_in(block) ∪ {defs seen so far}`. The debugger must
-//!    show `a` after `let a = 10` whether or not anything reads it again, so
+//!    show `a` after `var a = 10` whether or not anything reads it again, so
 //!    this set is what making the *root* set exact must not shrink (H3).
 //!
 //! The fourth is a **contract, not an emission plan** (ADR-104). The backend no
@@ -443,7 +443,7 @@ mod tests {
 
     #[test]
     fn dead_local_is_not_in_safepoint_roots() {
-        // fn f() { let a = 1; let b = 2; a }   — `b` is dead; a live.
+        // fn f() { var a = 1; var b = 2; a }   — `b` is dead; a live.
         // Build: int0=1, int1=2, alloc0(a)=Int(int0), alloc1(b)=Int(int1),
         //        return a. At alloc1's safepoint, `a` is live, `b` is not yet born.
         let mut db = TypeDb::new();

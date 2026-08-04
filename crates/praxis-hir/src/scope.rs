@@ -81,7 +81,7 @@ impl ScopeTree {
     /// chain.
     ///
     /// [`ScopeTree::lookup`] cannot answer this: a top-level `fn` declared twice
-    /// and a `let` shadowing a prelude name both find a symbol, and only the
+    /// and a `var` shadowing a prelude name both find a symbol, and only the
     /// first is a mistake (TY-24).
     #[must_use]
     pub fn is_bound_here(&self, scope: ScopeId, name: &str) -> bool {
@@ -100,7 +100,7 @@ impl ScopeTree {
     ///
     /// The scope is what answers "did this name cross a boundary": a `fn` body
     /// is a child of the scope around it, so the lookup walks straight out to the
-    /// file's top level and a `fn` reading a top-level `let` resolved silently
+    /// file's top level and a `fn` reading a top-level `var` resolved silently
     /// (REP-22). Only the caller knows which boundaries matter, so this reports
     /// the fact and decides nothing.
     #[must_use]

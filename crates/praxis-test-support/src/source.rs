@@ -8,7 +8,7 @@ use praxis_source::{FileId, SourceMap};
 /// # Example
 /// ```no_run
 /// use praxis_test_support::single_file;
-/// let (map, id) = single_file("day.px", "out(1)\n");
+/// var (map, id) = single_file("day.px", "out(1)\n");
 /// ```
 pub fn single_file(name: &str, text: &str) -> (SourceMap, FileId) {
     let map = SourceMap::new();

@@ -35,36 +35,9 @@ impl SourceFile {
     }
 }
 
-/// A `let name = expr` binding.
-#[derive(Clone, Debug)]
-pub struct LetStmt {
-    syntax: SyntaxNode,
-}
-impl AstNode for LetStmt {
-    const KIND: K = K::LET_STMT;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
-}
-impl LetStmt {
-    /// The bound name (a bare `Ident` token).
-    pub fn name(&self) -> Option<SyntaxToken> {
-        name_token(&self.syntax)
-    }
-    /// The optional `: Type` annotation, if present.
-    pub fn ty(&self) -> Option<TypeRef> {
-        child(&self.syntax)
-    }
-    /// The initializer expression.
-    pub fn init(&self) -> Option<Expr> {
-        self.syntax.children().find_map(Expr::cast_from_child)
-    }
-}
-
-/// A `var name = expr` binding.
+/// A `var name = expr` binding — the language's one binding form (§4.2,
+/// ADR-125). A later `var` of the same name in the same scope shadows the
+/// earlier one and may carry an unrelated type.
 #[derive(Clone, Debug)]
 pub struct VarStmt {
     syntax: SyntaxNode,
@@ -79,12 +52,15 @@ impl AstNode for VarStmt {
     }
 }
 impl VarStmt {
+    /// The bound name (a bare `Ident` token).
     pub fn name(&self) -> Option<SyntaxToken> {
         name_token(&self.syntax)
     }
+    /// The optional `: Type` annotation, if present.
     pub fn ty(&self) -> Option<TypeRef> {
         child(&self.syntax)
     }
+    /// The initializer expression.
     pub fn init(&self) -> Option<Expr> {
         self.syntax.children().find_map(Expr::cast_from_child)
     }
@@ -441,7 +417,7 @@ impl ExprStmt {
 /// for a name (with or without bracketed arguments), [`K::TUPLE_TYPE`] for
 /// `(T, U)`, [`K::FN_TYPE`] for `(P) -> R` — and this wrapper accepts all
 /// three. It used to accept only `TYPE_REF`, so `fn f(x: (Int, Text))` had *no*
-/// annotation as far as `Param::ty` was concerned, and the same held for `let`,
+/// annotation as far as `Param::ty` was concerned, and the same held for `var`,
 /// `var`, return types, struct fields and enum payloads: six positions where a
 /// written type was silently discarded and inference invented a fresh variable
 /// instead (TY-08).

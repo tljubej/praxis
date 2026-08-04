@@ -3996,7 +3996,7 @@ fn tuple_schema_for(
     //
     // A slot that is still an inference *variable* is the one exception, and it
     // is the same one `collection_arg_descriptor` makes for the same reason
-    // (HIR-01/MONO-01, hazard H10): `let m = Map()` generalizes at the `let`, so
+    // (HIR-01/MONO-01, hazard H10): `var m = Map()` generalizes at the `var`, so
     // a `for kv in m` whose body never looks inside the pair leaves K and V
     // unresolved, and failing the compile there rejects a working program. The
     // null slot says "no static type" and the runtime reads the value's own
@@ -4195,8 +4195,8 @@ fn debug_descriptor_for_type(
 /// - `MirType::Opaque` — a fused pipeline's result Vec, which genuinely has no
 ///   type until MIR-05 (S21), or a construction whose result type did not match
 ///   its ctor.
-/// - a `Known` type that is still an inference *variable* — `let xs = Vec()`
-///   generalizes at the `let`, so the construction site's own element type is
+/// - a `Known` type that is still an inference *variable* — `var xs = Vec()`
+///   generalizes at the `var`, so the construction site's own element type is
 ///   never resolved. That is HIR-01/MONO-01 (S15), and failing the compile on it
 ///   would reject working programs, which hazard H10 exists to prevent.
 ///
@@ -6170,7 +6170,7 @@ mod tests {
     const SAMPLE_LOOP: &str = concat!(
         "var i = 0\n",
         "var acc = 0\n",
-        "let limit = 1000\n",
+        "var limit = 1000\n",
         "while i < limit {\n",
         "  acc = acc + i * 3\n",
         "  i = i + 1\n",
@@ -6331,7 +6331,7 @@ mod tests {
     /// also pass if the lowering had stopped emitting them altogether.
     #[test]
     fn a_check_after_a_faulting_wrapper_is_still_a_load_and_a_branch() {
-        let src = "let v = [3, 1, 2]\nout(v[0] < v[1])\n";
+        let src = "var v = [3, 1, 2]\nout(v[0] < v[1])\n";
         assert!(
             emitted_fault_checks(&lowered_function(src)) > 0,
             "`praxis_value_cmp` faults, and nothing but the slot says so"

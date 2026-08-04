@@ -185,7 +185,7 @@ fn fmt_node(node: &SyntaxNode, ctx: &mut FmtContext, out: &mut String) {
             ctx.write_indent(out);
             out.push('}');
         }
-        SyntaxKind::LET_STMT | SyntaxKind::VAR_STMT | SyntaxKind::ASSIGN_STMT => {
+        SyntaxKind::VAR_STMT | SyntaxKind::ASSIGN_STMT => {
             // Emit the meaningful tokens with single spaces around operators.
             fmt_token_stream(node, ctx, out);
         }
@@ -208,7 +208,7 @@ fn fmt_node(node: &SyntaxNode, ctx: &mut FmtContext, out: &mut String) {
 ///
 /// This is the conservative fallback: it reproduces the token stream without
 /// the original trivia, inserting spacing only where two tokens would otherwise
-/// collide (e.g. `let` + `x`, or `x` + `=`). Backtick templates and text
+/// collide (e.g. `var` + `x`, or `x` + `=`). Backtick templates and text
 /// literals are emitted verbatim.
 fn fmt_token_stream(node: &SyntaxNode, ctx: &mut FmtContext, out: &mut String) {
     let tokens: Vec<SyntaxToken> = node
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn format_is_idempotent_on_let_binding() {
-        let src = "let x=1";
+        let src = "var x=1";
         let once = format(src);
         let twice = format(&once);
         assert_eq!(
@@ -314,7 +314,7 @@ mod tests {
             "not idempotent:\n--once--\n{once}\n--twice--\n{twice}"
         );
         // And the canonical form is readable.
-        insta::assert_snapshot!(once, @"let x = 1\n");
+        insta::assert_snapshot!(once, @"var x = 1\n");
     }
 
     #[test]
@@ -352,16 +352,16 @@ mod tests {
     /// way. A list literal inherits it rather than getting a second answer.
     #[test]
     fn format_is_idempotent_on_a_list_literal() {
-        let src = "let v=[1,2 , 3]";
+        let src = "var v=[1,2 , 3]";
         assert_clean(src);
         let once = format(src);
-        insta::assert_snapshot!(once, @"let v = [1,2,3]\n");
+        insta::assert_snapshot!(once, @"var v = [1,2,3]\n");
         assert_eq!(format(&once), once, "not idempotent:\n{once}");
         // The same shape a call and a tuple get, which is the point.
-        assert_eq!(format("let v = f(1, 2)").trim_end(), "let v = f(1,2)");
+        assert_eq!(format("var v = f(1, 2)").trim_end(), "var v = f(1,2)");
 
         // The empty one, and a nested one, keep their shape too.
-        for src in ["let v = []", "let v = [[1],[2,3]]"] {
+        for src in ["var v = []", "var v = [[1],[2,3]]"] {
             assert_clean(src);
             let once = format(src);
             assert_eq!(once.trim_end(), src, "{src}");
@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn format_preserves_backtick_template_verbatim() {
         // §15.2: backtick template contents must be preserved byte-for-byte.
-        let src = "let p = `{x:int}`";
+        let src = "var p = `{x:int}`";
         let once = format(src);
         assert!(once.contains("`{x:int}`"), "template changed: {once}");
         let twice = format(&once);
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn regression_formatting_does_not_delete_comments() {
-        let src = "let answer = 42 // the units matter";
+        let src = "var answer = 42 // the units matter";
         let once = format(src);
         assert!(
             once.contains("// the units matter"),
@@ -403,19 +403,19 @@ mod tests {
     /// idempotency would fail.
     #[test]
     fn comments_keep_their_line_and_survive_reformatting() {
-        let src = "// leading\nlet x=1 // trailing\nlet y=2";
+        let src = "// leading\nvar x=1 // trailing\nvar y=2";
         let once = format(src);
         insta::assert_snapshot!(once, @r"
         // leading
-        let x = 1 // trailing
-        let y = 2
+        var x = 1 // trailing
+        var y = 2
         ");
         assert_eq!(format(&once), once, "formatting comments is not idempotent");
     }
 
     #[test]
     fn comments_inside_a_block_are_kept_and_indented() {
-        let src = "fn f() {\n// inside\nlet y=2 // tail\n}";
+        let src = "fn f() {\n// inside\nvar y=2 // tail\n}";
         let once = format(src);
         assert!(once.contains("// inside"), "{once:?}");
         assert!(once.contains("// tail"), "{once:?}");
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn a_block_comment_survives_inside_an_expression() {
-        let src = "let x = /* why */ 1";
+        let src = "var x = /* why */ 1";
         let once = format(src);
         assert!(once.contains("/* why */"), "{once:?}");
         assert_eq!(format(&once), once, "not idempotent:\n{once}");
@@ -443,7 +443,7 @@ mod tests {
 
     #[test]
     fn format_is_idempotent_on_typed_let() {
-        let src = "let p:(Int,Int)=(1,2)";
+        let src = "var p:(Int,Int)=(1,2)";
         assert_clean(src);
         let once = format(src);
         let twice = format(&once);
@@ -472,14 +472,14 @@ mod tests {
     #[test]
     fn format_is_idempotent_on_a_headless_record_pattern() {
         for src in [
-            "let r=match p{{x,y}=>x+y}",
+            "var r=match p{{x,y}=>x+y}",
             "for {x,y} in ps{out(x)}",
-            "let f=|{x,y}|x+y",
+            "var f=|{x,y}|x+y",
             // Nested in a variant's payload — the shape a `choice(...)` payload
             // record needs, and the one the row was filed for.
-            "let r=match m{Mul({a,b})=>a*b,Do(_)=>0}",
+            "var r=match m{Mul({a,b})=>a*b,Do(_)=>0}",
             // The head is optional, not gone.
-            "let r=match p{P{x,y}=>x+y}",
+            "var r=match p{P{x,y}=>x+y}",
         ] {
             assert_clean(src);
             let once = format(src);

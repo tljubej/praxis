@@ -358,7 +358,7 @@ fn appendix_ds_demo_checks_runs_and_prints_its_answer() {
 fn check_and_run_agree_about_a_method_that_cannot_resolve() {
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     for (label, src) in [
-        ("concrete", "let v = Vec[Int]()\nv.push(1)\nout(v.nope())\n"),
+        ("concrete", "var v = Vec[Int]()\nv.push(1)\nout(v.nope())\n"),
         ("pinned", "fn f(x) { x.nope() }\nout(f(3))\n"),
         ("never_pinned", "fn f(x) { x.nope() }\nout(1)\n"),
     ] {

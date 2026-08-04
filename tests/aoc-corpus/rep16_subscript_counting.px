@@ -9,16 +9,16 @@
 // Output: how many points appear at least twice, the busiest count, a value
 // computed through Map subscripts, and an absent Counter key's zero.
 fn main() {
-    let points = read lines(`{x:int},{y:int}`)
+    var points = read lines(`{x:int},{y:int}`)
 
-    let counts = Counter[(Int, Int)]()
+    var counts = Counter[(Int, Int)]()
     for p in points {
         counts[(p.x, p.y)] += 1
     }
 
     var busiest = 0
     for p in points {
-        let n = counts[(p.x, p.y)]
+        var n = counts[(p.x, p.y)]
         if n > busiest { busiest = n }
     }
 
@@ -36,7 +36,7 @@ fn main() {
     out(busiest)
 
     // A Map indexes to its value type and stores through the same brackets.
-    let labels = Map()
+    var labels = Map()
     labels["origin"] = 0
     labels["far"] = 99
     labels["far"] += 1

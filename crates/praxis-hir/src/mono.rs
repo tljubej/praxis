@@ -90,6 +90,7 @@ pub fn monomorphize(module: TypedModule, names: &NameTable, db: &mut TypeDb) -> 
         items,
         diagnostics: module.diagnostics,
         escaping_vars: module.escaping_vars,
+        reassigned_vars: module.reassigned_vars,
     }
 }
 
@@ -238,7 +239,7 @@ fn rewrite_block(block: &mut TypedBlock, pass: &mut MonoPass<'_>) {
 
 fn rewrite_stmt(stmt: &mut TypedStmt, pass: &mut MonoPass<'_>) {
     match stmt {
-        TypedStmt::Let { init, .. } | TypedStmt::Var { init, .. } => rewrite_expr(init, pass),
+        TypedStmt::Var { init, .. } => rewrite_expr(init, pass),
         TypedStmt::Assign { value, .. } => rewrite_expr(value, pass),
         // Every sub-expression of a subscript store, not only the value: a
         // receiver or an index can hold the call this pass retargets.
@@ -357,7 +358,7 @@ fn resolve_block(db: &mut TypeDb, binders: &[VarId], args: &[Type], block: &mut 
 
 fn resolve_stmt(db: &mut TypeDb, binders: &[VarId], args: &[Type], stmt: &mut TypedStmt) {
     match stmt {
-        TypedStmt::Let { ty, init, .. } | TypedStmt::Var { ty, init, .. } => {
+        TypedStmt::Var { ty, init, .. } => {
             *ty = specialize_type(db, binders, args, *ty);
             resolve_expr(db, binders, args, init);
         }
@@ -634,7 +635,7 @@ mod tests {
         // cause the original to be dropped without emitting a clone.
         let names = mono_names(
             "fn empty() { Vec() }\n\
-             fn main() -> Int { let values = empty(); values.push(1); values.len() }",
+             fn main() -> Int { var values = empty(); values.push(1); values.len() }",
         );
         assert!(
             names.iter().any(|n| n.starts_with("empty__")),
@@ -687,8 +688,8 @@ mod tests {
         let names = mono_names(
             "fn empty() { Vec() }\n\
              fn main() -> Int {\n\
-               let ints = empty(); ints.push(1)\n\
-               let texts = empty(); texts.push(\"t\")\n\
+               var ints = empty(); ints.push(1)\n\
+               var texts = empty(); texts.push(\"t\")\n\
                ints.len() + texts.len()\n\
              }",
         );

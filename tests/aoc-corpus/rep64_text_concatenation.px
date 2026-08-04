@@ -6,13 +6,13 @@
 // No `Int` is concatenated anywhere, because there is nothing to concatenate it
 // with: `Int.to_text()` does not exist (ADR-085 records that as its own gap) and
 // `+` does not coerce. Every operand below is a `Text` already.
-let rows = read lines(`{first:word} {second:word}`)
+var rows = read lines(`{first:word} {second:word}`)
 
 var report = ""
-let index = Map()
+var index = Map()
 
 for row in rows {
-    let label = row.first + "/" + row.second
+    var label = row.first + "/" + row.second
     report += label + " "
     index[label] = row.first
 }

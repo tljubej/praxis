@@ -3,6 +3,6 @@
 //   "1,2,3\n4,5,6\n\n7,8,9\n"
 // → parses as Vec[Vec[Vec[Int]]] (sections → lines → csv tokens).
 fn main() -> Int {
-    let groups = read sections(lines(csv(int)));
+    var groups = read sections(lines(csv(int)));
     groups.len()
 }

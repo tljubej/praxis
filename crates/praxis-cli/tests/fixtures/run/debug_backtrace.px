@@ -1,5 +1,5 @@
 fn main() -> Int {
-  let xs = Vec()
+  var xs = Vec()
   xs.push(11)
   xs.push(22)
   xs.get(99)
