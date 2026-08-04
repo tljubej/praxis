@@ -159,3 +159,4 @@ verifier rule only. Its decision must not claim the elision.
 - [ADR-124: A field and a sequence element are places, and a store replaces what is already there](./124-a-field-and-a-sequence-element-are-places.md)
 - [ADR-125: A binding is a binding, and the compiler decides its storage](./125-a-binding-is-a-binding-and-the-compiler-decides-its-storage.md)
 - [ADR-126: A pipeline materializes on its own, and `collect` named a step it takes anyway](./126-a-pipeline-materializes-and-collect-named-a-step-it-takes-anyway.md)
+- [ADR-127: *proposed* — A pipeline's source is the `for` loop's, and a collection converts by naming what it becomes](./127-a-pipelines-source-is-the-for-loops-and-a-collection-converts-by-naming-what-it-becomes.md)
