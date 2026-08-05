@@ -8,12 +8,19 @@
 // M8-WS6, and §6.3's combinators were registered against one receiver.
 //
 // So this program is the ten receivers, once each, plus the conversions that let
-// a chain end anywhere it started. It is split into sections because one
-// function's `Gc` locals are bounded by `MAX_SHADOW_SLOTS`, not because the
-// sections mean anything on their own.
+// a chain end anywhere it started.
+//
+// It used to be split into six functions, and said so here: "It is split into
+// sections because one function's `Gc` locals are bounded by `MAX_SHADOW_SLOTS`,
+// not because the sections mean anything on their own." That is no longer true
+// and the split is gone (ADR-128). `main` has 340 `Gc` locals and **seven**
+// simultaneously-live roots, so it claims seven shadow slots; the cap it used to
+// hit was never a statement about this program, only about how its slots were
+// numbered. The output is byte-identical to the six-function form's, which is
+// what says the merge is a merge and not a rewrite.
 
-// The five sequence-shaped receivers, plus the two nullary ones.
-fn sequences() {
+fn main() {
+    // The five sequence-shaped receivers, plus the two nullary ones.
     var s = Set()
     s.insert(3)
     s.insert(1)
@@ -44,18 +51,14 @@ fn sequences() {
     out(bits.map(|n| n * n).sum())
 
     out((0..10).filter(|x| x % 2 == 0).map(|x| x * 2).sum())
-}
 
-// `Text` is the one iterable scalar, and it yields the `Char` that `t[i]`
-// already answers.
-fn text() {
+    // `Text` is the one iterable scalar, and it yields the `Char` that `t[i]`
+    // already answers.
     out("hello".count(|c| c == "l"[0]))
     out("hello".filter(|c| c != "l"[0]).count())
-}
 
-// A `Map` and a `Counter` yield **pairs**, from two index-aligned snapshots the
-// loop joins into the `(K, V)` tuple the item type names.
-fn keyed() {
+    // A `Map` and a `Counter` yield **pairs**, from two index-aligned snapshots the
+    // loop joins into the `(K, V)` tuple the item type names.
     var m = Map()
     m["a"] = 1
     m["b"] = 2
@@ -64,13 +67,11 @@ fn keyed() {
 
     var tally = ["the", "cat", "the", "dog", "the", "cat"].frequencies()
     out(tally.filter(|p| p.1 > 1).count())
-}
 
-// **A pipeline's currency is `Vec`.** Every streaming stage answers one,
-// whatever the receiver was, and a program that wants a collection back says
-// which one. One sentence answers "what does `filter` return" for all ten
-// receivers, and it is answerable without knowing which receiver you are on.
-fn currency() {
+    // **A pipeline's currency is `Vec`.** Every streaming stage answers one,
+    // whatever the receiver was, and a program that wants a collection back says
+    // which one. One sentence answers "what does `filter` return" for all ten
+    // receivers, and it is answerable without knowing which receiver you are on.
     var s = Set()
     s.insert(3)
     s.insert(1)
@@ -80,14 +81,12 @@ fn currency() {
     // A fused sink, not a barrier: `v.map(f).to_set()` is one loop and no
     // intermediate `Vec`.
     out([1, 2, 3].map(|x| x % 2).to_set().len())
-}
 
-// `to_vec` is the only route out of a keyed collection: `keys()` and `values()`
-// answer two aligned halves and nothing joins them. `to_map` is the route back
-// in, and it says "a pair" in its receiver pattern rather than in prose — so
-// `[1, 2].to_map()` is a type error at the method name and not a row that
-// resolves and then faults.
-fn conversions() {
+    // `to_vec` is the only route out of a keyed collection: `keys()` and `values()`
+    // answer two aligned halves and nothing joins them. `to_map` is the route back
+    // in, and it says "a pair" in its receiver pattern rather than in prose — so
+    // `[1, 2].to_map()` is a type error at the method name and not a row that
+    // resolves and then faults.
     var m = Map()
     m["a"] = 1
     m["b"] = 2
@@ -109,14 +108,12 @@ fn conversions() {
     var same = v.to_vec()
     same.push(2)
     out(v.len())
-}
 
-// **A keyed collection cannot order its own items.** No composite is orderable
-// (ADR-045), so the moment a pipeline's item is a pair — the moment its source
-// is a `Map` or a `Counter` — `sorted` is unavailable and "the two most common
-// words" has no spelling. The closure extracts an orderable key from an item
-// that is not.
-fn by_key() {
+    // **A keyed collection cannot order its own items.** No composite is orderable
+    // (ADR-045), so the moment a pipeline's item is a pair — the moment its source
+    // is a `Map` or a `Counter` — `sorted` is unavailable and "the two most common
+    // words" has no spelling. The closure extracts an orderable key from an item
+    // that is not.
     var tally = ["the", "cat", "the", "dog", "the", "cat"].frequencies()
     var top = tally.to_vec().sorted_by_key(|p| 0 - p.1).take(2)
     out(top)
@@ -130,13 +127,5 @@ fn by_key() {
     names.insert("a")
     names.insert("ccc")
     out(names.sorted_by_key(|t| t.len()))
-}
 
-fn main() {
-    sequences()
-    text()
-    keyed()
-    currency()
-    conversions()
-    by_key()
 }
