@@ -7,6 +7,12 @@
 prologue/epilogue overhead. ADR-012's `RootSet` seam, ADR-016's liveness pass,
 ADR-033's snapshot ordering, ADR-040's pacing and MIR-16's two-spill split are
 all preserved; where the change touches their edges it is recorded below.
+**Amended by:** ADR-128 (2026-08-05) — the account of `MAX_SHADOW_SLOTS` below
+is corrected. The cap is not what bounds the stack: the budget guard bounds
+every claimed slot on its own, and the cap contributes only the headroom term
+for Rust-side pushes. Its practical effect was that the cap kept being read as a
+performance dial, which it was under ADR-019, when it was the width of every
+frame, and has not been since this record. Nothing else here changes.
 
 ## Context
 

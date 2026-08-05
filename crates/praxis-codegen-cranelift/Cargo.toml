@@ -81,6 +81,57 @@ adr118-arm-a = []
 # arm-B-only for ADR-116's reason: under the feature the emitted code holds the
 # call they assert is absent.
 adr119-arm-a = []
+# ADR-128 decision 1 arm A: the prologue's slot zeroing goes back to a run of
+# stores up to 32 slots and a `%Memset` call above it — the tree exactly as
+# ADR-101 left it. The whole toggle is `emit_zero_slots` in `lower.rs`.
+#
+#     cargo build --release -p praxis-cli \
+#         --features praxis-codegen-cranelift/adr128-d1-arm-a             # arm A
+#
+# **It must be measured with `adr128-d2-arm-a` on in BOTH arms**, and that is the
+# one thing about this sweep a reader will get wrong. ADR-128 orders decision 1
+# first precisely because decisions 1 and 2 remove the same two calls from the
+# same prologue — but decision 2 removes them by making the *shadow* claim one
+# slot wide. Against a coloured tree `is_prime` claims 1 shadow slot and 33 debug
+# slots, so this feature no longer toggles what it was written to toggle: the
+# shadow claim is one store in both arms, and only the debug claim still crosses
+# the 32 threshold. The sweep would then price *one* memset against 33 stores and
+# report it as decision 1's effect, when decision 1 is about two memsets against
+# 66 stores. Half the change, attributed whole. Pair the features:
+#
+#     --features praxis-codegen-cranelift/adr128-d1-arm-a,praxis-codegen-cranelift/adr128-d2-arm-a   # D1 arm A
+#     --features praxis-codegen-cranelift/adr128-d2-arm-a                                            # D1 arm B
+#
+# which makes D1's arm B the same binary as D2's arm A, so the two sweeps chain
+# and each decision is attributable to exactly one of them. (Why they must chain
+# rather than be run independently: under `adr128-d1-arm-a` alone, against a
+# coloured tree, `is_prime`'s *shadow* claim is one slot and its *debug* claim is
+# 33 — so the arms differ only in how the debug claim is zeroed, and the sweep
+# measures a third thing neither decision is about.)
+#
+# **`cargo test --features adr128-d1-arm-a` fails by design**, for ADR-116's
+# reason: the five zeroing tests assert the shape this arm exists to undo —
+# `no_width_of_slot_zeroing_emits_a_call` and its siblings pin "no call at any
+# width" and "a straight run below the ceiling", and under the feature the
+# ceiling is 32 and the call is back. Enable it only when staging that arm.
+adr128-d1-arm-a = []
+# ADR-128 decision 2 arm A: a shadow slot index is the local's *position* among
+# `Gc` locals again, not a colour, so the shadow claim is as wide as the debug
+# claim. The whole toggle is `RootSlotMap::color` in `lower.rs`, which under the
+# feature numbers `mir.locals` in order instead of colouring the interference
+# relation; the two-map split of decision 3, the dense budget charge of decision
+# 4 and `DEBUG_VALUE_STACK_SLOTS`' own sizing are all unaffected, because those
+# are what the arm holds constant.
+#
+#     cargo build --release -p praxis-cli \
+#         --features praxis-codegen-cranelift/adr128-d2-arm-a             # arm A
+#
+# **It makes wide functions fail to compile**, exactly as this tree did before
+# ADR-128: with positional assignment a function of more than `MAX_SHADOW_SLOTS`
+# `Gc` locals is rejected again. That is the arm being faithful, not a bug — but
+# it means `cargo test --features adr128-d2-arm-a` fails by design, and the
+# corpus program ADR-128 re-merges into one function does not compile under it.
+adr128-d2-arm-a = []
 
 [dependencies]
 praxis-mir.workspace = true

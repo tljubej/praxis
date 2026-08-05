@@ -83,7 +83,9 @@
 
 use crate::context::{DebugLocal, RuntimeContext};
 use crate::gc::GcRef;
-use crate::shadow_stack::{SlotStack, SlotStackHeader, SHADOW_STACK_SLOTS};
+use crate::shadow_stack::{
+    SlotStack, SlotStackHeader, MAX_DEBUG_VALUE_SLOTS, MAX_LIVE_SLOTS, MAX_SHADOW_SLOTS,
+};
 use crate::MAX_RECURSION_DEPTH;
 
 /// How a local appears in the crash debugger (§9.4 `locals`). Mirrors
@@ -383,9 +385,18 @@ pub struct FunctionDebugMeta {
     /// How many `Gc` locals this function has — the length of both `locals` and
     /// the run of value slots a call of it claims.
     pub local_count: u32,
-    /// `local_count` entries, in shadow-slot order: a local's shadow slot index
-    /// doubles as its debug-local index, which is what makes the two stacks
-    /// index-parallel for free.
+    /// `local_count` entries, in **debug-slot order**: the local's position among
+    /// this function's `Gc` locals, in MIR local order. Entry `i` describes the
+    /// word at displacement `i` of the run a call claims, which is what
+    /// [`crate::crash_snapshot`] and [`DebugFrameStackHeader::clear_reclaimed`]
+    /// rely on when they zip the two.
+    ///
+    /// This said "in shadow-slot order: a local's shadow slot index doubles as
+    /// its debug-local index" until ADR-128 decision 3, and that is now false in
+    /// both halves. A shadow slot index is a *colour* — `is_prime`'s shadow
+    /// indices are `{0}` while its debug indices are `0..33` — and the two stacks
+    /// are no longer index-parallel. Nothing about this array changed; what
+    /// changed is that the other stack stopped agreeing with it.
     pub locals: *const DebugLocalMeta,
     /// The function's source span `[start, end)` as byte offsets into the
     /// program source (§9.3 "current source span", ADR-035 decision 3). `(0, 0)`
@@ -462,18 +473,69 @@ pub type DebugFrameStackHeader = SlotStackHeader<DebugFrameEntry>;
 
 /// The size of the debug value reservation, in slots.
 ///
-/// Exactly the shadow stack's, and for exactly its two reasons: a call claims
-/// one slot per `Gc` local, a frame has at most `MAX_SHADOW_SLOTS` of them, and
-/// every prologue rejects `recursion_depth >= MAX_RECURSION_DEPTH` *before* it
-/// claims anything. So exhaustion is unrepresentable here too, and generated
-/// code emits no bounds check. Written as the shadow constant rather than
-/// re-derived, because the two must move together: they are indexed by the same
-/// slot number for the same local.
+/// **Sized by its own headroom term since ADR-128 decision 3**, where it used to
+/// be written as `SHADOW_STACK_SLOTS` on the strength of "they are indexed by the
+/// same slot number for the same local". That is no longer true: root slots are
+/// colored by live range and debug value slots stay dense, one per `Gc` local, so
+/// the two index spaces answer different questions and are bounded by different
+/// caps ([`MAX_SHADOW_SLOTS`](crate::MAX_SHADOW_SLOTS) and
+/// [`MAX_DEBUG_VALUE_SLOTS`]).
+///
+/// The first two terms are unchanged, and they are unchanged *for the same
+/// reason* rather than by inheritance. Exhaustion is unrepresentable here exactly
+/// as it is on the shadow stack: every generated prologue rejects
+/// `stack_left < frame_cost(slots)` before it claims anything, and
+/// [`frame_cost`](crate::frame_cost) charges the **dense** count of `Gc` locals
+/// (ADR-128 decision 4) — which is precisely this stack's width. So the claimed
+/// debug value slots of all live frames are bounded by `MAX_LIVE_SLOTS`, the
+/// same `budget / FRAME_BYTES_PER_SLOT + MAX_RECURSION_DEPTH ×
+/// REFERENCE_FRAME_SLOTS` that bounds the shadow stack, and generated code emits
+/// no bounds check because there is nothing left to check.
+///
+/// The headroom term is [`MAX_DEBUG_VALUE_SLOTS`] rather than `MAX_SHADOW_SLOTS`,
+/// for the reason `SHADOW_STACK_SLOTS` keeps one at all: the Rust-side
+/// [`push_frame`] callers spend no budget, so the argument above does not cover
+/// them, and one widest frame of headroom is what covers them instead.
 ///
 /// This is a *reservation*, and the weak scan (ADR-106) does not walk it. Its
 /// cost is bounded by `top - base` — the slots live calls have actually claimed
 /// — so raising this number costs address space and not collection time.
-pub const DEBUG_VALUE_STACK_SLOTS: usize = SHADOW_STACK_SLOTS;
+pub const DEBUG_VALUE_STACK_SLOTS: usize = MAX_LIVE_SLOTS + MAX_DEBUG_VALUE_SLOTS;
+
+// The capacity identity for this stack, spelled the same way and for the same
+// reason `SHADOW_STACK_SLOTS`'s is (ADR-128 decision 3: "the assert is not
+// optional"). The hazard is not someone raising the budget — the reservation
+// follows it — it is someone deciding ~5 MiB of address space is too much and
+// writing a smaller number. That edit makes debug-value-stack overflow reachable
+// from generated code, silently, because generated code does not check the limit.
+// This fails the *build* instead.
+const _: () = assert!(
+    DEBUG_VALUE_STACK_SLOTS > MAX_LIVE_SLOTS,
+    "the debug value stack must cover every slot the budget can buy, plus one \
+     frame of headroom for Rust-side pushes"
+);
+
+// And the premise that keeps the two stacks' bounds the same arithmetic: a
+// colored root width can never exceed the dense debug width, so the budget
+// charge on the dense count over-covers the shadow stack. If a later change ever
+// made the shadow claim the wider of the two, `SHADOW_STACK_SLOTS` would need its
+// own re-derivation rather than this one.
+const _: () = assert!(
+    MAX_SHADOW_SLOTS <= MAX_DEBUG_VALUE_SLOTS,
+    "a function's root slots are colored from its `Gc` locals, so there cannot \
+     be more of them than there are locals"
+);
+
+// The two reservations are no longer the same size, and the asymmetry is the
+// whole of decision 3 in one line: same budget-derived terms, different headroom.
+// A `const` block rather than a test for the reason the capacity identity above
+// is one — this is arithmetic over constants, so a build that disagrees with it
+// should not link.
+const _: () = assert!(
+    DEBUG_VALUE_STACK_SLOTS - crate::SHADOW_STACK_SLOTS == MAX_DEBUG_VALUE_SLOTS - MAX_SHADOW_SLOTS,
+    "the two slot reservations differ by exactly their headroom terms, because \
+     the budget-derived terms are the same arithmetic over the same charge"
+);
 
 /// The size of the debug frame-entry reservation, in slots — one per live call,
 /// bounded by the same depth guard, plus the headroom `SHADOW_STACK_SLOTS`
@@ -1234,5 +1296,73 @@ mod tests {
         assert!(f.rt.debug_value_stack().is_empty());
         assert!(guard.values().is_empty());
         drop(guard);
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-128 decision 3: this stack is bounded on its own terms.
+    //
+    // The shadow stack's three sizing tests, restated here. They were not
+    // duplicated before because `DEBUG_VALUE_STACK_SLOTS` *was*
+    // `SHADOW_STACK_SLOTS`, so the shadow tests covered both by construction.
+    // The two are now sized independently and only one of them is being tested
+    // by the tests in `shadow_stack.rs`.
+    // -----------------------------------------------------------------------
+
+    /// The sibling of `rejects_an_oversized_frame`: a function with more `Gc`
+    /// locals than the debug value stack can index is unconstructible, not
+    /// rejected at run time.
+    #[test]
+    fn rejects_a_function_with_more_gc_locals_than_the_stack_can_index() {
+        use crate::DebugSlotCount;
+        assert!(DebugSlotCount::new(MAX_DEBUG_VALUE_SLOTS as u32).is_some());
+        assert!(DebugSlotCount::new(MAX_DEBUG_VALUE_SLOTS as u32 + 1).is_none());
+    }
+
+    /// The sibling of `the_reservation_covers_every_slot_the_budget_can_buy`.
+    ///
+    /// The arithmetic is the shadow stack's, and it closes here for the reason
+    /// ADR-128 decision 4 gives: `frame_cost` charges the **dense** count of `Gc`
+    /// locals, which is exactly this stack's width. Charging the colored root
+    /// count instead would leave this reservation unbounded — which is one of the
+    /// two reasons decision 4 refuses the obvious temptation.
+    #[test]
+    fn the_value_reservation_covers_every_slot_the_budget_can_buy() {
+        for width in [0u32, 1, 11, 192, 1024, MAX_DEBUG_VALUE_SLOTS as u32] {
+            let per_frame = crate::frame_cost(width);
+            let frames = crate::STACK_BUDGET_BYTES / per_frame;
+            let slots = frames as usize * width as usize;
+            assert!(
+                slots <= MAX_LIVE_SLOTS,
+                "a stack of {frames} frames {width} `Gc` locals wide claims \
+                 {slots} value slots, past the {MAX_LIVE_SLOTS}-slot bound"
+            );
+        }
+        let stack = DebugValueStack::new(DEBUG_VALUE_STACK_SLOTS, None);
+        assert_eq!(stack.capacity(), DEBUG_VALUE_STACK_SLOTS);
+    }
+
+    /// The sibling of `a_wide_frame_spends_more_budget_than_a_narrow_one`, and
+    /// the test that says decision 4 actually happened.
+    ///
+    /// A function's *debug* width is what the guard charges for, so a function
+    /// with many `Gc` locals recurses less deeply than one with few — whatever
+    /// its co-live root set colors down to. If some later change moved the charge
+    /// onto the colored count, `MAX_DEBUG_VALUE_SLOTS` locals would cost the same
+    /// as `REFERENCE_FRAME_SLOTS` and this fails.
+    #[test]
+    fn a_function_with_more_gc_locals_spends_more_budget() {
+        let reference = crate::STACK_BUDGET_BYTES / crate::frame_cost(crate::REFERENCE_FRAME_SLOTS);
+        let widest = crate::STACK_BUDGET_BYTES / crate::frame_cost(MAX_DEBUG_VALUE_SLOTS as u32);
+        assert_eq!(
+            reference, MAX_RECURSION_DEPTH,
+            "a reference-width frame still reaches exactly the depth the old \
+             call count allowed"
+        );
+        assert!(
+            widest * 50 < reference,
+            "and the widest function there is must be far dearer than the \
+             reference one — 129 against 8000 as this is written: {widest} vs \
+             {reference}"
+        );
     }
 }

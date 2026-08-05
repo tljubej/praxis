@@ -654,15 +654,9 @@ fn check_slot_sets(
     n_locals: usize,
     errs: &mut Vec<VerifyError>,
 ) {
-    let (roots, debug) = match inst {
-        Inst::Alloc { roots, debug, .. }
-        | Inst::Materialize { roots, debug, .. }
-        | Inst::Call { roots, debug, .. }
-        | Inst::CallIndirect { roots, debug, .. }
-        | Inst::StructEq { roots, debug, .. } => (Some(roots), Some(debug)),
-        Inst::CheckFault { debug, .. } => (None, Some(debug)),
-        _ => (None, None),
-    };
+    // One match, in `annot`, shared with the backend's root colouring (ADR-128
+    // decision 2) — see `annot::slot_sets` for why this is not spelled out here.
+    let (roots, debug) = crate::annot::slot_sets(inst);
 
     if let Some(roots) = roots {
         if !roots.is_annotated() {

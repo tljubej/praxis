@@ -47,8 +47,24 @@ use crate::{
 /// every allocation*, so raising it made every call in the language slower —
 /// the handover measured 192 → 24 taking a no-op-call benchmark from 1.43 s to
 /// 1.27 s on its own. Under the contiguous stack it costs no per-call time at
-/// all: it caps one frame's width, which is what makes the reservation
-/// arithmetic in [`SHADOW_STACK_SLOTS`] close.
+/// all.
+///
+/// **It is not what bounds the stack, and it has not been a performance dial
+/// since ADR-101** (ADR-128 amends the account this comment used to give). The
+/// budget guard bounds every claimed slot on its own — see [`SHADOW_STACK_SLOTS`]
+/// — and this constant contributes only that reservation's headroom term for
+/// Rust-side pushes. It appears in exactly two places that survive to run time:
+/// the size of the reservation, and [`SlotCount::new`], which is a compile-time
+/// check. **It appears in no generated code.** Raising it changes the cost of no
+/// program that compiles today; it changes only which programs compile.
+///
+/// Since ADR-128 a frame's root width is the number of *colors* its co-live root
+/// sets need, not its count of `Gc` locals, and over all 71 functions of
+/// `tests/aoc-corpus` the largest co-live root set is 11 — which is
+/// [`REFERENCE_FRAME_SLOTS`]. So this cap keeps its value and its meaning and
+/// simply stops being reachable. What a programmer can still exhaust is
+/// [`MAX_DEBUG_VALUE_SLOTS`], which bounds the thing they can see: how many `Gc`
+/// locals one function may have.
 ///
 /// This is part of the contract between the backend and the runtime; bumping it
 /// is an ABI-affecting change caught by the ABI version check (§11.6) only in
@@ -57,6 +73,34 @@ use crate::{
 /// M8 raises this from 64 to 192 to accommodate AoC-style graph programs that
 /// allocate many collections (Deque/Set/Map/Vec) in a single frame.
 pub const MAX_SHADOW_SLOTS: usize = 192;
+
+/// The maximum `Gc` locals a single JIT'd function may have — the bound on the
+/// *dense* index space the crash debugger reads (ADR-128 decision 3).
+///
+/// Until ADR-128 this was [`MAX_SHADOW_SLOTS`], because one index space served
+/// both: a local's shadow slot index doubled as its debug-local index. Colouring
+/// the root slots by live range ends that. The two spaces now answer different
+/// questions and are sized differently — root slots are as many as a function's
+/// co-live root sets need, debug value slots are one per `Gc` local, in MIR local
+/// order, so that the debugger can render a local the program has finished with.
+///
+/// So the dense space needs its own bound, and it is sized for the thing it now
+/// limits: how many `Gc` locals a function may have, which is a property of the
+/// source text a programmer can see and can act on. 192 was closer to biting than
+/// anyone noticed — `bfs`'s and `vm`'s entry points are already at 178 and 185,
+/// and a 40-line function of twenty `var v = [1, 2, 3]` / `out(v.len())` pairs
+/// did not compile at all, while its largest co-live root set was **2**.
+///
+/// The cost of the headroom is address space and nothing else, and it is **one**
+/// reservation's, not two: [`MAX_SHADOW_SLOTS`] keeps its value, so
+/// [`SHADOW_STACK_SLOTS`] is unchanged at 624,192 slots and only
+/// [`DEBUG_VALUE_STACK_SLOTS`](crate::debug::DEBUG_VALUE_STACK_SLOTS) grows —
+/// 624,192 → 628,096, which is `(4096 − 192) × 8` = **30.5 KiB**. (ADR-128's own
+/// text prices it at ~64 KB by charging both reservations; that is the one
+/// number in the record that is wrong.) [`SlotStack::new`] allocates zeroed,
+/// which for the shadow stack's raw pointers is an `mmap` of untouched zero
+/// pages, so resident memory tracks how wide programs actually are.
+pub const MAX_DEBUG_VALUE_SLOTS: usize = 4096;
 
 /// A frame width the shadow stack can actually hold: a `u32` proven `<=`
 /// [`MAX_SHADOW_SLOTS`] at construction.
@@ -85,6 +129,38 @@ impl SlotCount {
     }
 
     /// The width, which is `<= MAX_SHADOW_SLOTS` by construction.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// A count of debug value slots the debug value stack can actually hold: a `u32`
+/// proven `<=` [`MAX_DEBUG_VALUE_SLOTS`] at construction (ADR-128 decision 3).
+///
+/// **A distinct type from [`SlotCount`], and that is the point.** Before ADR-128
+/// one count was both — the claim on the shadow stack and the claim on the debug
+/// value stack were the same number, so one type served. They are now different
+/// numbers with different bounds over different index spaces, and the failure
+/// mode of confusing them is silent: claiming the *colored* width on the debug
+/// stack would give the debugger a frame too short for its own metadata to index,
+/// and every local past the end would render another frame's value. Making them
+/// two types means that mix-up does not compile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DebugSlotCount(u32);
+
+impl DebugSlotCount {
+    /// `Some` iff `n` `Gc` locals fit in one function's debug frame.
+    #[must_use]
+    pub const fn new(n: u32) -> Option<DebugSlotCount> {
+        if n as usize <= MAX_DEBUG_VALUE_SLOTS {
+            Some(DebugSlotCount(n))
+        } else {
+            None
+        }
+    }
+
+    /// The width, which is `<= MAX_DEBUG_VALUE_SLOTS` by construction.
     #[must_use]
     pub const fn get(self) -> u32 {
         self.0
@@ -128,7 +204,14 @@ pub const SHADOW_STACK_SLOTS: usize = (STACK_BUDGET_BYTES / FRAME_BYTES_PER_SLOT
 
 /// The bound the reservation above covers, spelled once so the `const` block and
 /// the test can both read it rather than restating the arithmetic.
-const MAX_LIVE_SLOTS: usize = (STACK_BUDGET_BYTES / FRAME_BYTES_PER_SLOT) as usize
+///
+/// `pub(crate)` since ADR-128: it bounds the *debug value* stack too, and for the
+/// same reason rather than by coincidence. [`crate::frame_cost`] charges the
+/// dense count of `Gc` locals (decision 4), which is exactly that stack's width,
+/// so the budget argument that bounds the claimed shadow slots bounds the claimed
+/// debug value slots by the identical arithmetic. The shadow stack's own claim is
+/// no wider — a colored width is at most the dense one — so this covers both.
+pub(crate) const MAX_LIVE_SLOTS: usize = (STACK_BUDGET_BYTES / FRAME_BYTES_PER_SLOT) as usize
     + (MAX_RECURSION_DEPTH * REFERENCE_FRAME_SLOTS) as usize;
 
 // The capacity identity, restated so a build cannot disagree with it. It is

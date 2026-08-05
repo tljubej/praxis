@@ -21,7 +21,41 @@
 //! [`crate::liveness::annotate`] may fill one, so a builder cannot hand-write a
 //! root set that the pass then silently overwrites (61 such literals existed).
 
-use crate::ir::LocalId;
+use crate::ir::{Inst, LocalId};
+
+/// The two slot sets `inst` carries, by shared reference — `None` for a set this
+/// kind of instruction does not have.
+///
+/// **One match, three readers.** The `&mut` twin of this lives in
+/// [`crate::liveness`] and is what *fills* the sets; this is what reads them, and
+/// before ADR-128 it was written out a second time inside
+/// [`crate::verify`]'s `check_slot_sets`. The backend needs a third reader — the
+/// root colouring of ADR-128 decision 2 walks every safepoint's
+/// [`RootSlots::live`] before it lowers anything — and a third hand-written copy
+/// of the variant list is how the debugger silently stops seeing a local. ADR-044
+/// fixes the count of exhaustive matches over [`Inst`] at five; this consolidates
+/// two of them into one rather than adding a sixth.
+#[must_use]
+pub fn slot_sets(inst: &Inst) -> (Option<&RootSlots>, Option<&DebugSlots>) {
+    match inst {
+        Inst::Alloc { roots, debug, .. }
+        | Inst::Materialize { roots, debug, .. }
+        | Inst::Call { roots, debug, .. }
+        | Inst::CallIndirect { roots, debug, .. }
+        | Inst::StructEq { roots, debug, .. } => (Some(roots), Some(debug)),
+        Inst::CheckFault { debug, .. } => (None, Some(debug)),
+        _ => (None, None),
+    }
+}
+
+/// The GC root set `inst` carries, if it is a GC safepoint.
+///
+/// The half of [`slot_sets`] the backend's slot colouring wants, named so the
+/// call site reads as the question it is asking.
+#[must_use]
+pub fn roots_of(inst: &Inst) -> Option<&RootSlots> {
+    slot_sets(inst).0
+}
 
 /// The GC root set at one safepoint: the `Gc` locals live *across* it, plus the
 /// slots whose stale values must be cleared there (MIR-01).

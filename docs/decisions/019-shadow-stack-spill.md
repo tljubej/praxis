@@ -17,6 +17,14 @@
 > reader will be tempted by, and the Consequences bullet on prologue overhead is
 > the sentence ADR-101 exists to answer.
 
+> **Amended by ADR-128 (2026-08-05): a slot is a live range, not a name.**
+> Decision 4's "the Gc-local → slot-index map is built once per function" is
+> retired for a map built by coloring the interference relation between locals
+> live at the same safepoint, so a frame's width is its peak simultaneous
+> liveness and a local live at no safepoint gets no slot at all. The spill
+> itself is unchanged — each live root is still written into its slot before
+> the safepointing call — and decisions 2 and 5 are untouched.
+
 ## Context
 
 §12.3 requires compiler-managed root tracking so the non-moving mark-and-sweep

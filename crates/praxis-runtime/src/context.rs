@@ -129,9 +129,20 @@ pub const STACK_BUDGET_BYTES: u32 = MAX_RECURSION_DEPTH * FRAME_BYTES_BASE;
 /// [`DEBUG_FRAME_STACK_SLOTS`](crate::debug::DEBUG_FRAME_STACK_SLOTS) is sized
 /// on.
 ///
-/// `slots` is a [`SlotCount`](crate::SlotCount) at every real call site and so
-/// is at most [`MAX_SHADOW_SLOTS`](crate::MAX_SHADOW_SLOTS); the saturating
-/// arithmetic is belt-and-braces for a caller that has not proved it yet.
+/// **`slots` is the count of `Gc` locals, not the count of shadow slots**
+/// (ADR-128 decision 4) — a [`DebugSlotCount`](crate::DebugSlotCount) at the one
+/// real call site, so at most [`MAX_DEBUG_VALUE_SLOTS`](crate::MAX_DEBUG_VALUE_SLOTS).
+/// It was a [`SlotCount`](crate::SlotCount) bounded by
+/// [`MAX_SHADOW_SLOTS`](crate::MAX_SHADOW_SLOTS) until colouring made the two
+/// different numbers, and the charge deliberately stayed on the larger one:
+/// `FRAME_BYTES_PER_SLOT` is not rent on a shadow slot, it is a calibrated proxy
+/// for the *native* frame, and under-reporting that is the SIGABRT ADR-105
+/// exists to remove.
+///
+/// So the bound this must not overflow is now 21× what it was — `frame_cost(4096)`
+/// is `134 + 2 × 4085` = 8304, comfortably inside `u32` and inside
+/// [`STACK_BUDGET_BYTES`] — and the saturating arithmetic is belt-and-braces for
+/// a caller that has not proved even that.
 #[must_use]
 pub const fn frame_cost(slots: u32) -> u32 {
     let over = slots.saturating_sub(REFERENCE_FRAME_SLOTS);

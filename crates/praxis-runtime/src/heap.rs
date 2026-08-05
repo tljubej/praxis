@@ -233,10 +233,13 @@ impl InlineInternSite {
 
     /// `log2(stride)` — the shift that scales an index to a byte offset.
     ///
-    /// A shift rather than a multiply because the stride is a pointer width and
-    /// the sequence is emitted at `opt_level = "none"`, where nothing would
-    /// strength-reduce an `imul` for us. `new` asserts the stride is a power of
-    /// two, so this is exact rather than approximate.
+    /// A shift rather than a multiply because the stride is a pointer width.
+    /// That was load-bearing when the sequence was emitted at
+    /// `opt_level = "none"`, where nothing would strength-reduce an `imul` for
+    /// us; the tree is at `"speed"` now and the mid-end would, so the shift is
+    /// free rather than necessary and is kept for being the thing that is
+    /// actually meant. `new` asserts the stride is a power of two, so this is
+    /// exact rather than approximate.
     #[must_use]
     pub const fn stride_shift(self) -> u8 {
         self.stride_shift

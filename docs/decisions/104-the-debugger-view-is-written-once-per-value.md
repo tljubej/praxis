@@ -9,7 +9,11 @@ is untouched); ADR-033 decision 4. ADR-101's `SlotStack` is used as delivered.
 MIR-16, MIR-01, MIR-02 and ADR-033 decisions 1–3 are preserved and the places
 this change touches their edges are recorded below.
 **Amended by:** ADR-106 (the value slots become the collector's one weak arm —
-the last Consequences bullet below is the defect it closes)
+the last Consequences bullet below is the defect it closes); ADR-128
+(2026-08-05) — the two stacks are no longer index-parallel: its decision 3
+colors the root slots and leaves the debug value slots dense, one per `Gc`
+local, so the shared `SlotCount` below is gone and each stack gets its own cap.
+`FunctionDebugMeta`'s layout is unchanged.
 
 ## Context
 

@@ -37,7 +37,7 @@ pub mod verify;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use annot::{DebugSlots, RootSlots};
+pub use annot::{roots_of, slot_sets, DebugSlots, RootSlots};
 pub use build::lower_module;
 pub use forward::forward_boxes;
 pub use ir::{

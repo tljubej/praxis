@@ -85,8 +85,8 @@ pub use roots::{
     NativeRootStore, NativeScope, RootScope, RootSet, Rooted, RuntimeRoots, NATIVE_ROOT_RESERVATION,
 };
 pub use shadow_stack::{
-    push_frame, ShadowFrameGuard, ShadowStack, ShadowStackHeader, SlotCount, SlotStack,
-    SlotStackHeader, MAX_SHADOW_SLOTS, SHADOW_STACK_SLOTS,
+    push_frame, DebugSlotCount, ShadowFrameGuard, ShadowStack, ShadowStackHeader, SlotCount,
+    SlotStack, SlotStackHeader, MAX_DEBUG_VALUE_SLOTS, MAX_SHADOW_SLOTS, SHADOW_STACK_SLOTS,
 };
 pub use small_int::{
     index_of as small_int_index, SMALL_INT_COUNT, SMALL_INT_MAX, SMALL_INT_MIN, SMALL_INT_STRIDE,

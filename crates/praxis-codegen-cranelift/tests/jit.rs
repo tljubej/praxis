@@ -9240,9 +9240,14 @@ fn adr100_a_wide_frame_recursing_deep_claims_and_gives_back_every_slot() {
     // inside the budget (which covers roughly 1990 of them), so ADR-105 does not
     // move it.
     //
-    // This frame is also wide enough to take the prologue's zeroing off the
-    // unrolled path and onto the `memset` one (well past SLOT_ZERO_UNROLL_MAX
-    // once temporaries are counted), which nothing else in the suite reaches.
+    // This frame used to be the one place in the suite wide enough to take the
+    // prologue's zeroing off the unrolled path and onto the `memset` one. There
+    // is no `memset` path any more (ADR-128 decision 1) and the unrolled ceiling
+    // is 256, so both claims here are straight runs of stores. What the width
+    // still buys is the other half of this test: twenty collections live across
+    // the recursive call is twenty *co-live* roots, so ADR-128 decision 2's
+    // colouring cannot fold them into fewer slots, and the frame is genuinely
+    // wide on both stacks rather than only on the debugger's.
     let mut body = String::from("fn wide(n: Int) -> Int {\n  if n == 0 { return 0 }\n");
     for i in 0..20 {
         body.push_str(&format!("  var v{i} = Vec()\n  v{i}.push(n)\n"));

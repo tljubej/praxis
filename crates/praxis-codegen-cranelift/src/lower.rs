@@ -22,8 +22,9 @@ use praxis_mir::{
     IntBinOp, LocalId, LocalKind, MirType, Overflow, RootSlots, ScalarKind, Terminator,
 };
 use praxis_runtime::{
-    descriptor::BuiltinTypeId, DebugFrameEntry, DebugLocalMeta, DebugSlotKind, FunctionDebugMeta,
-    RuntimeContext, ShadowStackHeader, SlotCount, MAX_SHADOW_SLOTS,
+    descriptor::BuiltinTypeId, DebugFrameEntry, DebugLocalMeta, DebugSlotCount, DebugSlotKind,
+    FunctionDebugMeta, RuntimeContext, ShadowStackHeader, SlotCount, MAX_DEBUG_VALUE_SLOTS,
+    MAX_SHADOW_SLOTS,
 };
 use praxis_stdlib::abi::{AbiKind, AbiRet, RuntimeSymbol};
 
@@ -54,13 +55,18 @@ const DEBUG_FRAMES_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, debug_fra
 /// box survives compilation — the `NonNull` niche (F18) — and because a local
 /// whose box ADR-120's forwarding elided stores its raw scalar payload into the
 /// *same* slot at the same stride. Derived rather than written as `8` for the
-/// reason `SHADOW_SLOT_BYTES` is, and asserted equal to it because a local's
-/// shadow slot index *is* its debug slot index — two strides that disagreed
-/// would put a local's value in another local's display.
+/// reason `SHADOW_SLOT_BYTES` is.
+///
+/// Asserted equal to `SHADOW_SLOT_BYTES` because one [`slot_displacement`] serves
+/// both stacks and [`emit_zero_slots`] writes one `GC`-typed word per slot on
+/// either. **Not** because the two stacks share an index — they did until
+/// ADR-128 decision 3, and the old wording of this assertion said so; the index
+/// spaces are now separate and only the stride is common.
 const DEBUG_VALUE_SLOT_BYTES: i64 = core::mem::size_of::<Option<praxis_runtime::GcRef>>() as i64;
 const _: () = assert!(
     DEBUG_VALUE_SLOT_BYTES == SHADOW_SLOT_BYTES,
-    "the shadow and debug stacks are indexed by the same slot number"
+    "both slot stacks are one machine word per slot, which is what lets one \
+     displacement helper and one zeroing emitter serve both"
 );
 
 /// The byte offset of `top` within a slot-stack header. The whole prologue and
@@ -76,16 +82,97 @@ const SLOT_STACK_TOP_OFFSET: i32 = ShadowStackHeader::TOP_OFFSET;
 /// local in the language.
 const SHADOW_SLOT_BYTES: i64 = core::mem::size_of::<*mut praxis_runtime::GcHeader>() as i64;
 
-/// Zero more than this many slots with a `memset` rather than a run of stores.
-/// Below it the call and its argument setup cost more than the stores; above
-/// it — a function with dozens of live `Gc` locals — the stores are both slower
-/// and a kilobyte of prologue.
+/// Zero more than this many slots with an inline loop rather than a run of
+/// stores. **This is a code-size budget, and nothing else** (ADR-128 decision 1).
+///
+/// It was 32, and that number was never measured: it appears in one commit
+/// (`488330f`, ADR-101's handover) and in no ADR and no handover. Its doc comment
+/// claimed a run of stores becomes *slower* than a call somewhere around 32
+/// slots, which has nothing behind it — a 264-byte `memset` is a call (argument
+/// setup, a branch to a stub, libc's own size dispatch) against 33 straight
+/// stores with no branch at all, and ADR-101's own figure priced the old
+/// prologue memset at ~32 ns per call.
+///
+/// So the threshold answers the one question that *is* real, and the measurements
+/// say which question that is. **Below it, a straight run beats both
+/// alternatives; above the widths any *hot* function reaches, nothing else can
+/// be measured at all.**
+///
+/// Three shapes were A/B'd at `is_prime`'s 33-slot debug claim, colouring held
+/// constant, `benchmarks/ab.py`:
+///
+/// | zeroing at 33 slots | against a straight run |
+/// |---|---:|
+/// | `%Memset` call | −0.3% ± 0.4% — unresolved |
+/// | **straight run of word stores** | — |
+/// | inline word loop | **−2.7% ± 0.3%** — resolved, and worse |
+///
+/// The loop is the *slowest* of the three at that width: 33 branches against 33
+/// stores a superscalar core pipelines with no branch at all. So the ceiling must
+/// sit above every hot function's width, and this one does — the widest claim in
+/// any function called more than a handful of times is `tree`'s `build` at 45:
+///
+/// | function | calls per run | dense claim |
+/// |---|---:|---:|
+/// | `tree`'s `build` | 131,071 | **45** |
+/// | `primes`' `is_prime` | 1.6 M | 33 |
+/// | `tree`'s `walk` | 131,071 | 25 |
+/// | `bfs`'s `open_cell` | ~40,000 | 14 |
+/// | `pipeline`'s closures | 1 M | 7–12 |
+/// | every `<entry>` (69–340) | **1** | — |
+///
+/// Everything wider than about 50 in this tree is an `<entry>`, claimed once per
+/// program run, where the prologue's cost is unmeasurable and its *size* is the
+/// only thing left to argue about. Hence a code-size budget, and hence 64: it
+/// clears the widest hot claim with headroom and caps a prologue's zeroing at
+///
+/// | slots | inline stores | code, both stacks |
+/// |---:|---:|---:|
+/// | 45 (`build`, the widest hot one) | 90 | 360 B |
+/// | 64 (this ceiling) | 128 | **512 B** |
+/// | 185 (`vm`'s `<entry>`) | — | *loops* |
+/// | 340 (`adr127_pipeline_over_every_iterable`'s `main`) | — | *loops* |
+/// | 4096 (`MAX_DEBUG_VALUE_SLOTS`) | 8192 | 32 KB if it did not |
+///
+/// The last row is why "always unroll, no threshold" is not the answer. 256 was
+/// the first value tried and is a **4× larger** code-size budget for no measured
+/// gain: 256 against 64 over the whole suite is `1.001×`, every one of eight rows
+/// unresolved, because nothing hot crosses either line.
 ///
 /// Deliberately not `FunctionBuilder::emit_small_memset`, whose threshold is 4:
 /// that would put a libc call in the prologue of any function with five `Gc`
 /// locals, which is most of them, and the point of ADR-101 is that the common
-/// prologue makes no calls at all.
+/// prologue makes no calls at all. Since ADR-128 that sentence is true rather
+/// than aspirational — see [`emit_zero_slots`], which no longer has a call in it
+/// at any width.
+///
+/// Under `adr128-d1-arm-a` this is 32 again and [`emit_zero_slots`] calls
+/// `%Memset` above it — the measurement arm, and the whole of that toggle.
+#[cfg(not(feature = "adr128-d1-arm-a"))]
+const SLOT_ZERO_UNROLL_MAX: u32 = 64;
+#[cfg(feature = "adr128-d1-arm-a")]
 const SLOT_ZERO_UNROLL_MAX: u32 = 32;
+
+/// ADR-128 decision 1's toggle: zero a run wider than [`SLOT_ZERO_UNROLL_MAX`]
+/// with a `%Memset` call, as ADR-101 left it, rather than with an inline loop.
+///
+/// A `const bool` and a runtime `if` rather than a `#[cfg]` block, which is the
+/// idiom every other measurement arm in this file uses
+/// ([`INLINE_COLLECTION_PRIMITIVES`], [`INLINE_SCALAR_CLAIM`]): the dead arm
+/// still type-checks in both builds, so an edit cannot rot the arm nobody
+/// compiles.
+#[cfg(not(feature = "adr128-d1-arm-a"))]
+const ZERO_SLOTS_WITH_MEMSET: bool = false;
+#[cfg(feature = "adr128-d1-arm-a")]
+const ZERO_SLOTS_WITH_MEMSET: bool = true;
+
+/// ADR-128 decision 2's toggle: assign a shadow slot by the local's *position*
+/// among `Gc` locals, as ADR-019 did, rather than by colouring the interference
+/// relation. See [`RootSlotMap`].
+#[cfg(not(feature = "adr128-d2-arm-a"))]
+const POSITIONAL_ROOT_SLOTS: bool = false;
+#[cfg(feature = "adr128-d2-arm-a")]
+const POSITIONAL_ROOT_SLOTS: bool = true;
 
 /// The byte offset of `stack_left` within a `RuntimeContext`. The prologue guard
 /// reads it — *before* it pushes anything — to decide whether what is left of the
@@ -210,8 +297,8 @@ pub(crate) fn lower_function<M: Module>(
 
 /// [`lower_function`], with the defined function's Cranelift IR cloned into
 /// `captured` when one is supplied — the post-`define_function` text, which at
-/// `opt_level = "none"` is the builder's own output tidied and not optimized
-/// output (`dump::emit` has the list of what "tidied" covers).
+/// the tree's `opt_level = "speed"` is the builder's output *after*
+/// `Context::optimize`, egraph mid-end included (`dump::emit` has the list).
 ///
 /// The compile path supplies none. This exists because `define_function` is the
 /// last point at which the lowered function exists at all — `clear_context`
@@ -228,9 +315,11 @@ fn lower_function_capturing<M: Module>(
     generation: &Generation,
     captured: Option<&mut codegen::ir::Function>,
 ) -> Result<()> {
-    // The ISA's pointer width and default call convention. Needed by the
-    // prologue's slot-zeroing memset and by `finalize` at the end, and taken
-    // here because both points hold a borrow that excludes `module`.
+    // The ISA's pointer width and default call convention, needed by `finalize`
+    // at the end and taken here because that point holds a borrow excluding
+    // `module`. The prologue's slot zeroing still takes it, but only
+    // `adr128-d1-arm-a` reads it: the `call_memset` ADR-128 decision 1 removed is
+    // the one thing in this backend that ever needed a call convention.
     let frontend_config = module.isa().frontend_config();
     // Use the module's own Context (the 0.134 idiom): build into `ctx.func`,
     // then `define_function(id, &mut ctx)`.
@@ -250,11 +339,20 @@ fn lower_function_capturing<M: Module>(
         .map(|_| builder.create_block())
         .collect();
 
-    // Build the Gc-local → slot-index map (ADR-019). Only `Gc` locals get a
-    // shadow-stack slot; `Scalar` locals are transient and must not survive a
-    // safepoint (the builder re-materializes them). The slot index is the
-    // local's position among Gc locals, *not* its MIR LocalId.
-    let gc_slot: HashMap<LocalId, u32> = {
+    // The debugger's index space: one slot per `Gc` local, in MIR local order
+    // (ADR-104, kept by ADR-128 decision 3). `Scalar` locals are transient and
+    // must not survive a safepoint (the builder re-materializes them), so they
+    // have no slot on either stack. The index is the local's position among `Gc`
+    // locals, *not* its MIR LocalId — and it is the same walk
+    // `build_function_debug_meta` makes, which is what lets a `DebugLocalMeta`
+    // at index `i` describe the word at displacement `i`.
+    //
+    // **Dense on purpose.** The crash debugger must render a local the program
+    // has finished with — that is the whole content of `DebugSlots` being
+    // deliberately over-approximate — so these cannot be colored the way the root
+    // slots below are, and `FunctionDebugMeta` resolves a slot to a name and a
+    // type *statically*, once per function.
+    let debug_slot: HashMap<LocalId, u32> = {
         let mut idx = 0u32;
         mir.locals
             .iter()
@@ -266,7 +364,12 @@ fn lower_function_capturing<M: Module>(
             })
             .collect()
     };
-    let gc_count = gc_slot.len() as u32;
+    let gc_count = debug_slot.len() as u32;
+
+    // The collector's index space: a *color*, not a position (ADR-128 decision
+    // 2). Two locals that are never live at one safepoint share a slot, and a
+    // local that is live at no safepoint gets none at all.
+    let root_slots = RootSlotMap::color(mir);
 
     // The inverse of `Function::debug_scalar_source` (ADR-120 part 2): for each
     // `Scalar` local that stands in for a box the forwarding elided, the debug
@@ -279,26 +382,64 @@ fn lower_function_capturing<M: Module>(
     // boxes of one scalar are representable (`Materialize` twice) and both slots
     // are then the same value — a fact worth writing down rather than an
     // `unwrap` waiting to be wrong.
+    //
+    // These are **debug** slots: the store they stand in for is
+    // `store_debug_local`'s, into the debug value stack. Sorted because the map
+    // they are read out of is a `HashMap`, and an unsorted `Vec` here would make
+    // the *order of two stores* depend on hash seeding — same MIR in, different
+    // CLIF out, which is what the snapshot suites and `PRAXIS_DUMP_CLIF` cannot
+    // have.
     let elided_box_slots: HashMap<LocalId, Vec<u32>> = {
         let mut map: HashMap<LocalId, Vec<u32>> = HashMap::new();
-        for (&boxed, &slot) in &gc_slot {
+        for (&boxed, &slot) in &debug_slot {
             if let Some((scalar, _)) = mir.debug_scalar_source(boxed) {
                 map.entry(scalar).or_default().push(slot);
             }
         }
+        for slots in map.values_mut() {
+            slots.sort_unstable();
+        }
         map
     };
-    // A frame wider than the shadow stack can hold is rejected here, and this
-    // is the only place it can be: `SlotCount` is unconstructible above the cap,
-    // and every consumer downstream — including the reservation-sizing argument
-    // in `SHADOW_STACK_SLOTS` — assumes the bound rather than re-checking it.
-    let slot_count = SlotCount::new(gc_count).ok_or_else(|| {
+
+    // The two widths, each checked against its own cap, and this is the only
+    // place either can be: both count types are unconstructible above their
+    // bound, and every consumer downstream — including the reservation-sizing
+    // arguments in `SHADOW_STACK_SLOTS` and `DEBUG_VALUE_STACK_SLOTS` — assumes
+    // the bound rather than re-checking it.
+    //
+    // The message names `Gc` locals in both cases because that is what a
+    // programmer wrote; only the second is a limit they can realistically reach.
+    let root_count = SlotCount::new(root_slots.width()).ok_or_else(|| {
         anyhow!(
-            "function `{}` has {gc_count} Gc locals, exceeding MAX_SHADOW_SLOTS \
-             ({MAX_SHADOW_SLOTS})",
+            "function `{}` needs {} simultaneously-live Gc roots, exceeding \
+             MAX_SHADOW_SLOTS ({MAX_SHADOW_SLOTS})",
+            mir.name,
+            root_slots.width(),
+        )
+    })?;
+    let debug_count = DebugSlotCount::new(gc_count).ok_or_else(|| {
+        anyhow!(
+            "function `{}` has {gc_count} Gc locals, exceeding \
+             MAX_DEBUG_VALUE_SLOTS ({MAX_DEBUG_VALUE_SLOTS}); split it",
             mir.name
         )
     })?;
+
+    // `PRAXIS_DUMP_SLOTS`, which exists so that ADR-128's measurement table is
+    // something a later reader re-runs rather than re-derives (dump::SLOTS_VAR).
+    // Answered from the MIR and the two maps, before a single instruction is
+    // emitted.
+    //
+    // The `wants_slots` test is outside the call and not inside it, which is the
+    // whole difference between "one relaxed load and a branch per compiled
+    // function" and "two more walks of every instruction in the program on every
+    // `praxis run`" — Rust evaluates the argument first, so a guard inside
+    // `emit_slots` would not be a guard at all. `wants_vcode` is placed the same
+    // way and for the same reason.
+    if dump::wants_slots(&mir.name) {
+        dump::emit_slots(&mir.name, &slot_census(mir, &root_slots, gc_count));
+    }
 
     // Entry block: receive context + params, map params to their Variables.
     let entry = blocks[0];
@@ -333,7 +474,19 @@ fn lower_function_capturing<M: Module>(
     // frames of real functions differ by a factor of three; counted as calls,
     // the widest legal frame aborted the host at a depth the narrowest one
     // survived, which is exactly the failure this guard exists to prevent.
-    // `slot_count` is known here, so the cost folds to one immediate.
+    // The width is known here, so the cost folds to one immediate.
+    //
+    // **The width it spends is the dense count of `Gc` locals, not the colored
+    // root count** (ADR-128 decision 4), and the temptation to charge the smaller
+    // number is obvious and wrong. `FRAME_BYTES_PER_SLOT` is not rent on a shadow
+    // slot; it is a calibrated proxy for the *native* frame. Charging the colored
+    // count would under-report a function whose native frame is large, and the
+    // failure mode of under-reporting is SIGABRT with no diagnostic — precisely
+    // what ADR-105 was written to remove. Two more reasons: the dense count is
+    // also the debug value stack's width, and *that* stack's reservation is
+    // bounded by exactly this charge; and at `opt_level = "speed"` the native
+    // frame already tracks live ranges, so charging the dense count is now
+    // conservative. Erring high here is free; erring low is a crash.
     //
     // And it counts *down*, against a budget the context arrived carrying. The
     // limit is therefore not in generated code at all — `Runtime::context` is
@@ -354,7 +507,7 @@ fn lower_function_capturing<M: Module>(
     let saved_left_var = builder.declare_var(types::I32);
     // What this frame spends. One immediate, folded at compile time; also what
     // the frame-size audit after `define_function` checks Cranelift against.
-    let this_frame_cost = praxis_runtime::frame_cost(slot_count.get());
+    let this_frame_cost = praxis_runtime::frame_cost(debug_count.get());
     {
         // Load `(*ctx).stack_left` (u32) at its fixed `#[repr(C)]` offset.
         // `MemFlags::trusted()` is aligned + notrap: the context is live for the
@@ -431,18 +584,21 @@ fn lower_function_capturing<M: Module>(
     //
     // Emitted unconditionally, including when this function has no `Gc` locals.
     // `spill_roots` calls `use_var(frame_var)` whenever the root set is
-    // non-empty, and a root set can be non-empty while `slot_of` yields nothing
-    // (a `Scalar` local in the set — see the `continue` there), so a
-    // `gc_count == 0` special case would leave `frame_var` undefined on a path
+    // non-empty, and a root set can be non-empty while `root_slot_of` yields
+    // nothing (a `Scalar` local in the set — see the `continue` there), so a
+    // `root_count == 0` special case would leave `frame_var` undefined on a path
     // that reads it and panic Cranelift. One code path is worth two wasted
-    // instructions in a case that essentially does not occur.
+    // instructions in a case that essentially does not occur — and since ADR-128
+    // decision 2 that case is *common* rather than hypothetical: a function whose
+    // locals are never live across a safepoint claims no root slots at all, which
+    // is `is_prime`, `bfs`'s `open_cell` and every closure in `pipeline`.
     let frame_var = builder.declare_var(GC);
     {
         let base = emit_slot_stack_push(
             &mut builder,
             ctx_val,
             SHADOW_OFFSET,
-            slot_count,
+            root_count.get(),
             SHADOW_SLOT_BYTES,
             frontend_config,
         );
@@ -455,13 +611,20 @@ fn lower_function_capturing<M: Module>(
     // to three mallocs:
     //
     //  - `debug_values_var` holds the base of this call's run of one word per
-    //    `Gc` local, in the same order as `gc_slot` — so a local's shadow slot
-    //    index doubles as its debug-local index and the two stacks are
-    //    index-parallel for free. Zeroed on claim, which is what makes an
-    //    unwritten slot render as `<uninit>` (F18). The word is a `GcRef` for
-    //    every local whose box survives and a raw scalar payload for one whose
-    //    box ADR-120's forwarding elided; the `DebugLocalMeta` beside the slot
-    //    is what says which, so nothing here has to know.
+    //    `Gc` local, in the same order as `debug_slot` — which is
+    //    `build_function_debug_meta`'s own walk, so a `DebugLocalMeta` at index
+    //    `i` describes the word at displacement `i`. Zeroed on claim, which is
+    //    what makes an unwritten slot render as `<uninit>` (F18). The word is a
+    //    `GcRef` for every local whose box survives and a raw scalar payload for
+    //    one whose box ADR-120's forwarding elided; the `DebugLocalMeta` beside
+    //    the slot is what says which, so nothing here has to know.
+    //
+    //    **This claim is a different width from the shadow one above** since
+    //    ADR-128 decision 3. ADR-104 built the two index-parallel "for free",
+    //    because a local's shadow slot index doubled as its debug-local index;
+    //    colouring the root slots by live range ends that, and the two spaces now
+    //    answer different questions. What ADR-104 built is otherwise kept whole,
+    //    `FunctionDebugMeta`'s layout included.
     //  - `debug_frame_var` holds this call's one `DebugFrameEntry`, which pairs
     //    the function's *static* `FunctionDebugMeta` with that base. Claimed
     //    without zeroing: both words are written immediately below, in
@@ -478,13 +641,32 @@ fn lower_function_capturing<M: Module>(
             &mut builder,
             ctx_val,
             DEBUG_VALUES_OFFSET,
-            slot_count,
+            debug_count.get(),
             DEBUG_VALUE_SLOT_BYTES,
             frontend_config,
         );
         builder.def_var(debug_values_var, values_base);
 
         let meta_ptr = build_function_debug_meta(mir, db, generation);
+        // The one equality the runtime reads this claim under, and the reason
+        // decision 3 is safe: `crash_snapshot::copy_stack` and
+        // `DebugFrameStackHeader::clear_reclaimed` both walk
+        // `0..meta.local_count` over *this* run of slots. A `local_count` larger
+        // than the claim reads — and, in `clear_reclaimed`, writes — past it into
+        // the next frame's slots. The two are built by two walks of `mir.locals`
+        // with the same filter, so they agree; this is what says so out loud, and
+        // it is the assertion decision 5 has to keep true when it starts denying
+        // locals a slot.
+        //
+        // SAFETY: `build_function_debug_meta` just returned this pointer out of
+        // the generation arena, which outlives the compilation.
+        debug_assert_eq!(
+            unsafe { (*meta_ptr).local_count },
+            debug_count.get(),
+            "`{}`'s debug metadata describes a different number of locals than \
+             its frame claims slots for",
+            mir.name
+        );
         let entry = emit_slot_stack_claim(
             &mut builder,
             ctx_val,
@@ -507,7 +689,8 @@ fn lower_function_capturing<M: Module>(
         saved_left_var,
         debug_values_var,
         debug_frame_var,
-        slot_of: &gc_slot,
+        root_slot_of: &root_slots,
+        debug_slot_of: &debug_slot,
         elided_box_slots: &elided_box_slots,
     };
 
@@ -616,10 +799,13 @@ fn lower_function_capturing<M: Module>(
     audit_frame_cost(&ctx, &mir.name, this_frame_cost);
     // Between here and `clear_context` is the only window in which the lowered
     // function exists, and the next line drops it. What `define_function` did to
-    // `ctx.func` on the way through is *not* optimization: at `opt_level =
-    // "none"` (module::CRANELIFT_FLAGS) `Context::optimize` is unreachable-block
-    // elimination, constant-block-parameter removal and alias resolution, and the
-    // egraph mid-end is gated off. See `dump::emit` for the whole of it.
+    // `ctx.func` on the way through *is* optimization: at `opt_level = "speed"`
+    // (module::CRANELIFT_FLAGS) `Context::optimize` runs unreachable-block
+    // elimination, constant-block-parameter removal, alias resolution **and the
+    // egraph mid-end**. This comment said the mid-end was gated off, which was
+    // true until the fifth measurement in `module.rs` moved the flag; ADR-128's
+    // aside is what caught it. See `dump::emit` for the whole of it, and for why
+    // a package quoting an instruction count off this text has to care.
     dump::emit(&mir.name, &ctx);
     if let Some(out) = captured {
         *out = ctx.func.clone();
@@ -715,7 +901,7 @@ fn emit_slot_stack_push(
     builder: &mut FunctionBuilder,
     ctx_val: Value,
     ctx_field_offset: i64,
-    count: SlotCount,
+    count: u32,
     slot_bytes: i64,
     cfg: TargetFrontendConfig,
 ) -> Value {
@@ -723,7 +909,7 @@ fn emit_slot_stack_push(
         builder,
         ctx_val,
         ctx_field_offset,
-        i64::from(count.get()) * slot_bytes,
+        i64::from(count) * slot_bytes,
     );
     emit_zero_slots(builder, base, count, slot_bytes, cfg);
     base
@@ -769,10 +955,21 @@ fn emit_slot_stack_claim(
 /// here rather than propagated to the caller.
 ///
 /// The header is re-read from the context rather than carried from the push.
-/// Carrying it would keep a second value live across the whole body, and at
-/// `opt_level = "none"` a value live across a call is a native stack slot in
-/// every frame — which is the budget deep recursion actually runs out of. The
-/// reload is an L1 hit off a pointer that is live regardless.
+/// Carrying it would keep a second value live across the whole body, which at
+/// `opt_level = "none"` — the level this was decided at — meant a native stack
+/// slot in every frame, and the native frame is the budget deep recursion
+/// actually runs out of.
+///
+/// **That premise is stale and the conclusion is kept on a different one**
+/// (ADR-128's aside). The tree has been at `"speed"` since the fifth measurement
+/// in `module.rs`, where the register allocator assigns stack slots by live range
+/// and would not necessarily spend one on this. What justifies the reload now is
+/// the second half of the old sentence, which never depended on the level: it is
+/// an L1 hit off a pointer that is live regardless, against a value that would
+/// otherwise be live across every call in the body. Re-measuring it means
+/// comparing the `sub sp, sp, #N` immediate in a `PRAXIS_DUMP_VCODE` prologue
+/// with and without the threading — no benchmark and no clock — and it is not
+/// this record's to spend.
 fn emit_slot_stack_pop(
     builder: &mut FunctionBuilder,
     ctx_val: Value,
@@ -800,17 +997,46 @@ fn emit_slot_stack_pop(
 /// reason: an unwritten slot must read `None` so `locals` renders `<uninit>`
 /// rather than a value from a deeper call that has since returned.
 ///
+/// # This run is never a `memset`, and cannot be one
+///
+/// It used to call one above [`SLOT_ZERO_UNROLL_MAX`], and that was the wrong
+/// shape rather than a wrong threshold (ADR-128 decision 1). `memset`'s cost is
+/// mostly *generality*: dispatch on a byte count that may be anything, fix-ups
+/// for a ragged head and tail, size-class branches. Every one of those cases is
+/// unreachable here. This run is always a whole number of slots, contiguous, and
+/// starting word-aligned — a slot is one machine word on both stacks, which is
+/// not an assumption added here but the one the assertion below already makes.
+///
+/// A run of word stores at word-aligned addresses needs none of `memset`'s
+/// machinery and needs nothing arranged to be correct: the element type's
+/// alignment already covers the access, so `MemFlags::trusted()`'s `aligned` bit
+/// stays honest with no work. So above the ceiling this emits an inline **loop**
+/// of the same word stores — bounded code, no libc, at any width. That is what
+/// makes ADR-101's "the common prologue makes no calls at all" true of *every*
+/// prologue rather than of the common one.
+///
+/// **The small case is untouched, deliberately.** For a four-slot frame the four
+/// stores are already optimal and a loop — counter setup, a branch per iteration
+/// — would regress nearly every function in the language.
+///
+/// Widths are computed in *words* rather than in the literal 8: the figures in
+/// [`SLOT_ZERO_UNROLL_MAX`] are the 64-bit targets in play, and nothing in
+/// ADR-128 should be the reason a 32-bit port is a rewrite.
+///
 /// # Panics
-/// If a slot is not one machine word wide. The unrolled path below writes one
-/// `GC`-typed zero per slot, so a wider slot would leave its tail untouched —
-/// silently, and only for the slots a function never writes. Both instantiations
-/// are pointer-width today; a third that is not must extend this rather than
-/// discover it in a profile.
+/// If a slot is not one machine word wide. Both paths below write one `GC`-typed
+/// zero per slot, so a wider slot would leave its tail untouched — silently, and
+/// only for the slots a function never writes. Both instantiations are
+/// pointer-width today; a third that is not must extend this rather than discover
+/// it in a profile.
 fn emit_zero_slots(
     builder: &mut FunctionBuilder,
     base: Value,
-    count: SlotCount,
+    count: u32,
     slot_bytes: i64,
+    // Read only on `adr128-d1-arm-a`'s `call_memset` path, which is compiled in
+    // both arms (a `const bool` and a runtime `if`, not a `#[cfg]`), so this is
+    // a live use either way and needs no `allow`.
     cfg: TargetFrontendConfig,
 ) {
     assert_eq!(
@@ -818,7 +1044,7 @@ fn emit_zero_slots(
         i64::from(GC.bytes()),
         "emit_zero_slots writes one word per slot"
     );
-    let n = count.get();
+    let n = count;
     if n == 0 {
         return;
     }
@@ -834,15 +1060,308 @@ fn emit_zero_slots(
         }
         return;
     }
-    let ch = builder.ins().iconst(types::I8, 0);
-    let size = builder
-        .ins()
-        .iconst(cfg.pointer_type(), i64::from(n) * slot_bytes);
-    builder.call_memset(cfg, base, ch, size);
+
+    if ZERO_SLOTS_WITH_MEMSET {
+        // ADR-128 decision 1 arm A: the `%Memset` call this decision removed,
+        // restored for the measurement and for nothing else. The zero constant
+        // is minted inside each arm rather than hoisted above them, so this path
+        // emits exactly what the pre-ADR-128 tree emitted and the arm is a
+        // measurement of the call rather than of the call plus a dead `iconst`.
+        let ch = builder.ins().iconst(types::I8, 0);
+        let size = builder
+            .ins()
+            .iconst(cfg.pointer_type(), i64::from(n) * slot_bytes);
+        builder.call_memset(cfg, base, ch, size);
+        return;
+    }
+
+    let zero = builder.ins().iconst(GC, 0);
+
+    // The loop, for the widths a straight run would make kilobytes of prologue.
+    //
+    // Shaped as a do-while over the *cursor* rather than over an index: `n >= 1`
+    // is established above, so the body runs before the test and there is no
+    // entry guard to emit. The block parameter is the cursor, which is the only
+    // value that changes across the back edge — Cranelift's SSA builder gets one
+    // phi and the register allocator one register.
+    //
+    // `end` is `base + n*slot_bytes`, the same one-past-the-end address
+    // `emit_slot_stack_claim` already stored back as the stack's `top`. It is
+    // recomputed here rather than threaded from there because the two are one
+    // `iadd_imm_s` of a folded immediate, and threading it would keep a second
+    // value live across the loop.
+    let body = builder.create_block();
+    let done = builder.create_block();
+    let cursor = builder.append_block_param(body, GC);
+    #[allow(deprecated)] // iadd_imm_s vs iadd_imm: a positive immediate, and the
+    // signed form is what the width arithmetic actually produces.
+    let end = builder.ins().iadd_imm_s(base, i64::from(n) * slot_bytes);
+    builder.ins().jump(body, &[base.into()]);
+
+    builder.switch_to_block(body);
+    builder.ins().store(MemFlags::trusted(), zero, cursor, 0);
+    #[allow(deprecated)] // as above: one slot forward.
+    let next = builder.ins().iadd_imm_s(cursor, slot_bytes);
+    let more = builder.ins().icmp(IntCC::UnsignedLessThan, next, end);
+    builder.ins().brif(more, body, &[next.into()], done, &[]);
+
+    builder.switch_to_block(done);
+}
+
+/// A `Gc` local's shadow-slot index, which is a **colour and not a position**
+/// (ADR-128 decision 2).
+///
+/// # What the colouring is
+///
+/// Two `Gc` locals *interfere* when they both appear in one safepoint's
+/// [`RootSlots::live`] — that is, when the collector may have to see both at
+/// once. Locals that never interfere may share one slot, and a local that
+/// appears in no live set needs no slot at all. The frame's width is the number
+/// of colours used, and that is the count that becomes the [`SlotCount`], the
+/// shadow claim and the run the prologue zeroes.
+///
+/// Everything a call pays scales with the width it *declares*: the prologue
+/// zeroes it, `frame_cost` charges for it, and `push_roots` walks it at every
+/// collection, since the scan is one linear pass over `[base, top)` and a null
+/// slot is skipped but still read. Before this, the width was the count of `Gc`
+/// locals — 33 in `primes`'s `is_prime`, whose largest co-live root set is
+/// **one**. Over all 71 functions of `tests/aoc-corpus` the widest frame was 110
+/// and the largest co-live root set is 11, which is `REFERENCE_FRAME_SLOTS`.
+///
+/// # Why it is sound
+///
+/// **A shadow slot is write-only from generated code.** The collector is
+/// non-moving, so nothing is ever loaded back out of a slot: the backend spills
+/// before a safepoint and re-reads its Cranelift `Variable` afterwards, and
+/// [`SpillCtx::spill_roots`] is the only writer. So two locals sharing a slot
+/// have no reload hazard to create — whichever of them is live at a safepoint
+/// writes the slot on the way in, and the other is by construction not live
+/// there.
+///
+/// The same observation, one layer down: at `opt_level = "speed"` Cranelift's
+/// register allocator already assigns *native* stack slots by live range, on
+/// these same locals. The shadow stack was the last array in the pipeline handed
+/// out by name.
+///
+/// **The second premise, which is Cranelift's and not ours: there is no
+/// dead-store elimination.** Sharing a slot creates store→store pairs to one
+/// address with no load between them — a spill of `a` at one safepoint, a spill
+/// of `b` into the same slot at the next — and a compiler that eliminated the
+/// first as dead would delete a root the collector needed to see in between. It
+/// is not a hazard today, and by Cranelift's own account not soon:
+/// `cranelift-codegen`'s `alias_analysis.rs` says of dead-store elimination
+/// "Because this is so complex, and the conditions for doing it correctly when
+/// post-trap state must be correct likely reduce the potential benefit, we don't
+/// yet do this." Written down here rather than assumed, because a Cranelift
+/// upgrade that added it would drop roots silently and no test in the tree would
+/// catch it.
+///
+/// # Why the map is a type
+///
+/// The property "no two locals of one live set share an index" is the one whose
+/// violation is a silent wrong answer from the collector — a root written into a
+/// slot another live root then overwrites, so the collector never sees it, so it
+/// is swept while reachable. That is not a comment's job. [`RootSlotMap::color`]
+/// is the only constructor, it *derives* the assignment from the live sets
+/// rather than accepting one, and it re-checks the result against those same
+/// sets. Every consumer downstream assumes the property, the way `SlotCount`'s
+/// bound is assumed.
+struct RootSlotMap {
+    /// Only the locals that need a slot. A `Gc` local live at no safepoint is
+    /// absent, which is the difference between this and the debugger's dense map.
+    of: HashMap<LocalId, u32>,
+    /// The number of colours used, which is this frame's shadow width.
+    width: u32,
+}
+
+impl RootSlotMap {
+    /// Colour `mir`'s `Gc` locals by the interference relation its safepoints
+    /// define.
+    ///
+    /// Degree-ordered greedy, which is sufficient: over every function measured
+    /// for ADR-128 it reached the largest co-live set exactly, so nothing here
+    /// needs an optimal colourer.
+    ///
+    /// **Deterministic — same MIR in, same slots out.** `PRAXIS_DUMP_CLIF` output
+    /// and the snapshot suites depend on it, so every ordering below is by
+    /// `LocalId` or by degree with `LocalId` breaking the tie, and nothing
+    /// iterates a `HashMap`.
+    fn color(mir: &MirFunction) -> RootSlotMap {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        if POSITIONAL_ROOT_SLOTS {
+            // ADR-128 decision 2 arm A: the positional map this replaced — one
+            // slot per `Gc` local, the local's position among them, which is
+            // also the debugger's index space. That the two then coincide is the
+            // whole of what the arm reverts; decisions 3 and 4 still hold,
+            // because holding them constant is what makes this a measurement of
+            // the colouring and of nothing else.
+            let mut idx = 0u32;
+            let of: HashMap<LocalId, u32> = mir
+                .locals
+                .iter()
+                .filter(|l| l.kind == LocalKind::Gc)
+                .map(|l| {
+                    let i = idx;
+                    idx += 1;
+                    (l.id, i)
+                })
+                .collect();
+            return RootSlotMap { of, width: idx };
+        }
+
+        // Only `Gc` locals get a slot, and this filter is the map's own rather
+        // than another crate's. The positional map this replaces filtered
+        // `mir.locals` by `LocalKind::Gc` and so could not answer for a `Scalar`
+        // local at all; a map built from the *root sets* could, because
+        // `RootSlots::live` is a list of locals and nothing in its type says
+        // they are `Gc`. That they are is `VerifyError::RootIsNotGc`'s job, in
+        // `praxis-mir` — and a backend that stored a raw scalar payload into the
+        // collector's scan region because a verifier in another crate stopped
+        // running is not a backend that is safe on its own terms.
+        let is_gc = |l: LocalId| {
+            mir.locals
+                .get(l.0 as usize)
+                .is_some_and(|loc| loc.kind == LocalKind::Gc)
+        };
+
+        // The interference graph, over exactly the locals some safepoint roots.
+        // `BTreeMap`/`BTreeSet` throughout: this is the input to a greedy
+        // assignment whose answer depends on the order it visits.
+        let mut adj: BTreeMap<LocalId, BTreeSet<LocalId>> = BTreeMap::new();
+        let live_sets: Vec<Vec<LocalId>> = mir
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .filter_map(praxis_mir::roots_of)
+            .map(|r| r.live().iter().copied().filter(|&l| is_gc(l)).collect())
+            .filter(|live: &Vec<LocalId>| !live.is_empty())
+            .collect();
+        for live in &live_sets {
+            for &a in live {
+                let entry = adj.entry(a).or_default();
+                for &b in live {
+                    if a != b {
+                        entry.insert(b);
+                    }
+                }
+            }
+        }
+
+        // Degree-ordered greedy: colour the most constrained local first, so the
+        // colours it forces onto its neighbours are chosen while the most
+        // choices remain. Ties break on `LocalId`, ascending.
+        let mut order: Vec<LocalId> = adj.keys().copied().collect();
+        order.sort_by_key(|l| (std::cmp::Reverse(adj[l].len()), *l));
+
+        let mut of: HashMap<LocalId, u32> = HashMap::with_capacity(order.len());
+        let mut width = 0u32;
+        for local in order {
+            // The smallest colour no already-coloured neighbour holds.
+            let taken: BTreeSet<u32> = adj[&local]
+                .iter()
+                .filter_map(|n| of.get(n).copied())
+                .collect();
+            let color = (0u32..).find(|c| !taken.contains(c)).unwrap_or(0);
+            width = width.max(color + 1);
+            of.insert(local, color);
+        }
+
+        let map = RootSlotMap { of, width };
+        map.debug_assert_disjoint(&live_sets);
+        map
+    }
+
+    /// Re-check the colouring against the live sets it was derived from.
+    ///
+    /// Correct by construction, and checked anyway: the cost of being wrong here
+    /// is a root the collector cannot see, which presents as a use-after-free in
+    /// an unrelated part of a program that ran for a while first. `debug_assert`
+    /// rather than `assert` because this is `O(Σ |live|²)` over every safepoint
+    /// and the release compiler is on the critical path of every `praxis run`.
+    fn debug_assert_disjoint(&self, live_sets: &[Vec<LocalId>]) {
+        debug_assert!(
+            live_sets.iter().all(|live| {
+                let mut seen: Vec<u32> = live.iter().filter_map(|&l| self.get(l)).collect();
+                let n = seen.len();
+                seen.sort_unstable();
+                seen.dedup();
+                seen.len() == n && n == live.len()
+            }),
+            "two locals live at one safepoint were given the same shadow slot, \
+             or a live root was given none: the collector would see only one of \
+             them, and sweep the other while it is still reachable"
+        );
+    }
+
+    /// This local's slot, if some safepoint roots it.
+    fn get(&self, local: LocalId) -> Option<u32> {
+        self.of.get(&local).copied()
+    }
+
+    /// The number of slots this frame claims.
+    fn width(&self) -> u32 {
+        self.width
+    }
+}
+
+/// Count the columns of ADR-128's measurement table for one function.
+///
+/// Everything here is read off the MIR and the colouring, so it is what the
+/// backend *will* claim rather than a second estimate of it: `dense` and
+/// `colored` are the two `emit_slot_stack_push` widths verbatim.
+fn slot_census(mir: &MirFunction, roots: &RootSlotMap, dense: u32) -> dump::SlotCensus {
+    let mut live_max = 0u32;
+    let mut debug_visible_max = 0u32;
+    for inst in mir.blocks.iter().flat_map(|b| &b.insts) {
+        let (r, d) = praxis_mir::slot_sets(inst);
+        if let Some(r) = r {
+            live_max = live_max.max(r.live().len() as u32);
+        }
+        if let Some(d) = d {
+            debug_visible_max = debug_visible_max.max(d.visible().len() as u32);
+        }
+    }
+    // Decision 5's candidate set: the `Gc` locals the debugger can say least
+    // about — no source name, no span. Counted rather than acted on; ADR-128
+    // keeps that decision separate and gated on the snapshot suites.
+    let nameless: Vec<LocalId> = mir
+        .locals
+        .iter()
+        .filter(|l| l.kind == LocalKind::Gc)
+        .filter(|l| mir.debug_name(l.id).is_none() && mir.debug_span(l.id).is_none())
+        .map(|l| l.id)
+        .collect();
+
+    // And the subset that passes decision 5's own gate. A local whose debug slot
+    // nothing ever stores into reads `None` forever, and `render_frame_locals`
+    // drops a temp with neither a value nor a span — so it is invisible today and
+    // dropping it cannot lose a line. Three ways a slot gets written, and a
+    // candidate must be excluded by all three: an instruction defines the local,
+    // it is a parameter (the prologue stores those), or it is an elided box whose
+    // scalar's definition writes its slot (ADR-120 part 2).
+    let mut written: std::collections::HashSet<LocalId> = mir.params.iter().copied().collect();
+    for inst in mir.blocks.iter().flat_map(|b| &b.insts) {
+        written.extend(praxis_mir::defs(inst));
+    }
+    let unrenderable = nameless
+        .iter()
+        .filter(|&&l| !written.contains(&l))
+        .filter(|&&l| mir.debug_scalar_source(l).is_none())
+        .count() as u32;
+
+    dump::SlotCensus {
+        dense,
+        colored: roots.width(),
+        live_max,
+        debug_visible_max,
+        nameless: nameless.len() as u32,
+        unrenderable,
+    }
 }
 
 /// The spill context handed to every instruction/terminator lowering: the
-/// Variables the prologue defined, and the Gc-local → slot-index map.
+/// Variables the prologue defined, and the two Gc-local → slot-index maps.
 ///
 /// **Two writers, not one** (MIR-16). There used to be a single `emit_spill`
 /// writing one root list into both frames, which is why the two frames could
@@ -868,7 +1387,19 @@ struct SpillCtx<'a> {
     /// stack, written in the prologue and stored back as that stack's `top` by
     /// the epilogue.
     debug_frame_var: Variable,
-    slot_of: &'a HashMap<LocalId, u32>,
+    /// The collector's index space: a `Gc` local's *color* under ADR-128
+    /// decision 2's interference colouring, feeding [`SpillCtx::spill_roots`] and
+    /// the shadow claim. A local live at no safepoint is absent from it.
+    root_slot_of: &'a RootSlotMap,
+    /// The debugger's index space: a `Gc` local's position among `Gc` locals,
+    /// feeding [`SpillCtx::store_debug_local`], [`SpillCtx::store_debug_defs`],
+    /// `elided_box_slots` and the debug value claim. Every `Gc` local is in it.
+    ///
+    /// **Two maps, not one, and no consumer needs to know there was ever one.**
+    /// Mixing them is the mistake that would put a local's value in another
+    /// local's display, or root the wrong slot; each store site below names the
+    /// one it means.
+    debug_slot_of: &'a HashMap<LocalId, u32>,
     /// The debug slots each `Scalar` local must write because the box that
     /// used to write them is gone (ADR-120 part 2). Empty for every function
     /// the forwarding pass did not touch, which is what makes this cost nothing
@@ -894,6 +1425,26 @@ impl SpillCtx<'_> {
     /// whole frame, so a dead slot kept its object reachable for the rest of the
     /// call — and, once RT-01 made swept storage reusable, a slot could name a
     /// live object of an entirely different type.
+    ///
+    /// ### The one subtlety colouring introduces
+    ///
+    /// [`RootSlots::dead`] is a set of **locals** whose slots may be stale
+    /// (MIR-01). Translated naively to slots it is wrong: under ADR-128 decision
+    /// 2 a dead local may share a slot with a live one, and nulling it would null
+    /// the live one's value — a root the collector then does not see, which is a
+    /// use-after-free the type system cannot catch and no test of a *dead* local
+    /// would notice.
+    ///
+    /// The translation is therefore a set difference at the *slot* level:
+    ///
+    /// ```text
+    /// dead_slots = { slot(l) : l ∈ roots.dead() } \ { slot(l) : l ∈ roots.live() }
+    /// ```
+    ///
+    /// which is correct by construction — a slot occupied by a live root is
+    /// written with that root's value in the loop above, and writing it *is* the
+    /// erasure of whatever dead local shared it. The difference also dedupes: two
+    /// dead locals sharing one slot are one null store, not two.
     fn spill_roots(&self, builder: &mut FunctionBuilder, roots: &RootSlots, vars: &[Variable]) {
         if roots.live().is_empty() && roots.dead().is_empty() {
             return;
@@ -902,10 +1453,39 @@ impl SpillCtx<'_> {
         // Aligned + non-trapping: the frame's slots are live for the whole call
         // and in-bounds by construction.
         let flags = MemFlags::trusted();
+        // The slots this safepoint's live roots occupy, collected as they are
+        // stored so the dead set below can be differenced against them.
+        //
+        // The *stores* are already deterministic without any of this: they are
+        // emitted in `roots.live()` order, which `annot` documents and `liveness`
+        // delivers as ascending `LocalId`. The `sort_unstable` further down is
+        // for the `binary_search`, not for the emission order — a distinction
+        // worth keeping straight, because sorting this earlier would change the
+        // order of the emitted stores for no reason.
+        let mut live_slots: Vec<u32> = Vec::with_capacity(roots.live().len());
         for &local in roots.live() {
-            let Some(&slot) = self.slot_of.get(&local) else {
-                continue; // a Scalar local in the root set; it has no slot.
+            let Some(slot) = self.root_slot_of.get(local) else {
+                // A `Scalar` local in the root set — it holds a payload, not a
+                // pointer, so there is nothing for the collector to see and no
+                // slot to write. The verifier rejects such MIR
+                // (`VerifyError::RootIsNotGc`) and `RootSlotMap::color` filters
+                // it out, so this is the *only* way to get here.
+                //
+                // It is a `debug_assert` and not a `continue` alone because the
+                // other way to reach it would be a colouring that missed a live
+                // `Gc` root, and that is a root the collector never sees: swept
+                // while reachable, presenting later as a use-after-free
+                // somewhere else entirely.
+                // `debug_slot_of`'s keys are exactly this function's `Gc`
+                // locals, so it answers "is this one" without a second map.
+                debug_assert!(
+                    !self.debug_slot_of.contains_key(&local),
+                    "live `Gc` root {local:?} has no shadow slot; the colouring \
+                     dropped a root the collector must see"
+                );
+                continue;
             };
+            live_slots.push(slot);
             let val = builder.use_var(vars[local.0 as usize]);
             builder
                 .ins()
@@ -914,11 +1494,20 @@ impl SpillCtx<'_> {
         if roots.dead().is_empty() {
             return;
         }
+        live_slots.sort_unstable();
+        let mut dead_slots: Vec<u32> = roots
+            .dead()
+            .iter()
+            .filter_map(|&local| self.root_slot_of.get(local))
+            .filter(|slot| live_slots.binary_search(slot).is_err())
+            .collect();
+        dead_slots.sort_unstable();
+        dead_slots.dedup();
+        if dead_slots.is_empty() {
+            return;
+        }
         let null = builder.ins().iconst(GC, 0);
-        for &local in roots.dead() {
-            let Some(&slot) = self.slot_of.get(&local) else {
-                continue;
-            };
+        for slot in dead_slots {
             builder
                 .ins()
                 .store(flags, null, frame_base, slot_displacement(slot));
@@ -1025,15 +1614,18 @@ impl SpillCtx<'_> {
 
     /// Store `local`'s current value into its debug slot, if it has one.
     ///
-    /// Non-`Gc` locals (a scalar payload) have no slot and are skipped — the
-    /// same `slot_of` filter [`SpillCtx::spill_roots`] applies.
+    /// Non-`Gc` locals (a scalar payload) have no slot and are skipped. Every
+    /// `Gc` local has one, which is where this differs from
+    /// [`SpillCtx::spill_roots`] since ADR-128 decision 3: the root map may have
+    /// nothing for a local that is live at no safepoint, and the debugger must
+    /// still be able to render it.
     ///
     /// One store, with the slot index as the store's own displacement, exactly
     /// like [`SpillCtx::spill_roots`]. Under ADR-021's heap frame this was a
     /// load of `frame.locals`, an `iadd_imm_s` over a 48-byte `DebugLocal`
     /// stride, and a store at zero.
     fn store_debug_local(&self, builder: &mut FunctionBuilder, local: LocalId, vars: &[Variable]) {
-        let Some(&slot) = self.slot_of.get(&local) else {
+        let Some(&slot) = self.debug_slot_of.get(&local) else {
             return;
         };
         let values_base = builder.use_var(self.debug_values_var);
@@ -3007,9 +3599,12 @@ fn emit_inline_intern<M: Module>(
     let slow = builder.create_block();
     let merge = builder.create_block();
     // Cold-block placement runs in the machine-independent lowering
-    // (`BlockLoweringOrder` reads `Layout::is_cold`), so it applies at
-    // `opt_level = "none"` too — the level this was measured at. Both edges
-    // into it are "unlikely", and neither is on the path a loop counter takes.
+    // (`BlockLoweringOrder` reads `Layout::is_cold`), so it applied at
+    // `opt_level = "none"` — the level this was measured at — and applies at the
+    // `"speed"` the tree runs now, the mechanism being the same either way. What
+    // the level does change is the block *set*: `module.rs` records `collatz`
+    // going 38 cold blocks to 34. Both edges into this one are "unlikely", and
+    // neither is on the path a loop counter takes.
     builder.set_cold_block(slow);
 
     // (1) The pacing predicate, ahead of everything. `Heap::collection_is_due`
@@ -4027,9 +4622,20 @@ fn tuple_schema_for(
 /// generation arena, and answer the address the prologue writes into its
 /// `DebugFrameEntry` (§9.3, ADR-104).
 ///
-/// The locals are in the same order as the `gc_slot` map iterates them, so a
-/// local's shadow-slot index doubles as its debug-local index. Each entry
-/// carries the source name (interned in the same arena, empty for temps), a
+/// **The locals are in the same order as `debug_slot`**, because this walk and
+/// that one are the same walk — `mir.locals` filtered to `LocalKind::Gc`, in
+/// order — so entry `i` describes the word `store_debug_local` writes at
+/// displacement `i`. That equality is the premise the runtime reads this array
+/// under, and `lower_fn` asserts the count half of it against `debug_count`
+/// immediately after this returns.
+///
+/// It used to say "so a local's shadow-slot index doubles as its debug-local
+/// index". That stopped being true at ADR-128 decision 2, where a shadow slot
+/// became a colour; the debug space is the one that stayed dense, and this
+/// function is unchanged precisely because it was always describing *that* one.
+///
+/// Each entry carries the source name (interned in the same arena, empty for
+/// temps), a
 /// per-local symbol-id placeholder, the static type descriptor resolved from the
 /// MIR local's `Type` (§9.3, M10-WS2), the user-vs-temp classification, and the
 /// source span.
@@ -4271,10 +4877,15 @@ mod tests {
     /// A `JITModule` configured exactly as `Jit::in_generation` configures its
     /// own — `crate::module::CRANELIFT_FLAGS`, not Cranelift's defaults.
     ///
-    /// The two agree today (the default `opt_level` is also `"none"`), and that
-    /// is the reason to share the constant rather than to leave it: a test that
-    /// asserts on the emitted shape, and a `PRAXIS_DUMP_CLIF` run of the same
-    /// program, must be looking at the same code.
+    /// **The two no longer agree**, and that is what makes sharing the constant
+    /// load-bearing rather than tidy. `CRANELIFT_FLAGS` is
+    /// `opt_level = "speed"`; Cranelift's default is `"none"`. A test that built
+    /// its own `JITBuilder` from the defaults would run the mid-end not at all
+    /// where the real compile path runs it, so it would assert on code no
+    /// `praxis run` ever emits. A test that asserts on the emitted shape, and a
+    /// `PRAXIS_DUMP_CLIF` run of the same program, must be looking at the same
+    /// code. (This comment said the opposite until ADR-128, from back when the
+    /// two did agree.)
     fn test_module() -> JITModule {
         let builder = JITBuilder::with_flags(
             crate::module::CRANELIFT_FLAGS,
@@ -6127,7 +6738,11 @@ mod tests {
 
     /// The post-`define_function` Cranelift IR of `src`'s entry point, as text
     /// — the same text `PRAXIS_DUMP_CLIF` writes, without the count headers.
-    /// Not "optimized": at `opt_level = "none"` the egraph mid-end never runs.
+    /// **Optimized**: the tree is at `opt_level = "speed"`, so the egraph mid-end
+    /// has run over this. A test asserting an instruction is *absent* from it is
+    /// asserting "the lowering did not emit it, or the mid-end folded it", which
+    /// is usually the question one wants and is never quite the question one
+    /// wrote.
     fn lowered_function_ir(src: &str) -> String {
         lowered_function(src).display().to_string()
     }
@@ -6225,6 +6840,326 @@ mod tests {
             triple,
             lowered_function_ir(src),
             "which is not the entry point's"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-128 decision 1: the prologue's slot zeroing.
+    // -----------------------------------------------------------------------
+
+    /// The whole IR of a function that does nothing but zero `n` slots, plus its
+    /// instruction count.
+    ///
+    /// The base is the context pointer, which is an `i64` like any other and is
+    /// never dereferenced — nothing here executes, and the question is the shape
+    /// of the emitted code.
+    fn zeroing_ir(n: u32) -> (String, usize) {
+        let (func, _entry) = emitted_function(|builder, ctx_val, dst, module| {
+            let cfg = module.isa().frontend_config();
+            emit_zero_slots(builder, ctx_val, n, SHADOW_SLOT_BYTES, cfg);
+            builder.def_var(dst, ctx_val);
+            Ok(())
+        });
+        let text = func.display().to_string();
+        let count = text
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.is_empty() && !t.starts_with("block") && !t.starts_with("function")
+            })
+            .count();
+        (text, count)
+    }
+
+    /// **No prologue makes a call, at any width the caps allow** (ADR-128
+    /// decision 1).
+    ///
+    /// ADR-101 said the common prologue makes no calls; above
+    /// `SLOT_ZERO_UNROLL_MAX` it made two, one per slot stack. The statement is
+    /// only worth making if it cannot rot, so this asks it at every width class
+    /// there is — including one past `MAX_DEBUG_VALUE_SLOTS`, which no function
+    /// can reach, so that raising a cap cannot quietly reintroduce the call.
+    #[test]
+    fn no_width_of_slot_zeroing_emits_a_call() {
+        for n in [
+            0,
+            1,
+            4,
+            SLOT_ZERO_UNROLL_MAX - 1,
+            SLOT_ZERO_UNROLL_MAX,
+            SLOT_ZERO_UNROLL_MAX + 1,
+            1024,
+            MAX_DEBUG_VALUE_SLOTS as u32,
+            MAX_DEBUG_VALUE_SLOTS as u32 + 1,
+        ] {
+            let (ir, _) = zeroing_ir(n);
+            assert!(
+                !ir.contains("call"),
+                "zeroing {n} slots must not call anything — not `memset`, not a \
+                 libcall stub, nothing:\n{ir}"
+            );
+        }
+    }
+
+    /// Below the ceiling the run is exactly one store per slot and no branch.
+    ///
+    /// This is the case that must not change: for a four-slot frame the four
+    /// stores are already optimal, and replacing them with a loop — counter
+    /// setup, a branch per iteration — would regress nearly every function in
+    /// the language.
+    #[test]
+    fn a_narrow_claim_is_one_store_per_slot_and_no_branch() {
+        for n in [1u32, 4, 33, SLOT_ZERO_UNROLL_MAX] {
+            let (ir, _) = zeroing_ir(n);
+            let stores = ir.lines().filter(|l| l.contains("store")).count();
+            assert_eq!(
+                stores, n as usize,
+                "{n} slots is {n} stores, one per slot:\n{ir}"
+            );
+            assert!(
+                !ir.contains("brif") && !ir.contains("jump"),
+                "and a straight run has nothing to branch on:\n{ir}"
+            );
+        }
+    }
+
+    /// Above the ceiling the code is a loop, so its *size* stops growing with
+    /// the width — which is the whole reason there is a ceiling rather than
+    /// "always unroll".
+    #[test]
+    fn a_wide_claim_is_a_loop_whose_code_does_not_grow_with_it() {
+        let (small, small_count) = zeroing_ir(SLOT_ZERO_UNROLL_MAX + 1);
+        let (large, large_count) = zeroing_ir(MAX_DEBUG_VALUE_SLOTS as u32);
+        assert!(
+            small.contains("brif") && large.contains("brif"),
+            "both are loops:\n{small}\n{large}"
+        );
+        assert_eq!(
+            small_count,
+            large_count,
+            "and a loop's code is the same size whether it runs {} times or {}: \
+             the width is an immediate, not a length:\n{small}\n{large}",
+            SLOT_ZERO_UNROLL_MAX + 1,
+            MAX_DEBUG_VALUE_SLOTS
+        );
+        // And it is genuinely small — the point of not unrolling 4096 slots.
+        assert!(
+            large_count < 16,
+            "a zeroing loop is a handful of instructions, not {large_count}:\n{large}"
+        );
+        let stores = large.lines().filter(|l| l.contains("store")).count();
+        assert_eq!(stores, 1, "one store, executed n times:\n{large}");
+    }
+
+    /// The ceiling is the last unrolled width and the first looped one is one
+    /// past it — asserted rather than assumed, because an off-by-one here is a
+    /// silent kilobyte of prologue (or a needless branch in every small frame).
+    #[test]
+    fn the_unroll_ceiling_is_where_the_loop_begins() {
+        let (at, _) = zeroing_ir(SLOT_ZERO_UNROLL_MAX);
+        let (past, _) = zeroing_ir(SLOT_ZERO_UNROLL_MAX + 1);
+        assert!(!at.contains("brif"), "at the ceiling, still a run:\n{at}");
+        assert!(past.contains("brif"), "one past it, a loop:\n{past}");
+    }
+
+    /// A zero-slot claim emits nothing at all. `is_prime`'s sibling closures in
+    /// `pipeline` have no `Gc` locals whatever, and a frame of no slots has no
+    /// slot to zero.
+    #[test]
+    fn a_zero_slot_claim_zeroes_nothing() {
+        let (ir, _) = zeroing_ir(0);
+        assert!(
+            !ir.contains("store"),
+            "no slots claimed is no slots written:\n{ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-128 decision 2: the root-slot colouring.
+    // -----------------------------------------------------------------------
+
+    /// A program exercising the shapes the colouring has to get right: a hot
+    /// leaf function whose locals are never co-live, a recursive one whose are,
+    /// a loop that redefines a root every iteration, and a closure with no `Gc`
+    /// locals at all.
+    const COLOURING_SAMPLE: &str = concat!(
+        "fn is_prime(n: Int) -> Bool {\n",
+        "  if n < 2 { return false }\n",
+        "  if n % 2 == 0 { return n == 2 }\n",
+        "  var d = 3\n",
+        "  while d * d <= n {\n",
+        "    if n % d == 0 { return false }\n",
+        "    d = d + 2\n",
+        "  }\n",
+        "  true\n",
+        "}\n",
+        "fn build(depth: Int) -> Int {\n",
+        "  if depth == 0 { return 0 }\n",
+        "  var left = Vec()\n",
+        "  left.push(depth)\n",
+        "  var right = Vec()\n",
+        "  right.push(build(depth - 1))\n",
+        "  left.len() + right.len() + right[0]\n",
+        "}\n",
+        "var acc = 0\n",
+        "for i in 0..10 {\n",
+        "  var row = Vec()\n",
+        "  row.push(i)\n",
+        "  if is_prime(i) { acc = acc + 1 }\n",
+        "  acc = acc + row.len() + build(2)\n",
+        "}\n",
+        "out(acc)\n",
+    );
+
+    /// **The invariant the whole of decision 2 rests on**: no two locals live at
+    /// one safepoint ever share a shadow slot.
+    ///
+    /// Its violation is not a crash and not a wrong number — it is a root the
+    /// collector never sees, swept while reachable, surfacing later as a
+    /// use-after-free somewhere unrelated. `RootSlotMap::color` builds the
+    /// assignment so that it cannot happen and `debug_assert_disjoint` re-checks
+    /// it on every real compilation; this asks the same question of a real
+    /// program's MIR, out of a test that fails rather than a `debug_assert` that
+    /// only fires in a debug build someone happened to run.
+    #[test]
+    fn two_locals_live_at_one_safepoint_never_share_a_slot() {
+        let (funcs, _db) = mir_for(COLOURING_SAMPLE);
+        let mut safepoints = 0usize;
+        let mut co_live = 0usize;
+        for f in &funcs {
+            let map = RootSlotMap::color(f);
+            for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+                let Some(roots) = praxis_mir::roots_of(inst) else {
+                    continue;
+                };
+                safepoints += 1;
+                let slots: Vec<u32> = roots
+                    .live()
+                    .iter()
+                    .filter_map(|&l| map.get(l))
+                    .collect::<Vec<_>>();
+                let mut sorted = slots.clone();
+                sorted.sort_unstable();
+                sorted.dedup();
+                assert_eq!(
+                    sorted.len(),
+                    slots.len(),
+                    "`{}` gives two co-live roots one slot at {inst:?}: {slots:?}",
+                    f.name
+                );
+                // And every live `Gc` root got one — the other way to lose a
+                // root, and the one `spill_roots`' `debug_assert` guards.
+                for &local in roots.live() {
+                    let is_gc = f.locals[local.0 as usize].kind == LocalKind::Gc;
+                    assert_eq!(
+                        is_gc,
+                        map.get(local).is_some(),
+                        "`{}`: local {local:?} is {}a `Gc` root but {}colored",
+                        f.name,
+                        if is_gc { "" } else { "not " },
+                        if map.get(local).is_some() { "" } else { "not " },
+                    );
+                }
+                if slots.len() > 1 {
+                    co_live += 1;
+                }
+            }
+        }
+        assert!(
+            safepoints > 20,
+            "this sample must actually have safepoints to check: {safepoints}"
+        );
+        assert!(
+            co_live > 0,
+            "and some of them must root more than one thing at once, or the \
+             disjointness above is vacuous"
+        );
+    }
+
+    /// Only `Gc` locals are coloured. A `Scalar` local carries a payload, not a
+    /// pointer; giving it a slot would store a raw integer into the region the
+    /// collector dereferences.
+    ///
+    /// The verifier rejects a `Scalar` in a root set (`VerifyError::RootIsNotGc`)
+    /// — this says the backend does not depend on that having run.
+    #[test]
+    fn only_gc_locals_are_colored() {
+        let (funcs, _db) = mir_for(COLOURING_SAMPLE);
+        for f in &funcs {
+            let map = RootSlotMap::color(f);
+            for local in &f.locals {
+                if map.get(local.id).is_some() {
+                    assert_eq!(
+                        local.kind,
+                        LocalKind::Gc,
+                        "`{}` colored {:?}, which is a {:?} local",
+                        f.name,
+                        local.id,
+                        local.kind
+                    );
+                }
+            }
+        }
+    }
+
+    /// Same MIR in, same slots out. `PRAXIS_DUMP_CLIF` output and the snapshot
+    /// suites both read emitted code, and a colouring that depended on hash
+    /// seeding would make two runs of one compiler disagree.
+    #[test]
+    fn the_colouring_is_deterministic() {
+        let (funcs, _db) = mir_for(COLOURING_SAMPLE);
+        for f in &funcs {
+            let first = RootSlotMap::color(f);
+            for _ in 0..8 {
+                let again = RootSlotMap::color(f);
+                assert_eq!(again.width(), first.width(), "`{}` width", f.name);
+                for local in &f.locals {
+                    assert_eq!(
+                        again.get(local.id),
+                        first.get(local.id),
+                        "`{}` local {:?}",
+                        f.name,
+                        local.id
+                    );
+                }
+            }
+        }
+    }
+
+    /// The width is the largest co-live root set, not the count of `Gc` locals
+    /// — which is the whole point, and is what makes `is_prime`'s prologue one
+    /// store instead of thirty-three.
+    #[test]
+    fn a_frames_width_is_its_largest_co_live_root_set() {
+        let (funcs, _db) = mir_for(COLOURING_SAMPLE);
+        let is_prime = funcs
+            .iter()
+            .find(|f| f.name == "is_prime")
+            .expect("the sample defines `is_prime`");
+        let gc_locals = is_prime
+            .locals
+            .iter()
+            .filter(|l| l.kind == LocalKind::Gc)
+            .count();
+        let width = RootSlotMap::color(is_prime).width();
+        let largest = is_prime
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter_map(praxis_mir::roots_of)
+            .map(|r| r.live().len())
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            width as usize, largest,
+            "greedy colouring reaches the largest co-live set exactly on this \
+             shape — if it ever stops doing so, the colourer is the thing that \
+             changed, not the program"
+        );
+        assert!(
+            (width as usize) < gc_locals,
+            "and that is strictly narrower than one slot per `Gc` local \
+             ({width} of {gc_locals}) — the entire content of decision 2"
         );
     }
 

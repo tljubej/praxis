@@ -1,8 +1,14 @@
 # ADR-128: A shadow slot is a live range, not a name, and the debugger's slot is the one that keeps a name
 
 **Date:** 2026-08-05
-**Status:** proposed — not implemented
+**Status:** Accepted — implemented
 **Milestone:** post-M11 performance
+**Amends:** ADR-019 decision 4's `Gc`-local → slot-index map (one slot per `Gc`
+local becomes one slot per live range); ADR-101's account of `MAX_SHADOW_SLOTS`
+(the cap is not what bounds the stack, and has not been a performance dial since
+ADR-101); ADR-104's index-parallelism (the shadow and debug value stacks no
+longer share an index space). **ADR-105 is not amended** — the budget charge
+stays on the count of `Gc` locals, and decision 4 says why.
 
 **The decisions are in the order they should be built.** Decision 1 is a
 one-line constant with its own A/B and no dependency on the rest; decisions 2–4
@@ -222,6 +228,12 @@ are actually worth. Rough sizing, to be replaced by a measurement: ~1.6M calls
 at the benchmark size, two libc calls each; at 10 ns apiece that is ~32 ms
 against a 343 ms median.
 
+> **Measured: no gain, and the threshold landed elsewhere.** Against a positional
+> tree the estimate has the sign wrong (−0.8%, twice); against the tree that
+> ships it is unresolved (−0.3% ± 0.4%). And the third bullet's inline loop is
+> the *slowest* of the three shapes at 33 slots, −2.7%, which is why the ceiling
+> is 64 rather than "well above 32" for its own sake. See "What was measured".
+
 ## Decision 2: a root slot index is a color, not a position
 
 The backend assigns shadow-slot indices by coloring the interference relation
@@ -276,8 +288,12 @@ longer is: introduce `MAX_DEBUG_VALUE_SLOTS`, and size it for the thing it now
 limits — how many `Gc` locals a function may have, which is a property of the
 source text a programmer can see. **4096** is the suggested value; `bfs` and
 `vm` are already at 178 and 185, so 192 was closer to biting than anyone
-noticed. The cost is address space only: one slot on each of the two
-reservations, 16 bytes per unit, ~64 KB at 4096.
+noticed. The cost is address space only, and — **corrected at implementation** —
+it falls on *one* reservation rather than two: `MAX_SHADOW_SLOTS` keeps its
+value, so `SHADOW_STACK_SLOTS` is unchanged at 624,192 slots and only
+`DEBUG_VALUE_STACK_SLOTS` grows, 624,192 → 628,096. That is
+`(4096 − 192) × 8 B` = **30.5 KiB**, not the ~64 KB this record first claimed by
+charging both stacks for a headroom term only one of them gained.
 
 `DEBUG_VALUE_STACK_SLOTS` is then sized by its own headroom term rather than
 inheriting `SHADOW_STACK_SLOTS`, with the same budget-derived first two terms
@@ -330,6 +346,56 @@ snapshot loses a line a user could have used.
 
 Last, and separately, so that its effect is separable from decision 2's.
 
+### What the gate answered: nothing qualifies
+
+**Implemented as a measurement, and the measurement closed it.** The paragraph
+above is wrong in its premise, and `PRAXIS_DUMP_SLOTS`' `unrenderable` column is
+what says so.
+
+Two of its claims do not survive contact with the renderer:
+
+- **"The debugger has nothing to say about these."** It has a type and a value to
+  say. The type column is driven by `type_id`/`descriptor`, both derived from the
+  local's `MirType` — *not* from the span — so a nameless, spanless temp of known
+  type renders as `<tmp#N: Bool> = false`, fully populated.
+- **"They render as `<tmp#N>` with no type column."** True only of the ones that
+  are also never written. `render_frame_locals` keeps a temp that has a value
+  **or** a span, so the truly invisible ones are already invisible, and dropping
+  them is the only removal the gate permits.
+
+So the gate's actual set is "nameless, spanless, and provably never written" —
+never defined by an instruction, not a parameter, and not the slot an elided box's
+scalar writes (ADR-120 part 2). Measured:
+
+| population | benchmarks | `tests/aoc-corpus` + `tests/input-parsers` |
+|---|---:|---:|
+| `Gc` locals | 599 | 1925 |
+| nameless **and** spanless — this decision as stated | 145 | 761 |
+| …of those, never writable — this decision as *gated* | **1** | **0** |
+
+One local, in `pipeline`'s `<entry>`, out of 906 candidates across 77 corpus
+functions and 16 benchmark functions. **Decision 5 is therefore not implemented,
+because implementing it correctly is a no-op.** That is the gate working, not the
+gate being dodged.
+
+Two further findings, recorded so the next attempt does not re-derive them:
+
+- **"Removal" could not have meant dropping the local.** MIR is deliberately not
+  SSA, every value-producing `Inst` carries a `dst: LocalId`, `Terminator::Return`
+  must name a `Gc` local and `MoveGc`'s source must be one. The only available
+  change was ever "keep the local, deny it a debug value slot" — which decision
+  3's map split is what makes expressible.
+- **It would also renumber every `<tmp#N>`**, because `symbol_id` is the local's
+  position among `Gc` locals. That is fixable — assign `symbol_id` over all `Gc`
+  locals while the `metas` vector skips the dropped ones — but it is a second
+  mechanism to buy the one slot above.
+
+The real population this decision was reaching for is a different one: the `Gc`
+locals ADR-120's forwarding leaves undefined, which `forward.rs` already counts at
+18 of 69 in `mandelbrot`'s `<entry>`. Those are written through the elided-box
+path and *do* render. Whether any subset of them is dead weight is a question for
+ADR-120's own follow-up, with its own census; it is not this record's.
+
 ## Verification
 
 **Correctness.**
@@ -366,6 +432,11 @@ was written first.
   the root scan); `bfs` and `pipeline` carry the zero-slot closures; same two
   controls.
 
+> **Both of those paragraphs are wrong, and "What was measured" below says how.**
+> Decision 1's arm A is not one constant once decision 2 exists, and the two
+> named controls are not controls for decision 2 at all — colouring narrows every
+> frame in the suite, and `ab.py` voided the first sweep for exactly that.
+
 The harness's quiescence gate refuses to run while an editor's `praxis lsp` is
 alive, load average included. That is not optional, and neither is stating the
 prediction before measuring: this is the second time in this repo that a change
@@ -378,6 +449,228 @@ function; it is not in the tree. Landing it — as an example, or as a
 `PRAXIS_DUMP_SLOTS` beside `PRAXIS_DUMP_CLIF` — is recommended for the same
 reason `dump.rs` gives for existing at all: every number in this record is
 otherwise a measurement someone has to re-derive by hand-editing the compiler.
+
+---
+
+## What was measured
+
+`PRAXIS_DUMP_SLOTS` landed, so every table above is now `praxis run` and a grep
+rather than a hand-edited compiler. **Every row of the Context table reproduces
+exactly** — `is_prime` 33/1/1/2/7, `vm`'s `<entry>` 185/10/10/83/51, `bfs`'s
+178/17/17/19/36, and the rest.
+
+So does the corpus claim, measured *before* this record's own merge of
+`adr127_pipeline_over_every_iterable.px`: over 83 functions the widest frame was
+110 and the largest co-live root set 11, which is `REFERENCE_FRAME_SLOTS`. After
+the merge it is 77 functions and the widest frame is **340** — that program's new
+single `main`, which is the point of merging it and is why the two figures differ.
+The root-side number does not move: the largest co-live root set is still **11**,
+and every one of the 77 is at or under it.
+
+**Greedy colouring reached `live` exactly in every function measured**, before
+and after, so the Context's "nothing here needs an optimal colourer" now has the
+whole corpus behind it rather than eight functions.
+
+Summed over the 77, the declared shadow width falls **1925 → 216 slots, −88.8%**
+(pre-merge: 1937 → 243, −87.5%). Twenty of them claim nothing at all.
+
+### The two sweeps
+
+`benchmarks/ab.py`, palindromic, paired statistic, two independent passes each.
+The load ceiling was waived to 6.0 in every run (observed 1.2–3.0, no competing
+build). Of the 19 recorded sweeps before these, 18 were waived to 6.0 and one
+(`ab-NOLET.json`) to 8.0 — so these numbers are comparable to those and **not**
+to any taken at the 0.5 default.
+
+**The arms had to be built differently from the way this record specifies them,
+and the reason is an ordering trap worth recording.** Decision 1's stated arm A
+is "this tree with `SLOT_ZERO_UNROLL_MAX` at 32 — one constant". Against a tree
+that already has decision 2, that arm measures the wrong thing: colouring drops
+`is_prime`'s *shadow* claim to one slot, so the shadow claim is one store in both
+arms and only the 33-slot *debug* claim still crosses 32. The sweep would then
+price one memset against 33 stores and report it as decision 1's effect, when
+decision 1 is about two memsets against 66. Half the change, attributed whole. Both toggles therefore ship as cargo features
+(`adr128-d1-arm-a`, `adr128-d2-arm-a`) and the sweeps *chain*: decision 1 is
+measured with colouring off in **both** arms, and decision 1's arm B is the same
+binary as decision 2's arm A.
+
+**Decision 1 — and the prediction was wrong.** This record estimated ~32 ms
+against a 343 ms median from removing 1.6M pairs of libc calls. The measurement
+is a small, reproducible **regression**:
+
+| | pass 1 (9 reps) | pass 2 (15 reps) |
+|---|---:|---:|
+| `primes` | −0.8% ± 1.2% | **−0.8% ± 0.2%** |
+| `collatz` (control) | +0.8% ± 0.7% | +1.3% ± 0.4% |
+| `mandelbrot` (control) | +0.4% ± 0.2% | +0.2% ± 0.2% |
+
+The deterministic figure is the honest one, and it explains the sign: `is_prime`
+goes **329 → 393 CLIF instructions**. Two calls become 66 stores, which is 64
+more instructions in a prologue executed 1.6M times, and on an M2 Pro that is
+about what one `memset` of 264 bytes costs. The Decision-1 argument that "a run
+of stores becomes slower than a call somewhere around 32 slots has nothing
+behind it" was right that nothing was behind it, and wrong about which way the
+crossover falls: at 33 slots the call is marginally the cheaper of the two.
+
+**But that sweep does not describe the shipping tree, and a follow-up says what
+does.** Decision 1's sweep holds colouring *off* in both arms — it has to, for the
+attribution reason above — so `is_prime` there claims 33 shadow **and** 33 debug
+slots: two memsets against 66 stores. With colouring on, which is what ships, it
+claims 1 and 33: **one** memset against **33** stores. Re-measured in that
+configuration, with colouring held constant in both arms, the difference is
+**−0.3% ± 0.4% on `primes` — unresolved**. The −0.8% is real for the arrangement
+it was measured in and is not a cost this tree pays.
+
+**What the follow-up did resolve is the threshold, and it points the other way
+from this decision's third bullet.** Three shapes at 33 slots, colouring held
+constant:
+
+| zeroing at 33 slots | against a straight run of word stores |
+|---|---:|
+| `%Memset` call | −0.3% ± 0.4% — unresolved |
+| inline word loop | **−2.7% ± 0.3% — resolved, and worse** |
+
+The inline loop is the *slowest* of the three at that width — 33 branches against
+33 stores a superscalar core pipelines with none. "Above the ceiling, an inline
+loop rather than a call" is still right, but only because above the ceiling
+nothing is hot: every claim in this tree wider than about 50 belongs to an
+`<entry>` executed once per run. The widest claim in a function called more than a
+handful of times is `tree`'s `build` at 45. So the ceiling has one job — clear the
+hot widths — and above that it is a pure code-size budget, exactly as this
+decision says.
+
+**`SLOT_ZERO_UNROLL_MAX` is therefore 64, not the 256 first tried.** 64 clears the
+widest hot claim with headroom and caps a prologue's zeroing at 512 B against 256's
+2 KB. The two are indistinguishable on the clock — `1.001×` over the whole suite,
+all eight rows unresolved — because nothing hot crosses either line, so the 4×
+smaller budget is free.
+
+Decision 1 is kept on the strength of what it makes *true* rather than what it
+makes fast: no prologue makes a call at any width the caps allow, which is what
+lets decision 3 raise the dense cap to 4096 without putting a 32 KB
+memset-or-unroll question in the prologue of every wide function. `vm`'s
+`<entry>` and the merged corpus program's `main` take the loop arm at 185 and 340
+slots; both are claimed once per run, which is the whole reason the loop's 2.7%
+does not matter where it is used.
+
+**Decision 2 — the whole of this record's win.** Arm A is colouring off,
+everything else held. The suite, twice:
+
+| | pass 1 | pass 2 |
+|---|---:|---:|
+| `vm` | +14.3% ± 0.5% | **+14.0% ± 0.5%** |
+| `tree` | +11.4% ± 0.4% | **+11.4% ± 0.4%** |
+| `bfs` | +4.2% ± 0.3% | +4.2% ± 0.4% |
+| `pipeline` | +3.6% ± 0.3% | +3.3% ± 0.4% |
+| `primes` | +2.6% ± 0.3% | +2.5% ± 0.2% |
+| `collatz` | +2.5% ± 0.6% | +2.3% ± 0.9% |
+| `mandelbrot` | +0.6% | +0.8% — inside the 2% floor |
+| `hashwork` | −0.2% | +0.1% — unresolved |
+| **suite geometric mean** | **1.048×** | **1.047×** |
+
+**This record's choice of controls was wrong, and the harness caught it.** The
+first decision-2 sweep named `collatz` and `mandelbrot` as controls "their hot
+code being inside a single `<entry>` claimed once", and `ab.py` **voided** it:
+`collatz` moved +2.3%, outside its noise bar. It was right to. Colouring narrows
+*every* frame — `collatz`'s `<entry>` goes 45 slots to 5, `mandelbrot`'s 69 to 18
+— and the prologue is not the mechanism. `push_roots` scans `[base, top)` at
+every collection, so a narrower frame is a cheaper scan on every live frame, and
+a benchmark that allocates enough to collect will move whether or not its
+prologue runs once. **There is no valid control for a change that is global**,
+which is handover 28 §"a control that is a target is not a control" a second
+time. The table above is the whole suite reported as results.
+
+**Composed, this tree against the tree before this record** (one sweep, 7 reps):
+suite geometric mean **1.048×**, with `vm` +13.8%, `tree` +11.6%, `bfs` +4.3%,
+`pipeline` +3.7%, `collatz` +3.6%, `mandelbrot` +1.1%, `primes` +1.7% and
+`hashwork` −0.1% — the last three under the 2% floor, the same floor decision 1's
+−0.8% sits under. Decision 2's win on `primes` and decision 1's cost there very
+nearly cancel, which is what a composed number is for. The raw files are `benchmarks/ab-ADR128-D1.json`,
+`ab-ADR128-D1-pass2.json`, `ab-ADR128-D2.json` (the void one, kept), 
+`ab-ADR128-D2-suite.json`, `ab-ADR128-D2-suite-pass2.json` and
+`ab-ADR128-composed.json`.
+
+### Correctness, item by item
+
+- The three debug-stack siblings landed in `debug.rs`, plus three `const`
+  asserts: the capacity identity the shadow stack's sizing already has, and two
+  new ones — that a colouring cannot need more slots than there are locals, and
+  that the two reservations differ by exactly their headroom terms.
+- `two_locals_live_at_one_safepoint_never_share_a_slot` landed, driven off real
+  MIR through `mir_for`, together with `only_gc_locals_are_colored`,
+  `the_colouring_is_deterministic` and
+  `a_frames_width_is_its_largest_co_live_root_set`.
+- Decision 1's "no prologue makes a call" landed as five tests over every width
+  class including one past `MAX_DEBUG_VALUE_SLOTS`.
+- **The crash-debugger snapshot suites did not move.** All 498 `jit.rs` tests,
+  the 15 that assert against `rt.crash_snapshot()` included, pass unchanged —
+  which is what says decision 3 did not leak into the debug index space.
+- `adr127_pipeline_over_every_iterable.px` **is one function now**, and its
+  header says why the split is gone. Its `main` has 340 `Gc` locals and **seven**
+  co-live roots, so it claims seven shadow slots where the old numbering would
+  have demanded 340 and been rejected at 192. Output byte-identical.
+
+### The aside, closed
+
+The `opt_level = "none"` comments the aside predicted are real and there were
+fourteen. Five of them were not "historical rather than wrong-in-effect" but
+**flatly false, in the direction that matters most**: they asserted that
+`define_function` does not run the egraph mid-end, so `PRAXIS_DUMP_CLIF` output
+and every CLIF-text test in `lower.rs` were described in the tree as *pre*-mid-end
+when they are post. A package attributing a missing instruction to its own
+lowering could have been reading a fold. Those five are rewritten
+(`dump.rs`'s `CLIF_VAR` and `emit` docs, `lower_function_capturing`, the
+`define_function` comment, `lowered_function_ir`), and the dump's doc now says
+plainly that a count read off it is post-fold.
+
+The three that remain naming `"none"` now read as provenance — "the level this
+was measured at" — rather than as current argument. The one the aside singled
+out, `emit_slot_stack_pop`'s "carrying the header would keep a value live across
+the body", is re-worded rather than re-measured: its stated premise is dead at
+`"speed"`, its conclusion survives on the half of the sentence that never
+depended on the level, and the experiment that would settle it is written down
+beside it (compare the `sub sp, sp, #N` immediate in two vcode dumps — no clock).
+
+Not addressed, and flagged for whoever next quotes them: `dump.rs`'s baseline
+table (311/171 CLIF, 458/215 vcode) and `periter.py`'s reproduction of it were
+both taken at `"none"` and no longer describe this tree.
+
+### Why the collector cannot tell the difference
+
+The question decision 2 has to answer is not "is the colouring tight" but "can it
+drop a root", and the answer is stronger than the record claims for it. Induct
+over safepoints on: *after every safepoint `S`, the non-null slots of the frame
+are exactly `{colour(l) : l ∈ live(S)}`, each holding that root's freshly stored
+value.*
+
+- **Base.** The prologue zeroes the whole claim, so the frame starts all-null.
+- **Step.** `spill_roots` writes every member of `live(S)` unconditionally —
+  there is no "spill only if it changed" path — and then nulls
+  `Slots(dead(S)) \ Slots(live(S))`. Since `dead = dirty \ live`, we have
+  `Dirty(S) ⊆ live(S) ∪ dead(S)`, so the non-null set after `S` is contained in
+  `Slots(live(S))`; and `dirty := live(S)` re-establishes the hypothesis.
+
+The consequence is the useful part: **the set of objects the frame retains is
+identical under positional and coloured assignment at every program point.**
+Colouring is observationally neutral for the collector — it changes which slot a
+root occupies and how many slots are scanned, and nothing else. MIR-01 holds at
+slot granularity, not merely at local granularity, which is what the naive
+translation of `RootSlots::dead()` would have broken.
+
+Two supporting facts, both checked rather than assumed: `dirty` is only ever
+assigned `roots_at[i]`, which is intersected with the `Gc` locals, so a dead slot
+needing a null can never be one the colouring omitted; and the `dirty` merge is a
+union, so it can only over-approximate — and over-nulling is harmless because the
+difference excludes every slot a live root occupies.
+
+### One premise this record did not state, now written down
+
+Colouring creates store→store pairs to one slot address with no load between
+them. A compiler with dead-store elimination would delete the first as dead and
+drop a root the collector needed. Cranelift 0.134.2 has none — its
+`alias_analysis.rs` says so in as many words — and that is now a comment beside
+`RootSlotMap` rather than an assumption, because an upgrade that added it would
+break this silently and no test in the tree would catch it.
 
 ## What this does not change
 

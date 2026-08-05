@@ -94,13 +94,26 @@ use std::sync::OnceLock;
 use cranelift::codegen::ir::Function;
 use cranelift::prelude::codegen;
 
-/// The environment variable selecting the Cranelift IR dump. That IR is what
-/// the builder emitted with `Context::optimize`'s `opt_level = "none"` tidying
-/// applied and nothing more — see [`emit`], which is where the exact list is.
+/// The environment variable selecting the Cranelift IR dump. That IR is what the
+/// builder emitted with `Context::optimize` applied — which at the tree's
+/// `opt_level = "speed"` includes the egraph mid-end, so it is post-fold and
+/// post-GVN. See [`emit`], which is where the exact list is.
 const CLIF_VAR: &str = "PRAXIS_DUMP_CLIF";
 
 /// The environment variable selecting the machine-level vcode dump.
 const VCODE_VAR: &str = "PRAXIS_DUMP_VCODE";
+
+/// The environment variable selecting the per-function slot census (ADR-128).
+///
+/// **It is in the tree for the reason this module is.** Every number in ADR-128's
+/// measurement table — the frame width, the largest co-live root set, what greedy
+/// colouring achieves, the debugger's visible set, the count of locals carrying
+/// neither a name nor a span — came from a throwaway `praxis-cli` example that
+/// ran the front end and reported the columns per function. It was not in the
+/// tree, so every one of those figures was a measurement the next reader had to
+/// re-derive by hand-editing the compiler. That is exactly how the 156/216
+/// instruction counts of handover 25 §3 became unreproducible.
+const SLOTS_VAR: &str = "PRAXIS_DUMP_SLOTS";
 
 /// Which functions one `PRAXIS_DUMP_*` variable selects.
 ///
@@ -164,11 +177,16 @@ impl DumpSelection {
 struct DumpHooks {
     clif: DumpSelection,
     vcode: DumpSelection,
+    slots: DumpSelection,
 }
 
 impl DumpHooks {
-    /// Is either dump asked for, for this function? The one question the
+    /// Is either code dump asked for, for this function? The one question the
     /// compile path asks on every function it compiles.
+    ///
+    /// The slot census is deliberately not part of this: it is answered from the
+    /// MIR *before* lowering, not from the `Context` after it, so it neither
+    /// needs nor affects `set_disasm`.
     fn selects(&self, name: &str) -> bool {
         self.clif.covers(name) || self.vcode.covers(name)
     }
@@ -187,7 +205,81 @@ fn hooks() -> &'static DumpHooks {
     HOOKS.get_or_init(|| DumpHooks {
         clif: DumpSelection::parse(std::env::var(CLIF_VAR).ok().as_deref()),
         vcode: DumpSelection::parse(std::env::var(VCODE_VAR).ok().as_deref()),
+        slots: DumpSelection::parse(std::env::var(SLOTS_VAR).ok().as_deref()),
     })
+}
+
+/// One function's slot census (ADR-128), as the backend computed it.
+///
+/// The columns are ADR-128's measurement table, in its order, so a row here and
+/// a row there are the same row.
+pub(crate) struct SlotCensus {
+    /// `gcloc` — `Gc` locals, which is the debug value stack's claim width and
+    /// what `frame_cost` charges for (decision 4).
+    pub dense: u32,
+    /// `rootc` — the colours the interference relation needs, which is the
+    /// shadow stack's claim width (decision 2).
+    pub colored: u32,
+    /// `live` — the largest `RootSlots::live()` at any safepoint. Equal to
+    /// `colored` wherever greedy colouring is optimal, which is everywhere
+    /// ADR-128 measured; a row where they differ is a row where a better
+    /// colourer would buy something.
+    pub live_max: u32,
+    /// `dbgvis` — the largest `DebugSlots::visible()`, for comparison. Not a
+    /// claim width: the debugger's set is over-approximate by design and its
+    /// slots are dense regardless.
+    pub debug_visible_max: u32,
+    /// `nameless` — `Gc` locals carrying neither a source name nor a span, which
+    /// is decision 5's candidate set *as ADR-128 states it*.
+    pub nameless: u32,
+    /// `unrenderable` — the subset of `nameless` that also can never hold a
+    /// value: never defined by any instruction, not a parameter, and not the
+    /// target of an elided box's scalar (ADR-120 part 2).
+    ///
+    /// **This is decision 5's set as its own gate defines it**, and it is much
+    /// smaller than `nameless`. The gate is "a local may be dropped only if no
+    /// snapshot loses a line a user could have used", and the debugger's renderer
+    /// draws the line elsewhere than the ADR assumed: `render_frame_locals` keeps
+    /// a temp that has *a value or a span*, and the type column comes from the
+    /// local's `MirType`, not from the span. So a nameless, spanless local that
+    /// is ever written still renders — with a type and a value — and dropping it
+    /// would delete a line. Only a local nothing can ever write is invisible
+    /// already, and only those may go.
+    pub unrenderable: u32,
+}
+
+/// Is a slot census asked for, for this function?
+///
+/// **The caller must ask this before computing one.** Unlike the two code dumps,
+/// whose input is a `Context` that exists regardless, a census is *work* — two
+/// walks of every instruction in the function — and Rust evaluates a call's
+/// arguments before the call, so a guard inside [`emit_slots`] would run after
+/// the cost had already been paid. Same shape and same reason as
+/// [`wants_vcode`].
+pub(crate) fn wants_slots(name: &str) -> bool {
+    hooks().slots.covers(name)
+}
+
+/// Write one function's slot census. Ask [`wants_slots`] first.
+///
+/// Stderr, like the other two and for the same load-bearing reason: the A/B
+/// protocol diffs a benchmark's stdout byte-for-byte between arms and voids the
+/// measurement when it differs, so a dump on stdout would void exactly the runs
+/// it exists to explain.
+pub(crate) fn emit_slots(name: &str, census: &SlotCensus) {
+    if !hooks().slots.covers(name) {
+        return;
+    }
+    eprintln!(
+        ";; praxis-dump slots `{name}`: gcloc={} rootc={} live={} dbgvis={} \
+         nameless={} unrenderable={}",
+        census.dense,
+        census.colored,
+        census.live_max,
+        census.debug_visible_max,
+        census.nameless,
+        census.unrenderable
+    );
 }
 
 /// Does this function need `Context::set_disasm(true)` before it is defined?
@@ -206,22 +298,25 @@ pub(crate) fn wants_vcode(name: &str) -> bool {
 /// window in which either text exists: `clear_context` drops both the function
 /// and the compiled code on the next line.
 ///
-/// **What `define_function` did to `ctx.func` first, and it is less than
-/// "optimized".** It reaches `Context::compile` → `compile_stencil` →
-/// `Context::optimize`, and at this JIT's `opt_level = "none"`
-/// ([`CRANELIFT_FLAGS`](crate::module::CRANELIFT_FLAGS)) that whole pass reduces
-/// to unreachable-block elimination, constant-block-parameter removal
-/// (`remove_constant_phis`) and `resolve_all_aliases`. The mid-end egraph pass
-/// — the one that would fold, GVN and license the word *optimized* — is behind
-/// `if opt_level != OptLevel::None` and does not run; nor does NaN
-/// canonicalization, whose flag defaults off. There is no separate CLIF
-/// legalization pass to run either: legalization happens inside
+/// **What `define_function` did to `ctx.func` first — and since
+/// [`CRANELIFT_FLAGS`](crate::module::CRANELIFT_FLAGS) became
+/// `opt_level = "speed"`, that is genuinely "optimized".** It reaches
+/// `Context::compile` → `compile_stencil` → `Context::optimize`: unreachable-block
+/// elimination, constant-block-parameter removal (`remove_constant_phis`),
+/// `resolve_all_aliases` — **and the mid-end egraph pass**, which is behind
+/// `if opt_level != OptLevel::None` and therefore now runs. It folds, GVNs and
+/// rewrites. NaN canonicalization still does not, its flag defaulting off. There
+/// is no separate CLIF legalization pass either: legalization happens inside
 /// `isa.compile_function`, on the way to vcode, and never touches this text.
 ///
-/// So the CLIF dumped here is **what the builder produced, tidied**: dead blocks
-/// and trivial block parameters gone, value aliases collapsed. That is worth
-/// knowing in both directions — a block or a `jump` argument the lowering
-/// emitted may be missing here, and nothing else will be.
+/// This paragraph said the opposite until ADR-128, and had done since the fifth
+/// `opt_level` measurement (`module.rs`) moved the flag out from under it. The
+/// difference is not cosmetic for anyone quoting a count: **the CLIF dumped here
+/// is post-mid-end**, so an instruction it does not show may have been folded
+/// away rather than never emitted, and a package attributing a count to its own
+/// lowering has to allow for that. What survives unchanged is the other
+/// direction — a block or a `jump` argument the lowering emitted may be missing
+/// here.
 pub(crate) fn emit(name: &str, ctx: &codegen::Context) {
     let hooks = hooks();
     if !hooks.selects(name) {
@@ -473,6 +568,7 @@ mod tests {
         let hooks = DumpHooks {
             clif: DumpSelection::Nothing,
             vcode: DumpSelection::Nothing,
+            slots: DumpSelection::Nothing,
         };
         let compiled = Compiled {
             listing: "block0:\n  ret\n",
@@ -488,6 +584,7 @@ mod tests {
         let hooks = DumpHooks {
             clif: DumpSelection::Every,
             vcode: DumpSelection::Nothing,
+            slots: DumpSelection::Nothing,
         };
         let out = render(&hooks, "f", &scratch_function(), None);
         assert!(
@@ -512,6 +609,7 @@ mod tests {
         let hooks = DumpHooks {
             clif: DumpSelection::Named(vec!["other".to_string()]),
             vcode: DumpSelection::Nothing,
+            slots: DumpSelection::Nothing,
         };
         assert_eq!(render(&hooks, "f", &scratch_function(), None), "");
     }
@@ -522,6 +620,7 @@ mod tests {
         let hooks = DumpHooks {
             clif: DumpSelection::Nothing,
             vcode: DumpSelection::Every,
+            slots: DumpSelection::Nothing,
         };
         let listing = concat!(
             "  pacibsp\n",
@@ -564,6 +663,7 @@ mod tests {
         let hooks = DumpHooks {
             clif: DumpSelection::Nothing,
             vcode: DumpSelection::Every,
+            slots: DumpSelection::Nothing,
         };
         let listing = concat!("block0:\n", "  add x0, x0, x0\n", "  ret\n");
         let out = render(
@@ -589,6 +689,7 @@ mod tests {
         let hooks = DumpHooks {
             clif: DumpSelection::Nothing,
             vcode: DumpSelection::Every,
+            slots: DumpSelection::Nothing,
         };
         let out = render(&hooks, "f", &scratch_function(), None);
         assert!(out.contains("no disassembly was requested"), "{out}");

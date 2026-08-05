@@ -160,4 +160,4 @@ verifier rule only. Its decision must not claim the elision.
 - [ADR-125: A binding is a binding, and the compiler decides its storage](./125-a-binding-is-a-binding-and-the-compiler-decides-its-storage.md)
 - [ADR-126: A pipeline materializes on its own, and `collect` named a step it takes anyway](./126-a-pipeline-materializes-and-collect-named-a-step-it-takes-anyway.md)
 - [ADR-127: *proposed* — A pipeline's source is the `for` loop's, and a collection converts by naming what it becomes](./127-a-pipelines-source-is-the-for-loops-and-a-collection-converts-by-naming-what-it-becomes.md)
-- [ADR-128: *proposed* — A shadow slot is a live range, not a name, and the debugger's slot is the one that keeps a name](./128-a-shadow-slot-is-a-live-range-not-a-name.md)
+- [ADR-128: A shadow slot is a live range, not a name, and the debugger's slot is the one that keeps a name](./128-a-shadow-slot-is-a-live-range-not-a-name.md)
