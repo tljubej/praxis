@@ -1,0 +1,26 @@
+// A closure pipeline over records read from a template.
+//
+// The template `{name:word}: {score:int}` names its captures, so each line
+// parses into a record `{name: Text, score: Int}` and the whole read is a
+// `Vec[{name: Text, score: Int}]`. Everything after that is pipeline
+// combinators and closures — including one closure returned from a function,
+// which captures the parameter it was built with.
+
+var entries = read lines(`{name:word}: {score:int}`)
+
+// A function that returns a closure. `cut` is captured by value; the closure
+// outlives the call that made it.
+fn above(cut) {
+    |e| e.score > cut
+}
+
+var passing = above(50)
+
+out(entries.len())
+out(entries.filter(passing).map(|e| e.name))
+out(entries.map(|e| e.score).fold(0, |a, s| a + s))
+out(entries.sorted_by_key(|e| 0 - e.score).take(2).map(|e| e.name))
+// `frequencies` counts, and a `Counter` reads absent keys as zero.
+var initials = entries.map(|e| e.name[0]).frequencies()
+out(initials["a"[0]])
+out(initials["z"[0]])

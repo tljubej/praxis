@@ -1,0 +1,42 @@
+// Shape: a character map, a blank line, then a stream of movement characters
+// wrapped across lines for no reason of its own.
+//
+// #######
+// #.....#
+//
+// >>vv<^^
+//
+// `chars(P, skip: newlines)` folds the command stream back into one sequence:
+// `newlines` is the broader policy — it passes over spaces, tabs and line
+// endings alike. There is no character literal, so `"#"[0]` is how a program
+// names one.
+var data = read sections(
+    map: grid(char),
+    moves: chars(one_of("^v<>"), skip: newlines),
+)
+
+out(data.map.width())
+out(data.map.height())
+out(data.moves.len())
+
+var wall = "#"[0]
+var x = 1
+var y = 1
+var blocked = 0
+for move in data.moves {
+    var nx = x
+    var ny = y
+    if move == ">"[0] { nx = x + 1 }
+    if move == "<"[0] { nx = x - 1 }
+    if move == "v"[0] { ny = y + 1 }
+    if move == "^"[0] { ny = y - 1 }
+    if data.map[nx, ny] == wall {
+        blocked = blocked + 1
+    } else {
+        x = nx
+        y = ny
+    }
+}
+out(x)
+out(y)
+out(blocked)

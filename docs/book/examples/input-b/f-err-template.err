@@ -1,0 +1,19 @@
+error[I020]: named and anonymous captures may not be mixed in one template (§7.3)
+
+  f-err-template.px:4:20
+  4 | var a = read lines(`{x:int},{int}`)
+    |                    ^^^^^^^^^^^^^^^ named and anonymous captures may not be mixed in one template (§7.3)
+
+error[I021]: duplicate capture name `x` in template
+
+  f-err-template.px:5:20
+  5 | var b = read lines(`{x:int},{x:int}`)
+    |                    ^^^^^^^^^^^^^^^^^ duplicate capture name `x` in template
+
+error[I026]: a positional `block` item returning a scalar must be named
+
+  f-err-template.px:6:14
+  6 | var c = read block(int)
+    |              ^^^^^^^^^^ a positional `block` item returning a scalar must be named
+
+praxis: 3 error(s)

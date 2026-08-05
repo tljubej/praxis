@@ -1,0 +1,5 @@
+// `uint` refuses a leading `-`. Every atomic fails the same way: a mismatch
+// naming the byte offset it looked at and the parser that looked.
+fn main() {
+    out(read uint)
+}

@@ -1,0 +1,13 @@
+var a = 4
+var a = "Foo"
+out(a)
+
+var b = 4
+var b = b + 1
+out(b)
+
+var c = 4
+var show_old = || out(c)
+var c = "Foo"
+show_old()
+out(c)

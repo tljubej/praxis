@@ -1,0 +1,14 @@
+error: program faulted: size or extent out of range
+
+Backtrace:
+#0   <entry>
+
+  locals:
+    seen: BitSet = {}
+  temps:
+    <tmp#1: BitSet> = {}
+    <tmp#3: Int> @ "1000000000000000000" = 1000000000000000000
+    <tmp#4: Unit> @ "seen.insert(1000000000000000000)" = Unit
+    <tmp#5: Int> @ "seen.len()" = <uninit>
+    <tmp#6: Unit> @ "out(seen.len())" = <uninit>
+    <tmp#7: Unit> @ "var seen = BitSet() seen.insert(1000000000000000000) out(seen.len())" = <uninit>

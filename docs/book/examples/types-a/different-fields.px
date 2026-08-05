@@ -1,0 +1,9 @@
+fn area(r) {
+    r.w * r.h
+}
+
+var rooms = parse("3x4", `{w:int}x{h:int}`)
+var boxes = parse("3x4", `{w:int}x{d:int}`)
+
+out(area(rooms))
+out(area(boxes))

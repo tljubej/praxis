@@ -1,0 +1,2 @@
+var xs = [3, 1, 2]
+out(xs.sortd())

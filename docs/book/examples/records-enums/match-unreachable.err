@@ -1,0 +1,7 @@
+error[Y121]: unreachable match arm
+
+  match-unreachable.px:7:9
+  7 |         Number(n) => n
+    |         ^^^^^^^^^^^^^^ unreachable match arm
+
+praxis: 1 error(s)

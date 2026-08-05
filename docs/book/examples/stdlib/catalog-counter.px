@@ -1,0 +1,11 @@
+var c = Counter()
+c.inc("x")
+c.inc("x")
+c.inc("y")
+
+out(c.get("x"))
+out(c.get("never seen"))
+out(c.len())
+out(c.keys())
+out(c.values())
+out(c.is_empty())

@@ -1,0 +1,6 @@
+fn area(w: Int, h: Int) {
+    w * h
+}
+
+var side: Int = 4
+out(area(side, side + 1))

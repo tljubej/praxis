@@ -1,0 +1,61 @@
+error[Y001]: expected Bool, found Vec[Int]
+
+  t-collection-types.px:3:15
+  3 | var a: Bool = read lines(int)
+    |               ^^^^^^^^^^^^^^^ expected Bool, found Vec[Int]
+
+error[Y001]: expected Bool, found Vec[Vec[Vec[Int]]]
+
+  t-collection-types.px:4:15
+  4 | var b: Bool = read sections(lines(csv(int)))
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected Bool, found Vec[Vec[Vec[Int]]]
+
+error[Y001]: expected Bool, found Vec[Text]
+
+  t-collection-types.px:5:15
+  5 | var c: Bool = read ws(word)
+    |               ^^^^^^^^^^^^^ expected Bool, found Vec[Text]
+
+error[Y001]: expected Bool, found Vec[Text]
+
+  t-collection-types.px:6:15
+  6 | var d: Bool = read sep(" -> ", word)
+    |               ^^^^^^^^^^^^^^^^^^^^^^ expected Bool, found Vec[Text]
+
+error[Y001]: expected Bool, found Grid[Char]
+
+  t-collection-types.px:7:15
+  7 | var e: Bool = read grid(char)
+    |               ^^^^^^^^^^^^^^^ expected Bool, found Grid[Char]
+
+error[Y001]: expected Bool, found Grid[Float]
+
+  t-collection-types.px:8:15
+  8 | var f: Bool = read matrix(float)
+    |               ^^^^^^^^^^^^^^^^^^ expected Bool, found Grid[Float]
+
+error[Y001]: expected Bool, found Vec[Char]
+
+  t-collection-types.px:9:15
+  9 | var g: Bool = read chars(one_of("^v"), skip: newlines)
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected Bool, found Vec[Char]
+
+error[Y001]: expected Bool, found Vec[Int]
+
+  t-collection-types.px:10:15
+  10 | var h: Bool = read chars(int, skip: whitespace)
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected Bool, found Vec[Int]
+
+error[Y001]: expected Bool, found Option[{ x: Int, y: Int }]
+
+  t-collection-types.px:11:15
+  11 | var i: Bool = read optional(`{x:int},{y:int}`)
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected Bool, found Option[{ x: Int, y: Int }]
+
+error[Y001]: expected Bool, found Vec[(Int, Int)]
+
+  t-collection-types.px:12:15
+  12 | var j: Bool = read scan(`mul({int},{int})`)
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected Bool, found Vec[(Int, Int)]
+
+praxis: 10 error(s)

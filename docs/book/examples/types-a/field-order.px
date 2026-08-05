@@ -1,0 +1,9 @@
+fn width_of(r) { r.w }
+
+var a = parse("3x4", `{w:int}x{h:int}`)
+var b = parse("4x3", `{h:int}x{w:int}`)
+
+out(a)
+out(b)
+out(width_of(a))
+out(width_of(b))

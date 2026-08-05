@@ -1,0 +1,13 @@
+var n = 1
+var show_n = || out(n)
+n = 2
+show_n()
+
+var fns = Vec[() -> Int]()
+for i in 0..3 {
+    i = i * 10
+    fns.push(|| i)
+}
+for f in fns {
+    out(f())
+}

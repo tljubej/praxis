@@ -1,0 +1,32 @@
+var s = Set()
+s.insert(2)
+s.insert(1)
+out(s.sorted())
+
+var m = Map()
+m.insert("a", 1)
+m.insert("b", 2)
+out(m.map(|pair| pair.0))
+out(m.to_vec())
+
+var c = Counter()
+c.inc("x")
+out(c.to_vec())
+
+var d = Deque()
+d.push_back(7)
+out(d.sum())
+
+var lo = MinHeap()
+lo.push(2)
+lo.push(1)
+out(lo.to_vec())
+
+var b = BitSet()
+b.insert(4)
+b.insert(9)
+out(b.sum())
+
+out((0..5).sum())
+out((0..=5).sum())
+out("abc".map(|ch| ch.to_int()))

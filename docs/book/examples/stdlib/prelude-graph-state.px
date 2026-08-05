@@ -1,0 +1,7 @@
+fn step(s: Vec[Int]) -> Vec[Vec[Int]] {
+  var next = Vec()
+  next.push(s)
+  next
+}
+
+out(bfs([1], |s| step(s)).len())

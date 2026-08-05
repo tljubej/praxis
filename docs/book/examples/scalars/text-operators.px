@@ -1,0 +1,3 @@
+// `+` is Text's only arithmetic operator, and it does not stringify its operand.
+out("ab" * 3)
+out("count: " + 3)

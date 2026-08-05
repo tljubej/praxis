@@ -1,0 +1,16 @@
+struct Point { x: Int, y: Int }
+
+var p = Point { x: 1, y: 1 }
+p.x = 5
+p.y += 2
+out(p)
+
+var xs = [1, 2, 3]
+xs[0] = 100
+xs[2] += 1
+out(xs)
+
+var counts = Counter[Text]()
+counts["a"] += 1
+counts["a"] += 1
+out(counts["a"])

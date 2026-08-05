@@ -1,0 +1,24 @@
+// Shape: two columns of numbers, aligned with a variable run of spaces.
+//
+// 3   4
+// 4   3
+//
+// A run of ordinary spaces in a template matches one or more spaces or tabs,
+// so the alignment does not have to be exact.
+var pairs = read lines(`{left:int} {right:int}`)
+
+var left = pairs.map(|p| p.left).sorted()
+var right = pairs.map(|p| p.right).sorted()
+
+var distance = left
+    .zip(right)
+    .map(|(a, b)| abs(a - b))
+    .sum()
+
+var counts = right.frequencies()
+var similarity = left
+    .map(|value| value * counts[value])
+    .sum()
+
+out(distance)
+out(similarity)

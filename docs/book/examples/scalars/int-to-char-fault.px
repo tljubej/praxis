@@ -1,0 +1,5 @@
+fn as_char(n) {
+    n.to_char()
+}
+
+out(as_char(55296))

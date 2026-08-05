@@ -1,0 +1,34 @@
+error: program faulted: division by zero
+
+Backtrace:
+#0   ratio
+#1   step
+#2   <entry>
+
+  locals:
+    a: Int = 20
+    b: Int = 20
+  temps:
+    <tmp#3: Int> @ "b - a" = <uninit>
+    <tmp#4: Int> @ "a / (b - a)" = <uninit>
+Entered crash debugger. 3 frame(s). Type `help` for commands.
+Praxis crash> Crash debugger commands (§9.4):
+  bt              show the numbered backtrace
+  frame N         select frame N
+  up              move the selection toward the caller
+  down            move the selection toward the callee
+  locals          show the selected frame's locals
+  p EXPR          evaluate a read-only expression
+  type EXPR       show the inferred expression type
+  heap EXPR       inspect a value with its type
+  source [N]      show the selected (or Nth) frame's source
+  input           show the input near the active parser cursor
+  parser          show the active input parser near the fault
+  restart         rerun the program with the same input
+  reload          recompile source and rerun with the same input
+  help            show this message
+  quit            exit the debugger
+Praxis crash> unknown command `frobnicate`. Type `help` for the list.
+Praxis crash> usage: p EXPR
+Praxis crash> (no input context — not a parse failure)
+Praxis crash> 

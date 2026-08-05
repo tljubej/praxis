@@ -1,0 +1,5 @@
+p a + b + c + d + e + f
+p a + b + c + d + e + f + g
+p squares.len()
+p squares
+quit

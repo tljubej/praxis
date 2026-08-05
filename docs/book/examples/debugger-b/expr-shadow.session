@@ -1,0 +1,42 @@
+two
+error: program faulted: index out of bounds
+
+Backtrace:
+#0   main
+
+  locals:
+    n: Int = 1
+    n: Text = two
+    xs: Vec[Int] = [1]
+  temps:
+    <tmp#1: Int> @ "1" = 1
+    <tmp#3: Int> @ "0" = <uninit>
+    <tmp#4: Bool> @ "n > 0" = true
+    <tmp#5: Unit> = Unit
+    <tmp#6: Text> @ ""two"" = two
+    <tmp#8: Unit> @ "out(n)" = Unit
+    <tmp#10: Vec[Int]> @ "[1]" = [1]
+    <tmp#11: Int> @ "1" = 1
+    <tmp#12: Unit> = Unit
+  …(3 more)
+Entered crash debugger. 1 frame(s). Type `help` for commands.
+Praxis crash>   locals:
+    n: Int = 1
+    n: Text = two
+    xs: Vec[Int] = [1]
+  temps:
+    <tmp#1: Int> @ "1" = 1
+    <tmp#3: Int> @ "0" = <uninit>
+    <tmp#4: Bool> @ "n > 0" = true
+    <tmp#5: Unit> = Unit
+    <tmp#6: Text> @ ""two"" = two
+    <tmp#8: Unit> @ "out(n)" = Unit
+    <tmp#10: Vec[Int]> @ "[1]" = [1]
+    <tmp#11: Int> @ "1" = 1
+    <tmp#12: Unit> = Unit
+    <tmp#14: Int> @ "9" = 9
+    <tmp#15: Int> @ "xs[9]" = Unit
+    <tmp#16: Unit> @ "out(xs[9])" = <uninit>
+Praxis crash> two
+Praxis crash> Text
+Praxis crash> 

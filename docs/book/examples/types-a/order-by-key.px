@@ -1,0 +1,7 @@
+struct Point { x: Int, y: Int }
+
+var points = [Point { x: 3, y: 1 }, Point { x: 1, y: 2 }]
+
+out(points.sorted_by_key(|p| p.x))
+out([3, 1, 2].sorted())
+out(["pear", "apple"].sorted())

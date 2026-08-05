@@ -1,0 +1,7 @@
+error[Y001]: expected Point, found { x: Int, y: Int }
+
+  record-anonymous-is-not-nominal.px:7:16
+  7 | var p: Point = rows[0]
+    |                ^^^^^^^ expected Point, found { x: Int, y: Int }
+
+praxis: 1 error(s)

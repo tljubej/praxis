@@ -1,0 +1,7 @@
+error[N007]: `over_limit` cannot use `limit`: a function does not capture the bindings around it (pass `limit` as a parameter, or use a closure)
+
+  fn-does-not-capture.px:4:9
+  4 |     n > limit
+    |         ^^^^^ `over_limit` cannot use `limit`: a function does not capture the bindings around it (pass `limit` as a parameter, or use a closure)
+
+praxis: 1 error(s)

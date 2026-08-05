@@ -1,0 +1,8 @@
+struct Point { x: Int, y: Int }
+
+fn shift(p: Point, dx: Int) -> Point {
+  Point { x: p.x + dx, z: p.y }
+}
+
+var p = shift(Point { x: 1, y: 2 })
+out(p.x)

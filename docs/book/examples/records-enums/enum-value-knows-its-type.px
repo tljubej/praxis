@@ -1,0 +1,9 @@
+enum Colour { Red, Green }
+enum Light { Red, Amber }
+
+// An enum value records which enum type it is, so a `Colour` and a `Light` are
+// never the same value — and here they are not even the same type. In
+// *expression* position `Red` is an ordinary name, and the later declaration
+// shadows the earlier one, so this `Red` is `Light`'s.
+var c: Colour = Red
+out(c)

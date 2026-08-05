@@ -1,0 +1,13 @@
+error[Y004]: values of type `(Int) -> Int` cannot be compared with `==`
+
+  requirement-rides.px:10:5
+  10 | out(same(double, double))
+     |     ^^^^^^^^^^^^^^^^^^^^ values of type `(Int) -> Int` cannot be compared with `==`
+
+note: this is the operation that requires it
+
+  requirement-rides.px:2:10
+  2 |     a == b
+    |          ^
+
+praxis: 1 error(s)

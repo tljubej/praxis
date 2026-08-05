@@ -1,0 +1,7 @@
+error[Y125]: a `for` binding must match every item, and a variant pattern does not
+
+  lowering-only.px:4:5
+  4 | for Circle(r) in shapes {
+    |     ^^^^^^^^^ a `for` binding must match every item, and a variant pattern does not
+
+praxis: 1 error(s)

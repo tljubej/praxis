@@ -1,0 +1,7 @@
+error[P002]: expected `;` or a line break between statements
+
+  statement_separator.px:4:11
+  4 | var a = 1 var b = 2
+    |           ^^^ expected `;` or a line break between statements
+
+praxis: 1 error(s)

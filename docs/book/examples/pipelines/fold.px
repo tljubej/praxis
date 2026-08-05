@@ -1,0 +1,32 @@
+// `fold` threads an accumulator of any type through the chain.
+struct Run {
+    best: Int
+    total: Int
+    count: Int
+}
+
+fn main() {
+    var xs = [3, 9, 4, 1, 12, 7]
+
+    // A record accumulator: three answers from one pass.
+    var r = xs.fold(Run { best: 0, total: 0, count: 0 }, |acc, x| Run {
+        best: max(acc.best, x),
+        total: acc.total + x,
+        count: acc.count + 1,
+    })
+    out(r.best)
+    out(r.total)
+    out(r.count)
+
+    // A Vec accumulator: a running total, one entry per element. A collection
+    // is a reference, so the closure hands the same one back each step.
+    var running = xs.fold([0], |acc, x| {
+        acc.push(acc[acc.len() - 1] + x)
+        acc
+    })
+    out(running)
+
+    // `reduce` is `fold` seeded with the first element, so it has no answer
+    // for an empty sequence and faults instead of inventing one.
+    out(xs.reduce(|a, b| max(a, b)))
+}

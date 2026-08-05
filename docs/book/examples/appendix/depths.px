@@ -1,0 +1,14 @@
+// The smallest complete program that reads input: one integer per line.
+//
+// `read lines(int)` is the whole parser. Its type — `Vec[Int]` — is derived
+// from the parser expression, so nothing is annotated. What follows is three
+// pipelines over that vector.
+
+var depths = read lines(int)
+
+out(depths.len())
+out(depths.sum())
+// A window over consecutive pairs: how many readings are larger than the one
+// before. `zip` pairs the vector with itself offset by one, and `count` takes
+// the predicate.
+out(depths.zip(depths.skip(1)).count(|p| p.1 > p.0))

@@ -1,0 +1,9 @@
+// A capture body is a whole parser expression (ADR-072), not just an atomic
+// name: a constructor call, a call with a string argument, a `}` inside that
+// string, and a template of its own all sit inside `{...}`.
+fn main() {
+    out(parse("Monkey 0: 79, 98", `Monkey {id:int}: {items:csv(int)}`))
+    out(parse("a-b-c", `{parts:sep("-", word)}`))
+    out(parse("}", `{c:one_of("}")}`))
+    out(parse("at 3,4", `at {p:`{x:int},{y:int}`}`))
+}

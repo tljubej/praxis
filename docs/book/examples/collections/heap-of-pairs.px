@@ -1,0 +1,2 @@
+var frontier = MinHeap()
+frontier.push((3, "b"))

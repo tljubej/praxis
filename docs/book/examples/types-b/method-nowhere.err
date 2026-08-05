@@ -1,0 +1,7 @@
+error[Y110]: no type has a method `upper` taking 0 argument(s)
+
+  method-nowhere.px:2:10
+  2 |     word.upper()
+    |          ^^^^^ no type has a method `upper` taking 0 argument(s)
+
+praxis: 1 error(s)

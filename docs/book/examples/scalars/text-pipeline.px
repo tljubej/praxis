@@ -1,0 +1,6 @@
+// A Text is a pipeline receiver, and its item is the Char `t[i]` answers.
+var line = "a1b2c3"
+out(line.count())
+out(line.count(|c| c >= "0"[0] && c <= "9"[0]))
+out(line.filter(|c| c >= "a"[0]).to_vec().len())
+out(line.map(|c| c.to_int()).sum())

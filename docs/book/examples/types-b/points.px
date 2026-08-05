@@ -1,0 +1,3 @@
+var points = read lines(`{x:int},{y:int}`)
+var first = points[0]
+out(points.len() + first.x + first.y)

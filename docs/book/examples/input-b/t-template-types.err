@@ -1,0 +1,33 @@
+error[Y001]: expected Bool, found Unit
+
+  t-template-types.px:4:15
+  4 | var a: Bool = read `hello`
+    |               ^^^^^^^^^^^^ expected Bool, found Unit
+
+help: this value is `Unit`; the binding's type annotation expected `Bool` — make the last expression produce a value, or change the declared type to `Unit`
+
+error[Y001]: expected Bool, found Int
+
+  t-template-types.px:5:15
+  5 | var b: Bool = read `{int}`
+    |               ^^^^^^^^^^^^ expected Bool, found Int
+
+error[Y001]: expected Bool, found (Int, Int)
+
+  t-template-types.px:6:15
+  6 | var c: Bool = read `{int},{int}`
+    |               ^^^^^^^^^^^^^^^^^^ expected Bool, found (Int, Int)
+
+error[Y001]: expected Bool, found { x: Int, y: Int }
+
+  t-template-types.px:7:15
+  7 | var d: Bool = read `{x:int},{y:int}`
+    |               ^^^^^^^^^^^^^^^^^^^^^^ expected Bool, found { x: Int, y: Int }
+
+error[Y001]: expected Bool, found { name: Text, values: Vec[Int] }
+
+  t-template-types.px:8:15
+  8 | var e: Bool = read `{name:word} {values:csv(int)}`
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected Bool, found { name: Text, values: Vec[Int] }
+
+praxis: 5 error(s)

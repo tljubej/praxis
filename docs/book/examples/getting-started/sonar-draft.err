@@ -1,0 +1,16 @@
+error[Y110]: no method `length` on type `Vec[Int]` taking 0 argument(s)
+
+  sonar-draft.px:4:20
+  4 | for i in 1..depths.length() {
+    |                    ^^^^^^ no method `length` on type `Vec[Int]` taking 0 argument(s)
+
+error[N001]: `increase` is not defined
+
+  sonar-draft.px:10:5
+  10 | out(increase)
+     |     ^^^^^^^^ `increase` is not defined
+
+help: did you mean `increases`?
+      increases
+
+praxis: 2 error(s)

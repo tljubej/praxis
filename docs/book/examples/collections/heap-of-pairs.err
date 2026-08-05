@@ -1,0 +1,7 @@
+error[Y006]: values of type `(Int, Text)` cannot be ordered
+
+  heap-of-pairs.px:2:10
+  2 | frontier.push((3, "b"))
+    |          ^^^^ values of type `(Int, Text)` cannot be ordered
+
+praxis: 1 error(s)

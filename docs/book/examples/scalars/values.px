@@ -1,0 +1,14 @@
+// One value of every scalar type the language has.
+var n: Int = 42
+var f: Float = 3.5
+var b: Bool = true
+var t: Text = "praxis"
+var c: Char = "p"[0]
+var u: Unit = ()
+
+out(n)
+out(f)
+out(b)
+out(t)
+out(c)
+out(u)

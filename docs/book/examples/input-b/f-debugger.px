@@ -1,0 +1,7 @@
+fn shipping(limit: Int) -> Int {
+    // The third line of the input is not an integer.
+    var values = read lines(int)
+    values.filter(|v| v < limit).sum()
+}
+
+out(shipping(25))

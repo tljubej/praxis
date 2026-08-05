@@ -1,0 +1,9 @@
+// Named arguments parse fixed sections in order, into a record.
+var data = read sections(
+    rules: lines(`{before:int}|{after:int}`),
+    updates: lines(csv(int)),
+)
+
+out(data.rules.len())
+out(data.rules.get(0).before)
+out(data.updates)

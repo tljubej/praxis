@@ -1,0 +1,15 @@
+error: program faulted: input parse mismatch
+       at input offset 4..4: expected int
+       actual: 1⏎  ⏎2⏎
+
+Backtrace:
+#0   main
+
+  temps:
+    <tmp#1> = 1
+  
+2
+
+    <tmp#2: Int> = 1
+    <tmp#3: Vec[Int]> = Unit
+    <tmp#4: Int> @ "(read lines(int)).len()" = <uninit>

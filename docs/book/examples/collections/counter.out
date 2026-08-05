@@ -1,0 +1,9 @@
+{cat: 2, sat: 1, the: 2}
+2
+3
+[cat, sat, the]
+[2, 1, 2]
+0
+3
+4
+{cat: 2, dog: 0, sat: 1, the: 2}

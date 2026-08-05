@@ -1,0 +1,7 @@
+error[Y010]: values of type `Bool` do not support this operation
+
+  not-numeric.px:2:1
+  2 | flag += false
+    | ^^^^ values of type `Bool` do not support this operation
+
+praxis: 1 error(s)

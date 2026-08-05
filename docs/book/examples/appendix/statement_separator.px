@@ -1,0 +1,5 @@
+// ADR-049 in one line: a newline ends a statement, and nothing else does
+// except `;` and the closing brace. Two statements run together on one line
+// have no separator, and the parser says so rather than guessing.
+var a = 1 var b = 2
+out(a + b)

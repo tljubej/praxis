@@ -1,0 +1,21 @@
+var lo = MinHeap()
+for n in [5, 1, 3] {
+    lo.push(n)
+}
+out(lo.peek())
+out(lo.pop())
+out(lo.pop())
+out(lo.len())
+
+var hi = MaxHeap[Int]()
+for n in [5, 1, 3] {
+    hi.push(n)
+}
+out(hi.peek())
+
+// Walking a heap does not drain it: the loop reads a snapshot in pop order.
+for n in hi {
+    out(n)
+}
+out(hi.len())
+out(hi.is_empty())

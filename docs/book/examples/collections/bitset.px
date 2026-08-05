@@ -1,0 +1,19 @@
+var bits = BitSet()
+bits.insert(64)
+bits.insert(1)
+bits.insert(300)
+bits.insert(1)
+
+out(bits)
+out(bits.len())
+out(bits.contains(64))
+out(bits.contains(65))
+
+// Members come out in ascending numeric order, not by rendered form.
+for n in bits {
+    out(n)
+}
+
+bits.remove(64)
+out(bits)
+out(bits.is_empty())

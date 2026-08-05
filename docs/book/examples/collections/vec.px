@@ -1,0 +1,16 @@
+// A list literal is a Vec: an allocation followed by one push per element.
+var v = [3, 1, 2]
+v.push(4)
+v[0] = 30
+
+out(v)
+out(v.len())
+out(v[1])
+out(v.get(3))
+out(v.is_empty())
+
+// An empty literal has no element to read a type from, so the use decides —
+// here, an annotation.
+var names: Vec[Text] = []
+names.push("ada")
+out(names)

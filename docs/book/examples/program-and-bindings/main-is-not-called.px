@@ -1,0 +1,5 @@
+fn main() {
+    out("main ran")
+}
+
+out("the top level ran")

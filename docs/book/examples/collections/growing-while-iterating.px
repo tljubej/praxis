@@ -1,0 +1,18 @@
+// A Vec indexes itself, so a `for` over it re-reads the length each step and
+// sees an element pushed by the body.
+var v = [1, 2, 3]
+for x in v {
+    if x == 1 {
+        v.push(99)
+    }
+    out(x)
+}
+
+// A Set does not: the loop walks a snapshot taken once, before the first step.
+var s = Set()
+s.insert(1)
+for x in s {
+    s.insert(2)
+    out(x)
+}
+out(s)

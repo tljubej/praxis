@@ -1,0 +1,10 @@
+// Every walk keeps the states it has seen in a set, and the weighted ones key
+// a cost table on them. So a state has to be a value that cannot change after
+// it is stored — and a `Vec` can.
+fn steps(v: Vec[Int]) -> Vec[Vec[Int]] {
+    Vec()
+}
+
+fn main() -> Int {
+    bfs(Vec(), steps).len()
+}

@@ -1,0 +1,6 @@
+// The second line writes `=>` where the template writes `->`.
+fn pairs() -> Int {
+    read lines(`{from:int} -> {to:int}`).len()
+}
+
+out(pairs())

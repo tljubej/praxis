@@ -1,0 +1,15 @@
+21
+error: program faulted: panic: 42
+
+Backtrace:
+#0   <entry>
+
+  locals:
+    doubled: Int = 42
+  temps:
+    <tmp#1: Int> @ "21" = 21
+    <tmp#2: Int> @ "dbg(21)" = 21
+    <tmp#3: Int> @ "2" = 2
+    <tmp#4: Int> @ "dbg(21) * 2" = 42
+    <tmp#6> @ "panic(doubled)" = Unit
+    <tmp#7: Unit> @ "var doubled = dbg(21) * 2 panic(doubled)" = <uninit>

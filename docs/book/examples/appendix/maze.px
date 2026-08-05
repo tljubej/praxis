@@ -1,0 +1,58 @@
+// Breadth-first search over a maze read as a character grid.
+//
+// Two ways to write the same search. The first is the loop every puzzle starts
+// with: a `Deque` as the FIFO frontier, a `Set` of visited cells, a `Map` of
+// distances. The second is the prelude's `bfs_distance`, which takes the start,
+// a closure answering the neighbours of a state, and a closure saying whether a
+// state is the goal — the graph is never materialized.
+//
+// A cell is a `(Int, Int)` tuple, which is what lets it be a `Set` member and a
+// `Map` key: tuples are values compared by their elements.
+
+var maze = read grid(char)
+
+fn open_cell(maze, p) {
+    p.0 >= 0 && p.1 >= 0 && p.0 < maze.width() && p.1 < maze.height()
+        && maze[p.0, p.1] != "#"[0]
+}
+
+fn neighbours(maze, p) {
+    var found = Vec()
+    for step in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        var q = (p.0 + step.0, p.1 + step.1)
+        if open_cell(maze, q) { found.push(q) }
+    }
+    found
+}
+
+var start = (0, 0)
+var goal = (maze.width() - 1, maze.height() - 1)
+
+// The explicit loop.
+var frontier = Deque()
+frontier.push_back(start)
+var seen = Set()
+seen.insert(start)
+var dist = Map()
+dist[start] = 0
+var answer = -1
+while frontier.len() > 0 {
+    var here = frontier.pop_front()
+    if here == goal {
+        answer = dist[here]
+        break
+    }
+    for next in neighbours(maze, here) {
+        if !seen.contains(next) {
+            seen.insert(next)
+            dist[next] = dist[here] + 1
+            frontier.push_back(next)
+        }
+    }
+}
+out(answer)
+out(seen.len())
+
+// The same answer from the prelude helper. It answers an `Option[Int]`,
+// because a goal that is not reachable has no distance.
+out(bfs_distance(start, |p| neighbours(maze, p), |p| p == goal))

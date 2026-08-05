@@ -1,0 +1,7 @@
+error[Y001]: expected Text, found Int
+
+  shadowed.px:8:13
+  8 | out(value + 1)
+    |             ^ expected Text, found Int
+
+praxis: 1 error(s)

@@ -1,0 +1,8 @@
+struct Row { len: Int }
+
+var r = Row { len: 4 }
+out(r.len)
+
+var v = [1, 2, 3]
+out(v.len())
+out(v.len)

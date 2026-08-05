@@ -1,0 +1,7 @@
+error[Y001]: expected (?T, ?U), found Int
+
+  iterable-item-must-fit.px:1:12
+  1 | out([1, 2].to_map())
+    |            ^^^^^^ expected (?T, ?U), found Int
+
+praxis: 1 error(s)

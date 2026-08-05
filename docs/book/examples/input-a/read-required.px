@@ -1,0 +1,5 @@
+// The other half of ADR-087: a program that requires content still gets a
+// fault over empty input, and the fault says where it looked and what for.
+fn main() {
+    out(read int)
+}

@@ -1,0 +1,7 @@
+error[Y001]: expected (Vec[Int]) -> ?T, found (Vec[Text]) -> ?T
+
+  parameter-pinned-by-a-method.px:4:5
+  4 | out(head(["a", "b"]))
+    |     ^^^^^^^^^^^^^^^^ expected (Vec[Int]) -> ?T, found (Vec[Text]) -> ?T
+
+praxis: 1 error(s)

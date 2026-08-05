@@ -1,0 +1,3 @@
+var seen = BitSet()
+seen.insert(1000000000000000000)
+out(seen.len())

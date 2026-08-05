@@ -1,0 +1,12 @@
+// `+` builds a Text; `len`, `is_empty` and `[i]` take one apart.
+var greeting = "héllo" + ", " + "world"
+out(greeting)
+out(greeting.len())
+out(greeting.is_empty())
+out(greeting[1])
+
+var vowels = 0
+for c in greeting {
+    if c == "o"[0] || c == "e"[0] { vowels += 1 }
+}
+out(vowels)

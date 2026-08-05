@@ -1,0 +1,4 @@
+var seen = Set()
+var path = [1, 2]
+
+seen.insert(path)

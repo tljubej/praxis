@@ -1,0 +1,5 @@
+fn top_three(rows) {
+    rows.sorted().take(3)
+}
+
+out(top_three([5, 9, 1, 7]))

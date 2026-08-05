@@ -1,0 +1,54 @@
+// Shape: one header section, then an unknown number of boards.
+//
+// 7,4,9,5,11
+//
+// 22 13 17 11  0
+//  8  2 23  4 24
+//
+// `repeated(P)` is the final named argument: it takes every section that is
+// left. `matrix` splits each row into whitespace-separated tokens itself, so
+// the ragged column alignment does not matter.
+var bingo = read sections(
+    draws: csv(int),
+    boards: repeated(matrix(int)),
+)
+
+out(bingo.draws.len())
+out(bingo.boards.len())
+out(bingo.boards.get(0).width())
+
+// When does each board first complete a row or a column?
+fn wins_at(board: Grid[Int], order: Map[Int, Int]) -> Int {
+    var best = -1
+    for y in 0..board.height() {
+        var turn = board.row(y).map(|n| order[n]).max()
+        if best < 0 || turn < best {
+            best = turn
+        }
+    }
+    for x in 0..board.width() {
+        var turn = board.column(x).map(|n| order[n]).max()
+        if best < 0 || turn < best {
+            best = turn
+        }
+    }
+    best
+}
+
+var order = Map[Int, Int]()
+for (turn, n) in bingo.draws.enumerate() {
+    order[n] = turn
+}
+
+var turns = bingo.boards.map(|b| wins_at(b, order))
+out(turns)
+
+var first = turns.min()
+match turns.position(|t| t == first) {
+    Some(index) => {
+        var winner = bingo.boards.get(index)
+        var drawn = bingo.draws.take(first + 1).to_set()
+        out(winner.cells().filter(|n| !drawn.contains(n)).sum() * bingo.draws[first])
+    }
+    None => out("no board wins")
+}

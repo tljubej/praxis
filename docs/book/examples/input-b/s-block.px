@@ -1,0 +1,16 @@
+// A `block` applies its items in sequence inside one region. A positional
+// template contributes its named captures to the block's record; a named item
+// contributes one field. Each item is offered its own lines: the `csv(int)`
+// capture is its template's last part and still stops at the end of its line.
+var monkeys = read sections(block(
+    `Monkey {id:int}:`,
+    `  Starting items: {items:csv(int)}`,
+    `  Operation: new = old {op:char} {operand:word}`,
+))
+
+for m in monkeys {
+    out(m.id)
+    out(m.items)
+    out(m.op)
+    out(m.operand)
+}

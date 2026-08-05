@@ -1,0 +1,7 @@
+error[Y122]: `Tile` has no variant `Numbr`
+
+  match-unknown-variant.px:5:38
+  5 |     match t { Empty => 1, Wall => 2, Numbr(n) => n }
+    |                                      ^^^^^ `Tile` has no variant `Numbr`
+
+praxis: 1 error(s)

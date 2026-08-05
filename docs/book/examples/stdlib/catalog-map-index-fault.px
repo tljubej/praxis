@@ -1,0 +1,3 @@
+var m = Map()
+m.insert("a", 1)
+out(m["b"])

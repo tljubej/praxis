@@ -1,0 +1,50 @@
+// One chain over each of the ten things a pipeline can start from.
+fn main() {
+    // Vec[T] and Deque[T] yield T.
+    out([3, 1, 2].map(|x| x * 10).sum())
+
+    var d = Deque()
+    d.push_back(10)
+    d.push_front(20)
+    out(d.to_vec())
+
+    // Set[T], MinHeap[T] and MaxHeap[T] yield T, from a snapshot in a
+    // deterministic order.
+    var s = Set()
+    s.insert(3)
+    s.insert(1)
+    s.insert(2)
+    out(s.filter(|x| x > 1).sorted())
+
+    var lo = MinHeap()
+    lo.push(5)
+    lo.push(2)
+    out(lo.sum())
+
+    var hi = MaxHeap()
+    hi.push(5)
+    hi.push(2)
+    out(hi.max())
+
+    // Range and BitSet yield Int.
+    out((1..6).map(|n| n * n).sum())
+
+    var bits = BitSet()
+    bits.insert(2)
+    bits.insert(5)
+    out(bits.to_vec())
+
+    // Text yields Char — the same value `t[i]` answers.
+    out("mississippi".count(|c| c == "s"[0]))
+    out("hello".filter(|c| c != "l"[0]).to_vec())
+
+    // Map[K, V] yields (K, V), and Counter[T] yields (T, Int).
+    var m = Map()
+    m["a"] = 1
+    m["b"] = 2
+    out(m.map(|kv| kv.1).sum())
+    out(m.to_vec())
+
+    var tally = ["the", "cat", "the", "dog", "the"].frequencies()
+    out(tally.filter(|(word, n)| n > 1).map(|(word, n)| word))
+}

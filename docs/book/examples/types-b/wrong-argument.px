@@ -1,0 +1,6 @@
+fn double(n: Int) -> Int {
+    n * 2
+}
+
+var raw = "21"
+out(double(raw))

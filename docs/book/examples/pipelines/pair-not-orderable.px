@@ -1,0 +1,6 @@
+// A pipeline whose item is a pair has no `sorted`.
+fn main() {
+    var m = Map()
+    m["a"] = 1
+    out(m.to_vec().sorted())
+}

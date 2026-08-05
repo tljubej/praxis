@@ -1,0 +1,10 @@
+// A subscript is dispatched exactly like a method call, so `m` and `k` need no
+// annotation: the call site below is what says they are a `Map[Text, Int]` and
+// a `Text`.
+fn lookup(m, k) {
+    m[k]
+}
+
+var ages = Map[Text, Int]()
+ages["ada"] = 36
+out(lookup(ages, "grace"))

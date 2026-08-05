@@ -1,0 +1,19 @@
+error[Y016]: `*` is not defined for `Text`
+
+  text-operators.px:2:5
+  2 | out("ab" * 3)
+    |     ^^^^^^^^ `*` is not defined for `Text`
+
+error[Y001]: expected Text, found Int
+
+  text-operators.px:2:12
+  2 | out("ab" * 3)
+    |            ^ expected Text, found Int
+
+error[Y001]: expected Text, found Int
+
+  text-operators.px:3:17
+  3 | out("count: " + 3)
+    |                 ^ expected Text, found Int
+
+praxis: 3 error(s)

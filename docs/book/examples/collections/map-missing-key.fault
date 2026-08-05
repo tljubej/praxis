@@ -1,0 +1,11 @@
+error: program faulted: index out of bounds
+
+Backtrace:
+#0   lookup
+#1   <entry>
+
+  locals:
+    m: Map[Text, Int] = {ada: 36}
+    k: Text = grace
+  temps:
+    <tmp#3: Int> @ "m[k]" = Unit

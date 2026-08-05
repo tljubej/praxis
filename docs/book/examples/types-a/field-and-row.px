@@ -1,0 +1,7 @@
+struct Reading { len: Int, label: Text }
+
+var r = Reading { len: 7, label: "north" }
+
+out(r.len)
+out(r.label)
+out(r.label.len())

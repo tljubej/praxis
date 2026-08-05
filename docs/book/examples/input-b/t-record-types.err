@@ -1,0 +1,25 @@
+error[Y001]: expected Bool, found { rules: Vec[{ before: Int, after: Int }], updates: Vec[Vec[Int]] }
+
+  t-record-types.px:5:15
+  5 | var a: Bool = read sections(rules: lines(`{before:int}|{after:int}`), updates: lines(csv(int)))
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected Bool, found { rules: Vec[{ before: Int, after: Int }], updates: Vec[Vec[Int]] }
+
+error[Y001]: expected Bool, found { draws: Vec[Int], boards: Vec[Grid[Int]] }
+
+  t-record-types.px:6:15
+  6 | var b: Bool = read sections(draws: csv(int), boards: repeated(matrix(int)))
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected Bool, found { draws: Vec[Int], boards: Vec[Grid[Int]] }
+
+error[Y001]: expected Bool, found { source: Text, dest: Text, ranges: Vec[{ a: Int, b: Int }] }
+
+  t-record-types.px:7:15
+  7 | var c: Bool = read block(`{source:word}-to-{dest:word} map:`, ranges: lines(`{a:int} {b:int}`))
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected Bool, found { source: Text, dest: Text, ranges: Vec[{ a: Int, b: Int }] }
+
+error[Y001]: expected Bool, found { Number({ name: Text, value: Int }) | Op({ name: Text, l: Text, r: Text }) }
+
+  t-record-types.px:8:15
+  8 | var d: Bool = read choice(Number: `{name:word}: {value:int}`, Op: `{name:word}: {l:word} {r:word}`)
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected Bool, found { Number({ name: Text, value: Int }) | Op({ name: Text, l: Text, r: Text }) }
+
+praxis: 4 error(s)

@@ -1,0 +1,21 @@
+var x = -2.5
+
+out(x.abs())
+out(x.sign())
+out(x.floor())
+out(x.ceil())
+out(x.round())
+out(x.to_int())
+out(x.to_text())
+out(x.min(1.0))
+out(x.max(1.0))
+out((2.0).sqrt())
+out((0.0 / 0.0).is_nan())
+out((1.0 / 0.0).is_infinite())
+
+out((7).to_float())
+out((9223372036854775807).wrapping_add(1))
+out((9223372036854775807).saturating_add(1))
+out((9223372036854775807).checked_add(1))
+out((5).checked_sub(1))
+out((3).wrapping_mul(4))

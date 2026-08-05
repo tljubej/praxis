@@ -1,0 +1,6 @@
+var pairs = [(1, "a"), (2, "b")]
+for (n, label) in pairs {
+    out(label)
+}
+var f = |q| q + 1
+out(f(1))

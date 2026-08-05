@@ -1,0 +1,8 @@
+error: program faulted: stack overflow (recursion limit)
+
+Backtrace:
+#0   down
+#1   down
+#2   down
+#3   down
+#4   down

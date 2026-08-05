@@ -1,0 +1,7 @@
+error[Y001]: expected Text, found Int
+
+  type-arg-mismatch.px:2:7
+  2 | c.inc(1)
+    |       ^ expected Text, found Int
+
+praxis: 1 error(s)

@@ -1,0 +1,11 @@
+var d = Deque()
+d.push_back(2)
+d.push_back(3)
+d.push_front(1)
+
+out(d)
+out(d.len())
+out(d.get(0))
+out(d.pop_front())
+out(d.pop_back())
+out(d.is_empty())

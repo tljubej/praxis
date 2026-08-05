@@ -1,0 +1,7 @@
+// A non-template item is offered the rest of the region, so a greedy one that
+// is not last leaves nothing for the item after it.
+fn parts() -> Int {
+    read block(`h:`, a: csv(int), b: word).a.len()
+}
+
+out(parts())

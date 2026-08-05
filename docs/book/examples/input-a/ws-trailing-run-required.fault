@@ -1,0 +1,15 @@
+error: program faulted: input parse mismatch
+       at input offset 3..3: expected whitespace
+       actual: 1->2⏎
+
+Backtrace:
+#0   main
+
+  locals:
+    pair: { a: Int, b: Int } = <uninit>
+  temps:
+    <tmp#1> = 1->2
+
+    <tmp#2: Int> = 1
+    <tmp#3: { a: Int, b: Int }> = Unit
+    <tmp#7: Int> @ "pair.a + pair.b" = <uninit>

@@ -1,0 +1,41 @@
+// Shape: a header section, then any number of labeled blocks whose bodies are
+// lines of numbers.
+//
+// seeds: 79 14 55 13
+//
+// seed-to-soil map:
+// 50 98 2
+// 52 50 48
+//
+// `block` sequences a header template and a body parser inside one section;
+// `repeated(block(...))` applies that to every section that is left. The
+// header's captures are flattened into the same record as the named body.
+var almanac = read sections(
+    seeds: block(`seeds: {values:ws(int)}`),
+    maps: repeated(block(
+        `{source:word}-to-{destination:word} map:`,
+        ranges: lines(`{destination:int} {source:int} {length:int}`),
+    )),
+)
+
+out(almanac.seeds.values)
+out(almanac.maps.len())
+out(almanac.maps.get(0).source)
+out(almanac.maps.get(0).destination)
+
+// An anonymous record type has no name to write in an annotation, so the
+// mapping is done in place rather than in a helper that would have to name it.
+var locations = almanac.seeds.values.map(|seed| {
+    var v = seed
+    for m in almanac.maps {
+        for r in m.ranges {
+            if v >= r.source && v < r.source + r.length {
+                v = r.destination + (v - r.source)
+                break
+            }
+        }
+    }
+    v
+})
+out(locations)
+out(locations.min())

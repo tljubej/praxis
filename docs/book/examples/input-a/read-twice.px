@@ -1,0 +1,8 @@
+// `read` is not a consuming stream. Both expressions parse the same buffer
+// from its first byte, so the second one still sees all six bytes.
+fn main() {
+    var numbers = read lines(int)
+    var whole = read rest
+    out(numbers)
+    out(whole.len())
+}

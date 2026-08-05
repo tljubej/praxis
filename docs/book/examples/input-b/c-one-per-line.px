@@ -1,0 +1,16 @@
+// Shape: one number per line.
+//
+// 199
+// 200
+// 208
+var depths = read lines(int)
+
+out(depths.len())
+out(depths.sum())
+out(depths.max())
+
+// How many readings are larger than the one before.
+var increases = depths
+    .zip(depths.skip(1))
+    .count(|(a, b)| b > a)
+out(increases)

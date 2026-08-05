@@ -1,0 +1,4 @@
+// `panic` and `assert` put their message on the fault line itself.
+var node = "start"
+var visited = [1, 2]
+panic("no route from " + node)

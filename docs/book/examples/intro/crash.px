@@ -1,0 +1,12 @@
+var numbers = read lines(int)
+
+fn window_sum(values, start) {
+    values[start] + values[start + 1] + values[start + 2]
+}
+
+var largest = 0
+for i in 0..numbers.len() {
+    largest = max(largest, window_sum(numbers, i))
+}
+
+out(largest)

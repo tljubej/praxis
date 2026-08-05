@@ -1,0 +1,6 @@
+fn total(values) {
+    values.sum()
+}
+
+var values = [1, 2, 3]
+out(total(values))

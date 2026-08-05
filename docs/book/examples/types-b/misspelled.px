@@ -1,0 +1,7 @@
+var total = 0
+
+for n in [1, 2, 3] {
+    totl += n
+}
+
+out(total)

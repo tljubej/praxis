@@ -1,0 +1,2 @@
+fn down(n) { if n == 0 { 0 } else { down(n - 1) + 1 } }
+out(down(1000000))

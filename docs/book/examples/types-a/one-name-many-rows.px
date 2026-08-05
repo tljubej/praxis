@@ -1,0 +1,13 @@
+var text = "hello"
+var v = [10, 20]
+var m = Map()
+m.insert("a", 1)
+
+out(text.len())
+out(v.len())
+out(m.len())
+
+out(text.get(1))
+out(v.get(1))
+out(m.get("a"))
+out(m.get("z"))

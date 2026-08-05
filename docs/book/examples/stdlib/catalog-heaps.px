@@ -1,0 +1,16 @@
+var lo = MinHeap()
+lo.push(5)
+lo.push(1)
+lo.push(3)
+
+out(lo.len())
+out(lo.peek())
+out(lo.pop())
+out(lo.is_empty())
+
+var hi = MaxHeap()
+hi.push(5)
+hi.push(1)
+
+out(hi.peek())
+out(hi.pop())

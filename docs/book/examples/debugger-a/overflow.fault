@@ -1,0 +1,13 @@
+error: program faulted: integer overflow
+
+Backtrace:
+#0   <entry>
+
+  locals:
+    total: Int = 9223372036854775807
+  temps:
+    <tmp#1: Int> @ "9223372036854775807" = 9223372036854775807
+    <tmp#3: Int> @ "1" = 1
+    <tmp#4: Int> @ "total + 1" = <uninit>
+    <tmp#5: Unit> @ "out(total + 1)" = <uninit>
+    <tmp#6: Unit> @ "var total = 9223372036854775807 out(total + 1)" = <uninit>

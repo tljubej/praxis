@@ -1,0 +1,13 @@
+var distance = Map[Text, Int]()
+
+// An absent entry accepts the first value, so no key has to be seeded.
+distance["b"] min= 7
+distance["b"] min= 4
+distance["b"] min= 9
+out(distance["b"])
+
+var best = Map[Text, Int]()
+best["b"] max= 7
+best["b"] max= 4
+best["b"] max= 9
+out(best["b"])

@@ -1,0 +1,19 @@
+error: program faulted: index out of bounds
+
+Backtrace:
+#0   <entry>
+
+  locals:
+    xs: Vec[Int] = [10, 20, 30]
+  temps:
+    <tmp#1: Vec[Int]> @ "[10, 20, 30]" = [10, 20, 30]
+    <tmp#2: Int> @ "10" = 10
+    <tmp#3: Unit> = Unit
+    <tmp#4: Int> @ "20" = 20
+    <tmp#5: Unit> = Unit
+    <tmp#6: Int> @ "30" = 30
+    <tmp#7: Unit> = Unit
+    <tmp#9: Int> @ "3" = 3
+    <tmp#10: Int> @ "xs[3]" = Unit
+    <tmp#11: Unit> @ "out(xs[3])" = <uninit>
+    <tmp#12: Unit> @ "var xs = [10, 20, 30] out(xs[3])" = <uninit>

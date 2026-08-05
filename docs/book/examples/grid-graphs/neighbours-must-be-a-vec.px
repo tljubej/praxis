@@ -1,0 +1,9 @@
+// The neighbour function's shape is written into the helper's own signature,
+// so a `Set` of neighbours is reported at the call rather than at run time.
+fn steps(n: Int) -> Set[Int] {
+    Set()
+}
+
+fn main() -> Int {
+    bfs(0, steps).len()
+}

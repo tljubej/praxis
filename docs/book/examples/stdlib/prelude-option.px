@@ -1,0 +1,13 @@
+var seen = Map()
+seen.insert("a", 1)
+
+var found: Option[Int] = seen.get("a")
+var missing = seen.get("z")
+
+out(found)
+out(missing)
+
+match missing {
+  Some(n) => out(n)
+  None => out("nothing there")
+}

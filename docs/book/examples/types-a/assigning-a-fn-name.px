@@ -1,0 +1,8 @@
+fn ident(x) {
+    x
+}
+
+ident = |n| n + 100
+
+out(ident(1))
+out(ident("two"))

@@ -1,0 +1,5 @@
+fn apply_to_self(f) {
+    f(f)
+}
+
+out(1)

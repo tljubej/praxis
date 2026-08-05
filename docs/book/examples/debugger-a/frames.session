@@ -1,0 +1,46 @@
+error: program faulted: division by zero
+
+Backtrace:
+#0   ratio
+#1   step
+#2   <entry>
+
+  locals:
+    a: Int = 20
+    b: Int = 20
+  temps:
+    <tmp#3: Int> @ "b - a" = <uninit>
+    <tmp#4: Int> @ "a / (b - a)" = <uninit>
+Entered crash debugger. 3 frame(s). Type `help` for commands.
+Praxis crash> #0   ratio
+#1   step
+#2   <entry>
+  (frame 0 selected)
+Praxis crash> frame 2: <entry>
+Praxis crash>   locals:
+    depths: Vec[Int] = [10, 20, 20]
+    total: Int = 1
+    ? = 1
+  temps:
+    <tmp#1> = 10
+20
+20
+
+    <tmp#2: Int> = 1
+    <tmp#3: Vec[Int]> = [10, 20, 20]
+    <tmp#5: Int> @ "0" = 0
+    <tmp#7: Int> @ "0" = 0
+    <tmp#8: Int> @ "depths.len()" = 3
+    <tmp#9: Int> @ "1" = 1
+    <tmp#10: Int> @ "depths.len() - 1" = 2
+    <tmp#11: Range> @ "0..depths.len() - 1" = 0..2
+    <tmp#12: Int> = 1
+    <tmp#13: Int> = 2
+    <tmp#14: Int> = 1
+    <tmp#16: Int> @ "step(depths, i)" = 1
+    <tmp#17: Int> @ "total + step(depths, i)" = 1
+    <tmp#18: Unit> @ "{ total = total + step(depths, i) }" = Unit
+    <tmp#19: Unit> @ "for i in 0..depths.len() - 1 { total = total + step(depths, i) }" = <uninit>
+    <tmp#20: Unit> @ "out(total)" = <uninit>
+    <tmp#21: Unit> @ "var depths = read lines(int) fn ratio(a, b) { a / (b - a) } fn step(values, i) { ratio(values[i], values[i + 1]) } var total = 0 for i in 0..depths.len() - 1 { total = total + step(depths, i) } out(total)" = <uninit>
+Praxis crash> 

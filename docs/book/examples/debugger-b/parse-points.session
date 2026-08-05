@@ -1,0 +1,28 @@
+error: program faulted: input parse mismatch
+       at input offset 10..11: expected literal ","
+       actual: 12,7⏎5,3⏎9;1⏎4,4⏎
+
+Backtrace:
+#0   <entry>
+
+  locals:
+    points: Vec[{ x: Int, y: Int }] = <uninit>
+  temps:
+    <tmp#1> = 12,7
+5,3
+9;1
+4,4
+
+    <tmp#2: Int> = 1
+    <tmp#3: Vec[{ x: Int, y: Int }]> = Unit
+    <tmp#5: Int> @ "points.len()" = <uninit>
+    <tmp#6: Unit> @ "out(points.len())" = <uninit>
+    <tmp#7: Unit> @ "// Every line of the input is meant to be `x,y`. One of them is not. var points = read lines(`{x:int},{y:int}`) out(points.len())" = <uninit>
+Entered crash debugger. 1 frame(s). Type `help` for commands.
+Praxis crash> input at offset 10..11:
+  12,7⏎5,3⏎9;1⏎4,4⏎
+Praxis crash> expected: literal ","
+parser expression: <unknown parser>
+Praxis crash> #0   <entry>
+  (frame 0 selected)
+Praxis crash> 

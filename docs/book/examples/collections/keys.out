@@ -1,0 +1,6 @@
+an Int
+a Text
+a tuple of Ints
+a record of Ints
+an enum with no payload
+a Range

@@ -1,0 +1,12 @@
+// A collection constructor's type is its child's, wrapped: nesting the
+// constructors nests the type in the same order.
+var a: Bool = read lines(int)
+var b: Bool = read sections(lines(csv(int)))
+var c: Bool = read ws(word)
+var d: Bool = read sep(" -> ", word)
+var e: Bool = read grid(char)
+var f: Bool = read matrix(float)
+var g: Bool = read chars(one_of("^v"), skip: newlines)
+var h: Bool = read chars(int, skip: whitespace)
+var i: Bool = read optional(`{x:int},{y:int}`)
+var j: Bool = read scan(`mul({int},{int})`)

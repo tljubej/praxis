@@ -1,0 +1,10 @@
+var depths = read lines(int)
+
+var increases = 0
+for i in 1..depths.length() {
+    if depths.get(i) > depths.get(i - 1) {
+        increases = increases + 1
+    }
+}
+
+out(increase)

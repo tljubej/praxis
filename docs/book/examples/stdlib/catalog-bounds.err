@@ -1,0 +1,15 @@
+error[Y006]: values of type `(Int, Text)` cannot be ordered
+
+  catalog-bounds.px:2:11
+  2 | out(pairs.sorted())
+    |           ^^^^^^ values of type `(Int, Text)` cannot be ordered
+
+error[Y014]: a value of type `Vec[Int]` can change after it is stored, so it cannot be used as a key
+
+  catalog-bounds.px:5:12
+  5 | out(groups.to_set())
+    |            ^^^^^^ a value of type `Vec[Int]` can change after it is stored, so it cannot be used as a key
+
+help: use a value that cannot change — a number, `Text`, or a tuple of those
+
+praxis: 2 error(s)

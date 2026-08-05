@@ -1,0 +1,13 @@
+var p = read `{x:int},{y:int}`
+
+match p {
+    { x, y } => out(x + y)
+}
+
+p.x = 9
+out(p)
+
+var seen = Set()
+seen.insert(p)
+seen.insert(read `{x:int},{y:int}`)
+out(seen.len())

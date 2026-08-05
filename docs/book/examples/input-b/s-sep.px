@@ -1,0 +1,4 @@
+// `sep(SEPARATOR, P)` splits on an exact string. Nothing is trimmed.
+var chain = read sep(" -> ", word)
+
+out(chain)

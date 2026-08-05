@@ -1,0 +1,14 @@
+// Int literals, with `_` allowed between digits.
+out(42)
+out(1_000_000)
+
+// Float literals: a fraction, an exponent, or both. `.5` is not one.
+out(0.5)
+out(3.141_592)
+out(1.5e3)
+out(2e-3)
+
+// Bool, Unit, Text.
+out(true)
+out(())
+out("praxis")

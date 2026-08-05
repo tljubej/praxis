@@ -1,0 +1,26 @@
+var maze = read grid(char)
+var wall = "#"[0]
+
+// The same graph as the maze, written as one closure: the in-bounds
+// neighbours, minus the walls.
+var step = |p| maze.neighbors4(p).filter(|q| match q { (x, y) => maze[x, y] != wall })
+
+// `bfs` and `dfs` answer every reachable state, in the order they reached it.
+// Both start with the state you gave them.
+var breadth = bfs((0, 0), step)
+out(breadth.len())
+out(breadth[0])
+out(breadth[1])
+out(breadth[2])
+
+var depth = dfs((0, 0), step)
+out(depth[1])
+out(depth[2])
+
+// `flood_fill` asks the same reachability question and drops the order.
+var filled = flood_fill((0, 0), step)
+out(filled.len())
+
+// The pocket at (8, 2) is open but walled off, so no walk reaches it.
+out(maze[8, 2] != wall)
+out(filled.contains((8, 2)))

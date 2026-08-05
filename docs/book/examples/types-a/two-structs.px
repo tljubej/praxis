@@ -1,0 +1,9 @@
+struct Point { x: Int, y: Int }
+struct Velocity { x: Int, y: Int }
+
+fn magnitude(p) {
+    abs(p.x) + abs(p.y)
+}
+
+out(magnitude(Point { x: 1, y: 2 }))
+out(magnitude(Velocity { x: 3, y: 4 }))

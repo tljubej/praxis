@@ -1,0 +1,11 @@
+var b = BitSet()
+b.insert(3)
+b.insert(70)
+
+out(b.contains(3))
+out(b.contains(4))
+out(b.len())
+
+b.remove(3)
+out(b)
+out(b.is_empty())

@@ -1,0 +1,10 @@
+// `matrix(P)` is not `lines(ws(P))`. They differ exactly where a line has no
+// tokens: `ws` answers a line of spaces with an empty Vec, which is an
+// element; `matrix` makes no row of it at all.
+var rows = read lines(ws(int))
+var grid = read matrix(int)
+
+out(rows.len())
+out(rows)
+out(grid.height())
+out(grid)

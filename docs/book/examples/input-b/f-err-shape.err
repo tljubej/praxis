@@ -1,0 +1,37 @@
+error[I013]: unknown parser constructor `frobnicate` (§7.5)
+
+  f-err-shape.px:3:14
+  3 | var a = read frobnicate(int)
+    |              ^^^^^^^^^^ unknown parser constructor `frobnicate` (§7.5)
+
+error[I022]: `optional` expects 1 argument, got 2
+
+  f-err-shape.px:4:14
+  4 | var b = read optional(int, word)
+    |              ^^^^^^^^^^^^^^^^^^^ `optional` expects 1 argument, got 2
+
+error[I022]: `choice` expects at least 1 named argument(s), got 0
+
+  f-err-shape.px:5:14
+  5 | var c = read choice(int)
+    |              ^^^^^^^^^^^ `choice` expects at least 1 named argument(s), got 0
+
+error[I014]: `choice` argument 1 is a parser, but every argument must be `Name: parser`
+
+  f-err-shape.px:5:14
+  5 | var c = read choice(int)
+    |              ^^^^^^^^^^^ `choice` argument 1 is a parser, but every argument must be `Name: parser`
+
+error[I014]: `sep` argument 1 is a parser, but the separator must be a string literal
+
+  f-err-shape.px:6:14
+  6 | var d = read sep(int, int)
+    |              ^^^^^^^^^^^^^ `sep` argument 1 is a parser, but the separator must be a string literal
+
+error[I014]: `skip: wihtespace` is not a skip policy — `none` (skips nothing), `whitespace` (skips spaces and tabs) or `newlines` (skips spaces, tabs and line endings) (§7.5)
+
+  f-err-shape.px:7:14
+  7 | var e = read chars(digit, skip: wihtespace)
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `skip: wihtespace` is not a skip policy — `none` (skips nothing), `whitespace` (skips spaces and tabs) or `newlines` (skips spaces, tabs and line endings) (§7.5)
+
+praxis: 6 error(s)

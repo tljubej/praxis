@@ -1,0 +1,6 @@
+// The second row is one cell short. The fault names that row, not the file.
+fn heights() -> Int {
+    read grid(digit).width()
+}
+
+out(heights())

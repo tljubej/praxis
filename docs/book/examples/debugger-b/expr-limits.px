@@ -1,0 +1,14 @@
+// Seven bindings and one long vector: enough to hit the two ceilings `p` has —
+// six named locals per expression, and the twelve-local cap the banner (but not
+// the `locals` command) applies.
+fn main() {
+    var a = 1
+    var b = 2
+    var c = 3
+    var d = 4
+    var e = 5
+    var f = 6
+    var g = 7
+    var squares = (0..40).map(|n| n * n)
+    out(squares[500])
+}

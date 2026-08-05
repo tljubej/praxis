@@ -1,0 +1,17 @@
+out(1..4)
+out(1..=4)
+
+for i in 1..4 {
+    out(i)
+}
+
+out((1..4).count())
+out((1..4).sum())
+
+// A descending range is empty, not a countdown.
+out((5..0).count())
+
+// A Range has no mutator, so it is usable as a Map key.
+var spans = Map()
+spans[1..4] = "first three"
+out(spans[1..4])

@@ -1,0 +1,6 @@
+p left
+restart
+p left
+reload
+p budget
+quit

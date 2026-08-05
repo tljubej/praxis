@@ -1,0 +1,7 @@
+Monkey 0:
+  Starting items: 79, 98
+  Operation: new = old * 19
+
+Monkey 1:
+  Starting items: 54, 65, 75
+  Operation: new = old + 6

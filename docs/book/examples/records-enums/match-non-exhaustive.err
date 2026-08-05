@@ -1,0 +1,17 @@
+error[Y120]: non-exhaustive match: missing `Wall`, `Portal(_)`
+
+  match-non-exhaustive.px:9:5
+  9 |     match t {
+     |     ^^^^^^^^^ non-exhaustive match: missing `Wall`, `Portal(_)`...
+  10 |         Empty => 1
+     | ^^^^^^^^^^^^^^^^^^...
+  11 |         Number(n) => n
+     | ^^^^^^^^^^^^^^^^^^^^^^...
+  12 |     }
+     | ^^^^^
+
+help: add the missing match arms
+              Wall => panic("todo")
+              Portal(_) => panic("todo")
+
+praxis: 1 error(s)

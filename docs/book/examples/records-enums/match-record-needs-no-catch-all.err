@@ -1,0 +1,7 @@
+error[Y121]: unreachable match arm
+
+  match-record-needs-no-catch-all.px:8:9
+  8 |         _ => 0
+    |         ^^^^^^ unreachable match arm
+
+praxis: 1 error(s)

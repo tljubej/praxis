@@ -1,0 +1,8 @@
+// Trailing whitespace belongs to nobody when no parser reads it — at the end
+// of a line, of a region, or of the file. `int` makes nothing of a space or of
+// a line of spaces, so both are padding rather than data or a mismatch.
+fn main() {
+    out(parse("1 \n2 \n", lines(int)))
+    out(parse("1 2 3\n\n", ws(int)))
+    out(parse("1\n2\n  \n", lines(int)))
+}

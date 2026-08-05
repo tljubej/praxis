@@ -1,0 +1,6 @@
+fn remember(table, key) {
+    table.insert(key, 1)
+}
+
+var seen = Map()
+remember(seen, [3, 4])

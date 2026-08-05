@@ -1,0 +1,5 @@
+fn wrap(n, m) {
+    n % m
+}
+
+out(wrap(10, 0))

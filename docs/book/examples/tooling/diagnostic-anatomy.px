@@ -1,0 +1,6 @@
+var lines = read lines(word)
+var total = 0
+for line in lines {
+  total += line
+}
+out(total)

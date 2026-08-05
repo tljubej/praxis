@@ -1,0 +1,15 @@
+// `choice` parses one of several alternatives into an anonymous enum, one
+// variant per named case, each carrying its parser's result as its payload.
+// The first case that matches wins, so the longer alternative goes first: a
+// leading `Number` would match `bbb: 2` and leave ` 3` for `lines` to reject.
+var entries = read lines(choice(
+    Pair: `{name:word}: {left:int} {right:int}`,
+    Number: `{name:word}: {value:int}`,
+))
+
+for e in entries {
+    match e {
+        Number(p) => out(p.value)
+        Pair({ name, left, right }) => out(left + right)
+    }
+}

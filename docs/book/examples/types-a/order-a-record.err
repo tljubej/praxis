@@ -1,0 +1,7 @@
+error[Y006]: values of type `Point` cannot be ordered
+
+  order-a-record.px:5:12
+  5 | out(points.sorted())
+    |            ^^^^^^ values of type `Point` cannot be ordered
+
+praxis: 1 error(s)

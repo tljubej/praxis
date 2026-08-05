@@ -1,0 +1,7 @@
+error[Y001]: expected ({ w: Int, h: Int }) -> Int, found (Room) -> ?T
+
+  nominal-is-not-structural.px:10:5
+  10 | out(area(Room { w: 2, h: 5 }))
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^ expected ({ w: Int, h: Int }) -> Int, found (Room) -> ?T
+
+praxis: 1 error(s)

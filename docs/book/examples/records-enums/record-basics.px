@@ -1,0 +1,18 @@
+struct Point {
+    x: Int
+    y: Int
+}
+
+var p = Point { x: 3, y: 4 }
+out(p)
+out(p.x)
+
+// A field is an assignable place, in every spelling an assignment has.
+p.x = 5
+p.y += 1
+out(p)
+
+// Field punning: `x` and `y` are already the names the fields want.
+var x = 10
+var y = 20
+out(Point { x, y })

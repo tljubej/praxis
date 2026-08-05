@@ -1,0 +1,7 @@
+var line = "héllo"
+
+out(line.len())
+out(line.is_empty())
+out(line.get(1))
+out(line.get(1).to_int())
+out((233).to_char())

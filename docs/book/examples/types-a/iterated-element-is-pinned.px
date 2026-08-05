@@ -1,0 +1,8 @@
+fn show_all(items) {
+    for i in items {
+        out(i)
+    }
+}
+
+show_all([1, 2])
+show_all(["a", "b"])

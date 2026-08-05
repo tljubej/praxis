@@ -1,0 +1,10 @@
+// `repeated(P)` is the final named argument of a `sections` call: it takes
+// every section that is left, as a Vec.
+var bingo = read sections(
+    draws: csv(int),
+    boards: repeated(matrix(int)),
+)
+
+out(bingo.draws)
+out(bingo.boards.len())
+out(bingo.boards.get(1))

@@ -1,0 +1,8 @@
+struct Point { x: Int, y: Int }
+
+// An anonymous record is a type of its own. It is the same type as another
+// anonymous record with the same field names and types, and it is never the
+// same type as a `struct` that happens to look like it.
+var rows = read lines(`{x:int},{y:int}`)
+var p: Point = rows[0]
+out(p)

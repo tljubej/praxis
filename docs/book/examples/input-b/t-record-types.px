@@ -1,0 +1,8 @@
+// Named arguments become record fields. A `block` flattens a positional
+// template's captures into the same record; a `repeated` tail is one field
+// holding a Vec; a `choice` is an anonymous enum, one variant per case.
+// Each probe is on one line so the diagnostic underlines it on one line.
+var a: Bool = read sections(rules: lines(`{before:int}|{after:int}`), updates: lines(csv(int)))
+var b: Bool = read sections(draws: csv(int), boards: repeated(matrix(int)))
+var c: Bool = read block(`{source:word}-to-{dest:word} map:`, ranges: lines(`{a:int} {b:int}`))
+var d: Bool = read choice(Number: `{name:word}: {value:int}`, Op: `{name:word}: {l:word} {r:word}`)

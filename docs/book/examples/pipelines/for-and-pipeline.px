@@ -1,0 +1,19 @@
+// A pipeline's item is the `for` loop's variable. The same source, twice.
+fn main() {
+    var m = Map()
+    m["a"] = 1
+    m["b"] = 2
+
+    var loop_total = 0
+    for kv in m {
+        loop_total = loop_total + kv.1
+    }
+    out(loop_total)
+    out(m.map(|kv| kv.1).sum())
+
+    // Same order, too. Both walks read the same deterministic snapshot.
+    for kv in m {
+        out(kv.0)
+    }
+    out(m.map(|kv| kv.0))
+}

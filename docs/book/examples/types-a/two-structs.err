@@ -1,0 +1,7 @@
+error[Y001]: expected (Point) -> Int, found (Velocity) -> ?T
+
+  two-structs.px:9:5
+  9 | out(magnitude(Velocity { x: 3, y: 4 }))
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected (Point) -> Int, found (Velocity) -> ?T
+
+praxis: 1 error(s)

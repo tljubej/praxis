@@ -1,0 +1,17 @@
+bt
+p at
+p grid
+p row
+up
+p row
+p row * width
+p at
+up
+p grid.len()
+p width
+p edge(grid, 1)
+p widht
+frame 0
+p grid[at - 1]
+p grid[at]
+quit

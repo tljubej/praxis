@@ -1,0 +1,2 @@
+var doubled = dbg(21) * 2
+panic(doubled)

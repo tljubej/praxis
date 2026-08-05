@@ -1,0 +1,10 @@
+// Ask the compiler for a parser's type by annotating the binding with a type
+// it cannot be. The `found` half of the diagnostic is the derived type.
+var a: Bool = read int
+var b: Bool = read digit
+var c: Bool = read uint
+var d: Bool = read float
+var e: Bool = read byte
+var f: Bool = read char
+var g: Bool = read word
+var h: Bool = read one_of("LR")

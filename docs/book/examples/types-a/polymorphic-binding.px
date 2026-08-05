@@ -1,0 +1,16 @@
+fn swap(a, b) {
+    (b, a)
+}
+
+fn twice(x) {
+    [x, x]
+}
+
+var id = |x| x
+
+out(id(1))
+out(id("two"))
+out(swap(1, "one"))
+out(swap(true, 2.5))
+out(twice(7))
+out(twice("s"))

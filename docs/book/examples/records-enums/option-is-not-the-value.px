@@ -1,0 +1,6 @@
+var counts = Map()
+counts["a"] = 1
+
+// `.get` answers an `Option`, so it is not an `Int` until a `match` takes it
+// apart. Where the key is known to be present, index instead: `counts["a"]`.
+out(counts.get("a") + 1)

@@ -1,0 +1,13 @@
+var queue = Deque()
+queue.push_back("b")
+queue.push_back("c")
+queue.push_front("a")
+
+out(queue)
+out(queue.len())
+out(queue[0])
+
+queue[1] = "B"
+out(queue.pop_front())
+out(queue.pop_back())
+out(queue)

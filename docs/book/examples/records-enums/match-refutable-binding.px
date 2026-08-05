@@ -1,0 +1,8 @@
+var xs = [Some(1), None]
+
+// A `for` binding has no second arm for an item that does not fit, so a pattern
+// that can fail is `Y125`. This one is lowering's too: `praxis check` is silent
+// and `praxis run` reports it.
+for Some(n) in xs {
+    out(n)
+}

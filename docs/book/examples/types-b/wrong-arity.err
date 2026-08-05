@@ -1,0 +1,7 @@
+error[Y024]: this function takes 1 argument(s), but 2 were given
+
+  wrong-arity.px:2:1
+  2 | assert(total == 42, "the total is wrong")
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this function takes 1 argument(s), but 2 were given
+
+praxis: 1 error(s)

@@ -1,0 +1,29 @@
+struct Point { x: Int, y: Int }
+
+enum Dir { North, South }
+
+// A key type is fixed by the first use, so each of these is its own Map.
+var by_int = Map()
+by_int[7] = "an Int"
+
+var by_text = Map()
+by_text["k"] = "a Text"
+
+var by_tuple = Map()
+by_tuple[(1, 2)] = "a tuple of Ints"
+
+var by_record = Map()
+by_record[Point { x: 1, y: 2 }] = "a record of Ints"
+
+var by_enum = Map()
+by_enum[North] = "an enum with no payload"
+
+var by_range = Map()
+by_range[1..4] = "a Range"
+
+out(by_int[7])
+out(by_text["k"])
+out(by_tuple[(1, 2)])
+out(by_record[Point { x: 1, y: 2 }])
+out(by_enum[North])
+out(by_range[1..4])

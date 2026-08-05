@@ -1,0 +1,4 @@
+var counts = Map[Text, Vec[Int]]()
+counts["ada"] = [1, 2, 3]
+counts["alan"] = [4, 5]
+out(counts["ada"].sum() + counts["turing"].sum())

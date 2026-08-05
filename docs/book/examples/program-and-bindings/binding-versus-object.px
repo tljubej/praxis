@@ -1,0 +1,15 @@
+fn rebind(xs) {
+    xs = [9, 9]
+    xs
+}
+
+fn mutate(xs) {
+    xs.push(9)
+}
+
+var values = [1]
+out(rebind(values))
+out(values)
+
+mutate(values)
+out(values)

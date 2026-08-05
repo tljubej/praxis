@@ -17,6 +17,10 @@ editors/vscode/node_modules/
 editors/vscode/out/
 editors/vscode/*.vsix
 
+# The book's rendered HTML (`mdbook build` output). The source under
+# docs/book/src is committed; the render is not.
+docs/book/book/
+
 # The benchmark suite's compiled Rust binaries (benchmarks/run.py builds them
 # with `rustc` on demand). `results.json` and `REPORT.md` are *not* ignored:
 # they are the evidence the report is generated from.

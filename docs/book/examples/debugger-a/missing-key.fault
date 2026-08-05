@@ -1,0 +1,16 @@
+error: program faulted: index out of bounds
+
+Backtrace:
+#0   <entry>
+
+  locals:
+    ages: Map[Text, Int] = {ada: 36}
+  temps:
+    <tmp#1: Map[Text, Int]> = {ada: 36}
+    <tmp#3: Text> @ ""ada"" = ada
+    <tmp#4: Int> @ "36" = 36
+    <tmp#5> @ "ages["ada"] = 36" = Unit
+    <tmp#6: Text> @ ""alan"" = alan
+    <tmp#7: Int> @ "ages["alan"]" = Unit
+    <tmp#8: Unit> @ "out(ages["alan"])" = <uninit>
+    <tmp#9: Unit> @ "var ages = Map[Text, Int]() ages["ada"] = 36 out(ages["alan"])" = <uninit>

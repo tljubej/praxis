@@ -1,0 +1,31 @@
+error: program faulted: division by zero
+
+Backtrace:
+#0   ratio
+#1   step
+#2   <entry>
+
+  locals:
+    a: Int = 20
+    b: Int = 20
+  temps:
+    <tmp#3: Int> @ "b - a" = <uninit>
+    <tmp#4: Int> @ "a / (b - a)" = <uninit>
+Entered crash debugger. 3 frame(s). Type `help` for commands.
+Praxis crash> ratio:
+  <debug>:3:1
+  3 | fn ratio(a, b) {
+    | ^^^^^^^^^^^^^^^^...
+  4 |     a / (b - a)
+    | ^^^^^^^^^^^^^^^...
+  5 | }
+    | ^
+Praxis crash> step:
+  <debug>:7:1
+  7 | fn step(values, i) {
+    | ^^^^^^^^^^^^^^^^^^^^...
+  8 |     ratio(values[i], values[i + 1])
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+  9 | }
+    | ^
+Praxis crash> 

@@ -1,0 +1,21 @@
+struct Point { x: Int, y: Int }
+struct Segment { label: Text, from: Point, to: Point }
+
+// Two records of the same type with equal fields are equal, and hash alike.
+var a = Point { x: 1, y: 2 }
+var b = Point { x: 1, y: 2 }
+out(a == b)
+
+var seen = Set()
+seen.insert(a)
+seen.insert(b)
+out(seen.len())
+
+var owner = Map()
+owner[a] = "north"
+out(owner[b])
+
+// Records nest, and a nested field is read through the outer one.
+var s = Segment { label: "edge", from: a, to: Point { x: 4, y: 6 } }
+out(s)
+out(s.to.y)

@@ -1,0 +1,6 @@
+// A headless record pattern needs a record it can see. Field names alone do not
+// determine a record type, so a scrutinee nothing has pinned is reported.
+fn total(p) -> Int {
+    match p { {x, y} => x + y }
+}
+out(total(1))

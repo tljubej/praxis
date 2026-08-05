@@ -1,0 +1,13 @@
+var seen = Set()
+seen.insert(3)
+seen.insert(1)
+seen.insert(3)
+
+out(seen)
+out(seen.len())
+out(seen.contains(1))
+out(seen.contains(2))
+
+seen.remove(1)
+out(seen)
+out(seen.is_empty())

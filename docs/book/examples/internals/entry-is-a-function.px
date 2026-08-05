@@ -1,0 +1,8 @@
+// The top-level statements of a file are a function the compiler wrote, and
+// the crash backtrace names it `<entry>`. The temps under it are MIR locals.
+fn half(n: Int) -> Int {
+    return n / 0
+}
+
+var xs = [4, 8]
+out(half(xs[0]))

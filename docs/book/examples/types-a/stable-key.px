@@ -1,0 +1,13 @@
+struct Point { x: Int, y: Int }
+
+var seen = Set()
+seen.insert((1, 2))
+seen.insert((1, 2))
+seen.insert((3, 4))
+
+var visits = Map()
+visits.insert(Point { x: 0, y: 0 }, 1)
+visits.insert(Point { x: 0, y: 0 }, 2)
+
+out(seen.len())
+out(visits.get(Point { x: 0, y: 0 }))

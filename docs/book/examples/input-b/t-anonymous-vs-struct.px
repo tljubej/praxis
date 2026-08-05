@@ -1,0 +1,10 @@
+// A parser's record type is anonymous. It is not the declared `struct` that
+// has the same fields, and there is no syntax for writing it in an annotation,
+// so a helper function cannot take one as a parameter.
+struct Point { x: Int, y: Int }
+
+fn total(ps: Vec[Point]) -> Int {
+    ps.map(|p| p.x + p.y).sum()
+}
+
+out(total(read lines(`{x:int},{y:int}`)))

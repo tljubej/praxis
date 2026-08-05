@@ -1,0 +1,13 @@
+error[Y001]: expected Int, found Text
+
+  iterated-element-is-pinned.px:8:1
+  8 | show_all(["a", "b"])
+    | ^^^^^^^^^^^^^^^^^^^^ expected Int, found Text
+
+note: this is the operation that requires it
+
+  iterated-element-is-pinned.px:2:14
+  2 |     for i in items {
+    |              ^^^^^
+
+praxis: 1 error(s)

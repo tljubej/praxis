@@ -1,0 +1,11 @@
+// A snapshot frame is flat: every scope of the function contributes its
+// bindings, so a shadowed name is listed once per binding.
+fn main() {
+    var n = 1
+    if n > 0 {
+        var n = "two"
+        out(n)
+    }
+    var xs = [1]
+    out(xs[9])
+}

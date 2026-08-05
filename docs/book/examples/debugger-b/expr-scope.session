@@ -1,0 +1,33 @@
+error: program faulted: index out of bounds
+
+Backtrace:
+#0   cell
+#1   edge
+#2   main
+
+  locals:
+    grid: Vec[Int] = [1, 2, 3, 4, 5, 6]
+    at: Int = 6
+  temps:
+    <tmp#3: Int> @ "grid[at]" = Unit
+Entered crash debugger. 3 frame(s). Type `help` for commands.
+Praxis crash> #0   cell
+#1   edge
+#2   main
+  (frame 0 selected)
+Praxis crash> 6
+Praxis crash> [1, 2, 3, 4, 5, 6]
+Praxis crash> error: type error: `row` is not defined
+Praxis crash> frame 1: edge
+Praxis crash> 2
+Praxis crash> 6
+Praxis crash> error: type error: `at` is not defined
+Praxis crash> frame 2: main
+Praxis crash> 6
+Praxis crash> 3
+Praxis crash> error: type error: `edge` is not defined
+Praxis crash> error: type error: `widht` is not defined
+Praxis crash> frame 0: cell
+Praxis crash> 6
+Praxis crash> error: expression faulted: index out of bounds
+Praxis crash> 

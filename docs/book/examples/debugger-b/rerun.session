@@ -1,0 +1,30 @@
+error: program faulted: division by zero
+
+Backtrace:
+#0   <entry>
+
+  locals:
+    budget: Int = 120
+    spend: Vec[Int] = [40, 40, 40]
+    left: Int = 0
+    ? = 40
+  temps:
+    <tmp#1> = 120
+
+    <tmp#2: Int> = 1
+    <tmp#3: Int> = 120
+    <tmp#5: Vec[Int]> @ "[40, 40, 40]" = [40, 40, 40]
+    <tmp#6: Int> @ "40" = 40
+    <tmp#7: Unit> = Unit
+    <tmp#8: Int> @ "40" = 40
+    <tmp#9: Unit> = Unit
+  …(12 more)
+Entered crash debugger. 1 frame(s). Type `help` for commands.
+Praxis crash> 0
+Praxis crash> program faulted: division by zero
+1 frame(s); frame 0 selected.
+Praxis crash> 0
+Praxis crash> program faulted: division by zero
+1 frame(s); frame 0 selected.
+Praxis crash> 120
+Praxis crash> 

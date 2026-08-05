@@ -1,0 +1,14 @@
+error: program faulted: division by zero
+
+Backtrace:
+#0   mean
+#1   summarize
+#2   <entry>
+
+  locals:
+    xs: Vec[Int] = []
+    n: Int = 0
+  temps:
+    <tmp#3: Int> = 0
+    <tmp#4: Int> = 0
+    <tmp#7: Int> @ "xs.sum() / n" = <uninit>

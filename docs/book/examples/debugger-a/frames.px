@@ -1,0 +1,15 @@
+var depths = read lines(int)
+
+fn ratio(a, b) {
+    a / (b - a)
+}
+
+fn step(values, i) {
+    ratio(values[i], values[i + 1])
+}
+
+var total = 0
+for i in 0..depths.len() - 1 {
+    total = total + step(depths, i)
+}
+out(total)

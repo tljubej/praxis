@@ -1,0 +1,24 @@
+// `find` answers the element, `position` answers the index, and a miss is None.
+fn main() {
+    var words = ["alpha", "beta", "gamma"]
+
+    match words.find(|w| w.len() == 4) {
+        Some(w) => out("found " + w)
+        None => out("nothing that long")
+    }
+
+    match words.position(|w| w.len() == 4) {
+        Some(i) => out(i)
+        None => out(-1)
+    }
+
+    // The sentinel problem an Option removes: -1 is a perfectly ordinary
+    // element and a perfectly ordinary index.
+    var v = [10, -1, 30]
+    out(v.find(|x| x < 0))
+    out(v.find(|x| x > 100))
+
+    // `any` and `all` stop as soon as the answer is decided.
+    out(v.any(|x| x < 0))
+    out(v.all(|x| x < 0))
+}

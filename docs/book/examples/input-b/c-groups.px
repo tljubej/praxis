@@ -1,0 +1,16 @@
+// Shape: blank-line separated groups of numbers.
+//
+// 1000
+// 2000
+//
+// 4000
+//
+// `sections` splits on blank lines; `lines` splits each section.
+var groups = read sections(lines(int))
+
+out(groups.len())
+
+var totals = groups.map(|g| g.sum()).sorted()
+out(totals)
+out(totals.max())
+out(totals.skip(totals.len() - 3).sum())

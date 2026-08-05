@@ -1,0 +1,25 @@
+error: program faulted: division by zero
+
+Backtrace:
+#0   ratio
+#1   step
+#2   <entry>
+
+  locals:
+    a: Int = 20
+    b: Int = 20
+  temps:
+    <tmp#3: Int> @ "b - a" = <uninit>
+    <tmp#4: Int> @ "a / (b - a)" = <uninit>
+Entered crash debugger. 3 frame(s). Type `help` for commands.
+Praxis crash> #0   ratio
+#1   step
+#2   <entry>
+  (frame 0 selected)
+Praxis crash>   locals:
+    a: Int = 20
+    b: Int = 20
+  temps:
+    <tmp#3: Int> @ "b - a" = <uninit>
+    <tmp#4: Int> @ "a / (b - a)" = <uninit>
+Praxis crash> 

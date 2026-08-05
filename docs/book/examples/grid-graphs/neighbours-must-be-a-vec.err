@@ -1,0 +1,7 @@
+error[Y001]: expected (Int, (Int) -> Vec[Int]) -> Vec[Int], found (Int, (Int) -> Set[Int]) -> ?T
+
+  neighbours-must-be-a-vec.px:8:5
+  8 |     bfs(0, steps).len()
+    |     ^^^^^^^^^^^^^ expected (Int, (Int) -> Vec[Int]) -> Vec[Int], found (Int, (Int) -> Set[Int]) -> ?T
+
+praxis: 1 error(s)

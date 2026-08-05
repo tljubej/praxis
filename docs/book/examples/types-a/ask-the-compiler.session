@@ -1,0 +1,19 @@
+error: program faulted: panic: stopping here on purpose
+
+Backtrace:
+#0   inspect__Vec_Int__Int_Text
+#1   <entry>
+
+  locals:
+    values: Vec[Int] = [3, 4]
+    total: Int = 7
+    name: Text = run
+  temps:
+    <tmp#4: Text> @ ""stopping here on purpose"" = stopping here on purpose
+    <tmp#5> @ "panic("stopping here on purpose")" = Unit
+Entered crash debugger. 2 frame(s). Type `help` for commands.
+Praxis crash> Vec[Int]
+Praxis crash> Int
+Praxis crash> Text
+Praxis crash> Vec[Int]
+Praxis crash> 

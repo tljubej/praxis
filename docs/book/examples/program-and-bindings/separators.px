@@ -1,0 +1,17 @@
+// A line comment runs to the end of the line.
+/* A block comment /* nests */ and may span lines. */
+
+var a = 1; var b = 2; out(a + b)
+
+var total = 1 +
+    2 +
+    3
+out(total)
+
+var scaled = [3, 1, 2]
+    .sorted()
+    .map(|n| n * 10)
+out(scaled)
+
+fn one() { 1; }
+out(one())

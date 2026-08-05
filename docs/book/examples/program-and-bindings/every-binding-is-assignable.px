@@ -1,0 +1,19 @@
+fn clamp_low(n) {
+    if n < 0 { n = 0 }
+    n
+}
+
+out(clamp_low(-3))
+out(clamp_low(7))
+
+for i in 0..3 {
+    i = i * 10
+    out(i)
+}
+
+var total = 0
+for (a, b) in [(1, 2), (3, 4)] {
+    a = a * 100
+    total += a + b
+}
+out(total)

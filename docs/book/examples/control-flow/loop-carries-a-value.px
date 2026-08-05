@@ -1,0 +1,12 @@
+fn collatz_steps(start: Int) -> Int {
+    var n = start
+    var steps = 0
+    loop {
+        if n == 1 { break steps }
+        if n % 2 == 0 { n = n / 2 } else { n = 3 * n + 1 }
+        steps = steps + 1
+    }
+}
+
+out(collatz_steps(27))
+out(collatz_steps(1))

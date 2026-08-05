@@ -1,0 +1,2 @@
+var seen: Set[Vec[Int]] = Set()
+out(seen.len())

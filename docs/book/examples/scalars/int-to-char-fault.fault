@@ -1,0 +1,10 @@
+error: program faulted: not a Unicode scalar value
+
+Backtrace:
+#0   as_char
+#1   <entry>
+
+  locals:
+    n: Int = 55296
+  temps:
+    <tmp#2: Char> @ "n.to_char()" = Unit

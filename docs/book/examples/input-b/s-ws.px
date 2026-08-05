@@ -1,0 +1,5 @@
+// `ws(P)` splits on runs of whitespace, line endings included, so a token
+// never spans a line: this is four tokens, not three.
+var tokens = read ws(int)
+
+out(tokens)

@@ -1,0 +1,6 @@
+var counts = [1, 2, 3]
+var total = 0
+for n in counts {
+  total += n
+}
+out(totl)

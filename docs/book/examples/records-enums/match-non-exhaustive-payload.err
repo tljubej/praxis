@@ -1,0 +1,10 @@
+error[Y120]: non-exhaustive match: missing `Wrap(Off)`
+
+  match-non-exhaustive-payload.px:7:5
+  7 |     match w { Wrap(On) => 1 }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^ non-exhaustive match: missing `Wrap(Off)`
+
+help: add the missing match arms
+          Wrap(Off) => panic("todo")
+
+praxis: 1 error(s)

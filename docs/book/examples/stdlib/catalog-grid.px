@@ -1,0 +1,21 @@
+var g = read grid(one_of(".#"))
+var wall = "#"[0]
+
+out(g.width())
+out(g.height())
+out(g.get(1, 0))
+out(g.contains(3, 0))
+out(g.row(0))
+out(g.column(1))
+out(g.cells())
+out(g.positions().len())
+out(g.neighbors4((1, 1)))
+out(g.neighbors8((0, 0)))
+out(g.find(wall))
+out(g.find_all(wall))
+out(g.transpose().row(0))
+out(g.rotate_left().row(0))
+out(g.rotate_right().row(0))
+
+g.set(0, 0, wall)
+out(g.row(0))

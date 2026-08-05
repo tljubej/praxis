@@ -1,0 +1,21 @@
+// A frame carrying one local of each interesting shape, so a debugger session
+// can ask `p` / `type` / `heap` about all of them. The last line faults.
+struct Reading {
+    site: Text
+    depth: Int
+}
+
+enum Signal {
+    Ping(Int)
+    Quiet
+}
+
+fn main() {
+    var readings = [Reading { site: "north", depth: 12 }, Reading { site: "south", depth: 30 }]
+    var totals = Map()
+    totals["north"] = 12
+    totals["south"] = 30
+    var latest = Ping(30)
+    var label = "sonar"
+    out(readings[9].depth)
+}

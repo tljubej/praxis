@@ -1,0 +1,8 @@
+var v = [10, 20, 30]
+
+out(v.len())
+out(v.is_empty())
+out(v.get(1))
+
+v.push(40)
+out(v)

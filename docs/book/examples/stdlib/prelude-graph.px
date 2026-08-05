@@ -1,0 +1,13 @@
+fn steps(n: Int) -> Vec[Int] {
+  var next = Vec()
+  if n * 2 <= 20 { next.push(n * 2) }
+  if n + 1 <= 20 { next.push(n + 1) }
+  next
+}
+
+out(bfs(1, |n| steps(n)).len())
+out(dfs(1, |n| steps(n)).len())
+out(flood_fill(1, |n| steps(n)).len())
+out(bfs_distance(1, |n| steps(n), |n| n == 20))
+out(dijkstra(1, |n| steps(n), |a, b| b - a).len())
+out(a_star(1, |n| steps(n), |a, b| b - a, |n| 20 - n, |n| n == 20))

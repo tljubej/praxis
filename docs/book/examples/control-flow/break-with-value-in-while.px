@@ -1,0 +1,6 @@
+var n = 0
+var first = while n < 10 {
+    if n * n > 20 { break n }
+    n = n + 1
+}
+out(first)

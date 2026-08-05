@@ -1,0 +1,25 @@
+// `Option[T]` is an ordinary enum with two variants, `Some(T)` and `None`. It
+// is what a library answers when a value may legitimately be absent.
+var counts = Map()
+counts["a"] = 1
+
+out(counts.get("a"))
+out(counts.get("z"))
+out(match counts.get("z") { Some(n) => n, None => 0 })
+
+var words = ["alpha", "beta"]
+out(words.find(|w| w == "beta"))
+out(words.find(|w| w == "gamma"))
+out(words.position(|w| w == "beta"))
+
+out(9000000000000000000.checked_add(9000000000000000000))
+out(2.checked_add(3))
+
+// A closure may build one: `filter_map` keeps the `Some`s and drops the `None`s.
+out([1, 2, 3].filter_map(|n| if n % 2 == 1 { Some(n * 10) } else { None }))
+
+// And a function may declare one.
+fn first_big(v: Vec[Int]) -> Option[Int] {
+    v.find(|n| n > 1)
+}
+out(first_big([1, 2, 3]))

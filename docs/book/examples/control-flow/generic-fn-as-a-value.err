@@ -1,0 +1,7 @@
+error[Y018]: `identity` is generic, so it has no single function value; write `|x| identity(x)` to fix its type arguments at the call
+
+  generic-fn-as-a-value.px:3:9
+  3 | var f = identity
+    |         ^^^^^^^^ `identity` is generic, so it has no single function value; write `|x| identity(x)` to fix its type arguments at the call
+
+praxis: 1 error(s)

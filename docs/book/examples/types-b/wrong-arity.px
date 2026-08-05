@@ -1,0 +1,3 @@
+var total = 41 + 1
+assert(total == 42, "the total is wrong")
+out(total)

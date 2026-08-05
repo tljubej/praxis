@@ -1,0 +1,19 @@
+error[Y113]: `Point` literal is missing a field: y
+
+  two-mistakes.px:4:3
+  4 |   Point { x: p.x + dx, z: p.y }
+    |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Point` literal is missing a field: y
+
+error[Y114]: `Point` has no field `z`
+
+  two-mistakes.px:4:24
+  4 |   Point { x: p.x + dx, z: p.y }
+    |                        ^ `Point` has no field `z`
+
+error[Y024]: this function takes 2 argument(s), but 1 were given
+
+  two-mistakes.px:7:9
+  7 | var p = shift(Point { x: 1, y: 2 })
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^ this function takes 2 argument(s), but 1 were given
+
+praxis: 3 error(s)

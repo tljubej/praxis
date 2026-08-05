@@ -1,0 +1,13 @@
+error[Y001]: expected Int, found Text
+
+  iterated-parameter-mismatch.px:8:5
+  8 | out(total(["a", "b"]))
+    |     ^^^^^^^^^^^^^^^^^ expected Int, found Text
+
+note: this is the operation that requires it
+
+  iterated-parameter-mismatch.px:3:14
+  3 |     for i in items { t = t + i }
+    |              ^^^^^
+
+praxis: 1 error(s)

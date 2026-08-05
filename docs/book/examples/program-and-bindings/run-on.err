@@ -1,0 +1,7 @@
+error[P002]: expected `;` or a line break between statements
+
+  run-on.px:1:11
+  1 | var a = 1 var b = 2
+    |           ^^^ expected `;` or a line break between statements
+
+praxis: 1 error(s)

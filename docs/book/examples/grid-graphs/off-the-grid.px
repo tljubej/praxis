@@ -1,0 +1,2 @@
+var g = read grid(char)
+out(g[4, 0])

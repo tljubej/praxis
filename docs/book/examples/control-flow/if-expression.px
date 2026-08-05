@@ -1,0 +1,17 @@
+fn grade(score: Int) -> Text {
+    if score >= 90 {
+        "A"
+    } else if score >= 80 {
+        "B"
+    } else {
+        "C"
+    }
+}
+
+var n = 7
+var parity = if n % 2 == 0 { "even" } else { "odd" }
+
+out(parity)
+out(grade(95))
+out(grade(83))
+out(grade(12))

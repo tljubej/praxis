@@ -1,0 +1,9 @@
+error[Y014]: a value of type `Vec[Int]` can change after it is stored, so it cannot be used as a key
+
+  mutable-key.px:4:6
+  4 | seen.insert(path)
+    |      ^^^^^^ a value of type `Vec[Int]` can change after it is stored, so it cannot be used as a key
+
+help: use a value that cannot change — a number, `Text`, or a tuple of those
+
+praxis: 1 error(s)

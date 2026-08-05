@@ -1,0 +1,9 @@
+p a
+p b - a
+type a
+frame 1
+p values
+type values
+p values.len() * 2
+p values.push(9)
+quit

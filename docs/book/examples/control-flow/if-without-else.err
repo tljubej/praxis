@@ -1,0 +1,9 @@
+error[Y001]: expected Text, found Unit
+
+  if-without-else.px:2:22
+  2 | var label = if n > 0 { "positive" }
+    |                      ^^^^^^^^^^^^^^ expected Text, found Unit
+
+help: this value is `Unit`; an `if` with no `else` expected `Text` — make the last expression produce a value, or change the declared type to `Unit`
+
+praxis: 1 error(s)

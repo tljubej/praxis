@@ -1,0 +1,9 @@
+// The six escapes a text literal decodes.
+out("a\tb")
+out("line\nbreak")
+out("quote: \" backslash: \\")
+out("a\rb".len())
+out("a\0b".len())
+
+// A `\`` is accepted and left alone: two characters, not one.
+out("a\`b".len())

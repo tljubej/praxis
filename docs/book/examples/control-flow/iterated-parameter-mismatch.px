@@ -1,0 +1,8 @@
+fn total(items) {
+    var t = 0
+    for i in items { t = t + i }
+    t
+}
+
+out(total([1, 2, 3]))
+out(total(["a", "b"]))

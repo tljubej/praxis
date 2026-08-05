@@ -1,0 +1,7 @@
+error[Y001]: expected Int, found Text
+
+  element-pinned.px:3:13
+  3 | widths.push("4")
+    |             ^^^ expected Int, found Text
+
+praxis: 1 error(s)

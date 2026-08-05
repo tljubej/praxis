@@ -1,0 +1,7 @@
+error[T002]: unterminated backtick template
+
+  template-unterminated.px:4:18
+  4 |     var v = read `{int`
+    |                  ^^^^^^ unterminated backtick template
+
+praxis: 1 error(s)

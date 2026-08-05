@@ -1,0 +1,4 @@
+var id = |x| x
+
+out(id(1))
+out(id("text"))

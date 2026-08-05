@@ -1,0 +1,9 @@
+var value = read lines(int)
+var value = value.sum()
+var value = value > 10
+
+out(value)
+
+var label = "hello"
+var label = label.len()
+out(label)

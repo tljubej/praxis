@@ -1,0 +1,20 @@
+// The derived type is an ordinary type: fields are read with `.`, and a
+// record pattern takes one apart without naming it, because it has no name.
+var almanac = read sections(
+    seeds: block(`seeds: {values:ws(int)}`),
+    maps: repeated(block(
+        `{source:word}-to-{destination:word} map:`,
+        ranges: lines(`{destination:int} {source:int} {length:int}`),
+    )),
+)
+
+out(almanac.seeds.values)
+out(almanac.maps.len())
+
+for m in almanac.maps {
+    out(m.source)
+    out(m.destination)
+    for { destination, source, length } in m.ranges {
+        out(destination + source + length)
+    }
+}

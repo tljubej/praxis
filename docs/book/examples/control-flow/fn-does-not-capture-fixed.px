@@ -1,0 +1,10 @@
+var offset = 10
+
+fn shift(n: Int, by: Int) -> Int {
+    n + by
+}
+
+var shift_by_offset = |n| n + offset
+
+out(shift(1, offset))
+out(shift_by_offset(1))

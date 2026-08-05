@@ -106,6 +106,25 @@ Language Server Protocol on stdin/stdout and is not meant to be run by hand —
 the VS Code extension in `editors/vscode/` launches it. `watch` and `repl` are
 wired but implemented in later milestones.
 
+## The book
+
+[`docs/book/`](./docs/book/) is an mdBook covering the whole language: the
+input-parser DSL, type inference, the crash debugger, the collection set, the
+prelude and method catalog as reference tables, the diagnostic index, and the
+compiler internals.
+
+```sh
+just book         # render to docs/book/book
+just book-serve   # live reload on localhost:3000
+just book-verify  # re-run every example and diff it against the chapters
+```
+
+Its examples are checked, not illustrative. Every code block that shows a
+program *and* its output is a real file under `docs/book/examples/`, and
+`book-verify` runs all of them — including the ones that are supposed to fail,
+whose diagnostics, fault reports and debugger transcripts are captured the same
+way. It needs a built `praxis` binary and is not part of `just ci`.
+
 ## Development
 
 Requires a stable Rust toolchain and the [`just`](https://github.com/casey/just)

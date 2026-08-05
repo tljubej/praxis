@@ -1,0 +1,18 @@
+var xs = Vec[Int]()
+var i = 0
+while i < 200 {
+    xs.push(i + 2000)
+    i = i + 1
+}
+
+var sum = xs.len()
+var j = 0
+while j < 40000 {
+    var junk = Vec[Int]()
+    junk.push(j + 2000)
+    sum = sum + junk.len()
+    j = j + 1
+}
+
+var ys = [sum]
+out(ys[99])

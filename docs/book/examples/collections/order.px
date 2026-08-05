@@ -1,0 +1,31 @@
+// A hashed collection walks its members ascending by *rendered* form, so 10
+// sorts before 2. The order is fixed and seed-independent; it is not numeric.
+var seen = Set()
+for n in [1, 2, 10, 20, 3] {
+    seen.insert(n)
+}
+out(seen)
+for n in seen {
+    out(n)
+}
+
+// keys() and values() share that one order, so they are index-aligned.
+var m = Map()
+m[1] = "one"
+m[10] = "ten"
+m[2] = "two"
+out(m.keys())
+out(m.values())
+
+// A `for` over a keyed collection yields the (key, value) pair itself.
+for kv in m {
+    out(kv.1)
+}
+
+// Printing a keyed collection sorts the rendered *entry*; keys(), values() and
+// a `for` sort the rendered *key*. The two orders can disagree.
+var names = Map()
+names["a"] = 1
+names["a1"] = 2
+out(names)
+out(names.keys())

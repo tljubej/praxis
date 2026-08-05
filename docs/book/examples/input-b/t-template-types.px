@@ -1,0 +1,8 @@
+// A template's type is decided by its captures: none is Unit, one anonymous
+// capture is that capture's type, several are a tuple, and named captures are
+// an anonymous record.
+var a: Bool = read `hello`
+var b: Bool = read `{int}`
+var c: Bool = read `{int},{int}`
+var d: Bool = read `{x:int},{y:int}`
+var e: Bool = read `{name:word} {values:csv(int)}`

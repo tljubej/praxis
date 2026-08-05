@@ -1,0 +1,19 @@
+var window = 2..6
+out(window)
+out(1..=3)
+
+var windows = [0..2, 3..5]
+out(windows)
+
+var names = Map()
+names[0..2] = "low"
+names[2..4] = "high"
+out(names[0..2])
+
+fn width(r: Range) -> Int {
+    var n = 0
+    for i in r { n = n + 1 }
+    n
+}
+out(width(window))
+out(width(3..=7))

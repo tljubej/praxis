@@ -1,0 +1,84 @@
+error: program faulted: index out of bounds
+
+Backtrace:
+#0   window
+#1   count_increases
+#2   <entry>
+
+  locals:
+    depths: Vec[Int] = [199, 200, 208, 210, 200, 207, 240, 269, 260, 263]
+    i: Int = 8
+  temps:
+    <tmp#3: Int> @ "depths[i]" = 260
+    <tmp#4: Int> @ "1" = 1
+    <tmp#5: Int> @ "i + 1" = 9
+    <tmp#6: Int> @ "depths[i + 1]" = 263
+    <tmp#7: Int> @ "depths[i] + depths[i + 1]" = 523
+    <tmp#8: Int> @ "2" = 2
+    <tmp#9: Int> @ "i + 2" = 10
+    <tmp#10: Int> @ "depths[i + 2]" = Unit
+    <tmp#11: Int> @ "depths[i] + depths[i + 1] + depths[i + 2]" = <uninit>
+Entered crash debugger. 3 frame(s). Type `help` for commands.
+Praxis crash> #0   window
+#1   count_increases
+#2   <entry>
+  (frame 0 selected)
+Praxis crash>   locals:
+    depths: Vec[Int] = [199, 200, 208, 210, 200, 207, 240, 269, 260, 263]
+    i: Int = 8
+  temps:
+    <tmp#3: Int> @ "depths[i]" = 260
+    <tmp#4: Int> @ "1" = 1
+    <tmp#5: Int> @ "i + 1" = 9
+    <tmp#6: Int> @ "depths[i + 1]" = 263
+    <tmp#7: Int> @ "depths[i] + depths[i + 1]" = 523
+    <tmp#8: Int> @ "2" = 2
+    <tmp#9: Int> @ "i + 2" = 10
+    <tmp#10: Int> @ "depths[i + 2]" = Unit
+    <tmp#11: Int> @ "depths[i] + depths[i + 1] + depths[i + 2]" = <uninit>
+Praxis crash> 8
+Praxis crash> 10
+Praxis crash> 263
+Praxis crash> error: expression faulted: index out of bounds
+Praxis crash> Vec[Int]
+Praxis crash> window:
+  <debug>:3:1
+  3 | fn window(depths: Vec[Int], i: Int) -> Int {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+  4 |     depths[i] + depths[i + 1] + depths[i + 2]
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^...
+  5 | }
+    | ^
+Praxis crash> frame 1: count_increases
+Praxis crash>   locals:
+    depths: Vec[Int] = [199, 200, 208, 210, 200, 207, 240, 269, 260, 263]
+    larger: Int = 5
+    i: Int = 8
+  temps:
+    <tmp#2: Int> @ "0" = 0
+    <tmp#4: Int> @ "1" = 1
+    <tmp#6: Int> @ "depths.len()" = 10
+    <tmp#7: Bool> @ "i < depths.len()" = true
+    <tmp#8: Int> @ "window(depths, i)" = 792
+    <tmp#9: Int> @ "1" = 1
+    <tmp#10: Int> @ "i - 1" = 6
+    <tmp#11: Int> @ "window(depths, i - 1)" = 769
+    <tmp#12: Bool> @ "window(depths, i) > window(depths, i - 1)" = true
+    <tmp#13: Unit> = Unit
+    <tmp#14: Int> @ "1" = 1
+    <tmp#15: Int> @ "larger + 1" = 5
+    <tmp#16: Unit> @ "{ larger = larger + 1 }" = Unit
+    <tmp#17: Unit> = Unit
+    <tmp#18: Int> @ "1" = 1
+    <tmp#19: Int> @ "i + 1" = 8
+    <tmp#20: Unit> @ "{ if window(depths, i) > window(depths, i - 1) { larger = larger + 1 } i = i + 1 }" = Unit
+    <tmp#21: Unit> @ "while i < depths.len() { if window(depths, i) > window(depths, i - 1) { larger = larger + 1 } i = i + 1 }" = <uninit>
+Praxis crash> 8
+Praxis crash> (no input context — not a parse failure)
+Praxis crash> program faulted: index out of bounds
+3 frame(s); frame 0 selected.
+Praxis crash> #0   window
+#1   count_increases
+#2   <entry>
+  (frame 0 selected)
+Praxis crash> 

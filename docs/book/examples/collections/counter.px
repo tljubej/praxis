@@ -1,0 +1,21 @@
+var counts = Counter[Text]()
+for word in ["the", "cat", "the", "sat"] {
+    counts[word] += 1
+}
+counts.inc("cat")
+
+out(counts)
+out(counts["the"])
+out(counts.len())
+out(counts.keys())
+out(counts.values())
+
+// An absent key reads as zero, does not fault, and creates nothing.
+out(counts["dog"])
+out(counts.len())
+
+// A store is not zero-defaulting: it sets the count outright, and a stored
+// zero is an entry like any other.
+counts["dog"] = 0
+out(counts.len())
+out(counts)

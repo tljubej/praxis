@@ -1,0 +1,5 @@
+fn shout(word) {
+    word.upper()
+}
+
+out("nothing calls shout")

@@ -1,0 +1,7 @@
+var offset = 10
+
+fn shift(n: Int) -> Int {
+    n + offset
+}
+
+out(shift(1))

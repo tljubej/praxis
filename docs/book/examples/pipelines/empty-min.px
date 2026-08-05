@@ -1,0 +1,5 @@
+// An empty `min` has no answer, and the fault says so.
+fn main() {
+    var scores: Vec[Int] = []
+    out(scores.min())
+}

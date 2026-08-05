@@ -1,0 +1,18 @@
+original
+[a, b, c]
+[d, e, f]
+transpose
+[a, d]
+[b, e]
+[c, f]
+rotate_right
+[d, a]
+[e, b]
+[f, c]
+rotate_left
+[c, f]
+[b, e]
+[a, d]
+still original
+[a, b, c]
+[d, e, f]

@@ -1,0 +1,12 @@
+// `==` works on every scalar. `<` works on Int, Float, Char and Text.
+out(42 == 42)
+out(3.5 != 3.6)
+out(true == true)
+out(() == ())
+out("abc" == "ab" + "c")
+out("x"[0] == "x"[0])
+
+out(1 < 2)
+out(1.5 <= 1.5)
+out("Z" < "a")
+out("a"[0] < "b"[0])

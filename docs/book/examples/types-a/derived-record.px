@@ -1,0 +1,6 @@
+var rows = read lines(`{x:int},{y:int}`)
+
+for r in rows {
+    out(r.x * r.y)
+}
+out(rows)

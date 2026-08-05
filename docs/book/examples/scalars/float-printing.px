@@ -1,0 +1,12 @@
+// A Float prints in the shortest form that reads back as the same Float,
+// so a whole-numbered one keeps its fractional part.
+out(1.0)
+out(2.5)
+out(1e10)
+out(0.1 + 0.2)
+out(-0.0)
+out(1.0 / 0.0)
+out(-1.0 / 0.0)
+out(0.0 / 0.0)
+out(16.0.sqrt())
+out(1.5.to_text())

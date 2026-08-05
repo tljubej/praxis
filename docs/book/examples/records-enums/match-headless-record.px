@@ -1,0 +1,30 @@
+// A `choice` template derives an anonymous enum whose payloads are anonymous
+// records. Neither has a name, so a pattern that wants the fields cannot write
+// a head — a headless `{ a, b }` pins its record from the scrutinee instead.
+var instructions = read scan(choice(
+    Mul: `mul({a:int},{b:int})`,
+    Do: `do()`,
+    Dont: `don't()`,
+))
+
+var on = true
+var total = 0
+for m in instructions {
+    match m {
+        Mul({a, b}) => { if on { total = total + a * b } }
+        Do(_) => { on = true }
+        Dont(_) => { on = false }
+    }
+}
+out(total)
+
+// The same walk, binding the whole payload and reading its fields instead.
+var sum = 0
+for m in instructions {
+    match m {
+        Mul(p) => { sum = sum + p.a * p.b }
+        Do(_) => {}
+        Dont(_) => {}
+    }
+}
+out(sum)

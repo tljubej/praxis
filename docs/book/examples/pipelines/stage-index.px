@@ -1,0 +1,22 @@
+// Every stage that asks "which element is this?" counts its own input, not
+// the source's.
+fn main() {
+    var v = [1, 2, 3, 4, 5, 6, 7, 8]
+    var evens = |x| x % 2 == 0
+
+    // The first two survivors, not the survivors among the first two.
+    out(v.filter(evens).take(2))
+    out(v.filter(evens).skip(1))
+
+    // 0, 1, 2, 3 — the numbering the filter handed on.
+    out(v.filter(evens).enumerate())
+
+    // Paired with the argument's 0th, 1st, 2nd element.
+    out(v.filter(evens).zip(["a", "b", "c"]))
+
+    // The index among the evens: 6 is the third one.
+    out(v.filter(evens).position(|x| x == 6))
+
+    // A splice flattens, and the count keeps running across it.
+    out(v.take(3).flat_map(|x| [x, x * 10]).enumerate())
+}

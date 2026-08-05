@@ -1,0 +1,3 @@
+// One integer per line, twenty of them.
+var depths = read lines(int)
+out(depths.len())

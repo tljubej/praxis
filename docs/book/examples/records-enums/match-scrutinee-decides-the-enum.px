@@ -1,0 +1,16 @@
+enum Colour { Red, Green }
+enum Light { Red, Amber }
+
+// A variant pattern's enum is the *scrutinee's*. Both enums have a `Red`, and
+// each `match` reads its own — no annotation on the pattern, and no ambiguity.
+fn colour_code(c: Colour) -> Int {
+    match c { Red => 1, Green => 2 }
+}
+
+fn light_code(l: Light) -> Int {
+    match l { Red => 10, Amber => 20 }
+}
+
+out(colour_code(Green))
+var stop: Light = Amber
+out(light_code(stop))

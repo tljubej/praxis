@@ -1,0 +1,41 @@
+// The design document's representative program (§3.3), verbatim.
+//
+// It is the shape of a whole puzzle in thirty lines: a template read, a
+// function over the records it produced, a `Counter` keyed by a tuple, a
+// compound assignment through a subscript, an inclusive range, and two calls
+// printing the two parts. Nothing in it is annotated.
+//
+// Input: line segments, `x1,y1 -> x2,y2`. Output: the number of points covered
+// by two or more segments, first ignoring diagonals and then including them.
+var segments = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)
+
+fn overlaps(segments, diagonals) {
+    var counts = Counter[(Int, Int)]()
+
+    for segment in segments {
+        var dx = sign(segment.x2 - segment.x1)
+        var dy = sign(segment.y2 - segment.y1)
+
+        if !diagonals && dx != 0 && dy != 0 {
+            continue
+        }
+
+        var distance = max(
+            abs(segment.x2 - segment.x1),
+            abs(segment.y2 - segment.y1),
+        )
+
+        for step in 0..=distance {
+            var point = (
+                segment.x1 + dx * step,
+                segment.y1 + dy * step,
+            )
+            counts[point] += 1
+        }
+    }
+
+    counts.values().count(|n| n >= 2)
+}
+
+out(overlaps(segments, false))
+out(overlaps(segments, true))

@@ -1,0 +1,7 @@
+error[Y017]: a `break` carrying a value needs a `loop`; a `while` produces `Unit`
+
+  break-with-value-in-while.px:3:27
+  3 |     if n * n > 20 { break n }
+    |                           ^ a `break` carrying a value needs a `loop`; a `while` produces `Unit`
+
+praxis: 1 error(s)

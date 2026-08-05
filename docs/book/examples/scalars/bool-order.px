@@ -1,0 +1,4 @@
+// Bool and Unit have no order. Only Int, Float, Char and Text do.
+var ready = true
+var done = false
+out(ready < done)

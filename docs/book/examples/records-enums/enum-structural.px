@@ -1,0 +1,13 @@
+enum Tile { Empty, Wall, Number(Int) }
+
+// Equality is same variant and equal payloads; hashing follows it, so an enum
+// value is a map key or a set element like any other.
+out(Number(7) == Number(7))
+out(Number(7) == Number(8))
+out(Empty == Wall)
+
+var seen = Set()
+seen.insert(Number(1))
+seen.insert(Number(1))
+seen.insert(Empty)
+out(seen.len())

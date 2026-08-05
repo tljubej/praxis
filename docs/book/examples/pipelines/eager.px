@@ -1,0 +1,12 @@
+// A pipeline runs where it is written. Nothing waits for a consumer.
+fn seen(x) {
+    out(x)
+    x * 2
+}
+
+fn main() {
+    var v = [1, 2, 3]
+    var mapped = v.map(|x| seen(x))
+    out("--- the map is already finished ---")
+    out(mapped)
+}

@@ -1,0 +1,7 @@
+error[Y110]: no type has a method `frobnicate` taking 0 argument(s)
+
+  no-method-anywhere.px:2:11
+  2 |     thing.frobnicate()
+    |           ^^^^^^^^^^ no type has a method `frobnicate` taking 0 argument(s)
+
+praxis: 1 error(s)

@@ -1,0 +1,4 @@
+fn identity(x) { x }
+
+var f = identity
+out(f(3))

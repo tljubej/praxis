@@ -1,0 +1,11 @@
+// A named-capture template derives a record type with no declaration anywhere.
+var points = read lines(`{x:int},{y:int}`)
+out(points)
+out(points[0].x)
+
+// The derived record is an ordinary value: its fields are read by name, and a
+// function that takes one need not name the type.
+fn area(r) -> Int { r.x * r.y }
+for r in points {
+    out(area(r))
+}

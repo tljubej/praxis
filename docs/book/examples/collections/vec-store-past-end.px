@@ -1,0 +1,7 @@
+fn store(v, i, x) {
+    v[i] = x
+}
+
+var v = [1, 2, 3]
+store(v, v.len(), 4)
+out(v)

@@ -1,0 +1,2 @@
+// `%` is defined for Int only.
+out(5.0 % 2.0)

@@ -1,0 +1,11 @@
+error: program faulted: division by zero
+
+Backtrace:
+#0   share
+#1   <entry>
+
+  locals:
+    total: Int = 10
+    parts: Int = 0
+  temps:
+    <tmp#3: Int> @ "total / parts" = <uninit>

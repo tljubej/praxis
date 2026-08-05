@@ -1,0 +1,2 @@
+var v: Vec[Int] = Vec()
+out(v.min())

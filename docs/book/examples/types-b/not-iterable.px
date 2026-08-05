@@ -1,0 +1,11 @@
+fn largest(values) {
+    var best = 0
+    for v in values {
+        if v > best {
+            best = v
+        }
+    }
+    best
+}
+
+out(largest(42))

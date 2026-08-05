@@ -1,0 +1,7 @@
+var rows = [[1, 2], [3, 4]]
+
+var first = rows
+[0]
+
+out(first)
+out(rows[0])

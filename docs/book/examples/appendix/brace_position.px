@@ -1,0 +1,24 @@
+// ADR-050 in one program: a record literal is legal wherever the `{` cannot be
+// a block.
+//
+// The four keyword heads — `if` and `while` conditions, `for`'s iterator,
+// `match`'s scrutinee — claim the next `{` as their body, so a bare
+// `Name { … }` is suppressed there and in every operand of the head expression.
+// Every bracket re-admits it: inside `(…)`, `[…]`, an argument list, a block,
+// or a match arm body, nothing else is waiting for that brace.
+
+struct Point { x: Int, y: Int }
+
+var origin = Point { x: 0, y: 0 }
+
+// Suppressed at the head, allowed again inside the parentheses.
+if (Point { x: 0, y: 0 }) == origin { out("same") }
+
+// Allowed in an argument list, in a list literal, and in a match arm body.
+fn shift(p, dx) { Point { x: p.x + dx, y: p.y } }
+out(shift(Point { x: 1, y: 2 }, 3).x)
+out([Point { x: 4, y: 5 }].len())
+out(match origin.x {
+    0 => Point { x: 9, y: 9 }
+    _ => origin
+}.x)

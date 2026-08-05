@@ -1,0 +1,3 @@
+// There is no implicit widening: an Int and a Float never mix.
+var scale = 2
+out(scale * 1.5)

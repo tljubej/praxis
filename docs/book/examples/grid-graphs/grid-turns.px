@@ -1,0 +1,16 @@
+var g = read grid(char)
+
+fn show(name: Text, g: Grid[Char]) -> Unit {
+    out(name)
+    for y in 0..g.height() {
+        out(g.row(y))
+    }
+}
+
+show("original", g)
+show("transpose", g.transpose())
+show("rotate_right", g.rotate_right())
+show("rotate_left", g.rotate_left())
+
+// Each answers a new grid; the receiver is untouched.
+show("still original", g)

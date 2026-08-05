@@ -1,0 +1,7 @@
+error[Y123]: `{ … }` cannot tell which record it matches here; name the record (`P { … }`) or annotate the value
+
+  match-headless-needs-a-record.px:4:15
+  4 |     match p { {x, y} => x + y }
+    |               ^^^^^^ `{ … }` cannot tell which record it matches here; name the record (`P { … }`) or annotate the value
+
+praxis: 1 error(s)

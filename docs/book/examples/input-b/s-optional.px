@@ -1,0 +1,8 @@
+// `optional(P)` returns Option[T]. A failure consumes nothing.
+var maybe = read optional(int)
+
+out(maybe)
+match maybe {
+    Some(n) => out(n)
+    None => out("no number at the start of the input")
+}

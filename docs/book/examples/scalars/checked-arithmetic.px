@@ -1,0 +1,8 @@
+// The three modes over the three operators that overflow without a divisor.
+var big = 9223372036854775807
+out(big.wrapping_add(1))
+out(big.saturating_add(1))
+out(big.checked_add(1))
+out(big.checked_mul(2))
+out(5.checked_add(1))
+out(2.wrapping_mul(big))

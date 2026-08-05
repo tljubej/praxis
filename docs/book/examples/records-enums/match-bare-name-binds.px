@@ -1,0 +1,15 @@
+enum Tile { Empty, Wall, Number(Int) }
+
+// `Wal` is not a variant of `Tile`, so it is not a variant pattern — it is a
+// binding, and a binding matches everything. The match is exhaustive, nothing
+// is reported, and every tile that is not `Empty` takes the second arm.
+fn cost(t: Tile) -> Int {
+    match t {
+        Empty => 1
+        Wal => 2
+    }
+}
+
+out(cost(Empty))
+out(cost(Wall))
+out(cost(Number(9)))

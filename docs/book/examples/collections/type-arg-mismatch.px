@@ -1,0 +1,2 @@
+var c = Counter[Text]()
+c.inc(1)

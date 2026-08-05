@@ -1,0 +1,7 @@
+error[Y001]: expected Int, found Text
+
+  retype.px:2:1
+  2 | score = "high"
+    | ^^^^^ expected Int, found Text
+
+praxis: 1 error(s)

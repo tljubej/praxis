@@ -1,0 +1,4 @@
+fn main() -> Int {
+    var values = read lines(int)
+    values.len()
+}

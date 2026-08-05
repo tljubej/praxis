@@ -1,0 +1,15 @@
+bt
+locals
+p i
+p depths.len()
+p depths[i + 1]
+p depths[i + 2]
+type depths
+source
+up
+locals
+p depths.len() - 2
+input
+restart
+bt
+quit

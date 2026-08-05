@@ -1,0 +1,5 @@
+// `collect` is not a method. A chain materializes without being told to.
+fn main() {
+    var v = [1, 2, 3]
+    out(v.map(|x| x * 2).collect())
+}

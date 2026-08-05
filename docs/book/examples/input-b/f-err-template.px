@@ -1,0 +1,6 @@
+// Template and block errors: captures may not mix naming styles, a capture
+// name is used once, and a positional `block` item that produces a scalar has
+// no field name to contribute.
+var a = read lines(`{x:int},{int}`)
+var b = read lines(`{x:int},{x:int}`)
+var c = read block(int)

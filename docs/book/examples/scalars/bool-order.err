@@ -1,0 +1,7 @@
+error[Y006]: values of type `Bool` cannot be ordered
+
+  bool-order.px:4:13
+  4 | out(ready < done)
+    |             ^^^^ values of type `Bool` cannot be ordered
+
+praxis: 1 error(s)

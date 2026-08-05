@@ -1,0 +1,10 @@
+error[N001]: `totl` is not defined
+
+  misspelled.px:4:5
+  4 |     totl += n
+    |     ^^^^ `totl` is not defined
+
+help: did you mean `total`?
+      total
+
+praxis: 1 error(s)

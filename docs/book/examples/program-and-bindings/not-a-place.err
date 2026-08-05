@@ -1,0 +1,13 @@
+error[Y020]: values of type `Text` cannot be assigned through 1 index(es)
+
+  not-a-place.px:2:1
+  2 | t[0] = "z"
+    | ^^^^ values of type `Text` cannot be assigned through 1 index(es)
+
+error[Y021]: the left side of an assignment must be a name, a field, or an index
+
+  not-a-place.px:5:1
+  5 | pair.0 = 5
+    | ^^^^^^ the left side of an assignment must be a name, a field, or an index
+
+praxis: 2 error(s)

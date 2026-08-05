@@ -1,0 +1,11 @@
+fn area(r) {
+    r.w * r.h
+}
+
+var rooms = read lines(`{w:int}x{h:int}`)
+var default_room = parse("2x5", `{w:int}x{h:int}`)
+
+for room in rooms {
+    out(area(room))
+}
+out(area(default_room))

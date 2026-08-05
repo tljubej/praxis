@@ -1,0 +1,7 @@
+error[Y001]: expected Float, found Int
+
+  mixing-numbers.px:3:5
+  3 | out(scale * 1.5)
+    |     ^^^^^ expected Float, found Int
+
+praxis: 1 error(s)

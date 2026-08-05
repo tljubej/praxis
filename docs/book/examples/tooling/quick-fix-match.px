@@ -1,0 +1,10 @@
+enum Dir { North, South, East, West }
+
+fn step(d: Dir) -> (Int, Int) {
+  match d {
+    North => (0, -1)
+    South => (0, 1)
+  }
+}
+
+out(step(North))

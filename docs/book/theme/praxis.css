@@ -1,0 +1,34 @@
+/* Praxis book theme tweaks.
+ *
+ * Deliberately small: the `rust` mdbook theme already reads well. What is here
+ * covers the two things the book does that the default theme has no opinion
+ * about — terminal transcripts, and the "verified output" convention used by
+ * every example in the book. */
+
+/* A terminal transcript: what was typed and what came back. Distinguished from
+ * a source listing so a reader never mistakes one for the other. */
+pre > code.language-console,
+pre > code.language-text {
+    font-variant-ligatures: none;
+}
+
+/* The caption that follows an example's output block. Examples in this book are
+ * run before they are published; this is where that is said. */
+.verified {
+    font-size: 0.85em;
+    opacity: 0.75;
+    margin-top: -0.8em;
+    padding-left: 0.2em;
+    font-style: italic;
+}
+
+/* Diagnostic codes (`Y110`, `P002`, `E103`) read as identifiers, not prose. */
+table code {
+    white-space: nowrap;
+}
+
+/* Wide reference tables — the method catalog and the diagnostic index — scroll
+ * rather than forcing the page to. */
+.table-wrapper {
+    overflow-x: auto;
+}

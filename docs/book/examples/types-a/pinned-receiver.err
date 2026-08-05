@@ -1,0 +1,7 @@
+error[Y001]: expected (Vec[Int]) -> ?T, found (Vec[Float]) -> ?T
+
+  pinned-receiver.px:9:5
+  9 | out(total(weights))
+    |     ^^^^^^^^^^^^^^ expected (Vec[Int]) -> ?T, found (Vec[Float]) -> ?T
+
+praxis: 1 error(s)

@@ -1,0 +1,5 @@
+// `csv(P)` splits on commas. The space around a comma is left in the field;
+// `int` does not read it, and what a parser declines is not data.
+var program = read csv(int)
+
+out(program)

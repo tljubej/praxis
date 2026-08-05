@@ -1,0 +1,2 @@
+var max = 10
+out(max + 1)

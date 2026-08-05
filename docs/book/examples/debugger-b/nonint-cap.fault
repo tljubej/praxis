@@ -1,0 +1,19 @@
+error: program faulted: division by zero
+
+Backtrace:
+#0   main
+
+  locals:
+    alpha: Int = 1
+    bravo: Int = 2
+    charlie: Int = 3
+    delta: Int = 4
+    echo: Int = 5
+    foxtrot: Int = 6
+    golf: Int = 7
+    hotel: Int = 8
+    india: Int = 9
+    juliett: Int = 10
+    kilo: Int = 11
+    lima: Int = 12
+  …(20 more)

@@ -1,0 +1,3 @@
+var g = read grid(char)
+
+out(g.map(|c| c))

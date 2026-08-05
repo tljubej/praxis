@@ -1,0 +1,5 @@
+fn fourth(t) {
+    t[3]
+}
+
+out(fourth("ab"))

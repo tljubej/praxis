@@ -1,0 +1,3 @@
+// Blank-line-separated sections of comma-separated integers.
+var groups = read sections(lines(csv(int)))
+out(groups.len())

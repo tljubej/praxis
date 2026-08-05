@@ -1,0 +1,16 @@
+struct Point { x: Int, y: Int }
+
+fn shift(p: Point, dx: Int, dy: Int) -> Point {
+    Point { x: p.x + dx, y: p.y + dy }
+}
+
+var origin: Point = Point { x: 0, y: 0 }
+var counts: Map[Text, Int] = Map()
+var double: (Int) -> Int = |n: Int| n * 2
+var pair: (Int, Text) = (1, "one")
+
+counts.insert("moves", 2)
+out(shift(origin, 3, 4))
+out(counts.get("moves"))
+out(double(21))
+out(pair)

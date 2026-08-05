@@ -1,0 +1,6 @@
+var count = 1
+if count > 0 {
+    var count = count + 40
+    var zero = 0
+    out(count / zero)
+}

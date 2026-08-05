@@ -1,0 +1,6 @@
+fn add(a, b) {
+    a + b
+}
+
+out(add(1, 2))
+out(add("one", 2))

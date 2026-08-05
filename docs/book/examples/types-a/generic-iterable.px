@@ -1,0 +1,14 @@
+fn total(items) {
+    var t = 0
+    for i in items {
+        t = t + i
+    }
+    t
+}
+
+var set = Set()
+set.insert(4)
+
+out(total([1, 2]))
+out(total(0..5))
+out(total(set))

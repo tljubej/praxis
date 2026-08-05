@@ -1,0 +1,10 @@
+out(42)
+out("a line")
+out([1, 2, 3])
+out((1, "x"))
+out(Some(3))
+
+var squares = Map()
+squares.insert(2, 4)
+squares.insert(3, 9)
+out(squares)

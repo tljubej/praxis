@@ -1,0 +1,8 @@
+// A run of ordinary spaces in a template matches one or more spaces or tabs.
+// That is the flexible rule column-aligned puzzle input needs: one space in
+// the template accepts any horizontal run in the input, but not none.
+fn main() {
+    out(parse("1 2", `{a:int} {b:int}`))
+    out(parse("1     2", `{a:int} {b:int}`))
+    out(parse("1\t2", `{a:int} {b:int}`))
+}

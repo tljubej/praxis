@@ -1,0 +1,32 @@
+// Shape: instructions embedded in text that is otherwise noise.
+//
+// xmul(2,4)&mul[3,7]!^don't()_mul(5,5)+mul(32,64](mul(11,8)undo()?mul(8,5))
+//
+// `scan` looks for its parser at every position, keeps the matches in source
+// order and ignores everything else. Nothing bounds the root, so a scan that
+// matches nothing is an empty Vec rather than a fault.
+var program = read scan(choice(
+    Multiply: `mul({left:int},{right:int})`,
+    Enable: `do()`,
+    Disable: `don't()`,
+))
+
+out(program.len())
+
+var all = 0
+var enabled = 0
+var on = true
+for step in program {
+    match step {
+        Multiply(p) => {
+            all = all + p.left * p.right
+            if on {
+                enabled = enabled + p.left * p.right
+            }
+        }
+        Enable(_) => { on = true }
+        Disable(_) => { on = false }
+    }
+}
+out(all)
+out(enabled)

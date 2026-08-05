@@ -1,0 +1,8 @@
+var text = "hello"
+
+var v = [10, 20]
+
+var m = Map()
+m.insert("a", 1)
+
+panic("stopping here on purpose")

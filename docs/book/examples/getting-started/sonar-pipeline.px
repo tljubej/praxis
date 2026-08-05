@@ -1,0 +1,3 @@
+var depths = read lines(int)
+
+out(depths.zip(depths.skip(1)).count(|pair| pair.1 > pair.0))

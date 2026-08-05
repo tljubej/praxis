@@ -1,0 +1,4 @@
+fn head(xs) { xs[0] }
+
+out(head([1, 2, 3]))
+out(head(["a", "b"]))

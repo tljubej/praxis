@@ -1,0 +1,4 @@
+enum Tile { Empty, Number(Int) }
+
+// Like records, enums are equatable and hashable but not ordered.
+out([Number(1), Empty].sorted())

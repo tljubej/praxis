@@ -1,0 +1,16 @@
+error: program faulted: input parse mismatch
+       at input offset 4..4: expected int
+       actual: 1⏎2⏎three⏎4⏎
+
+Backtrace:
+#0   total
+#1   <entry>
+
+  temps:
+    <tmp#1> = 1
+2
+three
+4
+
+    <tmp#2: Int> = 1
+    <tmp#3: Vec[Int]> = Unit

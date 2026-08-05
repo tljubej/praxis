@@ -1,0 +1,13 @@
+struct Point { x: Int, y: Int }
+
+var p = Point { x: 1, y: 2 }
+var seen = Set()
+seen.insert(p)
+out(seen.contains(p))
+
+// A field store changes the value the set hashed. The entry is still there —
+// it is just no longer reachable by its own key.
+p.x = 99
+out(seen.contains(p))
+out(seen.len())
+out(seen)

@@ -1,0 +1,36 @@
+// A pipeline's currency is Vec. To get a collection back, name it.
+fn main() {
+    var s = Set()
+    s.insert(3)
+    s.insert(1)
+    s.insert(2)
+
+    out(s.filter(|x| x > 1))
+    out(s.filter(|x| x > 1).to_set().len())
+
+    // to_vec is the route out of a keyed collection: keys() and values()
+    // answer two aligned halves and nothing joins them.
+    var m = Map()
+    m["a"] = 1
+    m["b"] = 2
+    out(m.to_vec())
+
+    // ...and to_map is the route back in.
+    var scaled = m.map(|kv| (kv.0, kv.1 * 10)).to_map()
+    out(scaled["b"])
+
+    // The rest of the set, one per collection that has a constructor.
+    out([1, 2, 3].map(|x| x % 2).to_set().len())
+    out([3, 1, 2].to_deque().pop_front())
+    out([3, 1, 2].to_min_heap().pop())
+    out([3, 1, 2].to_max_heap().pop())
+    out([1, 4].to_bitset().contains(4))
+    out(["a", "b", "a"].frequencies().to_vec().to_counter()["a"])
+
+    // On a Vec receiver, to_vec is the identity — the same reference, not a
+    // copy.
+    var v = [1]
+    var same = v.to_vec()
+    same.push(2)
+    out(v.len())
+}

@@ -1,0 +1,5 @@
+// `lines(P)` splits the region into lines and applies P to each one.
+var values = read lines(int)
+
+out(values)
+out(values.sum())

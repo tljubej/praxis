@@ -1,0 +1,11 @@
+var s = Set()
+s.insert(1)
+s.insert(1)
+s.insert(2)
+
+out(s.len())
+out(s.contains(2))
+
+s.remove(2)
+out(s)
+out(s.is_empty())

@@ -1,0 +1,3 @@
+var counts = Map[Text, Int]()
+counts.insert("ada", 1)
+out(counts.contain("ada"))

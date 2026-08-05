@@ -1,0 +1,40 @@
+// Shape: two heterogeneous sections — ordering rules, then updates.
+//
+// 47|53
+// 97|13
+//
+// 75,47,61,53,29
+//
+// Named arguments parse the sections in order and give the result one field
+// per name.
+var data = read sections(
+    rules: lines(`{before:int}|{after:int}`),
+    updates: lines(csv(int)),
+)
+
+out(data.rules.len())
+out(data.updates.len())
+
+var forbidden = Set[(Int, Int)]()
+for r in data.rules {
+    forbidden.insert((r.after, r.before))
+}
+
+var ordered = 0
+var middles = 0
+for update in data.updates {
+    var ok = true
+    for i in 0..update.len() {
+        for j in (i + 1)..update.len() {
+            if forbidden.contains((update[i], update[j])) {
+                ok = false
+            }
+        }
+    }
+    if ok {
+        ordered = ordered + 1
+        middles = middles + update[update.len() / 2]
+    }
+}
+out(ordered)
+out(middles)

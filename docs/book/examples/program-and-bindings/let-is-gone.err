@@ -1,0 +1,34 @@
+error[N001]: `let` is not defined
+
+  let-is-gone.px:1:1
+  1 | let x = 5
+    | ^^^ `let` is not defined
+
+help: did you mean `Set`?
+      Set
+
+error[P002]: expected `;` or a line break between statements
+
+  let-is-gone.px:1:5
+  1 | let x = 5
+    |     ^ expected `;` or a line break between statements
+
+error[N001]: `x` is not defined
+
+  let-is-gone.px:1:5
+  1 | let x = 5
+    |     ^ `x` is not defined
+
+help: did you mean `e`?
+      e
+
+error[N001]: `x` is not defined
+
+  let-is-gone.px:2:5
+  2 | out(x)
+    |     ^ `x` is not defined
+
+help: did you mean `e`?
+      e
+
+praxis: 4 error(s)

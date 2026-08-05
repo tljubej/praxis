@@ -1,0 +1,7 @@
+error[Y001]: expected Int, found Text
+
+  diagnostic-anatomy.px:4:3
+  4 |   total += line
+    |   ^^^^^ expected Int, found Text
+
+praxis: 1 error(s)

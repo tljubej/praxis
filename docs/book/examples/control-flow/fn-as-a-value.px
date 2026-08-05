@@ -1,0 +1,8 @@
+fn double(n: Int) -> Int { n * 2 }
+
+fn apply(f, x) { f(x) }
+
+var f = double
+out(f(3))
+out(apply(double, 20))
+out([1, 2, 3].map(double))

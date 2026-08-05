@@ -1,0 +1,37 @@
+// A maze on stdin: `#` is a wall, `S` the start, `E` the exit.
+// How few steps is the exit?
+var maze = read grid(char)
+var wall = "#"[0]
+
+// The graph is this function. `bfs_distance` never sees the grid: it only
+// ever asks "what is next to here?" and "is this the exit?".
+fn open_neighbours(maze: Grid[Char], wall: Char, p: (Int, Int)) -> Vec[(Int, Int)] {
+    var open = Vec()
+    for (x, y) in maze.neighbors4(p) {
+        if maze[x, y] != wall {
+            open.push((x, y))
+        }
+    }
+    open
+}
+
+fn square(maze: Grid[Char], mark: Char) -> (Int, Int) {
+    match maze.find(mark) {
+        Some(p) => p,
+        None => panic("the maze is missing a marker"),
+    }
+}
+
+var start = square(maze, "S"[0])
+var exit = square(maze, "E"[0])
+
+var steps = bfs_distance(
+    start,
+    |p| open_neighbours(maze, wall, p),
+    |p| p == exit,
+)
+
+match steps {
+    Some(n) => out(n),
+    None => out("walled in"),
+}

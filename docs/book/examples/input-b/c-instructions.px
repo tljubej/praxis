@@ -1,0 +1,31 @@
+// Shape: one instruction per line, and the instructions have different
+// shapes.
+//
+// noop
+// addx 3
+// addx -5
+//
+// `choice` inside `lines` gives one anonymous enum variant per case. The
+// first case that matches wins, and `lines` then requires the line to be
+// consumed — so a case that matches a prefix of a longer line is caught by
+// `lines`, not silently accepted.
+var program = read lines(choice(
+    Addx: `addx {value:int}`,
+    Noop: `noop`,
+))
+
+out(program.len())
+
+var x = 1
+var cycle = 0
+for instruction in program {
+    match instruction {
+        Noop(_) => { cycle = cycle + 1 }
+        Addx(p) => {
+            cycle = cycle + 2
+            x = x + p.value
+        }
+    }
+}
+out(cycle)
+out(x)

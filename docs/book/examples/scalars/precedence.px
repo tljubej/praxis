@@ -1,0 +1,14 @@
+// Tightest first: postfix, then prefix, then the binary levels.
+out(-1.5.abs())       // -(1.5.abs())
+out((-1.5).abs())     // the other reading, spelled out
+out(-2 * 3)           // (-2) * 3
+out(2 + 3 * 4)        // 2 + (3 * 4)
+out(2 - 3 - 4)        // (2 - 3) - 4
+out(1 + 2 == 3)       // (1 + 2) == 3
+out(1 == 1 && 2 == 3) // (1 == 1) && (2 == 3)
+out(true || false && false)
+
+var span = 0..3 - 1   // 0..(3 - 1)
+var n = 0
+for i in span { n += 1 }
+out(n)

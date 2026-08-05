@@ -1,0 +1,9 @@
+fn steps(n: Int) -> Vec[Int] {
+    var v = Vec()
+    if n < 3 { v.push(n + 1) }
+    v
+}
+
+fn main() -> Int {
+    dijkstra(0, steps, |a, b| -1).len()
+}

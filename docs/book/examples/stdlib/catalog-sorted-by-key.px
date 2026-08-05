@@ -1,0 +1,2 @@
+var pairs = [(2, "b"), (1, "a")]
+out(pairs.sorted_by_key(|pair| pair.0))

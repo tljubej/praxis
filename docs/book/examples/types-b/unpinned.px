@@ -1,0 +1,5 @@
+fn pair(item) {
+    [item, item]
+}
+
+out("pair is declared but never called")

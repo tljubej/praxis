@@ -1,0 +1,9 @@
+error[Y001]: expected Int, found Text
+
+  text-to-number.px:2:18
+  2 | var count: Int = raw
+    |                  ^^^ expected Int, found Text
+
+help: this is `Text`; call `.int()` on it (or use `read lines(int)`)
+
+praxis: 1 error(s)

@@ -1,0 +1,13 @@
+error[Y005]: values of type `Int` cannot be iterated
+
+  not-iterable.px:11:5
+  11 | out(largest(42))
+     |     ^^^^^^^^^^^ values of type `Int` cannot be iterated
+
+note: this is the operation that requires it
+
+  not-iterable.px:3:14
+  3 |     for v in values {
+    |              ^^^^^^
+
+praxis: 1 error(s)

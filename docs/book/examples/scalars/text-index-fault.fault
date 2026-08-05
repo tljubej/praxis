@@ -1,0 +1,11 @@
+error: program faulted: index out of bounds
+
+Backtrace:
+#0   fourth
+#1   <entry>
+
+  locals:
+    t: Text = ab
+  temps:
+    <tmp#2: Int> @ "3" = 3
+    <tmp#3: Char> @ "t[3]" = Unit

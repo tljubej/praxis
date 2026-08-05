@@ -1,0 +1,7 @@
+// A bare `,` consumes no whitespace of its own, and this still matches: the
+// capture's region ends at the comma, `int` reads `1` and leaves the space
+// behind, and whitespace a child declined is nobody's.
+fn main() {
+    out(parse("1 ,2", `{a:int},{b:int}`))
+    out(parse("1, 2", `{a:int},{b:int}`))
+}

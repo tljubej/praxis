@@ -1,0 +1,23 @@
+error: program faulted: index out of bounds
+
+Backtrace:
+#0   <entry>
+
+  locals:
+    v: Vec[Int] = [1, 2, 3]
+  temps:
+    <tmp#1: Vec[Int]> @ "[1, 2, 3]" = [1, 2, 3]
+    <tmp#2: Int> @ "1" = 1
+    <tmp#3: Unit> = Unit
+    <tmp#4: Int> @ "2" = 2
+    <tmp#5: Unit> = Unit
+    <tmp#6: Int> @ "3" = 3
+    <tmp#7: Unit> = Unit
+    <tmp#9: Int> @ "9" = 9
+    <tmp#10: Int> @ "v[9]" = Unit
+    <tmp#11: Unit> @ "out(v[9])" = <uninit>
+    <tmp#12: Unit> @ "var v = [1, 2, 3] out(v[9])" = <uninit>
+Entered crash debugger. 1 frame(s). Type `help` for commands.
+Praxis crash> 3
+Praxis crash> error: method `push` is impure (may mutate state) — `p` rejects mutating expressions
+Praxis crash> 

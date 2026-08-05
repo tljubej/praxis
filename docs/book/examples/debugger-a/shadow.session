@@ -1,0 +1,36 @@
+error: program faulted: division by zero
+
+Backtrace:
+#0   <entry>
+
+  locals:
+    count: Int = 1
+    count: Int = 41
+    zero: Int = 0
+  temps:
+    <tmp#1: Int> @ "1" = 1
+    <tmp#3: Int> @ "0" = <uninit>
+    <tmp#4: Bool> @ "count > 0" = true
+    <tmp#6: Int> @ "40" = 40
+    <tmp#7: Int> @ "count + 40" = 41
+    <tmp#9: Int> @ "0" = 0
+    <tmp#11: Int> @ "count / zero" = <uninit>
+    <tmp#12: Unit> @ "out(count / zero)" = <uninit>
+    <tmp#14: Unit> @ "var count = 1 if count > 0 { var count = count + 40 var zero = 0 out(count / zero) }" = <uninit>
+Entered crash debugger. 1 frame(s). Type `help` for commands.
+Praxis crash>   locals:
+    count: Int = 1
+    count: Int = 41
+    zero: Int = 0
+  temps:
+    <tmp#1: Int> @ "1" = 1
+    <tmp#3: Int> @ "0" = <uninit>
+    <tmp#4: Bool> @ "count > 0" = true
+    <tmp#6: Int> @ "40" = 40
+    <tmp#7: Int> @ "count + 40" = 41
+    <tmp#9: Int> @ "0" = 0
+    <tmp#11: Int> @ "count / zero" = <uninit>
+    <tmp#12: Unit> @ "out(count / zero)" = <uninit>
+    <tmp#14: Unit> @ "var count = 1 if count > 0 { var count = count + 40 var zero = 0 out(count / zero) }" = <uninit>
+Praxis crash> 41
+Praxis crash> 

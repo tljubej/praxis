@@ -1,0 +1,14 @@
+var m = Map()
+m.insert("a", 1)
+m.insert("b", 2)
+
+out(m.len())
+out(m.contains("a"))
+out(m.get("a"))
+out(m.get("z"))
+out(m.keys())
+out(m.values())
+
+m.remove("a")
+out(m)
+out(m.is_empty())

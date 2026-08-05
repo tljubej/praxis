@@ -1,0 +1,2 @@
+var mode = "diagonal"
+panic("unsupported mode: " + mode)

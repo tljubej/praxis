@@ -1,0 +1,5 @@
+fn identity(x) { x }
+
+out(identity(1))
+out(identity("s"))
+out(identity(true))

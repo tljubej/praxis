@@ -1,0 +1,17 @@
+struct Point { x: Int, y: Int }
+
+var p = Point { x: 1, y: 2 }
+
+// `if`, `while`, `for` and `match` claim the brace that follows their head, so
+// a record literal there needs parentheses to say it is not the block.
+if (Point { x: 1, y: 2 } == p) {
+    out("same")
+}
+
+// Inside a bracket the grammar knows what closes it, so a literal is legal at
+// any depth: an argument list, a match arm body, a block, a closure.
+out(match p {
+    Point { x: 1, y } => Point { x: 9, y: y }
+    _ => p
+})
+out([Point { x: 0, y: 0 }].map(|q: Point| Point { x: q.y, y: q.x }))

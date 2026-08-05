@@ -1,0 +1,10 @@
+error[Y110]: no method `contain` on type `Map[Text, Int]` taking 1 argument(s)
+
+  no-such-method.px:3:12
+  3 | out(counts.contain("ada"))
+    |            ^^^^^^^ no method `contain` on type `Map[Text, Int]` taking 1 argument(s)
+
+help: did you mean `contains`?
+      contains
+
+praxis: 1 error(s)

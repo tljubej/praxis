@@ -1,0 +1,5 @@
+var t = "abc"
+t[0] = "z"
+
+var pair = (1, 2)
+pair.0 = 5

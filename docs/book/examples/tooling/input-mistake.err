@@ -1,0 +1,7 @@
+error[I020]: named and anonymous captures may not be mixed in one template (§7.3)
+
+  input-mistake.px:1:24
+  1 | var moves = read lines(`move {count:int} from {int} to {target:int}`)
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ named and anonymous captures may not be mixed in one template (§7.3)
+
+praxis: 1 error(s)

@@ -1,0 +1,7 @@
+error[Y001]: expected ({ w: Int, h: Int }) -> Int, found ({ w: Int, d: Int }) -> ?T
+
+  different-fields.px:9:5
+  9 | out(area(boxes))
+    |     ^^^^^^^^^^^ expected ({ w: Int, h: Int }) -> Int, found ({ w: Int, d: Int }) -> ?T
+
+praxis: 1 error(s)

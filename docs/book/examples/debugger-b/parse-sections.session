@@ -1,0 +1,26 @@
+error: program faulted: input parse mismatch
+       at input offset 17..17: expected int
+       actual: 1,2,3⏎4,5,6⏎⏎7,8,x⏎
+
+Backtrace:
+#0   <entry>
+
+  locals:
+    groups: Vec[Vec[Vec[Int]]] = <uninit>
+  temps:
+    <tmp#1> = 1,2,3
+4,5,6
+
+7,8,x
+
+    <tmp#2: Int> = 1
+    <tmp#3: Vec[Vec[Vec[Int]]]> = Unit
+    <tmp#5: Int> @ "groups.len()" = <uninit>
+    <tmp#6: Unit> @ "out(groups.len())" = <uninit>
+    <tmp#7: Unit> @ "// Blank-line-separated sections of comma-separated integers. var groups = read sections(lines(csv(int))) out(groups.len())" = <uninit>
+Entered crash debugger. 1 frame(s). Type `help` for commands.
+Praxis crash> input at offset 17..17:
+  1,2,3⏎4,5,6⏎⏎7,8,x⏎
+Praxis crash> expected: int
+parser expression: <unknown parser>
+Praxis crash> 

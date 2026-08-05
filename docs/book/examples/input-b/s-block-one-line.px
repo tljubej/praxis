@@ -1,0 +1,6 @@
+// A block item is offered its own lines, but it need not fill them: `block`
+// carries its cursor to the next item, so two items can share a line.
+var pair = read block(`a: {a:int}`, `b: {b:int}`)
+
+out(pair.a)
+out(pair.b)

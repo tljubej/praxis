@@ -1,0 +1,6 @@
+// `chars(P, skip: policy)` applies P repeatedly. `newlines` is the broader
+// policy: it skips spaces, tabs and line endings.
+var moves = read chars(one_of("^v<>"), skip: newlines)
+
+out(moves.len())
+out(moves)

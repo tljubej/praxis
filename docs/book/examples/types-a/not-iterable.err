@@ -1,0 +1,7 @@
+error[Y005]: values of type `Int` cannot be iterated
+
+  not-iterable.px:1:1
+  1 | for x in 5 { out(x) }
+    | ^^^^^^^^^^^^^^^^^^^^^ values of type `Int` cannot be iterated
+
+praxis: 1 error(s)

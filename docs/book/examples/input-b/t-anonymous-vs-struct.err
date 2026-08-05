@@ -1,0 +1,7 @@
+error[Y001]: expected (Vec[Point]) -> Int, found (Vec[{ x: Int, y: Int }]) -> ?T
+
+  t-anonymous-vs-struct.px:10:5
+  10 | out(total(read lines(`{x:int},{y:int}`)))
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected (Vec[Point]) -> Int, found (Vec[{ x: Int, y: Int }]) -> ?T
+
+praxis: 1 error(s)

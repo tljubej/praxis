@@ -1,0 +1,7 @@
+error[Y006]: values of type `Tile` cannot be ordered
+
+  enum-cannot-be-ordered.px:4:24
+  4 | out([Number(1), Empty].sorted())
+    |                        ^^^^^^ values of type `Tile` cannot be ordered
+
+praxis: 1 error(s)

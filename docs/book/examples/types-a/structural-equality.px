@@ -1,0 +1,14 @@
+struct Point { x: Int, y: Int }
+enum Move { Step(Int), Stop }
+
+out((1, "a") == (1, "a"))
+out((1, "a") == (1, "b"))
+out(Point { x: 1, y: 2 } == Point { x: 1, y: 2 })
+out(Step(3) == Step(3))
+out(Step(3) == Stop)
+
+var seen = Set()
+seen.insert(Point { x: 1, y: 2 })
+seen.insert(Point { x: 1, y: 2 })
+seen.insert(Point { x: 3, y: 4 })
+out(seen.len())

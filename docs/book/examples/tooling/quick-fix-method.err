@@ -1,0 +1,10 @@
+error[Y110]: no method `sortd` on type `Vec[Int]` taking 0 argument(s)
+
+  quick-fix-method.px:2:8
+  2 | out(xs.sortd())
+    |        ^^^^^ no method `sortd` on type `Vec[Int]` taking 0 argument(s)
+
+help: did you mean `sorted`?
+      sorted
+
+praxis: 1 error(s)

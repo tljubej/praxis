@@ -1,0 +1,19 @@
+var point = (3, 4)
+out(point)
+out(point.0)
+out(point.1)
+
+// A tuple's identity is structural: same elements, same value.
+out((3, 4) == point)
+out((4, 3) == point)
+
+// Mixed element types are fine, and the arity is part of the shape.
+var row = ("ada", 36, true)
+out(row.1)
+
+// Tuples key a Map, which is what makes (x, y) coordinates work.
+var grid = Map()
+grid[(0, 0)] = "start"
+grid[(3, 4)] = "goal"
+out(grid[point])
+out(grid.len())

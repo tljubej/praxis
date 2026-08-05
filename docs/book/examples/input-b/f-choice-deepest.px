@@ -1,0 +1,11 @@
+// Neither case matches. The failure reported is the one that got furthest
+// into the input — `Multiply` reached the second argument, `Enable` failed at
+// the first byte.
+fn program() -> Int {
+    read lines(choice(
+        Multiply: `mul({left:int},{right:int})`,
+        Enable: `do()`,
+    )).len()
+}
+
+out(program())

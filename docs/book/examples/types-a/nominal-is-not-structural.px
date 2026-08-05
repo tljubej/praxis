@@ -1,0 +1,10 @@
+struct Room { w: Int, h: Int }
+
+fn area(r) {
+    r.w * r.h
+}
+
+var parsed = parse("3x4", `{w:int}x{h:int}`)
+
+out(area(parsed))
+out(area(Room { w: 2, h: 5 }))

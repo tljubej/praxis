@@ -1,0 +1,7 @@
+error[Y112]: no field `len` on type `Vec[Int]`
+
+  accessor-is-a-call.px:3:7
+  3 | out(v.len)
+    |       ^^^ no field `len` on type `Vec[Int]`
+
+praxis: 1 error(s)

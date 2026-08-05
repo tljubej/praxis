@@ -1,0 +1,6 @@
+// Output written before the fault is already on stdout; the diagnostic is on
+// stderr. A script that captures them separately keeps both.
+var totals = [10, 20, 30]
+out(totals[0])
+out(totals[1])
+out(totals[5])

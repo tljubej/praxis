@@ -1,0 +1,13 @@
+// One `read` at the top, ordinary code underneath. The parser expression is
+// broken across lines because whitespace outside the backticks is not input.
+fn main() {
+    var segments = read lines(
+        `{x1:int},{y1:int} -> {x2:int},{y2:int}`
+    )
+    var total = 0
+    for s in segments {
+        total = total + abs(s.x2 - s.x1) + abs(s.y2 - s.y1)
+    }
+    out(segments.len())
+    out(total)
+}

@@ -1,0 +1,5 @@
+fn share(total, parts) {
+    total / parts
+}
+
+out(share(10, 0))

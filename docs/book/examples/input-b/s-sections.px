@@ -1,0 +1,7 @@
+// `sections(P)` splits on blank lines and applies P to each section.
+var groups = read sections(lines(int))
+
+out(groups.len())
+for g in groups {
+    out(g.sum())
+}

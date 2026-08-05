@@ -1,0 +1,5 @@
+type values
+type total
+type name
+type values.sorted()
+quit

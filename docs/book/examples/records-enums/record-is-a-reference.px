@@ -1,0 +1,11 @@
+struct Point { x: Int, y: Int }
+
+// A record value is an object. A binding names it; it does not own it, so a
+// write through one name is visible through every other.
+var nodes = [Point { x: 0, y: 0 }]
+nodes[0].x += 1
+out(nodes)
+
+var alias = nodes[0]
+alias.y = 9
+out(nodes[0])

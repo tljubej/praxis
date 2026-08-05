@@ -1,0 +1,3 @@
+var checksum = 41
+assert(checksum == 42)
+out(checksum)

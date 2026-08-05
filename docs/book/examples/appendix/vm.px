@@ -1,0 +1,124 @@
+// vm — a stack bytecode interpreter.
+//
+// Ten opcodes as an `enum` with payloads, one `match` per executed instruction,
+// an operand stack in a `Deque`, and four registers held in plain bindings.
+// This is the "simulate this machine" half of a puzzle at full size: the loop
+// below retires 1.15 million instructions on the input in `vm.in`, and the
+// exhaustiveness check on the `match` is what says no opcode was forgotten.
+//
+// It is copied from `benchmarks/praxis/vm.px`, where it is the dispatch
+// benchmark.
+//
+// The interpreted program computes a rolling modular hash over `0..limit`; the
+// interpreter reports its result and the number of instructions it retired.
+//
+// Input: the interpreted loop's iteration count, as one integer on stdin.
+// Output: the interpreted program's result, then the instruction count.
+
+enum Op {
+    Push(Int)
+    Load(Int)
+    Store(Int)
+    Add
+    Mul
+    Mod
+    Lt
+    JmpZ(Int)
+    Jmp(Int)
+    Halt
+}
+
+var limit = read int
+
+// The program, hand-assembled. Register 0 is the loop counter, register 1 the
+// accumulator; the loop head is instruction 4 and the exit target is 27.
+var prog = Vec()
+prog.push(Push(0))      //  0
+prog.push(Store(0))     //  1   i = 0
+prog.push(Push(1))      //  2
+prog.push(Store(1))     //  3   acc = 1
+prog.push(Load(1))      //  4   <- loop head
+prog.push(Push(31))     //  5
+prog.push(Mul)          //  6   acc * 31
+prog.push(Load(0))      //  7
+prog.push(Push(7))      //  8
+prog.push(Mul)          //  9   i * 7
+prog.push(Push(13))     // 10
+prog.push(Add)          // 11   i * 7 + 13
+prog.push(Push(1000003)) // 12
+prog.push(Mod)          // 13   (i * 7 + 13) % 1000003
+prog.push(Add)          // 14   acc * 31 + that
+prog.push(Push(1000003)) // 15
+prog.push(Mod)          // 16
+prog.push(Store(1))     // 17   acc = ...
+prog.push(Load(0))      // 18
+prog.push(Push(1))      // 19
+prog.push(Add)          // 20
+prog.push(Store(0))     // 21   i = i + 1
+prog.push(Load(0))      // 22
+prog.push(Push(limit))  // 23
+prog.push(Lt)           // 24   i < limit
+prog.push(JmpZ(27))     // 25
+prog.push(Jmp(4))       // 26
+prog.push(Load(1))      // 27   <- exit
+prog.push(Halt)         // 28
+
+var stack = Deque()
+var pc = 0
+var r0 = 0
+var r1 = 0
+var r2 = 0
+var r3 = 0
+var steps = 0
+var running = true
+
+while running {
+    var op = prog[pc]
+    pc = pc + 1
+    steps = steps + 1
+    match op {
+        Push(k) => { stack.push_back(k) }
+        Load(k) => {
+            if k == 0 { stack.push_back(r0) }
+            else if k == 1 { stack.push_back(r1) }
+            else if k == 2 { stack.push_back(r2) }
+            else { stack.push_back(r3) }
+        }
+        Store(k) => {
+            var v = stack.pop_back()
+            if k == 0 { r0 = v }
+            else if k == 1 { r1 = v }
+            else if k == 2 { r2 = v }
+            else { r3 = v }
+        }
+        Add => {
+            var b = stack.pop_back()
+            var a = stack.pop_back()
+            stack.push_back(a + b)
+        }
+        Mul => {
+            var b = stack.pop_back()
+            var a = stack.pop_back()
+            stack.push_back(a * b)
+        }
+        Mod => {
+            var b = stack.pop_back()
+            var a = stack.pop_back()
+            stack.push_back(a % b)
+        }
+        Lt => {
+            var b = stack.pop_back()
+            var a = stack.pop_back()
+            if a < b { stack.push_back(1) } else { stack.push_back(0) }
+        }
+        JmpZ(t) => {
+            var v = stack.pop_back()
+            if v == 0 { pc = t }
+        }
+        Jmp(t) => { pc = t }
+        Halt => { running = false }
+    }
+}
+
+out(stack.pop_back())
+out(steps)

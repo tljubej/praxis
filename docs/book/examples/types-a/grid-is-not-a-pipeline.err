@@ -1,0 +1,7 @@
+error[Y110]: no method `map` on type `Grid[Char]` taking 1 argument(s)
+
+  grid-is-not-a-pipeline.px:3:7
+  3 | out(g.map(|c| c))
+    |       ^^^ no method `map` on type `Grid[Char]` taking 1 argument(s)
+
+praxis: 1 error(s)

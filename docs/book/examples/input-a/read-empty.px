@@ -1,0 +1,6 @@
+// Empty input is input (ADR-087). `read-empty.in` is a zero-byte file, and
+// `lines` over nothing is an empty Vec — an answer, not a fault.
+fn main() {
+    out(read lines(int))
+    out((read rest).len())
+}

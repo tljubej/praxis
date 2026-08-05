@@ -1,0 +1,12 @@
+// A fault two frames deep, with something worth reading in each frame.
+fn mean(xs: Vec[Int], n: Int) -> Int {
+    xs.sum() / n
+}
+
+fn summarize(xs: Vec[Int]) -> Int {
+    var kept = xs.filter(|x| x > 100)
+    mean(kept, kept.len())
+}
+
+var readings = [3, 9, 27]
+out(summarize(readings))

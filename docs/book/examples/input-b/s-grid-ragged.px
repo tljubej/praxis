@@ -1,0 +1,6 @@
+// Uneven rows need the ragged form, and `ragged` and `fill:` come together.
+var pad = read grid(char, ragged, fill: ".")
+
+out(pad.width())
+out(pad.height())
+out(pad)

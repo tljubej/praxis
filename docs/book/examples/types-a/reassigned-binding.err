@@ -1,0 +1,7 @@
+error[Y001]: expected (Int) -> Int, found (Text) -> ?T
+
+  reassigned-binding.px:5:5
+  5 | out(id("two"))
+    |     ^^^^^^^^^ expected (Int) -> Int, found (Text) -> ?T
+
+praxis: 1 error(s)

@@ -1,0 +1,2 @@
+var seen = Set()
+seen.insert([1, 2])

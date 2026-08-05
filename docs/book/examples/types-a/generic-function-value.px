@@ -1,0 +1,6 @@
+fn ident(x) {
+    x
+}
+
+var f = ident
+out(f(1))

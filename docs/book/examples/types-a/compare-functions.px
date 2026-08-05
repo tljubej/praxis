@@ -1,0 +1,6 @@
+struct Rule { name: Text, apply: (Int) -> Int }
+
+var double = Rule { name: "double", apply: |n| n * 2 }
+var triple = Rule { name: "triple", apply: |n| n * 3 }
+
+out(double == triple)

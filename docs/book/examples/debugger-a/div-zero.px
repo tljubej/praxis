@@ -1,0 +1,3 @@
+var budget = 100
+var people = 0
+out(budget / people)

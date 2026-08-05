@@ -1,0 +1,10 @@
+fn same(a, b) {
+    a == b
+}
+
+fn double(n) {
+    n * 2
+}
+
+out(same(1, 1))
+out(same(double, double))

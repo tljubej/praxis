@@ -1,0 +1,11 @@
+var offset = 10
+var add_offset = |x| x + offset
+out(add_offset(1))
+offset = 100
+out(add_offset(1))
+
+var base = 10
+var add_base = |x| x + base
+out(add_base(1))
+var base = 100
+out(add_base(1))

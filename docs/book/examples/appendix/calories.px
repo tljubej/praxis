@@ -1,0 +1,13 @@
+// A sections day: blank-line-separated groups of integers.
+//
+// `sections(lines(int))` nests two structural parsers, so the result is
+// `Vec[Vec[Int]]` — one inner vector per group. Nothing in the program says
+// that type; it is read off the parser expression.
+
+var groups = read sections(lines(int))
+
+out(groups.len())
+// The largest group total, and the sum of the three largest.
+var totals = groups.map(|g| g.sum())
+out(totals.max())
+out(totals.sorted_by_key(|t| 0 - t).take(3).sum())

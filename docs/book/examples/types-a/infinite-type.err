@@ -1,0 +1,7 @@
+error[Y002]: an infinite type would be required here
+
+  infinite-type.px:2:5
+  2 |     f(f)
+    |     ^^^^ an infinite type would be required here
+
+praxis: 1 error(s)

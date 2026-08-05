@@ -1,0 +1,6 @@
+// `matrix(P)` splits each row into whitespace-separated tokens itself.
+var board = read matrix(int)
+
+out(board.width())
+out(board.height())
+out(board[2, 1])

@@ -1,0 +1,15 @@
+var seen = Set()
+seen.insert(1)
+seen.insert(2)
+for x in seen {
+    out(x)
+    seen.insert(x + 10)
+}
+out(seen)
+
+var xs = [1, 2, 3]
+for x in xs {
+    out(x)
+    if x == 1 { xs.push(99) }
+}
+out(xs)

@@ -1,0 +1,7 @@
+fn combine(a, b) {
+    a += b
+    a
+}
+
+out(combine(1, 2))
+out(combine(true, false))

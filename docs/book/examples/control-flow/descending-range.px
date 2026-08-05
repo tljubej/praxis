@@ -1,0 +1,9 @@
+var down = 5..0
+out(down)
+
+var ran = 0
+for i in 5..0 { ran = ran + 1 }
+out(ran)
+
+for i in 0..0 { ran = ran + 1 }
+out(ran)

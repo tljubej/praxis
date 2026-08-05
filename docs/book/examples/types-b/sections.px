@@ -1,0 +1,2 @@
+var groups = read sections(lines(`{a:int},{b:int}`))
+out(groups.len())

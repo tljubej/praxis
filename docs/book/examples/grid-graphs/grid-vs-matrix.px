@@ -1,0 +1,15 @@
+// The only difference between the two constructors is how a row is cut up.
+// `grid` takes one cell per character; `matrix` takes one per whitespace-
+// separated token. Both answer a `Grid[T]`.
+var heights = parse("123\n456\n", grid(digit))
+var readings = parse("12 3\n45 6\n", matrix(int))
+
+out(heights.width())
+out(heights.cells())
+
+out(readings.width())
+out(readings.cells())
+
+// Same type, so the same methods.
+out(heights.row(1))
+out(readings.row(1))

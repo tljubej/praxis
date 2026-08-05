@@ -1,0 +1,6 @@
+// `skip: none` lets nothing through between matches: every byte of the region
+// must belong to the character parser. The file's own trailing newline is
+// still nobody's — no policy has to absorb it, because `one_of` declined it.
+var turns = read chars(one_of("LR"), skip: none)
+
+out(turns)

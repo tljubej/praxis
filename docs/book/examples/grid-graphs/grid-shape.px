@@ -1,0 +1,33 @@
+// `read grid(char)` makes every character of every line a cell.
+var map = read grid(char)
+var rock = "#"[0]
+
+out(map.width())
+out(map.height())
+
+// `map[x, y]` is column `x` of row `y`: x rightward, y downward.
+// `map.get(x, y)` is the same read spelled as a method.
+out(map[0, 0])
+out(map.get(3, 1))
+
+// Whether a position is inside is a question, not a fault.
+out(map.contains(3, 1))
+out(map.contains(9, 0))
+
+// A row, a column, and the whole thing flattened in row-major order.
+out(map.row(1))
+out(map.column(0))
+out(map.cells())
+
+// A `for` walks the cells in that same order.
+var rocks = 0
+for cell in map {
+    if cell == rock { rocks = rocks + 1 }
+}
+out(rocks)
+
+// A grid is mutable in place; `map.set(x, y, v)` is the same store.
+map[0, 0] = rock
+map.set(0, 2, rock)
+out(map.row(0))
+out(map.row(2))

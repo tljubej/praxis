@@ -1,0 +1,18 @@
+// Shape: a name, an arrow, then a space-separated list.
+//
+// jqt -> rhn xhk nvd
+//
+// `sep` splits on the exact string and trims nothing, so the arrow's spaces
+// are part of the separator rather than of the words around it. A capture
+// whose parser is `ws(word)` takes the whole tail of the line.
+var edges = read lines(`{from:word} -> {to:ws(word)}`)
+
+out(edges.len())
+for e in edges {
+    out(e.from)
+    out(e.to)
+}
+
+// The same line read the other way: two fields split on the arrow.
+var halves = read lines(sep(" -> ", rest))
+out(halves.get(0))

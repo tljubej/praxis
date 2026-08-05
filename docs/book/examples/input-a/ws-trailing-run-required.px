@@ -1,0 +1,6 @@
+// The mirror of `ws-space-required.px`: a run at the *end* of a literal is a
+// policy too, so a template written `-> ` does not match `1->2` either.
+fn main() -> Int {
+    var pair = read `{a:int}-> {b:int}`
+    pair.a + pair.b
+}

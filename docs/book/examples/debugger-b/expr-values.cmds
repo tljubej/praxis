@@ -1,0 +1,16 @@
+p label
+p label.len()
+p readings.len()
+p readings[0]
+p readings[0].depth + readings[1].depth
+p (readings[0].site, readings[1].depth)
+p if label.len() > 3 { "long" } else { "short" }
+p Reading { site: "east", depth: 1 }
+type readings
+heap readings
+p totals["north"]
+type totals
+p latest
+heap latest
+p match latest { Ping(n) => n, Quiet => 0 }
+quit

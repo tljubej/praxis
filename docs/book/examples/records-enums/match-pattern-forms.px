@@ -1,0 +1,46 @@
+struct Point { x: Int, y: Int }
+enum Tile { Empty, Number(Int) }
+
+// A literal pattern tests the value; `_` matches anything and binds nothing.
+fn word(n: Int) -> Text {
+    match n {
+        0 => "zero"
+        1 => "one"
+        _ => "many"
+    }
+}
+out(word(0))
+out(word(9))
+
+// A variant pattern tests the tag and takes the payload apart. A bare name that
+// is a variant of the scrutinee's enum is that variant, not a binding.
+fn cost(t: Tile) -> Int {
+    match t {
+        Empty => 1
+        Number(n) => n
+    }
+}
+out(cost(Empty))
+out(cost(Number(6)))
+
+// A record pattern names fields in any order, and a field it does not name is
+// left alone. A punned field binds under its own name.
+fn quadrant(p: Point) -> Int {
+    match p {
+        Point { x: 0, y: 0 } => 0
+        Point { x: 0, y } => y
+        Point { y: 0, x } => x * 10
+        Point { x, y } => x * 100 + y
+    }
+}
+out(quadrant(Point { x: 0, y: 0 }))
+out(quadrant(Point { x: 0, y: 7 }))
+out(quadrant(Point { x: 7, y: 0 }))
+out(quadrant(Point { x: 1, y: 2 }))
+
+// A tuple pattern binds by position, and patterns nest inside one another.
+out(match (1, 2, 3) { (a, _, c) => a + c })
+out(match Some((4, 5)) { Some((a, b)) => a * b, None => 0 })
+
+// `true` and `false` are literal patterns, and they are the whole of `Bool`.
+out(match 3 > 2 { true => "yes", false => "no" })

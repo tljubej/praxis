@@ -1,0 +1,10 @@
+enum Wrapped { Wrap(Int) }
+
+// Naming *more* sub-patterns than the payload has is `Y124`. It comes from
+// lowering rather than from analysis, so `praxis check` is silent about it and
+// `praxis run` reports it.
+fn value(w: Wrapped) -> Int {
+    match w { Wrap(a, b) => a + b }
+}
+
+out(value(Wrap(1)))

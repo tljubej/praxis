@@ -1,0 +1,19 @@
+error[N006]: `Node` refers to itself, and a self-referring type is not supported
+
+  record-self-referring.px:1:8
+  1 | struct Node {
+    |        ^^^^ `Node` refers to itself, and a self-referring type is not supported
+
+error[N006]: `A` refers to itself through `B`, and a self-referring type is not supported
+
+  record-self-referring.px:6:8
+  6 | struct A { b: B }
+    |        ^ `A` refers to itself through `B`, and a self-referring type is not supported
+
+error[N006]: `B` refers to itself through `A`, and a self-referring type is not supported
+
+  record-self-referring.px:7:8
+  7 | struct B { a: A }
+    |        ^ `B` refers to itself through `A`, and a self-referring type is not supported
+
+praxis: 3 error(s)

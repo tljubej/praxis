@@ -1,0 +1,12 @@
+// A named type is one `.map` away: the parsed record has the fields, and a
+// struct literal takes them.
+struct Point { x: Int, y: Int }
+
+fn total(ps: Vec[Point]) -> Int {
+    ps.map(|p| p.x + p.y).sum()
+}
+
+var points = read lines(`{x:int},{y:int}`).map(|p| Point { x: p.x, y: p.y })
+
+out(points.len())
+out(total(points))

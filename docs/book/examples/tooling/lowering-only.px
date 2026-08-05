@@ -1,0 +1,6 @@
+enum Shape { Circle(Int), Square(Int) }
+
+var shapes = [Circle(1), Square(2)]
+for Circle(r) in shapes {
+  out(r)
+}

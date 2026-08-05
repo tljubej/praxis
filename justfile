@@ -62,3 +62,34 @@ ci: fmt-check clippy test
 # Run the whole suite under AddressSanitizer (nightly toolchain; not in `ci`).
 asan:
     ./scripts/asan.sh
+
+# --- The book -----------------------------------------------------------------
+#
+# `docs/book` is an mdBook. Its examples are not decoration: every code block
+# that shows a program *and* its output is a real file under
+# `docs/book/examples/`, and `book-verify` re-runs all of them against the
+# compiler in this tree and diffs the result against what the chapter prints.
+#
+# None of these are part of `ci`. `book-verify` takes about five seconds and
+# would be a reasonable addition, but it needs a built `praxis` binary and `ci`
+# only ever builds test binaries; adding it means adding a link step to the
+# gate, which is the expensive part on macOS. Add `book-verify` to the `ci`
+# dependency list if you decide that trade is worth it.
+
+# Render the book to docs/book/book (gitignored).
+book:
+    cd docs/book && mdbook build
+
+# Serve the book with live reload on http://localhost:3000.
+book-serve:
+    cd docs/book && mdbook serve --open
+
+# Re-run every example in the book and diff it against the chapters.
+# Needs `cargo build --release -p praxis-cli` (or any built `praxis`) first.
+book-verify:
+    ./docs/book/examples/verify.sh
+
+# Rewrite the book's expectation files from what the compiler actually prints.
+# Review the diff: this is how a real regression gets papered over.
+book-bless:
+    ./docs/book/examples/verify.sh --bless

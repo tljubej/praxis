@@ -1,0 +1,3 @@
+var numbers = read lines(int)
+
+out(numbers.sum())

@@ -1,0 +1,7 @@
+error[N007]: `shift` cannot use `offset`: a function does not capture the bindings around it (pass `offset` as a parameter, or use a closure)
+
+  fn-does-not-capture.px:4:9
+  4 |     n + offset
+    |         ^^^^^^ `shift` cannot use `offset`: a function does not capture the bindings around it (pass `offset` as a parameter, or use a closure)
+
+praxis: 1 error(s)

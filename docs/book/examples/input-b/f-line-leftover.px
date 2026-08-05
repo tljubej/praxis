@@ -1,0 +1,7 @@
+// `int` reads `12` and stops. `lines` requires the line to be consumed, and
+// what is left is not whitespace.
+fn values() -> Int {
+    read lines(int).len()
+}
+
+out(values())

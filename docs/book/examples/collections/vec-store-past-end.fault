@@ -1,0 +1,13 @@
+error: program faulted: index out of bounds
+
+Backtrace:
+#0   store
+#1   <entry>
+
+  locals:
+    v: Vec[Int] = [1, 2, 3]
+    i: Int = 3
+    x: Int = 4
+  temps:
+    <tmp#4> @ "v[i] = x" = Unit
+    <tmp#5: Unit> @ "{ v[i] = x }" = <uninit>

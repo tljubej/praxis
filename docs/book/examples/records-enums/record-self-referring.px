@@ -1,0 +1,9 @@
+struct Node {
+    next: Node
+    value: Int
+}
+
+struct A { b: B }
+struct B { a: A }
+
+out(1)

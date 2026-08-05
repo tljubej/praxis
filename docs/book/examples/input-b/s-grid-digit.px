@@ -1,0 +1,6 @@
+// The cell parser decides how far a cell reaches. `digit` reads one digit;
+// `int` reads a whole integer token, so the same file is a different grid.
+var heights = read grid(digit)
+
+out(heights.width())
+out(heights)

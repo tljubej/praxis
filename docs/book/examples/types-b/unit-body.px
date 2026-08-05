@@ -1,0 +1,5 @@
+fn checksum(rows: Vec[Int]) -> Int {
+    out(rows.len())
+}
+
+out(checksum([3, 1, 2]))

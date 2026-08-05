@@ -1,0 +1,7 @@
+// `parse(text, PARSER)` runs the same sublanguage against a `Text` you already
+// have. Nothing is trimmed off the root, so `parse(t, rest)` is the identity.
+fn main() {
+    var sample = "1,2,3"
+    out(parse(sample, csv(int)))
+    out(parse("ab\ncd\n", rest) == "ab\ncd\n")
+}

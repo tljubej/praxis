@@ -1,0 +1,4 @@
+var total = 10
+var n = 0
+
+out(total / n)

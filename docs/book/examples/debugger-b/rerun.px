@@ -1,0 +1,9 @@
+// `restart` reruns the same machine code; `reload` recompiles the file first.
+// Both keep the input the first run was given.
+var budget = read int
+var spend = [40, 40, 40]
+var left = budget
+for s in spend {
+    left = left - s
+}
+out(100 / left)

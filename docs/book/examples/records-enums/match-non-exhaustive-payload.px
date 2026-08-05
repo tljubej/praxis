@@ -1,0 +1,10 @@
+enum Flag { On, Off }
+enum Wrapped { Wrap(Flag) }
+
+// Coverage is asked at every position a value has, not only at the top level:
+// `Wrap` is named, and the `Off` inside it is not.
+fn on(w: Wrapped) -> Int {
+    match w { Wrap(On) => 1 }
+}
+
+out(on(Wrap(On)))

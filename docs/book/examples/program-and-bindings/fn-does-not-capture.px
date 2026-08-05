@@ -1,0 +1,7 @@
+var limit = 10
+
+fn over_limit(n) {
+    n > limit
+}
+
+out(over_limit(11))

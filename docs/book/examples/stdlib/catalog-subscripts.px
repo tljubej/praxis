@@ -1,0 +1,25 @@
+var v = [10, 20, 30]
+v[0] = 11
+out(v[0])
+
+var d = Deque()
+d.push_back("a")
+d[0] = "b"
+out(d[0])
+
+out("praxis"[2])
+
+var m = Map()
+m["k"] = 1
+out(m["k"])
+
+var c = Counter()
+c["x"] = 4
+out(c["x"])
+out(c["never seen"])
+
+var best = Map()
+best["r"] min= 5
+best["r"] min= 3
+best["r"] max= 4
+out(best)

@@ -1,0 +1,25 @@
+[book]
+title = "The Praxis Book"
+description = "A guide to Praxis: a small, statically typed, garbage-collected language for Advent of Code-style puzzle solving."
+authors = ["The Praxis project"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/tljubej/praxis"
+edit-url-template = "https://github.com/tljubej/praxis/edit/main/docs/book/{path}"
+additional-css = ["theme/praxis.css"]
+additional-js = ["theme/praxis-hljs.js"]
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.code.hidelines]
+praxis = "~"

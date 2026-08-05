@@ -1,0 +1,15 @@
+p queue.len()
+p queue.sorted()
+p queue.push(4)
+p seen.insert(9)
+p { steps = 9; steps }
+p abs(steps - 5)
+p |x| x + steps
+p for q in queue { q }
+p read int
+p while steps < 3 { steps }
+p { var t = steps + 1; t * 2 }
+p queue.map(|x| x + 1)
+type queue.push(4)
+type read int
+quit

@@ -1,0 +1,6 @@
+type text.get(1)
+type v.get(0)
+type m.get("a")
+type v.map(|n| n * 2)
+type m.keys()
+quit

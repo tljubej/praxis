@@ -1,0 +1,30 @@
+error: program faulted: input parse mismatch
+       at input offset 4..4: expected int
+       actual: 1⏎2⏎three⏎4⏎
+
+Backtrace:
+#0   shipping
+#1   <entry>
+
+  locals:
+    limit: Int = 25
+    values: Vec[Int] = <uninit>
+  temps:
+    <tmp#2> = 1
+2
+three
+4
+
+    <tmp#3: Int> = 1
+    <tmp#4: Vec[Int]> = Unit
+    <tmp#7: (Int) -> Bool> @ "|v| v < limit" = <uninit>
+Entered crash debugger. 2 frame(s). Type `help` for commands.
+Praxis crash> #0   shipping
+#1   <entry>
+  (frame 0 selected)
+Praxis crash> input at offset 4..4:
+  1⏎2⏎three⏎4⏎
+Praxis crash> expected: int
+parser expression: <unknown parser>
+Praxis crash> 25
+Praxis crash> 

@@ -1,0 +1,8 @@
+var value = "12"
+
+if value.len() == 2 {
+    var value = 12
+    out(value + 1)
+}
+
+out(value + 1)

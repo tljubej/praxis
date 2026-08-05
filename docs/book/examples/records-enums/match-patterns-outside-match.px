@@ -1,0 +1,19 @@
+struct Point { x: Int, y: Int }
+
+// The pattern grammar is one production, so a `for` header and a closure
+// parameter take the same shapes a match arm does.
+var points = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+for { x, y } in points {
+    out(x * y)
+}
+
+var pairs = [(1, 10), (2, 20)]
+var sum = 0
+for (weight, value) in pairs {
+    sum = sum + weight * value
+}
+out(sum)
+
+// A closure parameter is a pattern too. This one is headless, so it needs the
+// annotation to say which record it takes apart.
+out(points.map(|{ x, y }: Point| x + y))

@@ -1,0 +1,35 @@
+var v = Vec()
+v.push(1)
+
+var d = Deque()
+d.push_front("front")
+
+var m = Map()
+m.insert("k", 1)
+
+var s = Set()
+s.insert(3)
+
+var c = Counter()
+c.inc("x")
+
+var lo = MinHeap()
+lo.push(5)
+
+var hi = MaxHeap()
+hi.push(5)
+
+var g = Grid()
+
+var b = BitSet()
+b.insert(3)
+
+out(v)
+out(d)
+out(m)
+out(s)
+out(c)
+out(lo.peek())
+out(hi.peek())
+out(g.width())
+out(b)

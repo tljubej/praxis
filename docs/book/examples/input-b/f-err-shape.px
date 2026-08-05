@@ -1,0 +1,7 @@
+// A constructor call is a shape, and the shape is checked before anything is
+// built. None of these five reaches the parser interpreter.
+var a = read frobnicate(int)
+var b = read optional(int, word)
+var c = read choice(int)
+var d = read sep(int, int)
+var e = read chars(digit, skip: wihtespace)

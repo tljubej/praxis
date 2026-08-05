@@ -1,0 +1,12 @@
+var v = [1, 2, 3]
+
+var s = Set()
+s.insert(5)
+
+var m = Map()
+m.insert("a", 1)
+
+out(v.map(|n| n * 2))
+out(s.map(|n| n * 2))
+out((0..3).map(|n| n * 2))
+out(m.map(|entry| entry.0))

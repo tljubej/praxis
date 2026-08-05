@@ -1,0 +1,44 @@
+// A newline ends a *statement*. It never ends an expression — but a `(` or a
+// `[` that begins a line starts something new rather than continuing the
+// expression above it.
+
+// One expression across three lines: the operator loop never looks at line
+// breaks.
+var a = 1 +
+    2 +
+    3
+out(a)
+
+// A method chain across lines, for the same reason: the `.` continues.
+var b = [1, 2, 3]
+    .map(|x| x * 2)
+    .sum()
+out(b)
+
+// But a line-leading `[` opens a list literal. `d` is `c`, and the `[0]` on the
+// next line is a separate expression statement — not a subscript.
+var c = [1, 2, 3]
+var d = c
+    [0]
+out(d)
+
+// `break` takes a value only when the value is on the same line. Here it is,
+// so the loop yields it.
+var n = 0
+var found = loop {
+    n = n + 1
+    if n > 2 { break n }
+}
+out(found)
+
+// Here it is not: the `break` is value-less and the loop yields Unit. The line
+// after it is a separate statement, and unreachable.
+var m = 0
+var nothing = loop {
+    m = m + 1
+    if m > 2 {
+        break
+        out(m * 100)
+    }
+}
+out(nothing)

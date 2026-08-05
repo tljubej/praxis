@@ -1,0 +1,7 @@
+error[Y001]: expected Text, found Int
+
+  operand-order.px:2:5
+  2 | out(1 + value)
+    |     ^ expected Text, found Int
+
+praxis: 1 error(s)

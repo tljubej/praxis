@@ -1,0 +1,49 @@
+error[Y001]: expected Bool, found Int
+
+  t-atom-types.px:3:15
+  3 | var a: Bool = read int
+    |               ^^^^^^^^ expected Bool, found Int
+
+error[Y001]: expected Bool, found Int
+
+  t-atom-types.px:4:15
+  4 | var b: Bool = read digit
+    |               ^^^^^^^^^^ expected Bool, found Int
+
+error[Y001]: expected Bool, found Int
+
+  t-atom-types.px:5:15
+  5 | var c: Bool = read uint
+    |               ^^^^^^^^^ expected Bool, found Int
+
+error[Y001]: expected Bool, found Float
+
+  t-atom-types.px:6:15
+  6 | var d: Bool = read float
+    |               ^^^^^^^^^^ expected Bool, found Float
+
+error[Y001]: expected Bool, found Byte
+
+  t-atom-types.px:7:15
+  7 | var e: Bool = read byte
+    |               ^^^^^^^^^ expected Bool, found Byte
+
+error[Y001]: expected Bool, found Char
+
+  t-atom-types.px:8:15
+  8 | var f: Bool = read char
+    |               ^^^^^^^^^ expected Bool, found Char
+
+error[Y001]: expected Bool, found Text
+
+  t-atom-types.px:9:15
+  9 | var g: Bool = read word
+    |               ^^^^^^^^^ expected Bool, found Text
+
+error[Y001]: expected Bool, found Char
+
+  t-atom-types.px:10:15
+  10 | var h: Bool = read one_of("LR")
+     |               ^^^^^^^^^^^^^^^^^ expected Bool, found Char
+
+praxis: 8 error(s)

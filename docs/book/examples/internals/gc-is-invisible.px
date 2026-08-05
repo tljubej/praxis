@@ -1,0 +1,14 @@
+// One live vector, and a great deal of garbage made around it.
+var kept = Vec[Int]()
+kept.push(7)
+
+var total = 0
+var i = 0
+while i < 200000 {
+    var scratch = [i, i + 1, i + 2]
+    total = total + scratch.sum()
+    i = i + 1
+}
+
+out(total)
+out(kept)

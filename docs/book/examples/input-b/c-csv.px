@@ -1,0 +1,29 @@
+// Shape: one line of comma-separated numbers.
+//
+// 1,9,10,3,2,3,11,0,99,30,40,50
+//
+// `csv` splits on commas and nothing else. Space around a comma is left in
+// the field, and `int` does not read it, so no trimming is needed.
+var program = read csv(int)
+
+out(program.len())
+out(program.max())
+
+// Run it as a two-opcode machine: 1 adds, 2 multiplies, 99 halts.
+var pc = 0
+while pc < program.len() {
+    var op = program[pc]
+    if op == 99 {
+        break
+    }
+    var a = program[program[pc + 1]]
+    var b = program[program[pc + 2]]
+    var dst = program[pc + 3]
+    if op == 1 {
+        program[dst] = a + b
+    } else {
+        program[dst] = a * b
+    }
+    pc = pc + 4
+}
+out(program[0])

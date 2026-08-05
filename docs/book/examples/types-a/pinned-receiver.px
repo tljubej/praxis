@@ -1,0 +1,9 @@
+fn total(values) {
+    values.sum()
+}
+
+var counts = [1, 2]
+var weights = [1.5, 2.5]
+
+out(total(counts))
+out(total(weights))

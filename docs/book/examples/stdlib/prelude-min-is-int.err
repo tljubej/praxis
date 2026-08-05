@@ -1,0 +1,7 @@
+error[Y001]: expected (Int, Int) -> Int, found (Float, Float) -> ?T
+
+  prelude-min-is-int.px:1:5
+  1 | out(min(1.0, 2.0))
+    |     ^^^^^^^^^^^^^ expected (Int, Int) -> Int, found (Float, Float) -> ?T
+
+praxis: 1 error(s)

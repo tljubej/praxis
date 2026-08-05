@@ -1,0 +1,7 @@
+fn add(a, b) { a + b }
+
+var total = 0
+for n in [1, 2, 3] {
+  total = add(total, n)
+}
+out(total)

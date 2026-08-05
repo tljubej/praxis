@@ -1,0 +1,12 @@
+struct Segment { x1: Int, y1: Int, x2: Int, y2: Int }
+
+var rows = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)
+
+var segments = Vec()
+for r in rows {
+    segments.push(Segment { x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2 })
+}
+
+for s in segments {
+    out(s)
+}

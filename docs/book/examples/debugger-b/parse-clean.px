@@ -1,0 +1,3 @@
+// The input parses. The fault comes later, from the program.
+var depths = read lines(int)
+out(depths[99])

@@ -1,0 +1,17 @@
+error[Y120]: non-exhaustive match: missing `East`, `West`
+
+  quick-fix-match.px:4:3
+  4 |   match d {
+    |   ^^^^^^^^^ non-exhaustive match: missing `East`, `West`...
+  5 |     North => (0, -1)
+    | ^^^^^^^^^^^^^^^^^^^^...
+  6 |     South => (0, 1)
+    | ^^^^^^^^^^^^^^^^^^^...
+  7 |   }
+    | ^^^
+
+help: add the missing match arms
+          East => panic("todo")
+          West => panic("todo")
+
+praxis: 1 error(s)

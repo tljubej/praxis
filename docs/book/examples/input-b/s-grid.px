@@ -1,0 +1,8 @@
+// `grid(P)` parses rectangular lines into a Grid. A cell is whatever the cell
+// parser reads: `char` reads one scalar, so this grid is 4 wide.
+var map = read grid(char)
+
+out(map.width())
+out(map.height())
+out(map[2, 0])
+out(map)

@@ -1,0 +1,12 @@
+struct Point { x: Int, y: Int }
+
+// A record has one constructor, so naming it covers the type: the `_` below can
+// never run, and an arm that can never run is an error.
+fn sum(p: Point) -> Int {
+    match p {
+        Point { x, y } => x + y
+        _ => 0
+    }
+}
+
+out(sum(Point { x: 1, y: 2 }))

@@ -1,0 +1,26 @@
+var g = read grid(char)
+var blank = "."[0]
+
+// Every position, row-major, as `(x, y)` tuples.
+out(g.positions())
+
+// Where a value is: the first one as `Option[(Int, Int)]`, or all of them.
+out(g.find(blank))
+out(g.find_all(blank))
+out(g.find("z"[0]))
+
+// The in-bounds neighbours of a point. Both take one `(Int, Int)` and
+// answer a `Vec[(Int, Int)]`, already clipped to the grid.
+out(g.neighbors4((0, 0)))
+out(g.neighbors8((0, 0)))
+out(g.neighbors4((1, 1)))
+
+// A pattern opens a tuple by binding both elements at once.
+for (x, y) in g.neighbors4((1, 1)) {
+    out(g[x, y])
+}
+
+// `p.0` and `p.1` select one element by position.
+var p = g.neighbors4((1, 1))[0]
+out(p.0)
+out(p.1)

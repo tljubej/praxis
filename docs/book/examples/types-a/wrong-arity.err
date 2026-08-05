@@ -1,0 +1,7 @@
+error[Y024]: this function takes 2 argument(s), but 3 were given
+
+  wrong-arity.px:5:5
+  5 | out(add(1, 2, 3))
+    |     ^^^^^^^^^^^^ this function takes 2 argument(s), but 3 were given
+
+praxis: 1 error(s)

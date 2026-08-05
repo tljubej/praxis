@@ -1,0 +1,7 @@
+error[Y004]: values of type `(Int) -> Int` cannot be compared with `==`
+
+  compare-functions.px:6:15
+  6 | out(double == triple)
+    |               ^^^^^^ values of type `(Int) -> Int` cannot be compared with `==`
+
+praxis: 1 error(s)

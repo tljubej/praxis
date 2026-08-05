@@ -1,0 +1,13 @@
+error[Y015]: values of type `Bool` cannot be used in arithmetic
+
+  deferred-numeric.px:7:5
+  7 | out(combine(true, false))
+    |     ^^^^^^^^^^^^^^^^^^^^ values of type `Bool` cannot be used in arithmetic
+
+note: this is the operation that requires it
+
+  deferred-numeric.px:2:5
+  2 |     a += b
+    |     ^
+
+praxis: 1 error(s)

@@ -1,0 +1,10 @@
+error[Y110]: no method `lenn` on type `Vec[Int]` taking 0 argument(s)
+
+  no-such-method.px:3:7
+  3 | out(v.lenn())
+    |       ^^^^ no method `lenn` on type `Vec[Int]` taking 0 argument(s)
+
+help: did you mean `len`?
+      len
+
+praxis: 1 error(s)

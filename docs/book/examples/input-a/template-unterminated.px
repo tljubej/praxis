@@ -1,0 +1,6 @@
+// The same rule bounds the report when a template is left open: the run ends
+// at the line's end, so `T002` names one line and there is no cascade.
+fn main() {
+    var v = read `{int`
+    out(v)
+}

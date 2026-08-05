@@ -1,0 +1,19 @@
+var ages = Map[Text, Int]()
+ages["ada"] = 36
+ages["alan"] = 41
+ages["ada"] += 1
+
+out(ages)
+out(ages["ada"])
+out(ages.len())
+out(ages.contains("alan"))
+out(ages.keys())
+out(ages.values())
+
+match ages.get("grace") {
+    Some(n) => out(n)
+    None => out("no entry for grace")
+}
+
+ages.remove("alan")
+out(ages)

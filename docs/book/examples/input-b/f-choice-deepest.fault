@@ -1,0 +1,14 @@
+error: program faulted: input parse mismatch
+       at input offset 6..6: expected int
+       actual: mul(2,x)⏎
+
+Backtrace:
+#0   program
+#1   <entry>
+
+  temps:
+    <tmp#1> = mul(2,x)
+
+    <tmp#2: Int> = 1
+    <tmp#3: Vec[{ Multiply({ left: Int, right: Int }) | Enable(Unit) }]> = Unit
+    <tmp#4: Int> @ "read lines(choice( Multiply: `mul({left:int},{right:int})`, Enable: `do()`, )).len()" = <uninit>

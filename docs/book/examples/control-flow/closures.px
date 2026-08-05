@@ -1,0 +1,16 @@
+var offset = 10
+out([1, 2, 3].map(|x| x + offset))
+
+fn shifted(values, by) {
+    values.map(|x| x + by)
+}
+out(shifted([1, 2, 3], 100))
+
+fn adder(n: Int) -> (Int) -> Int { |x| x + n }
+var add5 = adder(5)
+out(add5(2))
+
+var seven = || 7
+out(seven())
+
+out([(1, 2), (3, 4)].map(|(a, b)| a + b))

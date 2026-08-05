@@ -1,0 +1,2 @@
+var moves = read lines(`move {count:int} from {int} to {target:int}`)
+out(moves.len())

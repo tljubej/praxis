@@ -1,0 +1,25 @@
+error[Y113]: `Point` literal is missing a field: y
+
+  record-literal-fields.px:3:15
+  3 | var missing = Point { x: 1 }
+    |               ^^^^^^^^^^^^^^ `Point` literal is missing a field: y
+
+error[Y114]: `Point` has no field `z`
+
+  record-literal-fields.px:4:33
+  4 | var extra = Point { x: 1, y: 2, z: 3 }
+    |                                 ^ `Point` has no field `z`
+
+error[Y115]: field `x` is initialized more than once
+
+  record-literal-fields.px:5:27
+  5 | var twice = Point { x: 1, x: 2, y: 3 }
+    |                           ^ field `x` is initialized more than once
+
+error[Y112]: no field `z` on type `Point`
+
+  record-literal-fields.px:6:13
+  6 | out(missing.z)
+    |             ^ no field `z` on type `Point`
+
+praxis: 4 error(s)

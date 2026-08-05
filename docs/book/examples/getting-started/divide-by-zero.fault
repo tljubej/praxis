@@ -1,0 +1,14 @@
+error: program faulted: division by zero
+
+Backtrace:
+#0   <entry>
+
+  locals:
+    total: Int = 10
+    n: Int = 0
+  temps:
+    <tmp#1: Int> @ "10" = 10
+    <tmp#3: Int> @ "0" = 0
+    <tmp#5: Int> @ "total / n" = <uninit>
+    <tmp#6: Unit> @ "out(total / n)" = <uninit>
+    <tmp#7: Unit> @ "var total = 10 var n = 0 out(total / n)" = <uninit>

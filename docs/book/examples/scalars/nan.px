@@ -1,0 +1,11 @@
+// NaN is unordered: `==` and the four order comparisons are false against it.
+var nan = 0.0 / 0.0
+out(nan == nan)
+out(nan != nan)
+out(nan < 1.0)
+out(nan > 1.0)
+out(nan <= nan)
+out(nan.is_nan())
+// The two zeros compare equal and print differently.
+out(0.0 == -0.0)
+out(1.0 / 0.0 == 1.0 / -0.0)

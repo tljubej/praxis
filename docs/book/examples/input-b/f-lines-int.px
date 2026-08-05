@@ -1,0 +1,6 @@
+// The third line is not an integer.
+fn total() -> Int {
+    read lines(int).sum()
+}
+
+out(total())

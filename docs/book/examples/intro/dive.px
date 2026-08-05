@@ -1,0 +1,15 @@
+var moves = read lines(`{dir:word} {amount:int}`)
+
+var horizontal = 0
+var depth = 0
+
+for move in moves {
+    match move.dir {
+        "forward" => { horizontal = horizontal + move.amount }
+        "down" => { depth = depth + move.amount }
+        "up" => { depth = depth - move.amount }
+        _ => {}
+    }
+}
+
+out(horizontal * depth)

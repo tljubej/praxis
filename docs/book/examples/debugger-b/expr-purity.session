@@ -1,0 +1,36 @@
+error: program faulted: index out of bounds
+
+Backtrace:
+#0   main
+
+  locals:
+    seen: Set[Int] = {3}
+    queue: Vec[Int] = [1, 2, 3]
+    steps: Int = 0
+  temps:
+    <tmp#1: Set[Int]> = {3}
+    <tmp#3: Int> @ "3" = 3
+    <tmp#4: Unit> @ "seen.insert(3)" = Unit
+    <tmp#5: Vec[Int]> @ "[1, 2, 3]" = [1, 2, 3]
+    <tmp#6: Int> @ "1" = 1
+    <tmp#7: Unit> = Unit
+    <tmp#8: Int> @ "2" = 2
+    <tmp#9: Unit> = Unit
+    <tmp#10: Int> @ "3" = 3
+  …(5 more)
+Entered crash debugger. 1 frame(s). Type `help` for commands.
+Praxis crash> 3
+Praxis crash> [1, 2, 3]
+Praxis crash> error: method `push` is impure (may mutate state) — `p` rejects mutating expressions
+Praxis crash> error: method `insert` is impure (may mutate state) — `p` rejects mutating expressions
+Praxis crash> error: assignment mutates — `p` rejects mutating expressions
+Praxis crash> error: call to `abs` — `p` cannot prove a user function is read-only
+Praxis crash> error: closure literals may capture and mutate — `p` rejects them
+Praxis crash> error: `for` diverges — `p` evaluates a single value
+Praxis crash> error: `read` consumes input and may fault — `p` rejects it
+Praxis crash> error: `while` diverges — `p` evaluates a single value
+Praxis crash> 2
+Praxis crash> error: closure literals may capture and mutate — `p` rejects them
+Praxis crash> Unit
+Praxis crash> Int
+Praxis crash> 

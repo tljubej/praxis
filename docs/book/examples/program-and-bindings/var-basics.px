@@ -1,0 +1,11 @@
+var score = 0
+score += 10
+score = 25
+out(score)
+
+var name: Text = "praxis"
+out(name.len())
+
+var seen: Vec[Int] = Vec()
+seen.push(3)
+out(seen)

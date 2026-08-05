@@ -1,0 +1,34 @@
+// A cost field: entering a square costs the number written on it.
+var cost = read matrix(int)
+var goal = (cost.width() - 1, cost.height() - 1)
+
+var step = |p| cost.neighbors4(p)
+var price = |a, b| match b { (x, y) => cost[x, y] }
+
+// `dijkstra` answers a table: the least cost from the start to every state it
+// reaches. The start is in it at 0, and a state it cannot reach is absent
+// rather than infinite — which is why this one needs no `Option`.
+var table = dijkstra((0, 0), step, price)
+out(table.len())
+out(table[(0, 0)])
+out(table[(2, 0)])
+out(table[goal])
+out(table.contains((99, 99)))
+
+fn manhattan(a: (Int, Int), b: (Int, Int)) -> Int {
+    match a {
+        (ax, ay) => match b {
+            (bx, by) => abs(ax - bx) + abs(ay - by),
+        },
+    }
+}
+
+// `a_star` answers one number, and wants an estimate that never overshoots.
+// Every step here costs at least 1, so Manhattan distance is admissible.
+out(a_star((0, 0), step, price, |p| manhattan(p, goal), |p| p == goal))
+
+// A zero estimate is admissible too; it turns A* back into Dijkstra.
+out(a_star((0, 0), step, price, |p| 0, |p| p == goal))
+
+// A goal nothing satisfies is `None`, not a fault and not a sentinel.
+out(a_star((0, 0), step, price, |p| 0, |p| p == (99, 99)))
