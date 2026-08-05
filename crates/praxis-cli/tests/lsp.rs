@@ -119,10 +119,10 @@ fn initialize(session: &mut Session) -> serde_json::Value {
     response
 }
 
-/// **The handshake completes**, and the server advertises exactly the M11
-/// capabilities.
+/// **The handshake completes**, and the server advertises exactly what it
+/// implements.
 #[test]
-fn the_handshake_completes_and_advertises_the_m11_capabilities() {
+fn the_handshake_completes_and_advertises_the_implemented_capabilities() {
     let mut session = Session::start();
     let response = initialize(&mut session);
     let caps = &response["result"]["capabilities"];
@@ -143,19 +143,27 @@ fn the_handshake_completes_and_advertises_the_m11_capabilities() {
     // Incremental document sync, not full.
     assert_eq!(caps["textDocumentSync"]["change"], 2);
 
-    // …and **no more**. Advertising a capability M11 does not implement makes
-    // the editor stop offering its own fallback (§19.12 owns these).
-    for m12 in [
-        "referencesProvider",
-        "renameProvider",
-        "workspaceSymbolProvider",
-        "inlayHintProvider",
+    // M12's five.
+    assert_eq!(caps["referencesProvider"], true);
+    assert_eq!(caps["workspaceSymbolProvider"], true);
+    assert_eq!(caps["inlayHintProvider"], true);
+    assert_eq!(caps["codeActionProvider"], true);
+    // Rename advertises `prepareProvider`, so a client asks whether a position
+    // can be renamed *before* the user types a replacement.
+    assert_eq!(caps["renameProvider"]["prepareProvider"], true);
+
+    // …and **no more**. Advertising a capability the server does not implement
+    // makes the editor stop offering its own fallback — and the formatter is
+    // deliberately not in this milestone (see the M12 handover), so a client
+    // must keep whatever it would do by itself.
+    for absent in [
         "documentFormattingProvider",
-        "codeActionProvider",
+        "documentRangeFormattingProvider",
+        "documentOnTypeFormattingProvider",
     ] {
         assert!(
-            caps.get(m12).is_none_or(serde_json::Value::is_null),
-            "`{m12}` is M12 and must not be advertised"
+            caps.get(absent).is_none_or(serde_json::Value::is_null),
+            "`{absent}` is not implemented and must not be advertised"
         );
     }
 
@@ -229,6 +237,150 @@ fn an_edit_changes_what_the_server_answers() {
         after_text.contains("Text"),
         "the edit must reach the analysis, got {after_text}"
     );
+
+    shutdown(&mut session);
+    assert_eq!(session.finish(), 0);
+}
+
+/// M12's requests over the wire, against the real binary.
+///
+/// The query layer has its own gates (`praxis-lsp/tests/m12.rs`); what this adds
+/// is that each method is **routed and serialized** — a handler the loop does not
+/// dispatch answers `MethodNotFound`, and a response shape a client cannot read
+/// is invisible to a test that calls the function directly.
+#[test]
+fn the_m12_requests_answer_over_the_wire() {
+    let mut session = Session::start();
+    initialize(&mut session);
+
+    let uri = "file:///m12.px";
+    session.send(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": { "textDocument": {
+            "uri": uri, "languageId": "praxis", "version": 1,
+            "text": "fn foo(a) { a + 1 }\nvar total = foo(1)\nout(total)\n"
+        }}
+    }));
+
+    // References: the `total` declaration and the `out(total)` that reads it.
+    session.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 10, "method": "textDocument/references",
+        "params": {
+            "textDocument": { "uri": uri },
+            "position": { "line": 1, "character": 4 },
+            "context": { "includeDeclaration": true }
+        }
+    }));
+    let refs = session.recv_response(10);
+    let locations = refs["result"].as_array().expect("an array of locations");
+    assert_eq!(locations.len(), 2, "{refs}");
+    assert_eq!(locations[0]["uri"], uri);
+
+    // Inlay hints: the unannotated parameter reads as `a: Int`.
+    session.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 11, "method": "textDocument/inlayHint",
+        "params": {
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end":   { "line": 3, "character": 0 }
+            }
+        }
+    }));
+    let hints = session.recv_response(11);
+    let hints = hints["result"].as_array().expect("an array of hints");
+    assert!(
+        hints.iter().any(|h| h["label"] == ": Int"),
+        "a parameter's inferred type: {hints:?}"
+    );
+
+    // Rename: an edit per reference, in this file.
+    session.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 12, "method": "textDocument/rename",
+        "params": {
+            "textDocument": { "uri": uri },
+            "position": { "line": 1, "character": 4 },
+            "newName": "sum"
+        }
+    }));
+    let renamed = session.recv_response(12);
+    let edits = renamed["result"]["changes"][uri]
+        .as_array()
+        .expect("edits for this file");
+    assert_eq!(edits.len(), 2, "{renamed}");
+    assert_eq!(edits[0]["newText"], "sum");
+
+    // …and a refused rename is a request **error**, so the client shows why.
+    session.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 13, "method": "textDocument/rename",
+        "params": {
+            "textDocument": { "uri": uri },
+            "position": { "line": 1, "character": 4 },
+            "newName": "out"
+        }
+    }));
+    let refused = session.recv_response(13);
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("out")),
+        "a refusal names the collision: {refused}"
+    );
+
+    // Workspace symbols: with no root, the open documents are the workspace.
+    session.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 14, "method": "workspace/symbol",
+        "params": { "query": "foo" }
+    }));
+    let symbols = session.recv_response(14);
+    let symbols = symbols["result"].as_array().expect("an array of symbols");
+    assert_eq!(symbols.len(), 1, "{symbols:?}");
+    assert_eq!(symbols[0]["name"], "foo");
+
+    shutdown(&mut session);
+    assert_eq!(session.finish(), 0);
+}
+
+/// A code action carries an edit a client can apply, over the wire.
+#[test]
+fn a_code_action_answers_with_an_applicable_edit() {
+    let mut session = Session::start();
+    initialize(&mut session);
+
+    let uri = "file:///fix.px";
+    session.send(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": { "textDocument": {
+            "uri": uri, "languageId": "praxis", "version": 1,
+            "text": "var v = read line(int)\nout(v.len())\n"
+        }}
+    }));
+
+    session.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 20, "method": "textDocument/codeAction",
+        "params": {
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": 13 },
+                "end":   { "line": 0, "character": 13 }
+            },
+            "context": { "diagnostics": [] }
+        }
+    }));
+    let actions = session.recv_response(20);
+    let actions = actions["result"].as_array().expect("an array of actions");
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(actions[0]["kind"], "quickfix");
+    assert!(
+        actions[0]["title"]
+            .as_str()
+            .is_some_and(|t| t.contains("lines")),
+        "§15.3's own example: {actions:?}"
+    );
+    let edit = &actions[0]["edit"]["changes"][uri][0];
+    assert_eq!(edit["newText"], "lines");
 
     shutdown(&mut session);
     assert_eq!(session.finish(), 0);

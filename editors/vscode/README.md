@@ -24,6 +24,24 @@ JSON-RPC tracing.
 command exists so the surface is complete and the binary's own "not implemented"
 message is what the user sees. Hiding the command would be a quieter lie.
 
+## What arrives without the extension contributing anything
+
+Diagnostics, hover, completion, signature help, go-to-definition, document
+symbols, semantic tokens — and, from M12, **find references, rename, workspace
+symbols, inlay hints and quick fixes**. All of them are server capabilities: the
+extension registers nothing for them, which is what "thin by design" means in
+practice.
+
+Two things worth knowing as a user:
+
+- **Inlay hints are on.** An unannotated binding or parameter shows the type the
+  compiler inferred — `fn foo(a: Int, b: Int)` — and `?T` where inference has
+  not pinned one. Accepting a hint (double-click, or *Accept Inlay Hint*) writes
+  the annotation into the file where that is legal. `editor.inlayHints.enabled`
+  turns them off; the server has no setting of its own.
+- **Formatting is not implemented**, and the server does not advertise it, so
+  VS Code keeps whatever it would do by itself on `Format Document`.
+
 ## The two highlighting layers, and why they agree
 
 Highlighting arrives twice: the TextMate grammar paints a `.px` file instantly —
@@ -102,7 +120,7 @@ gitignored; reinstalling the same version replaces the previous one.
 ## The manual check
 
 The last mile genuinely needs a host, so it is written down rather than
-automated. Steps 1–7 run from source (`F5`); **step 8 is the packaged form**,
+automated. Steps 1–8 run from source (`F5`); **step 9 is the packaged form**,
 because the two differ:
 
 1. `cargo build --release` (or `cargo build`), and set `praxis.binaryPath` to
@@ -111,13 +129,17 @@ because the two differ:
 3. Open `tests/aoc-corpus/day02_grid_of_char.px`.
 4. Expect: the file is coloured before anything connects; `grid` and `char`
    inside the `read` are coloured as a parser constructor and a capture type;
-   hovering `read`'s body shows `Grid[Char]`; typing `map.` offers the grid
-   methods.
-5. Run `Praxis: Check File` — the integrated terminal shows
+   hovering `read`'s body shows `Grid[Char]`; hovering `grid` itself shows its
+   signature and what it does; typing `map.` offers the grid methods; every
+   unannotated binding carries an inferred-type hint.
+5. Put the caret on a binding: `Shift+F12` lists its references, and `F2`
+   renames it — try renaming it to `out` and expect a refusal that names the
+   collision rather than a silent no-op.
+6. Run `Praxis: Check File` — the integrated terminal shows
    `<binaryPath> check <file>` and its exit status.
-6. Run `Praxis: Run File` — the same terminal runs the program, with
+7. Run `Praxis: Run File` — the same terminal runs the program, with
    `--input input.txt` appended when that file sits beside the source.
-7. Run `Praxis: Restart Language Server` and confirm diagnostics come back.
-8. Package and install per "Sideloading it" above, reload, and confirm the
+8. Run `Praxis: Restart Language Server` and confirm diagnostics come back.
+9. Package and install per "Sideloading it" above, reload, and confirm the
    extension **activates** — a missing runtime dependency shows up only here,
    as "Cannot find module" in the Extension Host log, and never under `F5`.

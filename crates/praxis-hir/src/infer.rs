@@ -3499,6 +3499,27 @@ impl Inferer {
         self.infer_catalog_call(receiver_ty, &name, &arg_exprs, key, None)
     }
 
+    /// The method `name` was probably meant to be, among the rows this receiver
+    /// actually has (ADR-132).
+    ///
+    /// The candidate set is dispatch's own — `pattern_matches` against the
+    /// receiver, the same filter completion uses — so the fix offered is a call
+    /// that would resolve, rather than a name that merely exists somewhere in
+    /// the catalog.
+    fn nearest_method(&self, receiver_ty: Type, name: &str) -> Option<&'static str> {
+        let pattern = crate::catalog::type_to_pattern(&self.db, receiver_ty)?;
+        let mut candidates: Vec<&'static str> = self
+            .catalog
+            .entries()
+            .iter()
+            .filter(|e| praxis_stdlib::pattern_matches(&e.receiver, &pattern))
+            .map(|e| e.name)
+            .collect();
+        candidates.sort_unstable();
+        candidates.dedup();
+        praxis_source::nearest(name, candidates.iter().copied())
+    }
+
     /// Resolve one catalog-dispatched operation — a method call, or a subscript
     /// (REP-16) — against the receiver type, the name and the arity, and return
     /// its result type.
@@ -3589,12 +3610,25 @@ impl Inferer {
                 ));
             } else {
                 let rendered = self.db.render(self.db.follow(receiver_ty));
-                self.diagnostics.push(crate::diagnostics::unknown_method(
+                let mut diag = crate::diagnostics::unknown_method(
                     self.file_span(key),
                     name,
                     Some(&rendered),
                     arity,
-                ));
+                );
+                // A misspelled method is the same mistake as a misspelled
+                // constructor and gets the same fix (ADR-132). The candidates
+                // are the rows dispatch would have searched — this receiver's,
+                // not the whole catalog's — so `v.lenght()` is offered `len`
+                // and never a `Map` method a `Vec` does not have.
+                if let Some(near) = self.nearest_method(receiver_ty, name) {
+                    diag = diag.with_suggestion(
+                        self.file_span(key),
+                        near,
+                        format!("did you mean `{near}`?"),
+                    );
+                }
+                self.diagnostics.push(diag);
             }
             return result;
         };

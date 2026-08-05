@@ -28,6 +28,7 @@ pub mod mono;
 pub mod name_table;
 pub mod parser_index;
 pub mod parser_lower;
+pub(crate) mod pattern;
 pub mod resolve;
 pub mod scope;
 pub mod symbol;
@@ -175,7 +176,18 @@ impl Analysis {
 #[must_use]
 pub fn analyze(file: FileId, root: &SourceFile) -> Analysis {
     let resolution = resolve::resolve(file, root);
-    let inference = infer::infer_with_tree(file, resolution, root);
+    let mut inference = infer::infer_with_tree(file, resolution, root);
+    // Coverage last (ADR-130): a scrutinee's type is not final until the whole
+    // file has been inferred, and this is what puts `Y120`/`Y121` in front of
+    // `praxis check` and the editor rather than only in front of `praxis run`.
+    exhaustive::check_matches(
+        file,
+        root,
+        &mut inference.db,
+        &inference.decls,
+        &inference.expr_types,
+        &mut inference.diagnostics,
+    );
     Analysis {
         db: inference.db,
         names: inference.names,
@@ -219,6 +231,10 @@ pub fn analyze_root(file: FileId, root: &praxis_syntax::SyntaxNode) -> Analysis 
         },
     }
 }
+
+#[cfg(test)]
+#[path = "coverage_tests.rs"]
+mod coverage_tests;
 
 #[cfg(test)]
 #[path = "hir_tests.rs"]

@@ -36,6 +36,31 @@ pub use validate::{check_call, validate, ArgKind, ValidationError};
 /// Marker documenting that this crate is filled at Milestone 6.
 pub const FILLED_AT_MILESTONE: u32 = 6;
 
+/// Every name a parser expression may begin with: §7.4's atomics and §7.5's
+/// constructors, in their own tables' order.
+///
+/// The two are one list because they are one thing to a *user* — the word after
+/// `read` or inside `{…}` — and the two diagnostics for getting it wrong
+/// (`I010`, `I013`) are the same mistake seen from two tables. A "did you mean"
+/// that only knew one of them would answer `int` for `intt` and nothing for
+/// `line`.
+pub fn parser_names() -> impl Iterator<Item = &'static str> {
+    AtomicKind::ALL
+        .iter()
+        .map(|a| a.keyword())
+        .chain(Constructor::ALL.iter().map(|c| c.keyword()))
+}
+
+/// The atomic or constructor `name` was probably meant to be (ADR-132).
+///
+/// §15.3's own example: `line` answers `lines`. The threshold is
+/// [`praxis_source::nearest`]'s, shared with every other did-you-mean in the
+/// compiler, so one place decides when a near miss is near enough.
+#[must_use]
+pub fn nearest_parser_name(name: &str) -> Option<&'static str> {
+    praxis_source::nearest(name, parser_names())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

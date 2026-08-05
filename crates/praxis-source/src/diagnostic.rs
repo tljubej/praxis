@@ -673,6 +673,27 @@ impl Diagnostic {
         });
         self
     }
+
+    /// Attach a machine-applicable fix to an already-built diagnostic.
+    ///
+    /// [`DiagnosticBuilder::suggestion`]'s operation, for the same reason
+    /// [`with_note`](Self::with_note) exists: the wording helper says what is
+    /// wrong, and the caller is the one that knows where the fix goes. A
+    /// zero-width `span` is an insertion.
+    #[must_use]
+    pub fn with_suggestion(
+        mut self,
+        span: FileSpan,
+        replacement: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Diagnostic {
+        self.suggestions.push(Suggestion {
+            span,
+            replacement: Some(replacement.into()),
+            label: label.into(),
+        });
+        self
+    }
 }
 
 /// Fluent builder for the optional parts of a [`Diagnostic`].
@@ -800,7 +821,13 @@ impl<'a> Renderer<'a> {
                 .paint(style::Style::Severity(style::Severity::Help), "help:");
             let _ = writeln!(out, "{label} {}", sugg.label);
             if let Some(repl) = &sugg.replacement {
-                let _ = writeln!(out, "      {repl}");
+                // Line by line, skipping the leading break an *insertion* starts
+                // with: a fix that adds a line writes `"\n        B => …"`, so
+                // that break belongs to where the text goes rather than to what
+                // it says, and printing it raw left a line of trailing spaces.
+                for line in repl.trim_start_matches('\n').lines() {
+                    let _ = writeln!(out, "      {line}");
+                }
             }
         }
     }

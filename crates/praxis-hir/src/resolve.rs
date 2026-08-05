@@ -224,11 +224,24 @@ impl Resolver {
     }
 
     /// Record an unresolved name reference and emit `N001`.
-    fn unresolved(&mut self, range: TextRange, name: &str) {
+    ///
+    /// With a fix when one of the names actually in scope is a near miss
+    /// (ADR-132) — the most common mistake in the language, and the one the
+    /// resolver is uniquely placed to answer: it is holding the scope chain at
+    /// the moment the lookup fails.
+    fn unresolved(&mut self, scope: ScopeId, range: TextRange, name: &str) {
         let span = range_to_span(range);
-        self.out
-            .diagnostics
-            .push(unresolved_name(self.file_span(span), name));
+        let mut diag = unresolved_name(self.file_span(span), name);
+        let visible = self.out.scopes.visible_names(scope);
+        if let Some(near) = praxis_source::nearest(name, visible.iter().copied()) {
+            let near = near.to_string();
+            diag = diag.with_suggestion(
+                self.file_span(span),
+                near.clone(),
+                format!("did you mean `{near}`?"),
+            );
+        }
+        self.out.diagnostics.push(diag);
     }
 
     // --- prelude (§16.1) ----------------------------------------------------
@@ -961,7 +974,7 @@ impl Resolver {
                 Some(symbol)
             }
             None => {
-                self.unresolved(range, &name);
+                self.unresolved(scope, range, &name);
                 None
             }
         }

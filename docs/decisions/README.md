@@ -162,3 +162,6 @@ verifier rule only. Its decision must not claim the elision.
 - [ADR-127: *proposed* — A pipeline's source is the `for` loop's, and a collection converts by naming what it becomes](./127-a-pipelines-source-is-the-for-loops-and-a-collection-converts-by-naming-what-it-becomes.md)
 - [ADR-128: A shadow slot is a live range, not a name, and the debugger's slot is the one that keeps a name](./128-a-shadow-slot-is-a-live-range-not-a-name.md)
 - [ADR-129: The ceiling is worth what a collection costs, and collections got cheaper](./129-the-ceiling-is-worth-what-a-collection-costs.md)
+- [ADR-130: A match's coverage is analysis's answer, and the pattern shape is built once](./130-a-matchs-coverage-is-analysis-answer-and-the-pattern-is-built-once.md)
+- [ADR-131: A rename is safe when re-resolution is unchanged](./131-a-rename-is-safe-when-re-resolution-is-unchanged.md)
+- [ADR-132: A code action is a diagnostic's machine-applicable suggestion](./132-a-code-action-is-a-diagnostics-machine-applicable-suggestion.md)

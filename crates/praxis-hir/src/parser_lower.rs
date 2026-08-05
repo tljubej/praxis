@@ -146,12 +146,22 @@ fn convert_parser_expr(
             match AtomicKind::from_keyword(&text) {
                 Some(kind) => Some(ParserAst::Atomic { kind, span }),
                 None => {
-                    diagnostics.push(err_diag(
+                    let mut diag = err_diag(
                         file,
                         span,
                         DiagCode::UnknownAtomic,
                         format!("unknown atomic parser `{text}`"),
-                    ));
+                    );
+                    // The atom node's span *is* the name, so the fix replaces it
+                    // whole (ADR-132).
+                    if let Some(near) = praxis_input_parser::nearest_parser_name(&text) {
+                        diag = diag.with_suggestion(
+                            FileSpan { file, span },
+                            near,
+                            format!("did you mean `{near}`?"),
+                        );
+                    }
+                    diagnostics.push(diag);
                     None
                 }
             }
@@ -222,12 +232,33 @@ fn convert_template(
             // constructed nowhere in the tree. `ScanError::code` is an
             // exhaustive match, so a new variant has to decide.
             let at = base + e.byte_offset() as u32;
-            diagnostics.push(err_diag(
-                file,
-                Span::at(at.min(u32::from(token.text_range().end()))),
-                e.code(),
-                e.to_string(),
-            ));
+            let end = u32::from(token.text_range().end());
+            // An error about a *name* underlines the name: the scanner anchors
+            // at an offset, and a caret with no width is all a caller could
+            // draw until the error started carrying what it could not resolve.
+            // Everything else keeps the point it was anchored at, because for
+            // an unterminated capture or a nesting bound there is no word to
+            // underline.
+            let name = e.unknown_parser_name();
+            let extent = match name {
+                Some(name) => {
+                    let stop = (at + name.len() as u32).min(end);
+                    Span::new(at.min(stop), stop)
+                }
+                None => Span::at(at.min(end)),
+            };
+            let mut diag = err_diag(file, extent, e.code(), e.to_string());
+            // A misspelled parser *inside* a capture is the same mistake as one
+            // outside it, and gets the same fix (§15.3, ADR-132) — over the same
+            // extent the report underlines.
+            if let Some(near) = name.and_then(praxis_input_parser::nearest_parser_name) {
+                diag = diag.with_suggestion(
+                    FileSpan { file, span: extent },
+                    near,
+                    format!("did you mean `{near}`?"),
+                );
+            }
+            diagnostics.push(diag);
             Vec::new()
         }
     }
@@ -287,12 +318,28 @@ fn convert_constructor_call(
     // a `?` on an `Option`, so `read frobnicate(int)` returned `None` with no
     // diagnostic at all and the whole `read` silently became nothing (IP-07).
     let Some(ctor) = Constructor::from_keyword(&ctor_name) else {
-        diagnostics.push(err_diag(
+        // The **name's** span, not the call's: it is what the report is about,
+        // and it is what a fix replaces (§15.3, ADR-132). Falling back to the
+        // call's span keeps the diagnostic total when the tree has no name node
+        // to point at.
+        let name_span = constructor_name_span(&parser_call).unwrap_or(span);
+        let mut diag = err_diag(
             file,
-            span,
+            name_span,
             DiagCode::UnknownConstructor,
             format!("unknown parser constructor `{ctor_name}` (§7.5)"),
-        ));
+        );
+        if let Some(near) = praxis_input_parser::nearest_parser_name(&ctor_name) {
+            diag = diag.with_suggestion(
+                FileSpan {
+                    file,
+                    span: name_span,
+                },
+                near,
+                format!("did you mean `{near}`?"),
+            );
+        }
+        diagnostics.push(diag);
         return None;
     };
 
@@ -550,6 +597,17 @@ fn repeated_call_args(
 
 fn err_diag(file: FileId, span: Span, code: DiagCode, msg: String) -> Diagnostic {
     Diagnostic::new(Severity::Error, code, msg, FileSpan { file, span })
+}
+
+/// The source extent of a constructor call's name.
+fn constructor_name_span(
+    parser_call: &rowan::SyntaxNode<praxis_syntax::PraxisLanguage>,
+) -> Option<Span> {
+    let path = parser_call
+        .children()
+        .find(|c| c.kind() == praxis_syntax::SyntaxKind::PATH_EXPR)?;
+    let range = path.text_range();
+    Some(Span::new(u32::from(range.start()), u32::from(range.end())))
 }
 
 /// Convert a [`ValidationError`] into a [`Diagnostic`] (free function, avoids the

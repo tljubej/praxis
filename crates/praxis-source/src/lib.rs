@@ -15,6 +15,7 @@ pub mod line_map;
 pub mod snippet;
 pub mod span;
 pub mod style;
+pub mod suggest;
 
 pub use diagnostic::{
     render_one, DiagCode, Diagnostic, DiagnosticCategory, DiagnosticCode, DiagnosticNote, Renderer,
@@ -23,3 +24,4 @@ pub use diagnostic::{
 pub use file::{FileId, SourceFile, SourceMap};
 pub use line_map::{LineCol, LineMap};
 pub use span::{BytePos, FileSpan, Span};
+pub use suggest::nearest;

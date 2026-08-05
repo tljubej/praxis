@@ -1,17 +1,18 @@
-//! Go-to-definition and document symbols (WS7, §15.2).
+//! Go-to-definition, find references, and document symbols (WS7, §15.2).
 //!
-//! **Find references, rename and workspace symbols are M12** (§19.12) and are
-//! deliberately absent: they are the multi-file half of navigation, and M11's
-//! query layer is one document.
+//! Every query here turns on one thing: a name's **symbol**, not its spelling.
+//! Two shadowed bindings share a word and have distinct `SymbolId`s, so a query
+//! that matched text would answer plausibly and wrongly — definition would land
+//! on whichever declaration came first, and references would return both
+//! bindings' uses as though they were one.
 //!
-//! Definition is a two-step lookup that already exists —
-//! `refs[range].symbol → Symbol.decl` — and the reason it is worth a gate is
-//! that a *name match* would also appear to work. Two shadowed bindings share a
-//! name and have distinct `SymbolId`s; only the symbol table tells them apart.
+//! Definition is a two-step lookup: `refs[range].symbol → Symbol.decl`.
+//! References is the same map read the other way, and it is what rename edits.
 
 use lsp_types::{DocumentSymbol, Location, SymbolKind as LspSymbolKind, Uri};
+use praxis_hir::SymbolId;
 use praxis_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
-use rowan::NodeOrToken;
+use rowan::{NodeOrToken, TextRange};
 
 use crate::position::Encoding;
 use crate::query::Snapshot;
@@ -42,6 +43,78 @@ pub fn goto_definition(
         uri: uri.clone(),
         range: snapshot.positions().range(decl.span, enc),
     })
+}
+
+/// The symbol the name at `offset` denotes — a use or its declaration.
+///
+/// The one lookup every symbol-shaped query starts from: references, rename,
+/// and definition all ask it, so "which binding is this word" is decided once.
+#[must_use]
+pub fn symbol_at(snapshot: &Snapshot, offset: u32) -> Option<SymbolId> {
+    let analysis = snapshot.analyze();
+    let range = snapshot.token_at(offset)?.text_range();
+    analysis
+        .refs
+        .get(&range)
+        .map(|r| r.symbol)
+        .or_else(|| analysis.decls.get(&range).copied())
+}
+
+/// Every source range that names `symbol`: its declaration site, and every
+/// reference that resolved to it.
+///
+/// In source order, and **disjoint from every other binding's** — which is the
+/// property a text search cannot have. A shadowed `var a` and the `var a` that
+/// shadows it are two symbols, so asking about one never returns the other's
+/// uses.
+#[must_use]
+pub fn reference_ranges(snapshot: &Snapshot, symbol: SymbolId) -> Vec<TextRange> {
+    let analysis = snapshot.analyze();
+    let mut out: Vec<TextRange> = analysis
+        .decls
+        .iter()
+        .filter(|(_, id)| **id == symbol)
+        .map(|(range, _)| *range)
+        .chain(
+            analysis
+                .refs
+                .iter()
+                .filter(|(_, r)| r.symbol == symbol)
+                .map(|(range, _)| *range),
+        )
+        .collect();
+    out.sort_by_key(|r| (r.start(), r.end()));
+    out.dedup();
+    out
+}
+
+/// `textDocument/references` at `offset`.
+///
+/// `include_declaration` is the client's own flag and is honoured rather than
+/// ignored: an editor that asks for uses only should not be told about the
+/// `var` line it is standing on.
+#[must_use]
+pub fn references(
+    snapshot: &Snapshot,
+    offset: u32,
+    uri: &Uri,
+    enc: Encoding,
+    include_declaration: bool,
+) -> Option<Vec<Location>> {
+    let symbol = symbol_at(snapshot, offset)?;
+    let analysis = snapshot.analyze();
+    let positions = snapshot.positions();
+    let is_decl = |range: &TextRange| analysis.decls.get(range) == Some(&symbol);
+    Some(
+        reference_ranges(snapshot, symbol)
+            .into_iter()
+            .filter(|range| include_declaration || !is_decl(range))
+            .map(|range| Location {
+                uri: uri.clone(),
+                range: positions.text_range(range, enc),
+            })
+            .collect(),
+    )
 }
 
 /// The document's top-level symbols: `fn`, `struct`, `enum`, and bindings.

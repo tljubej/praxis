@@ -76,6 +76,31 @@ impl AtomicKind {
         }
     }
 
+    /// One line of §7.4, for hover. Exhaustive, for the reason
+    /// [`Constructor::doc`] is.
+    pub fn doc(self) -> &'static str {
+        match self {
+            AtomicKind::Int => {
+                "Signed decimal integer. Surrounding horizontal space is the \
+                 caller's, not the atomic's."
+            }
+            AtomicKind::UInt => "Non-negative decimal integer; a leading `-` is refused.",
+            AtomicKind::Float => "Decimal floating-point number.",
+            AtomicKind::Byte => "A decimal integer in `0..=255` — a number, not a raw input byte.",
+            AtomicKind::Char => "One Unicode scalar value, whitespace included where offered.",
+            AtomicKind::Digit => "One decimal digit.",
+            AtomicKind::Word => {
+                "A non-empty run excluding whitespace and parser-delimiter punctuation."
+            }
+            AtomicKind::Identifier => "An identifier, by §4.1's own identifier rule.",
+            AtomicKind::Text => {
+                "Consumes as little as possible until the literal run that \
+                 follows can match."
+            }
+            AtomicKind::Rest => "The remainder of the current region.",
+        }
+    }
+
     /// Parse an atomic name into its kind, or `None` if unknown.
     pub fn from_keyword(name: &str) -> Option<Self> {
         Some(match name {
@@ -694,6 +719,69 @@ impl Constructor {
         Constructor::Scan,
         Constructor::Repeated,
     ];
+
+    /// One line of §7.5, for hover (§15.2's "method documentation", and its
+    /// parser half).
+    ///
+    /// Exhaustive, and here rather than in the language server for the reason
+    /// every other table is: a constructor added to §7.5 cannot ship without
+    /// saying what it does, and the editor cannot describe one differently from
+    /// the compiler. The wording is §7.5's own, compressed to a line.
+    pub fn doc(self) -> &'static str {
+        match self {
+            Constructor::Lines => {
+                "Split the region into lines and apply the parser to each. Every \
+                 line must be consumed whole."
+            }
+            Constructor::Sections => {
+                "Split the region on blank lines and apply the parser to each \
+                 section. With named arguments, parses fixed sections in order \
+                 into a record."
+            }
+            Constructor::Csv => {
+                "Split the region on commas. Whitespace around a comma is \
+                 forgiven, because the field's own parser does not read it."
+            }
+            Constructor::Ws => {
+                "Split on runs of whitespace — line endings included, so a token \
+                 never spans a line."
+            }
+            Constructor::Sep => "Split on an exact separator string, with no implicit trimming.",
+            Constructor::Grid => {
+                "Parse rectangular lines into a `Grid[T]`, one cell per parser \
+                 application. `ragged` with `fill:` permits uneven rows."
+            }
+            Constructor::Matrix => {
+                "Parse lines of whitespace-separated elements into a `Grid[T]`. \
+                 Unlike `lines(ws(P))`, a row with no tokens is not a row."
+            }
+            Constructor::Chars => {
+                "Apply a parser repeatedly to characters. `skip:` says what is \
+                 passed over between matches: `none`, `whitespace`, `newlines`."
+            }
+            Constructor::OneOf => "Match one character from a literal set.",
+            Constructor::Block => {
+                "Apply parsers in sequence within one region. A positional item \
+                 contributes its captures; a named one contributes a field."
+            }
+            Constructor::Choice => {
+                "Parse one of several alternatives into an anonymous enum, one \
+                 variant per named case."
+            }
+            Constructor::Optional => {
+                "Return `Option[T]`. A failure consumes no input — this is \
+                 parser-level optionality, not recovery."
+            }
+            Constructor::Scan => {
+                "Find repeated matches inside otherwise irrelevant text, for \
+                 input that embeds its data in noise."
+            }
+            Constructor::Repeated => {
+                "The repeating tail of a heterogeneous `sections`. Legal only as \
+                 its final named argument."
+            }
+        }
+    }
 
     /// The one named argument this constructor takes whose value is a
     /// **keyword and not a parser** — `chars(P, skip: policy)`'s `skip:` and

@@ -5,8 +5,40 @@ Advent of Code-style puzzle solving. It favors rapid iteration, concise data
 manipulation, practical parsing, and strong diagnostics over systems-programming
 concerns.
 
-> **Status:** Milestone 11 complete — the **language server MVP**, the VS Code
-> extension, and its syntax highlighting.
+> **Status:** Milestone 12 complete except the formatter — **LSP
+> completeness**: find references, rename, workspace symbols, inlay hints, code
+> actions, and documentation in hover. The **formatter is deliberately out of
+> scope** and is not advertised as a capability; see
+> [`docs/handovers/29-milestone-12-handover.md`](./docs/handovers/29-milestone-12-handover.md) §4.
+>
+> **Inlay hints are on and show what the compiler inferred**: `fn foo(a, b)`
+> reads as `fn foo(a: Int, b: Int)` in the editor, and a type inference has not
+> pinned shows as `?T` rather than as nothing. Accepting a hint writes the
+> annotation into the file wherever that is legal.
+>
+> **A `match` that is not exhaustive is now reported by `praxis check`.** It was
+> reported only by `praxis run`, because coverage was checked where MIR is built
+> and neither `check` nor the editor lowers — so a file could check clean and
+> fail to run. Pattern shape is built in one place now and coverage is decided at
+> the end of analysis
+> ([ADR-130](./docs/decisions/130-a-matchs-coverage-is-analysis-answer-and-the-pattern-is-built-once.md)).
+> This changes what `praxis check` says about existing programs.
+>
+> **A misspelled parser constructor, name or method now carries a fix.** A quick
+> fix *is* a diagnostic's machine-applicable suggestion
+> ([ADR-132](./docs/decisions/132-a-code-action-is-a-diagnostics-machine-applicable-suggestion.md)),
+> written where the mistake is found rather than in a table in the language
+> server — so every fix the editor offers is one `praxis check` also prints, and
+> each one is gated by applying it and re-analyzing.
+>
+> **Rename rejects unsafe collisions by re-analyzing**
+> ([ADR-131](./docs/decisions/131-a-rename-is-safe-when-re-resolution-is-unchanged.md)):
+> the edit is applied to a copy and accepted only if name resolution comes out
+> unchanged, which catches capture in both directions rather than the collision
+> kinds somebody remembered to list.
+>
+> **Milestone 11** shipped the language server MVP, the VS Code extension, and
+> its syntax highlighting.
 >
 > **Language change since M11:** `let` is gone. **`var` is the one binding
 > form**, and every binding is assignable — a parameter, a `for` variable and a
@@ -54,10 +86,9 @@ concerns.
 > both remain closed; see
 > [`docs/handovers/18-every-row-closed-handover.md`](./docs/handovers/18-every-row-closed-handover.md).
 > See [`praxis_technical_design.md`](./praxis_technical_design.md) for the full
-> language and the milestone roadmap (§19); the next milestone (M12) is LSP
-> completeness — find references, rename, workspace symbols, inlay hints, the
-> formatter, and code actions — and `praxis watch` / `praxis repl` remain
-> unimplemented.
+> language and the milestone roadmap (§19); the next milestone (M13) is corpus
+> validation and performance hardening. The formatter (§19.12), `praxis watch`
+> and `praxis repl` remain unimplemented.
 
 ## Command surface
 

@@ -15,12 +15,14 @@ use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestI
 use lsp_types::notification::Notification as _;
 use lsp_types::request::Request as _;
 use lsp_types::{
-    CompletionOptions, CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentSymbolResponse,
-    GotoDefinitionResponse, InitializeParams, InitializeResult, OneOf, PublishDiagnosticsParams,
-    SemanticTokensFullOptions, SemanticTokensOptions, SemanticTokensServerCapabilities,
-    ServerCapabilities, ServerInfo, SignatureHelpOptions, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
+    CodeActionProviderCapability, CompletionOptions, CompletionResponse,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, DocumentSymbolResponse, GotoDefinitionResponse, InitializeParams,
+    InitializeResult, OneOf, PublishDiagnosticsParams, RenameOptions, SemanticTokensFullOptions,
+    SemanticTokensOptions, SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
+    SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri, WorkDoneProgressOptions,
+    WorkspaceSymbolResponse,
 };
 
 use crate::document::DocumentStore;
@@ -67,6 +69,7 @@ pub fn serve(connection: &Connection) -> anyhow::Result<i32> {
             .as_ref()
             .and_then(|g| g.position_encodings.as_deref()),
     );
+    let roots = workspace_roots(&params);
     let result = InitializeResult {
         capabilities: capabilities(encoding),
         server_info: Some(ServerInfo {
@@ -77,15 +80,43 @@ pub fn serve(connection: &Connection) -> anyhow::Result<i32> {
     connection.initialize_finish(id, serde_json::to_value(result)?)?;
 
     let mut server = Server::new(encoding);
+    server.set_roots(roots);
     server.main_loop(connection)
 }
 
-/// Exactly the M11 capabilities, and no more.
+/// The folders `workspace/symbol` searches.
+///
+/// `workspaceFolders` when the client sent them, and the deprecated `rootUri`
+/// when it did not — a client may still send only the latter, and a symbol
+/// picker that answered nothing there would look broken rather than
+/// unconfigured. A client with neither is in single-file mode, and
+/// [`crate::workspace::open_document_symbols`] is what answers for it.
+fn workspace_roots(params: &InitializeParams) -> Vec<std::path::PathBuf> {
+    #[allow(deprecated)]
+    let from_root = params.root_uri.iter();
+    params
+        .workspace_folders
+        .iter()
+        .flatten()
+        .map(|f| &f.uri)
+        .chain(from_root)
+        .filter_map(crate::workspace::uri_to_path)
+        .collect()
+}
+
+/// Exactly what this server implements, and no more.
 ///
 /// Advertising a capability the server does not implement is worse than not
-/// advertising it: the editor stops offering its own fallback. Find references,
-/// rename, workspace symbols, inlay hints and formatting are M12 and are absent
-/// on purpose.
+/// advertising it: the editor stops offering its own fallback. M12 adds find
+/// references, rename (with `prepareProvider`, so a position that cannot be
+/// renamed says so before the user types a new name), workspace symbols, inlay
+/// hints and code actions.
+///
+/// **`documentFormattingProvider` stays absent.** §19.12 lists a stable
+/// formatter and it is deliberately not part of this milestone — see the M12
+/// handover. An editor that is told this server formats would stop offering its
+/// own behaviour and then do nothing on `Format Document`, which is a worse
+/// state than the one where the feature is simply missing.
 fn capabilities(encoding: Encoding) -> ServerCapabilities {
     ServerCapabilities {
         position_encoding: Some(encoding.kind()),
@@ -120,12 +151,20 @@ fn capabilities(encoding: Encoding) -> ServerCapabilities {
         semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
             SemanticTokensOptions {
                 legend: crate::semantic::legend(),
-                // Full document only; deltas are M12.
+                // Full document only; deltas remain out of scope.
                 full: Some(SemanticTokensFullOptions::Bool(true)),
                 range: Some(false),
                 ..SemanticTokensOptions::default()
             },
         )),
+        references_provider: Some(OneOf::Left(true)),
+        rename_provider: Some(OneOf::Right(RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: WorkDoneProgressOptions::default(),
+        })),
+        workspace_symbol_provider: Some(OneOf::Left(true)),
+        inlay_hint_provider: Some(OneOf::Left(true)),
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         ..ServerCapabilities::default()
     }
 }
@@ -137,6 +176,9 @@ pub struct Server {
     encoding: Encoding,
     /// URIs whose diagnostics are owed once the typing stops.
     dirty: Vec<Uri>,
+    /// The workspace folders `workspace/symbol` searches. Empty in single-file
+    /// mode, where the open documents are the workspace.
+    roots: Vec<std::path::PathBuf>,
     shutdown_requested: bool,
 }
 
@@ -148,8 +190,15 @@ impl Server {
             analyzer: Analyzer::new(),
             encoding,
             dirty: Vec::new(),
+            roots: Vec::new(),
             shutdown_requested: false,
         }
+    }
+
+    /// Point the workspace queries at these folders. Called once, from the
+    /// `initialize` handshake.
+    pub fn set_roots(&mut self, roots: Vec<std::path::PathBuf>) {
+        self.roots = roots;
     }
 
     fn main_loop(&mut self, connection: &Connection) -> anyhow::Result<i32> {
@@ -285,6 +334,111 @@ impl Server {
                     .map(|s| crate::navigation::document_symbols(&s, self.encoding))
                     .unwrap_or_default();
                 ok(id, DocumentSymbolResponse::Nested(symbols))
+            }
+            lsp_types::request::References::METHOD => {
+                let params: lsp_types::ReferenceParams = match parse_params(&req) {
+                    Ok(p) => p,
+                    Err(e) => return invalid(id, &e),
+                };
+                let include = params.context.include_declaration;
+                let uri = params.text_document_position.text_document.uri.clone();
+                let Some(doc) = self.docs.get(&uri) else {
+                    return ok(id, serde_json::Value::Null);
+                };
+                let offset = doc
+                    .positions()
+                    .offset(params.text_document_position.position, self.encoding);
+                let Some(snapshot) = self.snapshot(&uri) else {
+                    return ok(id, serde_json::Value::Null);
+                };
+                match crate::navigation::references(&snapshot, offset, &uri, self.encoding, include)
+                {
+                    Some(locations) => ok(id, locations),
+                    None => ok(id, serde_json::Value::Null),
+                }
+            }
+            lsp_types::request::PrepareRenameRequest::METHOD => {
+                self.answer::<lsp_types::TextDocumentPositionParams, _>(
+                    id,
+                    req,
+                    |s, uri, offset| {
+                        let snapshot = s.snapshot(uri)?;
+                        crate::rename::prepare(&snapshot, offset, s.encoding)
+                    },
+                )
+            }
+            lsp_types::request::Rename::METHOD => {
+                let params: lsp_types::RenameParams = match parse_params(&req) {
+                    Ok(p) => p,
+                    Err(e) => return invalid(id, &e),
+                };
+                let uri = params.text_document_position.text_document.uri.clone();
+                let Some(doc) = self.docs.get(&uri) else {
+                    return ok(id, serde_json::Value::Null);
+                };
+                let offset = doc
+                    .positions()
+                    .offset(params.text_document_position.position, self.encoding);
+                let Some(snapshot) = self.snapshot(&uri) else {
+                    return ok(id, serde_json::Value::Null);
+                };
+                match crate::rename::rename(
+                    &snapshot,
+                    offset,
+                    &params.new_name,
+                    &uri,
+                    self.encoding,
+                ) {
+                    Ok(edit) => ok(id, edit),
+                    // **An error, not an empty edit.** A refusal is a sentence
+                    // the user needs to read — which name would have been safe —
+                    // and a client shows a request error and silently ignores an
+                    // edit that changes nothing.
+                    Err(refusal) => {
+                        Response::new_err(id, ErrorCode::RequestFailed as i32, refusal.to_string())
+                    }
+                }
+            }
+            lsp_types::request::WorkspaceSymbolRequest::METHOD => {
+                let params: lsp_types::WorkspaceSymbolParams = match parse_params(&req) {
+                    Ok(p) => p,
+                    Err(e) => return invalid(id, &e),
+                };
+                let symbols = if self.roots.is_empty() {
+                    crate::workspace::open_document_symbols(
+                        &params.query,
+                        &self.docs,
+                        self.encoding,
+                    )
+                } else {
+                    crate::workspace::symbols(&params.query, &self.roots, &self.docs, self.encoding)
+                };
+                ok(id, WorkspaceSymbolResponse::Nested(symbols))
+            }
+            lsp_types::request::InlayHintRequest::METHOD => {
+                let params: lsp_types::InlayHintParams = match parse_params(&req) {
+                    Ok(p) => p,
+                    Err(e) => return invalid(id, &e),
+                };
+                let uri = params.text_document.uri;
+                match self.snapshot(&uri) {
+                    Some(s) => ok(id, crate::inlay::hints(&s, params.range, self.encoding)),
+                    None => ok(id, serde_json::Value::Null),
+                }
+            }
+            lsp_types::request::CodeActionRequest::METHOD => {
+                let params: lsp_types::CodeActionParams = match parse_params(&req) {
+                    Ok(p) => p,
+                    Err(e) => return invalid(id, &e),
+                };
+                let uri = params.text_document.uri;
+                match self.snapshot(&uri) {
+                    Some(s) => ok(
+                        id,
+                        crate::code_action::actions(&s, params.range, &uri, self.encoding),
+                    ),
+                    None => ok(id, serde_json::Value::Null),
+                }
             }
             lsp_types::request::SemanticTokensFullRequest::METHOD => {
                 let params: lsp_types::SemanticTokensParams = match parse_params(&req) {
@@ -510,6 +664,12 @@ impl HasPosition for lsp_types::GotoDefinitionParams {
             self.text_document_position_params.text_document.uri,
             self.text_document_position_params.position,
         )
+    }
+}
+
+impl HasPosition for lsp_types::TextDocumentPositionParams {
+    fn position(self) -> (Uri, lsp_types::Position) {
+        (self.text_document.uri, self.position)
     }
 }
 

@@ -42,8 +42,11 @@
 //! appears *literally* in the first column, so it can recurse no deeper than
 //! real constructor patterns nest in the source.
 
+use praxis_ast::AstNode;
 use praxis_source::{Diagnostic, FileId, FileSpan, Span};
+use praxis_syntax::SyntaxKind;
 use praxis_types::{data::TypeData, EnumDefId, RecordDefId, ScalarType, Type, TypeDb};
+use rowan::NodeOrToken;
 
 use crate::diagnostics::{non_exhaustive, unreachable_arm};
 use crate::lower::{Lit, TypedMatchArm, TypedPattern};
@@ -73,19 +76,211 @@ fn zero_span(file: FileId) -> FileSpan {
     )
 }
 
+/// Check **every** `match` in the file, at the end of analysis (ADR-130).
+///
+/// This is where `Y120`/`Y121` are decided. It used to be lowering, which meant
+/// coverage was asked only where MIR was being built: `praxis check` was silent
+/// on a non-exhaustive match and `praxis run` reported one, and §15.2's
+/// "exhaustiveness errors" never reached an editor at all.
+///
+/// It runs *after* inference rather than inside it because a scrutinee's type is
+/// not final until the whole file has been inferred — `match e { … }` on an
+/// unannotated parameter is pinned by a later call — and a coverage answer given
+/// against a type that is still a variable is a `Y120` naming a catch-all the
+/// program does not need.
+///
+/// The patterns come from [`crate::pattern::PatternBuilder`], the same builder
+/// lowering uses, and its diagnostics are **discarded here**: inference has
+/// already walked these patterns and reported the shape mistakes (`Y122`,
+/// `Y123`), and lowering reports what only it can see. Reporting them a third
+/// time from this pass would put the same message under the same caret twice.
+pub(crate) fn check_matches(
+    file: FileId,
+    root: &praxis_ast::SourceFile,
+    db: &mut TypeDb,
+    decls: &std::collections::HashMap<rowan::TextRange, crate::SymbolId>,
+    expr_types: &std::collections::HashMap<crate::NodeKey, Type>,
+    out: &mut Vec<Diagnostic>,
+) {
+    for node in root.syntax().descendants() {
+        let Some(m) = praxis_ast::MatchExpr::cast(node.clone()) else {
+            continue;
+        };
+        let Some(scrutinee) = m.scrutinee() else {
+            continue;
+        };
+        // No recorded type means inference did not reach this match — a tree
+        // recovery left it unreachable, and a coverage answer about it would be
+        // about a program that does not exist.
+        let Some(scrutinee_ty) = expr_types
+            .get(&crate::NodeKey::of(scrutinee.syntax()))
+            .copied()
+        else {
+            continue;
+        };
+
+        let mut discarded = Vec::new();
+        let mut arms = Vec::new();
+        let mut arm_spans = Vec::new();
+        for arm in m.arms() {
+            let pattern = match arm.pattern() {
+                Some(pat) => crate::pattern::PatternBuilder {
+                    file,
+                    db,
+                    decls,
+                    diagnostics: &mut discarded,
+                }
+                .build(&pat, scrutinee_ty),
+                None => TypedPattern::Wildcard,
+            };
+            arm_spans.push(file_span(file, arm.syntax().text_range()));
+            // The **body** is not built: coverage is a question about patterns,
+            // and lowering an arm's body here would be a second lowering of
+            // every expression in the file. `TypedExpr::Unit` stands in for it.
+            arms.push(TypedMatchArm {
+                pattern,
+                body: crate::lower::TypedExpr::Lit {
+                    value: Lit::Unit,
+                    ty: scrutinee_ty,
+                    span: (0, 0),
+                },
+            });
+        }
+
+        check(
+            db,
+            file,
+            &MatchToCheck {
+                scrutinee_ty,
+                arms: &arms,
+                arm_spans: &arm_spans,
+                match_span: file_span(file, m.syntax().text_range()),
+                fix: arm_fix(&m),
+            },
+            out,
+        );
+    }
+}
+
+/// Where an added arm goes and how far in, read from the source's own layout.
+///
+/// The insertion point is the **end of the last arm**, not the closing brace:
+/// inserting before the brace would put the new arm after whatever trailing
+/// comment or blank line the author left, and appending after the last arm is
+/// where a person writing one would put it. An arm-less `match e { }` inserts
+/// just after the `{`.
+fn arm_fix(m: &praxis_ast::MatchExpr) -> Option<ArmFix> {
+    let node = m.syntax();
+    let arms: Vec<_> = node
+        .children()
+        .filter(|c| c.kind() == SyntaxKind::MATCH_ARM)
+        .collect();
+    let insert_at = match arms.last() {
+        Some(last) => u32::from(last.text_range().end()),
+        None => node
+            .children_with_tokens()
+            .filter_map(NodeOrToken::into_token)
+            .find(|t| t.kind() == SyntaxKind::L_BRACE)
+            .map(|t| u32::from(t.text_range().end()))?,
+    };
+    Some(ArmFix {
+        insert_at: Span::new(insert_at, insert_at),
+        indent: arm_indent(node, arms.first()),
+    })
+}
+
+/// The indentation the arms are written at.
+///
+/// Read from the whitespace token in front of the first arm, which is the one
+/// piece of layout that says what this file does — four spaces, eight, or a tab.
+/// A one-line `match e { A => 1 }` has no newline in that whitespace, and a
+/// generated arm would be the first on its own line, so it falls back to the
+/// `match`'s own column plus four.
+fn arm_indent(
+    match_node: &praxis_syntax::SyntaxNode,
+    first_arm: Option<&praxis_syntax::SyntaxNode>,
+) -> String {
+    let leading = first_arm
+        .and_then(|arm| arm.prev_sibling_or_token())
+        .and_then(NodeOrToken::into_token)
+        .filter(|t| t.kind() == SyntaxKind::Whitespace)
+        .map(|t| t.text().to_string())
+        .unwrap_or_default();
+    if let Some((_, after_newline)) = leading.rsplit_once('\n') {
+        return after_newline.to_string();
+    }
+    // No newline before the first arm: indent one level in from the `match`.
+    let own = match_node
+        .prev_sibling_or_token()
+        .and_then(NodeOrToken::into_token)
+        .filter(|t| t.kind() == SyntaxKind::Whitespace)
+        .map(|t| t.text().to_string())
+        .unwrap_or_default();
+    let column = own.rsplit_once('\n').map_or("", |(_, tail)| tail);
+    format!("{column}    ")
+}
+
+fn file_span(file: FileId, range: rowan::TextRange) -> FileSpan {
+    FileSpan::new(
+        file,
+        Span::new(u32::from(range.start()), u32::from(range.end())),
+    )
+}
+
+/// Where a missing arm would be written, and how far in.
+///
+/// Carried into [`check`] rather than derived from the `Y120` afterwards,
+/// because the arms a fix writes are the **witnesses** — the same shapes the
+/// message names — and recovering them from the rendered message would be a
+/// second implementation of `describe` that parses the first one's output.
+#[derive(Clone, Debug)]
+pub(crate) struct ArmFix {
+    /// A zero-width span: where the new arms are inserted, which is the end of
+    /// the last arm (or just after the `{` when there are none).
+    pub insert_at: Span,
+    /// The indentation the existing arms are written at, repeated for the new
+    /// ones. Read from the source's own whitespace, so a file indented with
+    /// tabs gets tabs.
+    pub indent: String,
+}
+
+/// The body a generated arm gets.
+///
+/// `panic` is `forall T. (T) -> Never` (§16.1), so it fits whatever the other
+/// arms joined to and the file the fix produces still type-checks. A generated
+/// arm that did not compile would trade one diagnostic for another.
+const GENERATED_ARM_BODY: &str = "panic(\"todo\")";
+
+/// One `match` as the coverage check sees it: a scrutinee type, the arms'
+/// patterns, and where to report.
+pub(crate) struct MatchToCheck<'a> {
+    pub scrutinee_ty: Type,
+    pub arms: &'a [TypedMatchArm],
+    pub arm_spans: &'a [FileSpan],
+    /// The whole `match` expression's span — where a `Y120` belongs, since the
+    /// thing that is not exhaustive is the match and not any one arm.
+    pub match_span: FileSpan,
+    /// Where a missing arm would be written, when there is somewhere to write
+    /// one. `None` from a caller that has no source layout to read.
+    pub fix: Option<ArmFix>,
+}
+
 /// Check one `match` expression for exhaustiveness and unreachable arms,
 /// appending `Y120`/`Y121` diagnostics to `out`.
 pub(crate) fn check(
     db: &mut TypeDb,
     file: FileId,
-    scrutinee_ty: Type,
-    arms: &[TypedMatchArm],
-    arm_spans: &[FileSpan],
-    // The whole `match` expression's span — where a `Y120` belongs, since the
-    // thing that is not exhaustive is the match and not any one arm.
-    match_span: FileSpan,
+    m: &MatchToCheck<'_>,
     out: &mut Vec<Diagnostic>,
 ) {
+    let MatchToCheck {
+        scrutinee_ty,
+        arms,
+        arm_spans,
+        match_span,
+        fix,
+    } = m;
+    let (scrutinee_ty, match_span) = (*scrutinee_ty, *match_span);
     let types = [scrutinee_ty];
 
     // --- Unreachable arms -------------------------------------------------
@@ -111,8 +306,49 @@ pub(crate) fn check(
     let wild: Row<'_> = vec![&WILDCARD];
     let witnesses = useful(db, &matrix, &wild, &types);
     if !witnesses.is_empty() {
-        out.push(non_exhaustive(match_span, &describe(db, &witnesses)));
+        let mut diag = non_exhaustive(match_span, &describe(db, &witnesses));
+        if let Some(fix) = fix {
+            // The fix names exactly what the message names: both are these
+            // witnesses, and `MAX_WITNESSES` bounds both. A match missing more
+            // shapes than that reports again after the fix is applied, which is
+            // the honest behaviour — the alternative is a fix that claims to be
+            // complete and is not.
+            if let Some(arms_text) = arm_text(db, &witnesses, &fix.indent) {
+                diag = add_arm_fix(diag, file, fix.insert_at, arms_text);
+            }
+        }
+        out.push(diag);
     }
+}
+
+/// The source text of the arms a fix would insert, or `None` when the missing
+/// shape is `_` — a wildcard arm is a decision about what the program *does*
+/// with the rest, and writing one for the author would silently answer it.
+fn arm_text(db: &TypeDb, witnesses: &[Vec<Witness>], indent: &str) -> Option<String> {
+    let heads: Vec<&Witness> = witnesses.iter().filter_map(|row| row.first()).collect();
+    if heads.iter().all(|w| matches!(w, Witness::Wild)) {
+        return None;
+    }
+    let mut out = String::new();
+    for head in heads {
+        out.push('\n');
+        out.push_str(indent);
+        out.push_str(&render_witness(db, head));
+        out.push_str(" => ");
+        out.push_str(GENERATED_ARM_BODY);
+    }
+    Some(out)
+}
+
+/// Attach the arms as a machine-applicable suggestion (ADR-132): the editor's
+/// quick fix is this replacement, and `praxis check` prints the same text under
+/// `help:`.
+fn add_arm_fix(diag: Diagnostic, file: FileId, insert_at: Span, arms: String) -> Diagnostic {
+    diag.with_suggestion(
+        FileSpan::new(file, insert_at),
+        arms,
+        "add the missing match arms",
+    )
 }
 
 /// Render the uncovered shapes as the `Y120` message's tail.
@@ -571,10 +807,13 @@ mod tests {
         check(
             db,
             FileId::SYNTHETIC,
-            scrutinee_ty,
-            arms,
-            &spans,
-            match_span,
+            &MatchToCheck {
+                scrutinee_ty,
+                arms,
+                arm_spans: &spans,
+                match_span,
+                fix: None,
+            },
             &mut diags,
         );
         let y120 = diags.iter().filter(|d| d.code().number() == 120).count();
@@ -590,10 +829,13 @@ mod tests {
         check(
             db,
             FileId::SYNTHETIC,
-            scrutinee_ty,
-            arms,
-            &spans,
-            match_span,
+            &MatchToCheck {
+                scrutinee_ty,
+                arms,
+                arm_spans: &spans,
+                match_span,
+                fix: None,
+            },
             &mut diags,
         );
         diags

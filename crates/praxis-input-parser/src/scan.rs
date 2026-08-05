@@ -167,6 +167,27 @@ impl ScanError {
             | ScanError::NestingTooDeep { .. } => DiagCode::TemplateScan,
         }
     }
+
+    /// The parser name this error could not resolve, when that is what went
+    /// wrong — the word a "did you mean" would replace (ADR-132).
+    ///
+    /// Exhaustive, so a variant added later has to answer: a name that reaches a
+    /// caller by accident is a fix offered for the wrong span, and a name that
+    /// does not reach it is a fix silently not offered.
+    #[must_use]
+    pub fn unknown_parser_name(&self) -> Option<&str> {
+        match self {
+            ScanError::UnknownCaptureKind { name, .. }
+            | ScanError::UnknownConstructor { name, .. } => Some(name),
+            ScanError::InvalidEscape { .. }
+            | ScanError::UnterminatedCapture { .. }
+            | ScanError::EmptyCapture { .. }
+            | ScanError::InvalidCaptureName { .. }
+            | ScanError::MalformedCaptureBody { .. }
+            | ScanError::CallShape(_)
+            | ScanError::NestingTooDeep { .. } => None,
+        }
+    }
 }
 
 impl std::fmt::Display for ScanError {

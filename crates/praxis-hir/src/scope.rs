@@ -115,6 +115,36 @@ impl ScopeTree {
         None
     }
 
+    /// Every name visible from `scope`, innermost scope first.
+    ///
+    /// What a "did you mean" for `N001` searches (ADR-132). A name shadowed by
+    /// an inner one appears once — the inner binding's spelling *is* the outer
+    /// one's, and suggesting a word twice says nothing the first time did not.
+    ///
+    /// Deliberately names and not symbols: the caller is answering "what should
+    /// this word have been", and two bindings of one word are one answer.
+    #[must_use]
+    pub fn visible_names(&self, scope: ScopeId) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut current = Some(scope);
+        while let Some(s) = current {
+            let data = &self.scopes[s.0 as usize];
+            let mut names: Vec<&str> = data.bindings.keys().map(String::as_str).collect();
+            // A `HashMap`'s iteration order is not stable across runs, and a
+            // suggestion that changes between two runs of the same compiler is
+            // a diagnostic nobody can write a test for.
+            names.sort_unstable();
+            for name in names {
+                if seen.insert(name) {
+                    out.push(name);
+                }
+            }
+            current = data.parent;
+        }
+        out
+    }
+
     /// Whether `scope` is `ancestor` or is nested inside it.
     ///
     /// Reflexive on purpose: a binding in the very scope being asked about has
