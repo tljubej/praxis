@@ -7223,3 +7223,159 @@ fn a_text_is_iterable_and_yields_char() {
         "fn main() -> Unit { for i in 3 { out(i) } }"
     ));
 }
+
+/// **ADR-127 decision 1.** A pipeline's receiver is anything a `for` loop can
+/// walk, and it yields what the `for` loop's variable would bind.
+///
+/// Every one of these was `Y110` against `target/debug/praxis check` before the
+/// generic receiver landed. The gap was never a missing feature per collection —
+/// `capability::iter_item` has answered "what does this yield" for eleven
+/// collections plus `Text` since M8-WS6 — it was one feature registered against
+/// one receiver.
+#[test]
+fn a_pipeline_walks_every_iterable_and_binds_what_the_for_loop_would() {
+    // The five sequence-shaped receivers and the two nullary ones.
+    for src in [
+        "fn main() -> Int { var s = Set()\n s.insert(1)\n s.map(|x| x * 2).sum() }",
+        "fn main() -> Int { var d = Deque()\n d.push_back(1)\n d.map(|x| x + 1).sum() }",
+        "fn main() -> Int { var h = MinHeap()\n h.push(1)\n h.count() }",
+        "fn main() -> Int { var h = MaxHeap()\n h.push(1)\n h.filter(|x| x > 0).count() }",
+        "fn main() -> Int { var b = BitSet()\n b.insert(1)\n b.map(|n| n * n).sum() }",
+        "fn main() -> Int { (0..10).map(|x| x * 2).sum() }",
+        "fn main() -> Int { \"hello\".count(|c| c == \"l\"[0]) }",
+    ] {
+        assert!(!has_type_error(src), "{src}");
+    }
+
+    // A `Map`'s item is the `(K, V)` pair, and a `Counter`'s is `(T, Int)` —
+    // the same pairs `for kv in m` binds.
+    assert!(!has_type_error(
+        "fn main() -> Int { var m = Map()\n m[\"a\"] = 1\n m.map(|kv| kv.1).sum() }"
+    ));
+    assert!(!has_type_error(
+        "fn main() -> Int { var c = [\"a\"].frequencies()\n c.filter(|p| p.1 > 0).count() }"
+    ));
+
+    // **`Grid` is excluded, and `grid.map` is why** (§6.4 asks for the
+    // shape-preserving row by name). It is still the `Y110` it was.
+    assert!(has_type_error(
+        "fn main() -> Unit { var g = Grid()\n out(g.map(|c| c)) }"
+    ));
+    // …but a grid's own pipeline entry is unchanged.
+    assert!(!has_type_error(
+        "fn main() -> Int { var g = Grid()\n g.cells().count() }"
+    ));
+
+    // The deferred door resolves the same way: `v` is still a variable when the
+    // body is inferred, so this goes through `resolve_deferred_method` rather
+    // than through the call site. A second copy of the binding rule is what that
+    // path is at risk of not having.
+    assert!(!has_type_error(
+        "fn total(v) { v.map(|x| x * 2).sum() }\n\
+         fn main() -> Int { var s = Set()\n s.insert(1)\n total(s) }"
+    ));
+}
+
+/// **ADR-127 decision 4.** A conversion says what it accepts in its *receiver*,
+/// so a wrong item shape is an ordinary unification report at the method name.
+///
+/// The alternative — a row that matches anything and faults at runtime — is what
+/// writing the pair shape in prose would have produced. `lookup` still accepts
+/// the receiver (it is one of the ten); the item unification is what reports.
+#[test]
+fn a_conversion_reports_a_wrong_item_shape_at_the_method_name() {
+    // `[1, 2]` yields an `Int`, and `to_map` wants a pair.
+    let errs = errors_of("fn main() -> Unit { out([1, 2].to_map()) }");
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(
+        errs[0].starts_with("Y001") && errs[0].contains("found Int"),
+        "a wrong item shape is a type error, not a missing method: {errs:?}"
+    );
+
+    // `to_bitset` says `Int` the same way.
+    let errs = errors_of("fn main() -> Unit { out([\"a\"].to_bitset()) }");
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(
+        errs[0].starts_with("Y001") && errs[0].contains("found Text"),
+        "{errs:?}"
+    );
+
+    // And the shapes that do fit resolve, on receivers that are not `Vec`s.
+    for src in [
+        "fn main() -> Int { var m = Map()\n m[\"a\"] = 1\n m.to_vec().count() }",
+        "fn main() -> Int { var s = Set()\n s.insert(1)\n s.to_vec().sum() }",
+        "fn main() -> Int { var m = Map()\n m[\"a\"] = 1\n m.to_map().len() }",
+        "fn main() -> Int { [\"a\"].frequencies().to_counter().len() }",
+        "fn main() -> Int { (0..3).to_deque().len() }",
+        "fn main() -> Int { [1, 2].to_min_heap().pop() }",
+        "fn main() -> Int { [1, 2].to_max_heap().pop() }",
+        "fn main() -> Int { [1, 2].to_bitset().len() }",
+        "fn main() -> Int { \"ab\".to_vec().count() }",
+    ] {
+        assert!(!has_type_error(src), "{src}");
+    }
+}
+
+/// **ADR-127.** The receiver generalizes; `zip`'s argument and `flat_map`'s
+/// closure result do not.
+///
+/// The fused loop indexes each of those with `praxis_vec_len`/`praxis_vec_get`
+/// directly — neither has an `IterPlan` in scope, because neither is the source
+/// — so generalizing them would put a `SetPayload` under `praxis_vec_get`, which
+/// is the exact wrong-type read `IterPlan` exists to prevent. The honest
+/// boundary is that the pipeline generalizes over what it *walks*.
+#[test]
+fn a_pipelines_second_source_is_a_vec_and_the_spelling_is_to_vec() {
+    // The receiver may be a `Set`…
+    assert!(!has_type_error(
+        "fn main() -> Int { var s = Set()\n s.insert(1)\n s.zip([1, 2]).count() }"
+    ));
+    // …and the argument may not.
+    assert!(has_type_error(
+        "fn main() -> Int { var s = Set()\n s.insert(1)\n [1, 2].zip(s).count() }"
+    ));
+    // `to_vec` is the spelling, which is a second thing it earns its place for.
+    assert!(!has_type_error(
+        "fn main() -> Int { var s = Set()\n s.insert(1)\n [1, 2].zip(s.to_vec()).count() }"
+    ));
+    // Same at `flat_map`'s closure result.
+    assert!(!has_type_error(
+        "fn main() -> Int { [1, 2].flat_map(|x| [x, x]).sum() }"
+    ));
+    assert!(has_type_error(
+        "fn main() -> Int { var s = Set()\n s.insert(1)\n [1, 2].flat_map(|x| s).sum() }"
+    ));
+}
+
+/// **ADR-127 decision 5.** `sorted_by_key` puts the `Ord` bound on the extracted
+/// key, so the composite-ordering question ADR-045 deferred stays deferred.
+///
+/// `pairs.sorted()` is `Y006` — "values of type `(Text, Int)` cannot be ordered"
+/// — and that is correct: MIR has one integer compare, so `(1, 2) < (1, 3)` would
+/// have compared two schema pointers. Which left "the five most common values"
+/// with no spelling at all.
+#[test]
+fn sorted_by_key_orders_what_sorted_cannot() {
+    let pairs = "var m = Map()\n m[\"a\"] = 1\n var pairs = m.keys().zip(m.values())\n";
+    assert!(
+        has_type_error(&format!(
+            "fn main() -> Unit {{ {pairs} out(pairs.sorted()) }}"
+        )),
+        "a composite is not orderable (ADR-045)"
+    );
+    assert!(
+        !has_type_error(&format!(
+            "fn main() -> Unit {{ {pairs} out(pairs.sorted_by_key(|p| p.1)) }}"
+        )),
+        "…but the key it carries is"
+    );
+    // The bound is on the key and is still a bound: a key with no order is
+    // `Y006`, the same code `sorted` gives.
+    assert!(has_type_error(
+        "fn main() -> Unit { out([1, 2].sorted_by_key(|x| |y| y)) }"
+    ));
+    // And the receiver is generic like every other barrier's.
+    assert!(!has_type_error(
+        "fn main() -> Unit { var s = Set()\n s.insert(\"a\")\n out(s.sorted_by_key(|t| t.len())) }"
+    ));
+}

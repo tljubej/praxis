@@ -213,7 +213,12 @@ fn dot_items(snapshot: &Snapshot, receiver: Type) -> Vec<CompletionItem> {
     };
     let catalog = praxis_stdlib::builtin_catalog();
     for entry in catalog.entries() {
-        if !receiver_accepts(&entry.receiver, &pattern) {
+        // The *same function* dispatch uses, not the same rule restated
+        // (ADR-127 decision 1). This used to be a local copy with the LSP's own
+        // comment admitting it — "the same rule … restated" — and the two are
+        // filtered differently only in that dispatch also asks name and arity,
+        // which completion must not.
+        if !praxis_stdlib::pattern_matches(&entry.receiver, &pattern) {
             continue;
         }
         if is_operator(entry.name) {
@@ -247,30 +252,6 @@ fn is_operator(name: &str) -> bool {
         name,
         INDEX_READ | INDEX_STORE | INDEX_STORE_MIN | INDEX_STORE_MAX
     )
-}
-
-/// Whether a catalog receiver pattern accepts a concrete one.
-///
-/// The same rule `praxis_hir::catalog::lookup` applies at dispatch, restated
-/// here only because that function also filters by name and arity, which
-/// completion must not. If the two ever disagree the editor offers a method the
-/// compiler refuses, so this is the one place worth watching.
-fn receiver_accepts(
-    catalog: &praxis_stdlib::TypePattern,
-    concrete: &praxis_stdlib::TypePattern,
-) -> bool {
-    use praxis_stdlib::TypePattern as P;
-    match (catalog, concrete) {
-        (P::Var { .. }, _) => true,
-        (P::Collection { ctor: a, args: x }, P::Collection { ctor: b, args: y }) => {
-            a == b && x.len() == y.len() && x.iter().zip(y).all(|(p, q)| receiver_accepts(p, q))
-        }
-        (P::Tuple(x), P::Tuple(y)) => {
-            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| receiver_accepts(p, q))
-        }
-        (P::Option(a), P::Option(b)) => receiver_accepts(a, b),
-        _ => catalog == concrete,
-    }
 }
 
 fn field_items(snapshot: &Snapshot, ty: Type) -> Vec<CompletionItem> {

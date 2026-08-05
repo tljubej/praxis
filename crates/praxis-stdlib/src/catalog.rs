@@ -208,6 +208,38 @@ pub enum MethodCatalogError {
         first: Bound,
         second: Bound,
     },
+    /// A concrete-receiver row shares a `(name, arity)` with a generic
+    /// [`TypePattern::Iterable`] row, on a receiver the generic one accepts
+    /// (ADR-127 decision 1).
+    ///
+    /// Both spellings would match at the call site, and the catalog's key is
+    /// `(receiver, name, arity)` — so the two are not duplicates and nothing
+    /// would refuse them; whichever came first in insertion order would win.
+    /// That is a **precedence rule**, and a precedence rule is what makes "which
+    /// does this call resolve to" a question at all (decision 6). The check
+    /// scopes to [`PIPELINE_RECEIVERS`](crate::type_pattern::PIPELINE_RECEIVERS)
+    /// deliberately: a `Grid[T].map/1` beside `Iterable.map/1` is *allowed*,
+    /// because `Grid` is not one of the ten and §6.4 asks for that row by name.
+    AmbiguousWithIterable {
+        receiver: TypePattern,
+        name: &'static str,
+        arity: usize,
+    },
+    /// A row writes [`TypePattern::Iterable`] somewhere other than its receiver
+    /// (ADR-127 decision 1).
+    ///
+    /// **The receiver generalizes; two parameters must not.** `zip`'s argument
+    /// is a `Vec[U]` and `flat_map`'s closure answers one, and the fused loop
+    /// indexes both with `praxis_vec_len`/`praxis_vec_get` directly — neither
+    /// has an `IterPlan` in scope, because neither is the source. Generalizing
+    /// either would put a `SetPayload` under `praxis_vec_get`, which is the
+    /// exact wrong-type read `IterPlan` exists to prevent. The pipeline
+    /// generalizes over what it *walks*, not over every sequence a row mentions.
+    ///
+    /// The rule is also what makes the instantiation path total: an `Iterable`
+    /// names ten types, so `pattern_to_type` has no answer for one, and the
+    /// receiver is the one position that never asks it for an answer.
+    IterableOutsideReceiver { method: &'static str, arity: usize },
 }
 
 impl fmt::Display for MethodCatalogError {
@@ -229,6 +261,22 @@ impl fmt::Display for MethodCatalogError {
             } => write!(
                 f,
                 "catalog entry `{method}` bounds `{var}` as both {first:?} and {second:?}"
+            ),
+            MethodCatalogError::AmbiguousWithIterable {
+                receiver,
+                name,
+                arity,
+            } => write!(
+                f,
+                "catalog entry {receiver}.{name}/{arity} shadows the generic \
+                 Iterable.{name}/{arity}: both match this receiver, and which \
+                 one a call resolves to would be insertion order"
+            ),
+            MethodCatalogError::IterableOutsideReceiver { method, arity } => write!(
+                f,
+                "catalog entry `{method}`/{arity} writes an Iterable pattern \
+                 outside its receiver: the pipeline generalizes over what it \
+                 walks, not over every sequence a row mentions"
             ),
         }
     }
@@ -318,16 +366,36 @@ impl MethodCatalogBuilder {
     }
 
     /// Finalize the catalog, returning an error if any two entries share a
-    /// `(receiver, name, arity)` triple, or if any single entry bounds one type
-    /// variable two different ways (TY-31).
+    /// `(receiver, name, arity)` triple, if any single entry bounds one type
+    /// variable two different ways (TY-31), or if a concrete row shadows a
+    /// generic `Iterable` one on a receiver both accept (ADR-127).
     pub fn finish(self) -> Result<MethodCatalog, MethodCatalogError> {
         for (i, a) in self.entries.iter().enumerate() {
+            // A receiver may *be* the generic pattern — that is the whole point
+            // — but nothing, the receiver included, may contain one.
+            let nested_in_receiver = match &a.receiver {
+                TypePattern::Iterable { item } => mentions_iterable(item),
+                other => mentions_iterable(other),
+            };
+            if nested_in_receiver || a.params.iter().chain([&a.result]).any(mentions_iterable) {
+                return Err(MethodCatalogError::IterableOutsideReceiver {
+                    method: a.name,
+                    arity: a.arity(),
+                });
+            }
             for b in self.entries.iter().skip(i + 1) {
                 if a.receiver == b.receiver && a.name == b.name && a.arity() == b.arity() {
                     return Err(MethodCatalogError::Duplicate {
                         receiver: a.receiver.clone(),
                         name: a.name,
                         arity: a.arity(),
+                    });
+                }
+                if let Some(concrete) = shadowed_by_iterable(a, b) {
+                    return Err(MethodCatalogError::AmbiguousWithIterable {
+                        receiver: concrete.receiver.clone(),
+                        name: concrete.name,
+                        arity: concrete.arity(),
                     });
                 }
             }
@@ -349,6 +417,46 @@ impl MethodCatalogBuilder {
             entries: self.entries,
         })
     }
+}
+
+/// Whether `pat` writes a [`TypePattern::Iterable`] anywhere inside it, at any
+/// depth. A row's receiver is allowed to *be* one; nothing is allowed to
+/// *contain* one.
+fn mentions_iterable(pat: &TypePattern) -> bool {
+    match pat {
+        TypePattern::Iterable { .. } => true,
+        TypePattern::Collection { args, .. } | TypePattern::Tuple(args) => {
+            args.iter().any(mentions_iterable)
+        }
+        TypePattern::Option(inner) => mentions_iterable(inner),
+        TypePattern::Function { params, result } => {
+            params.iter().any(mentions_iterable) || mentions_iterable(result)
+        }
+        TypePattern::Scalar(_)
+        | TypePattern::Var { .. }
+        | TypePattern::Unit
+        | TypePattern::Opaque => false,
+    }
+}
+
+/// The concrete row of `(a, b)` that a generic `Iterable` row shadows, if that
+/// is what this pair is (ADR-127 decision 1).
+///
+/// "Shadows" is: one receiver is [`TypePattern::Iterable`], the other is a
+/// receiver that pattern accepts, and the two agree on `(name, arity)`. Order is
+/// not part of the question — the pair is checked once, from whichever side each
+/// row happens to sit on.
+fn shadowed_by_iterable<'e>(a: &'e MethodEntry, b: &'e MethodEntry) -> Option<&'e MethodEntry> {
+    if a.name != b.name || a.arity() != b.arity() {
+        return None;
+    }
+    let concrete = match (&a.receiver, &b.receiver) {
+        (TypePattern::Iterable { .. }, TypePattern::Iterable { .. }) => return None,
+        (TypePattern::Iterable { .. }, _) => b,
+        (_, TypePattern::Iterable { .. }) => a,
+        _ => return None,
+    };
+    crate::type_pattern::is_pipeline_receiver(&concrete.receiver).then_some(concrete)
 }
 
 #[cfg(test)]
@@ -531,6 +639,164 @@ mod tests {
             .finish()
             .expect("different arity is not a duplicate");
         assert_eq!(catalog.len(), 2);
+    }
+
+    /// **ADR-127 decision 1.** A concrete row beside a generic `Iterable` one at
+    /// the same `(name, arity)` is not a duplicate — the catalog's key includes
+    /// the receiver — so nothing would refuse it, and both would match the same
+    /// call. That is a precedence rule arriving by accident, and decision 6's
+    /// whole argument against the shape-preserving family is that a precedence
+    /// rule is what makes "which does this resolve to" a question at all.
+    #[test]
+    fn finish_rejects_a_concrete_row_that_shadows_the_generic_one() {
+        let generic = MethodEntry {
+            receiver: TypePattern::iterable(TypePattern::var("T")),
+            name: "map",
+            params: vec![TypePattern::Function {
+                params: vec![TypePattern::var("T")],
+                result: Box::new(TypePattern::var("U")),
+            }],
+            result: TypePattern::Collection {
+                ctor: CollectionCtor::Vec,
+                args: vec![TypePattern::var("U")],
+            },
+            purity: Purity::Pure,
+            lowering: MethodLowering::Intrinsic("seq_map"),
+            doc: "Apply a function to each element.",
+            stability: Stability::Stable,
+        };
+        // A `Set` is one of the ten, so `Set[T].map/1` and `Iterable.map/1` both
+        // answer `set.map(f)`.
+        let on_a_set = MethodEntry {
+            receiver: TypePattern::Collection {
+                ctor: CollectionCtor::Set,
+                args: vec![TypePattern::var("T")],
+            },
+            ..generic.clone()
+        };
+        let err = MethodCatalog::build()
+            .entry(generic.clone())
+            .entry(on_a_set)
+            .finish()
+            .unwrap_err();
+        match err {
+            MethodCatalogError::AmbiguousWithIterable { name, arity, .. } => {
+                assert_eq!((name, arity), ("map", 1));
+            }
+            other => panic!("expected an Iterable shadow, got {other}"),
+        }
+
+        // Insertion order is not the question: the same pair the other way round
+        // is the same collision.
+        let on_a_set = MethodEntry {
+            receiver: TypePattern::Collection {
+                ctor: CollectionCtor::Set,
+                args: vec![TypePattern::var("T")],
+            },
+            ..generic.clone()
+        };
+        assert!(MethodCatalog::build()
+            .entry(on_a_set)
+            .entry(generic.clone())
+            .finish()
+            .is_err());
+
+        // **`Grid[T].map/1` is allowed**, and that is the point of scoping the
+        // check to the ten: §6.4 asks for a shape-preserving `grid.map` by name,
+        // and `Grid` is not a receiver the generic row accepts.
+        let on_a_grid = MethodEntry {
+            receiver: TypePattern::Collection {
+                ctor: CollectionCtor::Grid,
+                args: vec![TypePattern::var("T")],
+            },
+            result: TypePattern::Collection {
+                ctor: CollectionCtor::Grid,
+                args: vec![TypePattern::var("U")],
+            },
+            ..generic.clone()
+        };
+        assert!(MethodCatalog::build()
+            .entry(generic.clone())
+            .entry(on_a_grid)
+            .finish()
+            .is_ok());
+
+        // A different arity is a different question, as it is for a duplicate.
+        let different_arity = MethodEntry {
+            receiver: TypePattern::Collection {
+                ctor: CollectionCtor::Set,
+                args: vec![TypePattern::var("T")],
+            },
+            params: vec![],
+            ..generic.clone()
+        };
+        assert!(MethodCatalog::build()
+            .entry(generic)
+            .entry(different_arity)
+            .finish()
+            .is_ok());
+    }
+
+    /// **ADR-127.** The receiver generalizes; a parameter and a result do not.
+    ///
+    /// `zip`'s argument and `flat_map`'s closure result are the two rows this is
+    /// about, and the reason is not symmetry: the fused loop indexes each of them
+    /// with `praxis_vec_len`/`praxis_vec_get` directly — `Step::Zip` walks its
+    /// second source with its own dense counter, a splice walks the inner `Vec` —
+    /// and neither has an `IterPlan` in scope, because neither is the source.
+    /// Generalizing either would put a `SetPayload` under `praxis_vec_get`, which
+    /// is the exact wrong-type read `IterPlan` exists to prevent.
+    ///
+    /// It is also what keeps the instantiation path total: an `Iterable` names
+    /// ten types, so `pattern_to_type` has no single answer for one, and the
+    /// receiver is the only position that never asks it for one.
+    #[test]
+    fn finish_rejects_an_iterable_written_outside_the_receiver() {
+        let iterable = || TypePattern::iterable(TypePattern::var("T"));
+        let base = MethodEntry {
+            receiver: iterable(),
+            name: "zip",
+            params: vec![],
+            result: TypePattern::Unit,
+            purity: Purity::Pure,
+            lowering: MethodLowering::Intrinsic("seq_zip"),
+            doc: "Pair elements with another sequence.",
+            stability: Stability::Stable,
+        };
+        // Bare in a parameter, nested inside one, in the result, and nested
+        // inside the receiver's own item.
+        for offender in [
+            MethodEntry {
+                params: vec![iterable()],
+                ..base.clone()
+            },
+            MethodEntry {
+                params: vec![TypePattern::Function {
+                    params: vec![TypePattern::var("T")],
+                    result: Box::new(iterable()),
+                }],
+                ..base.clone()
+            },
+            MethodEntry {
+                result: TypePattern::Collection {
+                    ctor: CollectionCtor::Vec,
+                    args: vec![iterable()],
+                },
+                ..base.clone()
+            },
+            MethodEntry {
+                receiver: TypePattern::iterable(iterable()),
+                ..base.clone()
+            },
+        ] {
+            let err = MethodCatalog::build().entry(offender).finish().unwrap_err();
+            assert!(
+                matches!(err, MethodCatalogError::IterableOutsideReceiver { .. }),
+                "expected the parameter rule, got {err}"
+            );
+        }
+        // The receiver itself is the one position that may be one.
+        assert!(MethodCatalog::build().entry(base).finish().is_ok());
     }
 
     #[test]

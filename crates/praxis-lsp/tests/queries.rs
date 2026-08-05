@@ -241,6 +241,74 @@ fn typing_grid_dot_offers_grid_methods_with_signatures_and_nothing_else() {
     }
 }
 
+/// **ADR-127 decision 1, at the editor.** `set.` offers the whole pipeline, and
+/// `grid.` still does not.
+///
+/// The rule dispatch applies and the rule completion applies are now the *same
+/// function*, `praxis_stdlib::pattern_matches`, rather than two copies with the
+/// LSP's own comment admitting it was "the same rule … restated". If they
+/// disagree the editor offers a method the compiler refuses; sharing the
+/// function is what makes that unrepresentable, and this is what checks that the
+/// generic receiver reached both sides.
+#[test]
+fn typing_set_dot_offers_the_pipeline_and_a_grid_still_does_not() {
+    let src = "fn main() -> Unit {\n  var s = Set()\n  s.insert(1)\n  s.\n}\n";
+    let s = snap(src);
+    let labels = labels_at(&s, at(src, "s.\n}") + 2);
+
+    // The twenty-three fused rows, the four barriers and the eight conversions
+    // all reach a `Set` now. A spread of them, including the ones a `Set` could
+    // never have offered before: it has no member accessor in the language at
+    // all, so `to_vec` is the first spelling that reads one.
+    for offered in [
+        "map",
+        "filter",
+        "sum",
+        "count",
+        "fold",
+        "any",
+        "find",
+        "sorted",
+        "sorted_by_key",
+        "unique",
+        "frequencies",
+        "to_vec",
+        "to_map",
+        "to_counter",
+        "to_bitset",
+    ] {
+        assert!(
+            labels.contains(&offered.to_string()),
+            "`{offered}` is a pipeline row and a `Set` is one of the ten; got {labels:?}"
+        );
+    }
+    // …and the `Set`'s own rows are still there beside them.
+    for own in ["insert", "remove", "contains", "len"] {
+        assert!(labels.contains(&own.to_string()), "{own}: {labels:?}");
+    }
+    // A `Map` method is still a `Map`'s.
+    for foreign in ["keys", "values", "push"] {
+        assert!(
+            !labels.contains(&foreign.to_string()),
+            "`{foreign}` is not a `Set` method; got {labels:?}"
+        );
+    }
+
+    // **§19.11's acceptance criterion still holds**, and it holds for the reason
+    // the decision gives rather than by accident: `Grid` is out of
+    // `PIPELINE_RECEIVERS`, so no pipeline row matches it.
+    let grid_src = "fn main() -> Unit {\n  var grid = read grid(char)\n  grid.\n}\n";
+    let s = snap(grid_src);
+    let labels = labels_at(&s, at(grid_src, "grid.\n") + 5);
+    for absent in ["map", "filter", "sum", "to_set", "sorted_by_key"] {
+        assert!(
+            !labels.contains(&absent.to_string()),
+            "`grid.{absent}` would claim §6.4's shape-preserving name; got {labels:?}"
+        );
+    }
+    assert!(labels.contains(&"cells".to_string()), "{labels:?}");
+}
+
 /// Completion in parser-expression mode offers §7.4's atomics and §7.5's
 /// constructors — from the closed tables, so a name added later is offered
 /// without anybody editing this crate.

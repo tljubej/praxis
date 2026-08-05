@@ -562,6 +562,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::VecNew => praxis_vec_new as *const (),
         RuntimeSymbol::VecPush => praxis_vec_push as *const (),
         RuntimeSymbol::VecSorted => praxis_vec_sorted as *const (),
+        RuntimeSymbol::VecSortedByKey => praxis_vec_sorted_by_key as *const (),
         RuntimeSymbol::VecUnique => praxis_vec_unique as *const (),
         RuntimeSymbol::WriteStdout => praxis_write_stdout as *const (),
     };
@@ -3275,6 +3276,150 @@ pub unsafe extern "C" fn praxis_vec_sorted(ctx: *mut RuntimeContext, vec: GcRef)
         }
         unsafe { vec_of(ctx, p.element_descriptor, items.into_iter()) }
     })
+}
+
+/// `v.sorted_by_key(f)` — the elements of `vec` ordered by the key `f` extracts,
+/// as a **new** `Vec` (§6.3, ADR-127 decision 5). The receiver is not touched.
+///
+/// # Why this row exists, and why it is not `sorted_by`
+///
+/// ADR-045 decided that no composite is orderable, so the moment a pipeline's
+/// item is a pair — which is the moment its source is a `Map` or a `Counter` —
+/// `sorted` is unavailable and "the five most common values" has no spelling.
+/// The closure extracts an orderable key from an item that is not.
+///
+/// Not a `(T, T) -> Bool` comparator: `min_by`/`max_by` already own the
+/// less-than-predicate shape, and a comparator is O(n log n) calls back into
+/// JIT'd code where a key extractor is n.
+///
+/// **Decorate–sort–undecorate.** Every key is extracted once, up front, and the
+/// sort orders the (key, element) pairs — which is what makes it n calls. The
+/// keys are held in a `Vec<GcRef>` the collector cannot see, so they are rooted
+/// in a native scope: extraction allocates, and a collection triggered by the
+/// *next* call would otherwise free the key the previous one produced (P0-07).
+///
+/// Ordering goes through the same `compare` callback [`praxis_value_cmp`] uses,
+/// so the `Ord` bound the catalog row puts on the *key* is the rule this
+/// enforces. The sort is **stable**, so items with equal keys keep their input
+/// order and the answer is a function of the input alone.
+///
+/// Raises `FaultKind::TypeMismatch` and answers Unit when the keys are not all
+/// one type, or when that type has no ordering; a fault the closure itself
+/// raised stops the sort and is left for the call site's own check.
+///
+/// # Safety
+/// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef` and `key`
+/// a valid closure `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_vec_sorted_by_key(
+    ctx: *mut RuntimeContext,
+    vec: GcRef,
+    key: GcRef,
+) -> GcRef {
+    abi_guard!("praxis_vec_sorted_by_key", ctx, {
+        let scope = unsafe { NativeScope::new(ctx) };
+        // The receiver is rooted explicitly: its items are read into a Rust
+        // `Vec` and held across one closure call *per element*, which is a far
+        // longer window than a single-allocation wrapper's.
+        let _receiver = scope.root(vec);
+        // SAFETY: caller guarantees `vec` is a valid Vec.
+        let p = unsafe { vec_payload(vec) };
+        let element_descriptor = p.element_descriptor;
+        let items: Vec<GcRef> = p.items.to_vec();
+        for item in &items {
+            scope.root(*item);
+        }
+        // Decorate: one call per element, keys rooted as they arrive.
+        let mut decorated: Vec<(GcRef, GcRef)> = Vec::with_capacity(items.len());
+        for item in items {
+            let Some(k) = (unsafe { call_unary_closure(ctx, key, item) }) else {
+                // The closure faulted (or is not a closure, which the type
+                // checker already refused). Its answer is the Unit sentinel, so
+                // sorting on it would order garbage; stop and leave the fault
+                // for the call site.
+                return unsafe { unit_sentinel(ctx) };
+            };
+            decorated.push((scope.root(k).get(), item));
+        }
+        if decorated.len() > 1 {
+            // The keys' *own* descriptors decide, as `praxis_vec_sorted`'s
+            // elements' do: the source Vec's label says nothing about them.
+            let desc = decorated[0].0.descriptor();
+            if !decorated
+                .iter()
+                .all(|(k, _)| std::ptr::eq(k.descriptor(), desc))
+            {
+                unsafe { set_fault(ctx, RaisedFault::TYPE_MISMATCH) };
+                return unsafe { unit_sentinel(ctx) };
+            }
+            let Some(compare) = desc.compare else {
+                unsafe { set_fault(ctx, RaisedFault::TYPE_MISMATCH) };
+                return unsafe { unit_sentinel(ctx) };
+            };
+            decorated.sort_by(|(a, _), (b, _)| {
+                // SAFETY: every key carries `desc` (checked above), so both
+                // payloads are values of its type; the non-moving GC keeps them
+                // stable, and `sort_by` allocates nothing that could collect.
+                unsafe {
+                    compare(
+                        a.payload::<u8>() as *const u8,
+                        b.payload::<u8>() as *const u8,
+                    )
+                }
+            });
+        }
+        // Undecorate.
+        unsafe {
+            vec_of(
+                ctx,
+                element_descriptor,
+                decorated.into_iter().map(|(_, item)| item),
+            )
+        }
+    })
+}
+
+/// Call a `(T) -> U` Praxis closure with one argument, or `None` if it faulted —
+/// or if it is not a closure at all.
+///
+/// The descriptor is checked rather than assumed: the type checker says the
+/// operand is a function and the only runtime representation of one is a closure
+/// object, but the alternative to a `TypeMismatch` fault is transmuting whatever
+/// the payload's first word happens to be into a function pointer and jumping to
+/// it.
+///
+/// # Safety
+/// `ctx` must be live and wired; `closure` and `arg` must be valid `GcRef`s.
+unsafe fn call_unary_closure(
+    ctx: *mut RuntimeContext,
+    closure: GcRef,
+    arg: GcRef,
+) -> Option<GcRef> {
+    if !std::ptr::eq(closure.descriptor(), &crate::closures::CLOSURE) {
+        unsafe { set_fault(ctx, RaisedFault::TYPE_MISMATCH) };
+        return None;
+    }
+    // SAFETY: the descriptor check proves the payload is a `ClosurePayload`, so
+    // `fn_ptr` is the entry point the codegen wrote there.
+    let fn_ptr = unsafe { (*closure.payload::<crate::closures::ClosurePayload>()).fn_ptr };
+    // A closure's entry point is `fn(ctx, closure_self, params...) -> GcRef`
+    // (§4.10, Approach B): the closure value itself is a hidden first argument,
+    // and the prologue loads its captures from it.
+    //
+    // SAFETY: `fn_ptr` is a finalized JIT entry whose parameter count is the one
+    // the type checker enforced for this operand; every value crossing is a
+    // `GcRef`, which is the ABI's only value kind.
+    let result = unsafe {
+        let f: unsafe extern "C" fn(*mut RuntimeContext, GcRef, GcRef) -> GcRef =
+            std::mem::transmute(fn_ptr);
+        f(ctx, closure, arg)
+    };
+    // The closure ran arbitrary Praxis code and may have faulted; its result on
+    // that path is the Unit sentinel.
+    if unsafe { praxis_check_fault(ctx) } != 0 {
+        return None;
+    }
+    Some(result)
 }
 
 /// `v.unique()` — the elements of `vec` with later duplicates dropped, as a

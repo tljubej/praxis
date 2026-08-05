@@ -1,7 +1,7 @@
 # ADR-127: A pipeline's source is the `for` loop's, and a collection converts by naming what it becomes
 
 **Date:** 2026-08-04
-**Status:** Proposed — not implemented
+**Status:** Accepted — implemented
 
 ## Context
 

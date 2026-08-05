@@ -108,10 +108,120 @@ pub enum TypePattern {
     /// rows said `V` and `(Int, Int)` while their wrappers answered the Unit
     /// sentinel on a miss (RT-14, RT-15).
     Option(Box<TypePattern>),
+    /// A receiver the pipeline walks: any of the ten iterables named by
+    /// [`is_pipeline_receiver`], binding what it yields to `item` (ADR-127).
+    ///
+    /// # It is the one pattern that is not unified with the receiver
+    ///
+    /// Everywhere else a catalog receiver is instantiated and unified with the
+    /// actual receiver — that is what pins `T` in `Vec[T].push(T)`. This one
+    /// cannot be: it accepts ten different constructors, and unifying against
+    /// any one of them pins the other nine out. What is unified is the **item**,
+    /// against `capability::iter_item`'s answer for the receiver — the `for`
+    /// loop's own answer to "what does this yield".
+    ///
+    /// One consequence is load-bearing and Decision 4 uses it: a row constrains
+    /// *which* iterables it accepts by writing a shape into `item`.
+    /// `Iterable { item: Tuple[K, V] }` is "a `Map` or a `Counter`", because
+    /// those are the two whose item is a pair — and `[1, 2].to_map()` is an
+    /// ordinary unification failure at the method name, not a row that resolves
+    /// and then faults.
+    Iterable { item: Box<TypePattern> },
     /// Opaque / unknown during early scaffolding. Catalog entries added before
     /// a full type pattern is worked out can use this placeholder; the type
     /// checker will reject it if it is still present at use time.
     Opaque,
+}
+
+/// The collection constructors a [`TypePattern::Iterable`] receiver accepts
+/// (ADR-127 decision 1) — the `for` loop's list minus `Grid` and `Seq`.
+///
+/// **`Grid[T]` is excluded, and `grid.map` is why.** §6.4 requires `grid.map(fn)`
+/// and it means the shape-preserving one, `Grid[T] -> Grid[U]`, cells in place. A
+/// generic row would claim the name and answer `Vec[U]` instead. A grid enters a
+/// pipeline through `grid.cells()` or `grid.positions()`, which already answer
+/// `Vec`s. The exclusion is enforced rather than intended:
+/// [`MethodCatalogBuilder::finish`](crate::catalog::MethodCatalogBuilder::finish)
+/// refuses a concrete row that shares a `(name, arity)` with a generic one *on a
+/// receiver in this list*, so a future `Grid[T].map/1` is allowed and a
+/// `Set[T].map/1` is a build failure.
+///
+/// **`Seq[T]` is excluded because it has no values.** `praxis-repr` already says
+/// a `Seq` has no runtime representation; since ADR-127 nothing produces one and
+/// nothing consumes one.
+///
+/// `Text` is the tenth receiver and is not here, because it is not a collection:
+/// it is the one *scalar* with members (§4.13). [`is_pipeline_receiver`] is the
+/// predicate that answers for all ten.
+pub const PIPELINE_RECEIVERS: &[CollectionCtor] = &[
+    CollectionCtor::Vec,
+    CollectionCtor::Deque,
+    CollectionCtor::Set,
+    CollectionCtor::MinHeap,
+    CollectionCtor::MaxHeap,
+    CollectionCtor::Range,
+    CollectionCtor::BitSet,
+    CollectionCtor::Map,
+    CollectionCtor::Counter,
+];
+
+/// Whether a *concrete* receiver pattern is one of the ten a
+/// [`TypePattern::Iterable`] row accepts (ADR-127 decision 1).
+///
+/// A pure pattern-level test — ctor membership in [`PIPELINE_RECEIVERS`], or the
+/// `Text` scalar — so it needs no `TypeDb` and both callers can ask it from
+/// inside an immutable borrow. It deliberately says nothing about the row's
+/// `item`: a row whose item shape excludes this receiver still *matches*, and
+/// the item unification is what reports.
+#[must_use]
+pub fn is_pipeline_receiver(concrete: &TypePattern) -> bool {
+    match concrete {
+        TypePattern::Collection { ctor, .. } => PIPELINE_RECEIVERS.contains(ctor),
+        TypePattern::Scalar(ScalarType::Text) => true,
+        _ => false,
+    }
+}
+
+/// Whether a catalog receiver pattern accepts a concrete runtime pattern.
+///
+/// `Var("T")` in the catalog entry is a type-variable wildcard: it matches any
+/// concrete element (so `Vec[T].len()` matches `Vec[Int].len()`). A
+/// [`TypePattern::Iterable`] receiver matches any of the ten
+/// [`PIPELINE_RECEIVERS`]. All other variants require exact equality.
+///
+/// **This lives here because it was written twice.**
+/// `praxis_hir::catalog::lookup` decides dispatch and
+/// `praxis_lsp::completion::dot_items` decides what `set.` offers, and the LSP's
+/// own comment said it was "the same rule … restated". If the two disagree the
+/// editor offers a method the compiler refuses; one function is what makes that
+/// unrepresentable rather than merely unlikely.
+#[must_use]
+pub fn pattern_matches(catalog_pat: &TypePattern, concrete_pat: &TypePattern) -> bool {
+    match (catalog_pat, concrete_pat) {
+        (TypePattern::Var { .. }, _) => true,
+        // The generic pipeline receiver (ADR-127). Note what is *not* consulted:
+        // the row's `item`. `Iterable { item: (K, V) }` matches a `Set[Int]`
+        // here, and the item unification `bind_receiver` performs is what
+        // reports "expected `(K, V)`, found `Int`" at the method name.
+        (TypePattern::Iterable { .. }, concrete) => is_pipeline_receiver(concrete),
+        (
+            TypePattern::Collection { ctor: c1, args: a1 },
+            TypePattern::Collection { ctor: c2, args: a2 },
+        ) => {
+            c1 == c2
+                && a1.len() == a2.len()
+                && a1.iter().zip(a2).all(|(x, y)| pattern_matches(x, y))
+        }
+        // Tuples match element-wise (so a catalog `Tuple[Int, Int]` point
+        // pattern matches a concrete `(Int, Int)`).
+        (TypePattern::Tuple(a1), TypePattern::Tuple(a2)) => {
+            a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| pattern_matches(x, y))
+        }
+        // `Option[T]` matches through its argument, for the same reason a
+        // collection does.
+        (TypePattern::Option(a), TypePattern::Option(b)) => pattern_matches(a, b),
+        _ => catalog_pat == concrete_pat,
+    }
 }
 
 impl TypePattern {
@@ -140,6 +250,15 @@ impl TypePattern {
         TypePattern::bounded(name, Bound::Is(scalar))
     }
 
+    /// The pipeline receiver yielding `item` — `Iterable { item }`, spelled
+    /// without the `Box` every row would otherwise write (ADR-127).
+    #[must_use]
+    pub fn iterable(item: TypePattern) -> TypePattern {
+        TypePattern::Iterable {
+            item: Box::new(item),
+        }
+    }
+
     /// A type variable required to have `kind` — the barrier combinators, whose
     /// runtime wrappers read a descriptor callback the element may not have
     /// (`sorted` needs `compare`, `frequencies` and `unique` need a key that
@@ -164,6 +283,11 @@ impl TypePattern {
                     a.collect_bounds(into);
                 }
             }
+            // A bound on the pipeline receiver's item is the row's own — `sum`'s
+            // `Bound::Is(Int)` lives here — so the sweep has to reach it. Its
+            // load-bearing half is that an item type nothing has pinned yet is
+            // *pinned* to `Int` rather than merely permitted.
+            TypePattern::Iterable { item } => item.collect_bounds(into),
             TypePattern::Option(inner) => inner.collect_bounds(into),
             TypePattern::Function { params, result } => {
                 for p in params {
@@ -191,10 +315,15 @@ pub enum ScalarType {
 }
 
 /// Built-in collection constructors (§6.1). `Range` and `BitSet` take no type
-/// arguments; the others take one (`Vec`, `Set`, ...) or two (`Map`). `Seq` is
-/// the compiler-internal pipeline source (M8 WS8, §6.3): it is never user-named
-/// and has no runtime representation, but it threads the element type through
-/// lazy pipelines.
+/// arguments; the others take one (`Vec`, `Set`, ...) or two (`Map`).
+///
+/// **`Seq` has no rows and no values.** It was the compiler-internal pipeline
+/// source (M8 WS8, §6.3), threading an element type through what was meant to
+/// become a lazy chain; the pipeline is eager (ADR-028 decision 2), so no row
+/// ever answered one and the twenty-three `Seq`-receiver rows were dead.
+/// ADR-127's generic receiver deleted them. Nothing produces a `Seq`, nothing
+/// consumes one, and retiring the constructor itself is a mechanical follow-up
+/// rather than a decision.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum CollectionCtor {
     Vec,
@@ -273,6 +402,10 @@ impl fmt::Display for TypePattern {
                 f.write_str(")")
             }
             TypePattern::Option(inner) => write!(f, "Option[{inner}]"),
+            // Not a type a user can write — no annotation names it — but the
+            // completion table renders every receiver, and "the thing a `for`
+            // walks" is what this says.
+            TypePattern::Iterable { item } => write!(f, "Iterable[{item}]"),
             TypePattern::Opaque => f.write_str("_"),
             // The bound is not part of the type's spelling: it is a rule the
             // compiler enforces, and §5.4 forbids surfacing capability names to
@@ -353,5 +486,89 @@ mod tests {
             result: Box::new(TypePattern::var("U")),
         };
         assert_eq!(func.to_string(), "(T) -> U");
+        assert_eq!(
+            TypePattern::iterable(TypePattern::var("T")).to_string(),
+            "Iterable[T]"
+        );
+    }
+
+    fn collection(ctor: CollectionCtor, args: Vec<TypePattern>) -> TypePattern {
+        TypePattern::Collection { ctor, args }
+    }
+
+    /// **ADR-127 decision 1.** The pipeline's receiver list is the `for` loop's
+    /// minus two, and each exclusion is a decision rather than an oversight:
+    /// `Grid` because §6.4 owes `grid.map` a shape-preserving row, `Seq` because
+    /// it has no values.
+    #[test]
+    fn the_pipeline_walks_ten_receivers_and_not_a_grid() {
+        let accepted = [
+            collection(CollectionCtor::Vec, vec![TypePattern::var("T")]),
+            collection(CollectionCtor::Deque, vec![TypePattern::var("T")]),
+            collection(CollectionCtor::Set, vec![TypePattern::var("T")]),
+            collection(CollectionCtor::MinHeap, vec![TypePattern::var("T")]),
+            collection(CollectionCtor::MaxHeap, vec![TypePattern::var("T")]),
+            collection(CollectionCtor::Range, vec![]),
+            collection(CollectionCtor::BitSet, vec![]),
+            collection(
+                CollectionCtor::Map,
+                vec![TypePattern::var("K"), TypePattern::var("V")],
+            ),
+            collection(CollectionCtor::Counter, vec![TypePattern::var("T")]),
+            TypePattern::Scalar(ScalarType::Text),
+        ];
+        assert_eq!(
+            accepted.len(),
+            PIPELINE_RECEIVERS.len() + 1,
+            "`Text` is the tenth receiver and the only one that is not a ctor"
+        );
+        for pat in &accepted {
+            assert!(is_pipeline_receiver(pat), "{pat} is walked by a `for`");
+        }
+
+        for refused in [
+            collection(CollectionCtor::Grid, vec![TypePattern::var("T")]),
+            collection(CollectionCtor::Seq, vec![TypePattern::var("T")]),
+            TypePattern::Scalar(ScalarType::Int),
+            TypePattern::Tuple(vec![TypePattern::var("K"), TypePattern::var("V")]),
+        ] {
+            assert!(!is_pipeline_receiver(&refused), "{refused} is not walked");
+        }
+    }
+
+    /// The `Iterable` arm matches on the *receiver's shape alone*. A row whose
+    /// item is a pair still matches a `Set`, and the failure it earns is the
+    /// item unification's — an ordinary "expected `(K, V)`, found `Int`" at the
+    /// method name, rather than "no method `to_map`", which would be a worse
+    /// message for the same mistake.
+    #[test]
+    fn an_iterable_row_matches_by_receiver_and_reports_by_item() {
+        let to_map = TypePattern::iterable(TypePattern::Tuple(vec![
+            TypePattern::var("K"),
+            TypePattern::var("V"),
+        ]));
+        let set_of_int = collection(
+            CollectionCtor::Set,
+            vec![TypePattern::Scalar(ScalarType::Int)],
+        );
+        assert!(pattern_matches(&to_map, &set_of_int));
+        // …and a `Grid` is refused at the door, which is what keeps `grid.map`
+        // §6.4's row rather than this one's.
+        let grid = collection(
+            CollectionCtor::Grid,
+            vec![TypePattern::Scalar(ScalarType::Int)],
+        );
+        assert!(!pattern_matches(&to_map, &grid));
+    }
+
+    /// `sum`'s `Int` bound lives on the pipeline receiver's *item*, and there is
+    /// nowhere else in the row for it to live — so the sweep has to reach
+    /// through the `Iterable` arm.
+    #[test]
+    fn a_bound_on_the_item_is_found() {
+        let mut bounds = Vec::new();
+        TypePattern::iterable(TypePattern::is_scalar("T", ScalarType::Int))
+            .collect_bounds(&mut bounds);
+        assert_eq!(bounds, vec![("T", Bound::Is(ScalarType::Int))]);
     }
 }

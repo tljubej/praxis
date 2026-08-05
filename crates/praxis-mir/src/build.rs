@@ -1389,6 +1389,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             receiver,
             name,
             lowering_symbol,
+            receiver_is_iterable,
             args,
             purity,
             ty,
@@ -1412,6 +1413,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     receiver: receiver.clone(),
                     name: name.clone(),
                     lowering_symbol: *lowering_symbol,
+                    receiver_is_iterable: *receiver_is_iterable,
                     args: args.clone(),
                     purity: *purity,
                     ty: *ty,
@@ -1443,7 +1445,16 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 );
             };
             let mut arg_locals: Vec<LocalId> = Vec::with_capacity(args.len() + 1);
-            arg_locals.push(lower_expr_gc(b, receiver));
+            // **ADR-127 decision 3.** A row whose receiver pattern is `Iterable`
+            // and whose lowering is a `RuntimeSymbol` is called on the receiver
+            // *materialized as a `Vec`*, never on the receiver local: the three
+            // barriers need the whole sequence in a real `VecPayload` before
+            // they can answer, and their receiver may now be any of ten things.
+            arg_locals.push(if *receiver_is_iterable {
+                emit_iter_vec(b, receiver, MirType::Opaque)
+            } else {
+                lower_expr_gc(b, receiver)
+            });
             for a in args {
                 arg_locals.push(lower_expr_gc(b, a));
             }
@@ -2411,21 +2422,11 @@ fn lower_for(
     body: &praxis_hir::TypedBlock,
     item_ty: Type,
 ) {
-    // Lower the iterator once; it lives in a Gc slot for the loop's duration.
-    let iter_source = lower_expr_gc(b, iter);
-    // Take the snapshot before the header, so it is one call per loop and not
-    // one per step — and so the loop walks a value nothing in the body can
-    // mutate. `iter_local` is what the header and body index from here on; for
-    // the paired plan it is the keys and `paired_values` holds the values.
-    let plan = iter_plan(b.db, iter);
-    let (iter_local, paired_values) = match plan {
-        IterPlan::InPlace { .. } => (iter_source, None),
-        IterPlan::Snapshot(items) => (snapshot(b, iter_source, items), None),
-        IterPlan::Paired { keys, values } => (
-            snapshot(b, iter_source, keys),
-            Some(snapshot(b, iter_source, values)),
-        ),
-    };
+    // Lower the iterator and open it — the snapshot, or the receiver itself.
+    // One function decides how a collection is walked, and a `for` and a
+    // pipeline cannot disagree about the order or about what a member is
+    // (ADR-127 decision 2).
+    let src = emit_iter_source(b, iter);
     // The index lives in a Gc Int slot (not a scalar) so it persists across the
     // loop's block boundaries like other Gc values. Start at 0.
     let idx_gc = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
@@ -2457,39 +2458,9 @@ fn lower_for(
     b.loop_preheaders.push(b.cur);
     b.cur = header;
 
-    // `len = iter.len()`.
-    let len_sym = plan.len_symbol();
-    let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
-    // Only `praxis_range_len` faults among the lengths the plan can name; a
-    // `Vec`/`Deque`/`Text`/snapshot length does not, and this ran once per
-    // iteration.
-    b.call_runtime(len_dst, len_sym, vec![iter_local]);
-    let len_scalar = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ExtractScalar {
-        dst: len_scalar,
-        src: len_dst,
-        scalar: ScalarKind::Int,
-    });
-    // Extract the index scalar for the comparison.
-    let idx_scalar = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ExtractScalar {
-        dst: idx_scalar,
-        src: idx_gc,
-        scalar: ScalarKind::Int,
-    });
-    // `i < len`
-    let cond = b.alloc_scalar(ScalarKind::Bool);
-    b.push(Inst::IntCmp {
-        dst: cond,
-        op: CmpOp::Lt,
-        lhs: idx_scalar,
-        rhs: len_scalar,
-    });
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-        cond,
-        then_block: body_blk,
-        else_block: exit,
-    };
+    // `if i < iter.len() { body } else { exit }`, counting whatever the plan
+    // says the loop is walking.
+    emit_iter_bounds_check(b, src, idx_gc, body_blk, exit);
 
     b.loop_stack.push(LoopCtx {
         continue_target: incr,
@@ -2497,37 +2468,11 @@ fn lower_for(
         result: None, // a `for` is Unit; a value `break` in one is Y017
     });
     b.cur = body_blk;
-    // Bind the loop variable: `binding = iter.get(idx_gc)`.
-    let get_sym = plan.get_symbol();
-    // The item and the loop variable are the iterator's element type, which the
-    // typed tree carries on the `For` node (`item_ty`). Both slots used to be
-    // `Opaque`, so the debugger showed a `for` binding with no type at all.
-    let item_gc = b.alloc_gc(MirType::Known(item_ty), None, LocalDebugKind::Temp, None);
-    // Every accessor an `IterPlan` can name faults on an out-of-range index, so
-    // this check stays — but it is the row that says so, not the site.
-    b.call_runtime(item_gc, get_sym, vec![iter_local, idx_gc]);
-    // A keyed collection's member is the `(K, V)` pair `item_ty` names, and the
-    // two halves arrive from two index-aligned snapshots. The pair is built
-    // *here* rather than in the runtime because the tuple's schema is the
-    // compiler's answer already — `AllocKind::Tuple` resolves it from `item_ty`,
-    // the same way a `(a, b)` literal does — so no runtime schema interner has
-    // to exist.
-    let item_gc = match paired_values {
-        None => item_gc,
-        Some(values) => {
-            let value_gc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
-            b.call_runtime(value_gc, RuntimeSymbol::VecGet, vec![values, idx_gc]);
-            let pair = b.alloc_gc(MirType::Known(item_ty), None, LocalDebugKind::Temp, None);
-            b.alloc(
-                pair,
-                AllocKind::Tuple {
-                    ty: MirType::Known(item_ty),
-                    elements: vec![item_gc, value_gc],
-                },
-            );
-            pair
-        }
-    };
+    // Bind the loop variable: `binding = iter.get(idx_gc)`. The item and the
+    // loop variable are the iterator's element type, which the typed tree
+    // carries on the `For` node (`item_ty`). Both slots used to be `Opaque`, so
+    // the debugger showed a `for` binding with no type at all.
+    let item_gc = emit_iter_item(b, src, idx_gc, MirType::Known(item_ty));
     // The loop variable's slot: allocate one if the `for` binding has no slot
     // yet (it is introduced by the loop, not a `var` statement). Reads of the
     // binding inside the body resolve to this slot via `b.locals`.
@@ -2820,6 +2765,19 @@ enum Sink {
     },
     Reduce(Box<TypedExpr>),
     Collect,
+    /// `to_set()`, `to_map()`, … — the item sequence built into the named
+    /// collection, one wrapper call per element (ADR-127 decision 4).
+    ///
+    /// A **sink**, not a barrier: the accumulator *is* the target collection, so
+    /// `v.map(f).to_set()` is one loop with no intermediate `Vec`. That is the
+    /// whole difference from `sorted`/`unique`/`frequencies`, which need the
+    /// sequence before they can answer their first element.
+    ///
+    /// `to_vec()` is [`Sink::Collect`] rather than a ninth ctor here, so a chain
+    /// that ends on one and a chain that ends on a stage build the identical
+    /// plan — which is what ADR-126 established and what `to_vec` on a `Vec`
+    /// degenerating to the identity depends on.
+    CollectInto(praxis_types::CollectionCtor),
 }
 
 /// A recognized pipeline chain, source-first. `Then` is one element-wise stage
@@ -2923,6 +2881,7 @@ fn pair_ty_of(db: &praxis_types::TypeDb, ty: Type) -> MirType {
 /// `collect` method is gone from the catalog, so a call carrying that name no
 /// longer reaches MIR at all (inference reports `Y110` first).
 fn classify_sink(name: &str, args: &[TypedExpr]) -> Option<Sink> {
+    use praxis_types::CollectionCtor as C;
     Some(match (name, args) {
         ("sum", []) => Sink::Sum,
         ("product", []) => Sink::Product,
@@ -2940,6 +2899,18 @@ fn classify_sink(name: &str, args: &[TypedExpr]) -> Option<Sink> {
             f: Box::new(f.clone()),
         },
         ("reduce", [f]) => Sink::Reduce(Box::new(f.clone())),
+        // **ADR-127 decision 4.** `to_vec` is `Collect` and not a `CollectInto`
+        // over `Vec`: a chain that ends on a stage already builds that plan, and
+        // sharing it is what makes `v.to_vec()` the identity on a `Vec` rather
+        // than a copy under a name that does not mention one.
+        ("to_vec", []) => Sink::Collect,
+        ("to_set", []) => Sink::CollectInto(C::Set),
+        ("to_map", []) => Sink::CollectInto(C::Map),
+        ("to_counter", []) => Sink::CollectInto(C::Counter),
+        ("to_deque", []) => Sink::CollectInto(C::Deque),
+        ("to_min_heap", []) => Sink::CollectInto(C::MinHeap),
+        ("to_max_heap", []) => Sink::CollectInto(C::MaxHeap),
+        ("to_bitset", []) => Sink::CollectInto(C::BitSet),
         _ => return None,
     })
 }
@@ -3061,8 +3032,23 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     } = plan;
     let sink = chain.sink().clone();
 
-    // Lower the source Vec once; it lives for the loop's duration.
-    let src = lower_expr_gc(b, &source);
+    // **`to_vec()` with nothing in front of it is the materialization itself**
+    // (ADR-127 decision 4), and there is no loop to fuse: a `Vec` receiver
+    // answers *the same reference*, a receiver with a snapshot symbol answers it
+    // in one call, and the rest are walked. Since ADR-126 deleted `collect`,
+    // `Chain::Sink(Collect)` with no stages is reachable only from `to_vec`, so
+    // this cannot swallow a `v.map(f)`'s implicit collect.
+    if matches!(chain, Chain::Sink(Sink::Collect)) {
+        return emit_iter_vec(b, &source, MirType::Known(result_ty));
+    }
+
+    // Open the source once; it lives for the loop's duration. **This is the
+    // whole of ADR-127 decision 2 at the pipeline door.** It used to be a
+    // `lower_expr_gc` and a hardcoded `praxis_vec_len`/`praxis_vec_get` pair,
+    // which is the read `IterPlan` exists to prevent: a `Set`'s payload through
+    // `praxis_vec_get` hung or killed the process, and a `MinHeap`'s was a
+    // silently wrong answer.
+    let src = emit_iter_source(b, &source);
     // A Gc Int index counter (persists across blocks, like the for-loop counter).
     let idx = alloc_zeroed_counter(b);
 
@@ -3093,12 +3079,11 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     // Allocate the sink's accumulators up front.
     let (acc_scalar, acc_gc, seen_flag) = sink_alloc(b, &sink, sink_init_slot);
 
-    // The Collect sink needs a result Vec pushed into per element.
-    let collect_vec = match &sink {
-        Sink::Collect => {
-            let v = alloc_empty_vec(b, MirType::Known(result_ty));
-            Some(v)
-        }
+    // A collecting sink's accumulator *is* its target collection, allocated
+    // before the loop and filled one wrapper call per element.
+    let collect_target = match &sink {
+        Sink::Collect => Some(alloc_empty_vec(b, MirType::Known(result_ty))),
+        Sink::CollectInto(ctor) => Some(alloc_collect_target(b, *ctor, result_ty)),
         _ => None,
     };
 
@@ -3127,19 +3112,18 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     b.cur = header;
 
     // Header: `if idx < src.len() { body } else { exit }`.
-    emit_bounds_check(b, src, idx, body_blk, exit);
+    emit_iter_bounds_check(b, src, idx, body_blk, exit);
 
     // Body: load the element, thread it through the chain, run the sink.
     b.cur = body_blk;
-    let item = b.alloc_gc(source_item_ty, None, LocalDebugKind::Temp, None);
-    b.call_runtime(item, RuntimeSymbol::VecGet, vec![src, idx]);
+    let item = emit_iter_item(b, src, idx, source_item_ty);
 
     let sink_plan = SinkPlan {
         sink: &sink,
         acc_scalar,
         acc_gc,
         seen_flag,
-        collect_vec,
+        collect_target,
         closure: sink_closure_slot,
         position: sink_position,
     };
@@ -3158,7 +3142,7 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
         acc_scalar,
         acc_gc,
         seen_flag,
-        collect_vec,
+        collect_target,
         result_ty,
     )
 }
@@ -3217,7 +3201,7 @@ struct SinkPlan<'a> {
     acc_scalar: Option<LocalId>,
     acc_gc: Option<LocalId>,
     seen_flag: Option<LocalId>,
-    collect_vec: Option<LocalId>,
+    collect_target: Option<LocalId>,
     closure: Option<LocalId>,
     /// `find`/`position` report an index, so they are position-consuming like
     /// the four stages that are, and they get a dense counter for the same
@@ -3660,7 +3644,13 @@ fn idx_ge_len(b: &mut Builder<'_>, other: LocalId, idx: LocalId) -> LocalId {
     dst
 }
 
-/// Emit the header's bounds check: `if idx < src.len() { then } else { els }`.
+/// Emit a `Vec`'s bounds check: `if idx < src.len() { then } else { els }`.
+///
+/// The receiver is a real `Vec` by construction — this is the splice's inner
+/// loop, over the `Vec[U]` a `flat_map` closure answered, which stays a `Vec`
+/// (ADR-127 decision 1: "the pipeline generalizes over what it *walks*, not over
+/// every sequence a row mentions"). The **source** loop's header is
+/// [`emit_iter_bounds_check`], which asks the plan.
 fn emit_bounds_check(
     b: &mut Builder<'_>,
     src: LocalId,
@@ -3673,10 +3663,21 @@ fn emit_bounds_check(
     // fault. The check this used to emit ran once per element, and it is what
     // observed a fused `sum`'s overflow *one iteration late* (ADR-088).
     b.call_runtime(len_dst, RuntimeSymbol::VecLen, vec![src]);
+    emit_index_less_than(b, idx, len_dst, then_blk, els_blk);
+}
+
+/// Branch on `idx < len`, given both as boxed `Int` slots.
+fn emit_index_less_than(
+    b: &mut Builder<'_>,
+    idx: LocalId,
+    len: LocalId,
+    then_blk: BlockId,
+    els_blk: BlockId,
+) {
     let len_scalar = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ExtractScalar {
         dst: len_scalar,
-        src: len_dst,
+        src: len,
         scalar: ScalarKind::Int,
     });
     let idx_scalar = b.alloc_scalar(ScalarKind::Int);
@@ -3825,7 +3826,9 @@ fn sink_alloc(
             });
             (None, Some(acc), Some(seen))
         }
-        Sink::Collect => (None, None, None),
+        // A collecting sink's accumulator is the collection itself, allocated
+        // by `alloc_empty_vec`/`alloc_collect_target` rather than here.
+        Sink::Collect | Sink::CollectInto(_) => (None, None, None),
     }
 }
 
@@ -3948,7 +3951,7 @@ fn emit_sink_body(
         acc_scalar,
         acc_gc,
         seen_flag,
-        collect_vec,
+        collect_target,
         closure: sink_closure_slot,
         position,
     } = *plan;
@@ -4211,9 +4214,36 @@ fn emit_sink_body(
             // chain (`Y001`). The gate for this is therefore the verifier rule,
             // not an end-to-end fault — see
             // `a_fused_collect_observes_its_push`.
-            let result = collect_vec.unwrap();
+            let result = collect_target.unwrap();
             let unit = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
             b.call_runtime(unit, RuntimeSymbol::VecPush, vec![result, item]);
+        }
+        // **ADR-127 decision 4.** One wrapper call per element into the target
+        // collection, which is what makes these sinks rather than barriers:
+        // `v.map(f).to_set()` is one loop and no intermediate `Vec`.
+        Sink::CollectInto(ctor) => {
+            let target = collect_target.unwrap();
+            let (sym, is_pair) = collect_into_wrapper(*ctor);
+            let mut args = vec![target];
+            if is_pair {
+                // A `Map`/`Counter` target takes a key and a value, and the item
+                // is the `(K, V)` pair the row's receiver pattern demanded — so
+                // the split is the `praxis_tuple_get` MIR already emits for
+                // `p.0`, not a shape this sink invents.
+                for index in 0..2 {
+                    let part = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+                    b.push(Inst::LoadTupleElem {
+                        dst: part,
+                        src: item,
+                        index,
+                    });
+                    args.push(part);
+                }
+            } else {
+                args.push(item);
+            }
+            let unit = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
+            b.call_runtime(unit, sym, args);
         }
     }
 }
@@ -4256,11 +4286,11 @@ fn sink_finish(
     acc_scalar: Option<LocalId>,
     acc_gc: Option<LocalId>,
     seen_flag: Option<LocalId>,
-    collect_vec: Option<LocalId>,
+    collect_target: Option<LocalId>,
     ty: Type,
 ) -> LocalId {
     match sink {
-        Sink::Collect => collect_vec.unwrap(),
+        Sink::Collect | Sink::CollectInto(_) => collect_target.unwrap(),
         // `fold` always has an answer: its accumulator starts at `init`.
         Sink::Fold { .. } => acc_gc.unwrap(),
         // MIR-09. These three seed from the first element, so on an empty
@@ -4438,6 +4468,60 @@ fn alloc_empty_vec(b: &mut Builder<'_>, result_ty: MirType) -> LocalId {
     result
 }
 
+/// Allocate a [`Sink::CollectInto`] target — the empty `Set`/`Map`/`Deque`/…
+/// the loop inserts into (ADR-127 decision 4).
+///
+/// **The type arguments are the real ones**, read off the chain's own result
+/// type, where `alloc_empty_vec` passes `MirType::Opaque`. The two are not
+/// inconsistent: a `Vec` adopts its element descriptor from the first push and
+/// has nothing to state before then, but `AllocKind::Collection` already
+/// resolves a `Map`'s key descriptor and a `Set`'s element descriptor from the
+/// static args, and this sink has them. A `to_set()` whose element type is still
+/// an inference variable degrades to the same null descriptor either way.
+fn alloc_collect_target(
+    b: &mut Builder<'_>,
+    ctor: praxis_types::CollectionCtor,
+    result_ty: Type,
+) -> LocalId {
+    use praxis_types::data::TypeData;
+    let args: Vec<MirType> = match b.db.data(b.db.follow(result_ty)) {
+        TypeData::Collection { args, .. } => args.iter().copied().map(MirType::Known).collect(),
+        // The row's result *is* this collection, so anything else is a compiler
+        // bug; the null-descriptor shape is the same answer an unresolved
+        // element type gets, so it degrades rather than panicking in the JIT.
+        _ => vec![MirType::Opaque; ctor.arity()],
+    };
+    let result = b.alloc_gc(MirType::Known(result_ty), None, LocalDebugKind::Temp, None);
+    b.alloc(result, AllocKind::Collection { ctor, args });
+    result
+}
+
+/// The wrapper a [`Sink::CollectInto`] calls once per element, and whether the
+/// item is a **pair** it takes apart first (ADR-127 decision 4).
+///
+/// Each is a wrapper that already exists, which is what makes the four
+/// collections the ask did not name cost a table entry apiece. `Grid` is the one
+/// collection with no row, because a grid needs a width and a flat item sequence
+/// does not carry one; `Range` and `Seq` are not constructible at all.
+fn collect_into_wrapper(ctor: praxis_types::CollectionCtor) -> (RuntimeSymbol, bool) {
+    use praxis_types::CollectionCtor as C;
+    match ctor {
+        C::Vec => (RuntimeSymbol::VecPush, false),
+        C::Set => (RuntimeSymbol::SetInsert, false),
+        C::Deque => (RuntimeSymbol::DequePushBack, false),
+        C::MinHeap => (RuntimeSymbol::MinHeapPush, false),
+        C::MaxHeap => (RuntimeSymbol::MaxHeapPush, false),
+        C::BitSet => (RuntimeSymbol::BitsetInsert, false),
+        C::Map => (RuntimeSymbol::MapInsert, true),
+        C::Counter => (RuntimeSymbol::CounterSet, true),
+        C::Grid | C::Range | C::Seq => unreachable!(
+            "internal compiler error: no `to_{}` row exists — a grid needs a \
+             width, and `Range`/`Seq` are not constructible (ADR-127 decision 4)",
+            ctor.name().to_lowercase()
+        ),
+    }
+}
+
 /// How a `for` reaches the members of the thing it iterates (REP-15, ADR-066).
 ///
 /// Only four of the eleven iterables answer "the member at `i`" in constant
@@ -4549,6 +4633,152 @@ fn iter_plan(db: &TypeDb, iter: &TypedExpr) -> IterPlan {
             values: RuntimeSymbol::CounterValues,
         },
     }
+}
+
+/// An opened iteration source: what the header counts and the body indexes
+/// (ADR-127 decision 2).
+///
+/// Produced by [`emit_iter_source`] and consumed by [`emit_iter_bounds_check`]
+/// and [`emit_iter_item`]. The three together are the whole of "how a collection
+/// is walked", and they are what a `for` and a fused pipeline now share — so the
+/// two cannot disagree about the order, or about what a member is.
+#[derive(Clone, Copy)]
+struct IterSource {
+    plan: IterPlan,
+    /// The local the header and body index: the receiver itself for an
+    /// [`IterPlan::InPlace`], the snapshot `Vec` otherwise. For an
+    /// [`IterPlan::Paired`] it is the **keys** snapshot.
+    local: LocalId,
+    /// A [`IterPlan::Paired`] plan's second, index-aligned snapshot: the values.
+    values: Option<LocalId>,
+}
+
+/// Lower an iterable expression and open it for walking: the snapshot, or the
+/// receiver itself (ADR-127 decision 2).
+///
+/// The snapshot is taken **before** any loop scaffold, so it is one call per
+/// walk and not one per step — and so the walk sees a value nothing in the body
+/// can mutate.
+fn emit_iter_source(b: &mut Builder<'_>, iter: &TypedExpr) -> IterSource {
+    let source = lower_expr_gc(b, iter);
+    let plan = iter_plan(b.db, iter);
+    let (local, values) = match plan {
+        IterPlan::InPlace { .. } => (source, None),
+        IterPlan::Snapshot(items) => (snapshot(b, source, items), None),
+        IterPlan::Paired { keys, values } => {
+            (snapshot(b, source, keys), Some(snapshot(b, source, values)))
+        }
+    };
+    IterSource {
+        plan,
+        local,
+        values,
+    }
+}
+
+/// Emit a walk header's `if idx < src.len() { then } else { els }`.
+///
+/// A snapshot's count is its `Vec`'s, not the source collection's — they agree,
+/// and asking the `Vec` is what keeps the two sides of `i < len` about one
+/// object. Only `praxis_range_len` faults among the lengths a plan can name.
+fn emit_iter_bounds_check(
+    b: &mut Builder<'_>,
+    src: IterSource,
+    idx: LocalId,
+    then_blk: BlockId,
+    els_blk: BlockId,
+) {
+    let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
+    b.call_runtime(len_dst, src.plan.len_symbol(), vec![src.local]);
+    emit_index_less_than(b, idx, len_dst, then_blk, els_blk);
+}
+
+/// Read the member at `idx`, as the value the walk yields (ADR-127 decision 2).
+///
+/// A keyed collection's member is the `(K, V)` pair `item_ty` names, and the two
+/// halves arrive from two index-aligned snapshots. The pair is built *here*
+/// rather than in the runtime because the tuple's schema is the compiler's
+/// answer already — `AllocKind::Tuple` resolves it from `item_ty`, the same way
+/// a `(a, b)` literal does — so no runtime schema interner has to exist.
+///
+/// Every accessor an [`IterPlan`] can name faults on an out-of-range index, so
+/// the read carries a fault check — but it is the manifest row that says so, not
+/// this site.
+fn emit_iter_item(b: &mut Builder<'_>, src: IterSource, idx: LocalId, item_ty: MirType) -> LocalId {
+    let item_gc = b.alloc_gc(item_ty, None, LocalDebugKind::Temp, None);
+    b.call_runtime(item_gc, src.plan.get_symbol(), vec![src.local, idx]);
+    let Some(values) = src.values else {
+        return item_gc;
+    };
+    let value_gc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+    b.call_runtime(value_gc, RuntimeSymbol::VecGet, vec![values, idx]);
+    let pair = b.alloc_gc(item_ty, None, LocalDebugKind::Temp, None);
+    b.alloc(
+        pair,
+        AllocKind::Tuple {
+            ty: item_ty,
+            elements: vec![item_gc, value_gc],
+        },
+    );
+    pair
+}
+
+/// Materialize an iterable receiver as a real `Vec`, for a barrier row
+/// (ADR-127 decision 3).
+///
+/// `sorted`, `unique` and `frequencies` are `RuntimeSymbol` rows rather than
+/// intrinsics — they need the whole sequence before they can answer, so they are
+/// wrapper calls over a `VecPayload` — and since their receiver became
+/// `Iterable` it may be any of ten things. Getting this wrong in the other
+/// direction is the defect [`IterPlan`] was built out of, so the materialization
+/// is not optional and a test asserts it per row.
+///
+/// Three shapes, cheapest first:
+///
+/// - **A `Vec` is already one**, and it is handed on by reference. That is the
+///   same identity `to_vec` answers on a `Vec` receiver, and for the same
+///   reason: leaving a shallow copy behind under a name that does not mention
+///   one is what ADR-126 decision 2 declined.
+/// - **A plan with a snapshot symbol answers a `Vec` in one call** — `Set`,
+///   `BitSet`, the two heaps, `Grid`. This is literally "its plan's snapshot
+///   symbol before the wrapper".
+/// - **Everything else is walked and pushed.** `Deque`, `Range` and `Text` index
+///   themselves but are not `Vec`s, and a `Map`/`Counter` has two aligned
+///   snapshots and no pair accessor, so for these five "the snapshot" is a loop.
+///   It is the same loop `to_vec` fuses, with no stages in front of it.
+fn emit_iter_vec(b: &mut Builder<'_>, receiver: &TypedExpr, result_ty: MirType) -> LocalId {
+    if matches!(
+        b.db.data(b.db.follow(expr_static_type(receiver))),
+        praxis_types::data::TypeData::Collection {
+            ctor: praxis_types::CollectionCtor::Vec,
+            ..
+        }
+    ) {
+        return lower_expr_gc(b, receiver);
+    }
+    let src = emit_iter_source(b, receiver);
+    if let (IterPlan::Snapshot(_), None) = (src.plan, src.values) {
+        return src.local;
+    }
+    // The materializing walk: `for item in receiver { out.push(item) }`, with
+    // `out`'s element descriptor adopted from the first push as every other
+    // collect target's is.
+    let out = alloc_empty_vec(b, result_ty);
+    let idx = alloc_zeroed_counter(b);
+    let header = b.func.new_block();
+    let body = b.func.new_block();
+    let exit = b.func.new_block();
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.cur = header;
+    emit_iter_bounds_check(b, src, idx, body, exit);
+    b.cur = body;
+    let item = emit_iter_item(b, src, idx, MirType::Opaque);
+    let pushed = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
+    b.call_runtime(pushed, RuntimeSymbol::VecPush, vec![out, item]);
+    emit_increment(b, idx);
+    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.cur = exit;
+    out
 }
 
 /// Emit `sym(source)` and answer the `Vec` local it lands in: one member-list
@@ -6779,6 +7009,248 @@ mod tests {
         assert_eq!(calls(compound, RuntimeSymbol::MapUpdateMin), 0);
     }
 
+    /// **ADR-127 decision 2.** A pipeline's source protocol is `IterPlan`: the
+    /// same prologue and body-head a `for` uses, so the two cannot disagree
+    /// about the order or about what a member is.
+    ///
+    /// `lower_pipeline` opened its source with a hardcoded
+    /// `praxis_vec_len`/`praxis_vec_get` pair, and `iter_plan`'s own doc says
+    /// what that pair does to a `Set`: "reading a `Set`'s payload through
+    /// `praxis_vec_get` was a wrong-type read that hung or killed the process,
+    /// and a `MinHeap`'s was a silently wrong answer." The instruction counts are
+    /// the assertion a behavioural test cannot make — the wrong-type read
+    /// *sometimes* returns.
+    #[test]
+    fn a_fused_pipeline_opens_its_source_the_way_a_for_does() {
+        // A `Set` is snapshotted once, before the header, and the loop walks the
+        // snapshot — one `praxis_set_items`, and no read of the `Set` itself.
+        let (funcs, _) = lower_src_to_mir(
+            "fn main() -> Int {\n  var s = Set()\n  s.insert(1)\n  s.map(|x| x * 2).sum()\n}",
+        );
+        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        assert_eq!(runtime_calls(main, RuntimeSymbol::SetItems), 1);
+        assert_eq!(runtime_calls(main, RuntimeSymbol::VecLen), 1);
+        assert_eq!(runtime_calls(main, RuntimeSymbol::VecGet), 1);
+        assert_eq!(runtime_calls(main, RuntimeSymbol::SetLen), 0);
+
+        // A `Map` takes the same **two** aligned snapshots a `for kv in m` does,
+        // and pairs them once per step.
+        let (funcs, _) = lower_src_to_mir(
+            "fn main() -> Int {\n  var m = Map()\n  m.insert(1, 2)\n  \
+             m.map(|kv| kv.1).sum()\n}",
+        );
+        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        assert_eq!(runtime_calls(main, RuntimeSymbol::MapKeys), 1);
+        assert_eq!(runtime_calls(main, RuntimeSymbol::MapValues), 1);
+        assert_eq!(
+            runtime_calls(main, RuntimeSymbol::VecGet),
+            2,
+            "one read per snapshot per step"
+        );
+
+        // A `Range` and a `Text` index themselves, through their **own**
+        // accessors — `praxis_vec_get` on a `Text` is the same wrong-type read.
+        let (funcs, _) = lower_src_to_mir("fn main() -> Int {\n  (0..3).map(|x| x * 2).sum()\n}");
+        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        assert_eq!(runtime_calls(main, RuntimeSymbol::RangeLen), 1);
+        assert_eq!(runtime_calls(main, RuntimeSymbol::RangeGet), 1);
+        assert_eq!(runtime_calls(main, RuntimeSymbol::VecGet), 0);
+
+        let (funcs, _) =
+            lower_src_to_mir("fn main() -> Int {\n  \"ab\".filter(|c| true).count()\n}");
+        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        assert_eq!(runtime_calls(main, RuntimeSymbol::TextLen), 1);
+        assert_eq!(runtime_calls(main, RuntimeSymbol::TextGet), 1);
+        assert_eq!(runtime_calls(main, RuntimeSymbol::VecGet), 0);
+
+        // And a `Vec` source stays allocation-free: nothing about `v.map(f)`
+        // changed.
+        let (funcs, _) = lower_src_to_mir(
+            "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.map(|x| x * 2).sum()\n}",
+        );
+        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        for sym in [
+            RuntimeSymbol::SetItems,
+            RuntimeSymbol::MinHeapItems,
+            RuntimeSymbol::MapKeys,
+        ] {
+            assert_eq!(
+                runtime_calls(main, sym),
+                0,
+                "a Vec is walked in place ({sym})"
+            );
+        }
+    }
+
+    /// **ADR-127 decision 3.** A barrier is called on its receiver *materialized
+    /// as a `Vec`*, never on the receiver local.
+    ///
+    /// The three are `RuntimeSymbol` rows over a real `VecPayload`, and their
+    /// receiver is now `Iterable`. Leaving them on `Vec[T]` was the alternative
+    /// and it was rejected because it makes `set.map(f).sorted()` legal and
+    /// `set.sorted()` a `Y110` — a rule nobody can hold in their head. Getting it
+    /// wrong in the other direction is the defect `IterPlan` was built out of, so
+    /// the materialization is not optional and this is what says so per row.
+    #[test]
+    fn a_barrier_materializes_a_non_vec_receiver_before_the_wrapper() {
+        for (name, wrapper) in [
+            ("sorted()", RuntimeSymbol::VecSorted),
+            ("unique()", RuntimeSymbol::VecUnique),
+            ("frequencies()", RuntimeSymbol::VecFrequencies),
+            ("sorted_by_key(|x| x)", RuntimeSymbol::VecSortedByKey),
+        ] {
+            // A `Set` has a snapshot symbol, so the materialization is that one
+            // call — literally "its plan's snapshot symbol before the wrapper".
+            let src = format!(
+                "fn main() -> Unit {{\n  var s = Set()\n  s.insert(1)\n  out(s.{name})\n}}"
+            );
+            let (funcs, _) = lower_src_to_mir(&src);
+            let main = funcs.iter().find(|f| f.name == "main").expect("main");
+            assert_eq!(runtime_calls(main, wrapper), 1, "{name}");
+            assert_eq!(
+                runtime_calls(main, RuntimeSymbol::SetItems),
+                1,
+                "`s.{name}` reads the `Set` through its own accessor, not through \
+                 `praxis_vec_get`"
+            );
+
+            // A `Deque` has none — it indexes itself but is not a `Vec` — so the
+            // materialization is the walk `to_vec` fuses, and the wrapper still
+            // gets a real `Vec`.
+            let src = format!(
+                "fn main() -> Unit {{\n  var d = Deque()\n  d.push_back(1)\n  \
+                 out(d.{name})\n}}"
+            );
+            let (funcs, _) = lower_src_to_mir(&src);
+            let main = funcs.iter().find(|f| f.name == "main").expect("main");
+            assert_eq!(runtime_calls(main, wrapper), 1, "{name}");
+            assert_eq!(
+                runtime_calls(main, RuntimeSymbol::DequeGet),
+                1,
+                "the walk reads the `Deque` through `praxis_deque_get` ({name})"
+            );
+            assert_eq!(
+                runtime_calls(main, RuntimeSymbol::VecPush),
+                1,
+                "…and pushes each member into the `Vec` the wrapper needs ({name})"
+            );
+
+            // **A `Vec` receiver copies nothing.** The identity is what keeps
+            // `v.sorted()` the one call it has always been.
+            let src =
+                format!("fn main() -> Unit {{\n  var v = Vec()\n  v.push(1)\n  out(v.{name})\n}}");
+            let (funcs, _) = lower_src_to_mir(&src);
+            let main = funcs.iter().find(|f| f.name == "main").expect("main");
+            assert_eq!(runtime_calls(main, wrapper), 1, "{name}");
+            assert_eq!(
+                runtime_calls(main, RuntimeSymbol::VecPush),
+                1,
+                "only the program's own push ({name})"
+            );
+        }
+    }
+
+    /// **ADR-127 decision 4.** A conversion is a *sink*, so it fuses: the
+    /// accumulator is the target collection and there is no intermediate `Vec`.
+    ///
+    /// That is the whole difference from the three barriers, which need the
+    /// sequence before they can answer their first element. `v.map(f).to_set()`
+    /// is one loop that inserts into the `Set` directly.
+    #[test]
+    fn a_conversion_fuses_into_the_target_collection() {
+        let (funcs, _) = lower_src_to_mir(
+            "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  \
+             v.map(|x| x * 2).to_set().len()\n}",
+        );
+        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        assert_eq!(runtime_calls(main, RuntimeSymbol::SetInsert), 1);
+        assert_eq!(
+            runtime_calls(main, RuntimeSymbol::VecPush),
+            1,
+            "only the program's own push — the map does not materialize"
+        );
+        // One loop: one source read.
+        assert_eq!(runtime_calls(main, RuntimeSymbol::VecGet), 1);
+
+        // A `Map`/`Counter` target takes the pair apart with the same
+        // `praxis_tuple_get` MIR emits for `p.0`. The source is a `Counter` the
+        // program never inserts into by hand, so the one `praxis_map_insert` is
+        // unambiguously the sink's.
+        let (funcs, _) =
+            lower_src_to_mir("fn main() -> Int {\n  [\"a\"].frequencies().to_map().len()\n}");
+        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        assert_eq!(runtime_calls(main, RuntimeSymbol::MapInsert), 1);
+        assert_eq!(
+            runtime_calls(main, RuntimeSymbol::CounterKeys),
+            1,
+            "the source is opened the way a `for` opens it"
+        );
+        let splits = main
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .filter(|i| matches!(i, Inst::LoadTupleElem { .. }))
+            .count();
+        assert_eq!(
+            splits, 2,
+            "a key and a value, from the item the source yields"
+        );
+
+        // **`to_vec` on a `Vec` is the identity**, and that is not `collect`
+        // coming back: it answers the same reference, so there is no push and no
+        // second allocation. On the other nine receivers it is the only route to
+        // a `Vec` at all.
+        let (funcs, _) = lower_src_to_mir(
+            "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.to_vec().count()\n}",
+        );
+        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        assert_eq!(
+            runtime_calls(main, RuntimeSymbol::VecPush),
+            1,
+            "only the program's own push"
+        );
+        let allocs = main
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .filter(|i| {
+                matches!(
+                    i,
+                    Inst::Alloc {
+                        alloc: AllocKind::Collection { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(allocs, 1, "only the `Vec()` the program wrote");
+
+        // …and on a `Set` it is the snapshot, which is one call and not a loop.
+        let (funcs, _) = lower_src_to_mir(
+            "fn main() -> Int {\n  var s = Set()\n  s.insert(1)\n  s.to_vec().count()\n}",
+        );
+        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        assert_eq!(runtime_calls(main, RuntimeSymbol::SetItems), 1);
+        assert_eq!(runtime_calls(main, RuntimeSymbol::VecPush), 0);
+    }
+
+    /// Every runtime call to `sym` in `f`, for the shape tests above.
+    fn runtime_calls(f: &Function, sym: RuntimeSymbol) -> usize {
+        f.blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .filter(|i| {
+                matches!(
+                    i,
+                    Inst::Call {
+                        callee: CallTarget::Runtime(s),
+                        ..
+                    } if *s == sym
+                )
+            })
+            .count()
+    }
+
     /// **REP-40.** There is no second pipeline lowering, and this test is what
     /// makes deleting the first one safe.
     ///
@@ -6813,6 +7285,7 @@ mod tests {
                 receiver: Box::new(dummy()),
                 name: entry.name.to_string(),
                 lowering_symbol: None,
+                receiver_is_iterable: true,
                 args: (0..entry.arity()).map(|_| dummy()).collect(),
                 purity: entry.purity,
                 ty: unit,
@@ -6829,8 +7302,15 @@ mod tests {
         }
         // A catalog that stopped registering intrinsics would make the loop
         // vacuous, and the assertion above would then prove nothing.
+        //
+        // The floor **re-based at ADR-127**. It was written against 47 intrinsic
+        // rows, of which 23 were the `Seq` half that nothing could ever reach;
+        // the generic receiver deleted those and added the eight conversions, so
+        // the count is what it is now rather than what a duplicated table made
+        // it. `sorted_by_key` is not in it: it is a barrier, so it is a
+        // `RuntimeSymbol` row and the loop above skips it.
         assert!(
-            checked >= 40,
+            checked >= 31,
             "expected the pipeline combinators to be intrinsic rows; saw {checked}"
         );
     }

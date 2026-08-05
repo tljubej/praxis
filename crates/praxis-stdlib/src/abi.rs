@@ -401,6 +401,10 @@ runtime_symbols! {
     // `praxis_vec_unique` and `praxis_vec_frequencies` go through `DynamicKey`,
     // which answers "not equal" for a type with no `equals` instead of raising.
     VecSorted = "praxis_vec_sorted": (Ctx, Gc) -> Gc, AllocatesAndFaults;
+    // The key extractor is called once per element and it is arbitrary Praxis
+    // code, so this faults for two reasons where `praxis_vec_sorted` faults for
+    // one: an unorderable key, and whatever the closure itself raised.
+    VecSortedByKey = "praxis_vec_sorted_by_key": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     VecUnique = "praxis_vec_unique": (Ctx, Gc) -> Gc, Allocates;
     WriteStdout = "praxis_write_stdout": (Ctx, Gc) -> GcUnit, Pure;
 }

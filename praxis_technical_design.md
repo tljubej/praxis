@@ -693,15 +693,24 @@ Example entries:
 ```text
 Vec[T].push(T) -> Unit
 Vec[T].len() -> Int
-Vec[T].map((T) -> U) -> Vec[U]
+Iterable[T].map((T) -> U) -> Vec[U]
+Iterable[T].to_set() -> Set[T]
 Text.ints() -> Vec[Int]
 Map[K,V].get(K) -> Option[V]
 Grid[T].neighbors4(Point) -> Vec[Point]
 ```
 
-The two sequence rows answer `Vec`, not the `Seq[U]` they once wrote: §6.3's
-pipeline is eagerly materialized, so `Seq[T]` is a name for a fused chain's
-*intermediate* and never a row's result type (ADR-028 decision 2, ADR-126).
+The sequence rows answer `Vec`, not the `Seq[U]` they once wrote: §6.3's
+pipeline is eagerly materialized, so `Seq[T]` is never a row's result type
+(ADR-028 decision 2, ADR-126).
+
+`Iterable[T]` is a **receiver shape and not a type**: it is the ten things a
+`for` loop can walk, bound to what each yields, and no annotation names it
+(ADR-127). It is the one receiver the table does not unify with the call site's;
+what unifies is the item, against the same answer `for x in receiver` binds. A
+row constrains which of the ten it accepts by writing a shape there —
+`Iterable[(K, V)].to_map()` is "a `Map` or a `Counter`", because those are the
+two whose item is a pair.
 
 Every row is a method, including the ones that take no arguments, and every call
 site writes the parentheses: `v.len()`, `grid.width()`. There is no property form
@@ -752,6 +761,22 @@ a type constructor's brackets are told from a subscript's (ADR-065) and a
 line-leading `(` from an argument list's (ADR-049). So a subscript is written on
 one line with its receiver.
 
+**Every one of these but `Grid` converts to every other**, through §6.3's
+`to_vec`/`to_set`/`to_map`/`to_counter`/`to_deque`/`to_min_heap`/`to_max_heap`/
+`to_bitset` (ADR-127). The route out of any collection is a pipeline over it,
+and the route back in is naming what it becomes:
+
+```praxis
+var s = Set()
+s.insert(3)
+s.insert(1)
+var ordered = s.to_vec().sorted()
+var again = ordered.to_set()
+```
+
+There is no `to_grid()`: a grid needs a width, and an item sequence does not
+carry one.
+
 ### 6.2 Collection semantics
 
 `Counter[T]` behaves as a map whose absent values read as zero.
@@ -790,50 +815,88 @@ appends: `v[v.len()] = x` is an out-of-range fault, and `push` is the spelling
 that grows a sequence. A store is checked against the collection's element type,
 and a compound operator evaluates its receiver and every index once.
 
-### 6.3 Functional sequences
+#### Enumerating a keyed collection
 
-The language exposes lazy, compiler-known sequence pipelines without a user-visible iterator type.
+`Map` and `Counter` answer `keys()` and `values()` as two index-aligned `Vec`s,
+and `to_vec()` as the `(K, V)` pairs themselves — which is the only spelling that
+joins the two halves, and the one a pipeline over the collection yields:
 
 ```praxis
+var m = Map[Text, Int]()
+m["a"] = 1
+var pairs = m.to_vec()
+var loud = m.filter(|p| p.1 > 0).map(|p| p.0)
+```
+
+A pair is not orderable (ADR-045), so `pairs.sorted()` is an error and
+`pairs.sorted_by_key(|p| p.1)` is the spelling (§6.3).
+
+### 6.3 Functional sequences
+
+The language exposes compiler-known sequence pipelines without a user-visible iterator type. **A pipeline's receiver is anything a `for` loop can walk**, and it yields what the `for` loop's variable would bind (ADR-127):
+
+| Receiver | Item |
+| --- | --- |
+| `Vec[T]`, `Deque[T]`, `Set[T]`, `MinHeap[T]`, `MaxHeap[T]` | `T` |
+| `Range`, `BitSet` | `Int` |
+| `Text` | `Char` |
+| `Map[K, V]` | `(K, V)` |
+| `Counter[T]` | `(T, Int)` |
+
+```praxis
+var values = [3, -1, 4]
 var answer = values
     .filter(|x| x > 0)
     .map(|x| x * x)
     .sum()
+
+var counts = ["a", "b", "a"].frequencies()
+var loud = counts.filter(|p| p.1 > 1).map(|p| p.0)
 ```
 
-Initial operations:
+`Grid[T]` is not in the table: `grid.map(fn)` is §6.4's shape-preserving row and answers a `Grid`. A grid enters a pipeline through `grid.cells()` or `grid.positions()`.
 
-- `map`
-- `filter`
-- `filter_map` — the closure answers `Option[U]`; a `None` drops the element
-- `flat_map`
-- `fold`
-- `reduce`
-- `sum`
-- `product`
-- `count`
-- `any`
-- `all`
+**A pipeline's currency is `Vec`.** Every streaming stage answers a `Vec`, whatever the receiver was, and a program that wants a collection back says which one — `set.filter(p)` is a `Vec[T]` and `set.filter(p).to_set()` is a `Set[T]`. Iteration order is deterministic and seed-independent for every receiver, so a pipeline's answer is a function of its input alone.
+
+Streaming stages and sinks:
+
+- `map`, `filter`, `filter_map`, `flat_map`
+- `take`, `skip`, `take_while`
+- `enumerate`, `zip`
+- `fold`, `reduce`, `sum`, `product`, `count`
+- `any`, `all`
 - `find` — the first matching **element**, as `Option[T]`
 - `position` — the first matching element's **index**, as `Option[Int]`
-- `enumerate`
-- `zip`
-- `chunks`
-- `windows`
-- `take`
-- `skip`
-- `take_while`
-- `unique`
-- `frequencies`
-- `sorted`
-- `min`
-- `max`
-- `min_by`
-- `max_by`
+- `min`, `max`, `min_by`, `max_by`
 
-**There is no `collect`, and this is the one place the list is shorter than a Rust programmer expects.** A chain that ends on a streaming combinator materializes on its own — `v.map(f)` *is* a `Vec[U]`, and the compiler appends the materializing step whether or not anything is written to ask for it. So the spelling named a stage the compiler takes anyway, and `v.map(f).collect()` and `v.map(f)` compiled to the same loop (ADR-126). The method a lazy `Seq[T]` would need is the method to add if `Seq[T]` ever becomes a value; until then the pipeline has no laziness for it to end.
+Barriers — they need the whole sequence before answering, so they are runtime calls rather than fused stages, and a chain ends at one and begins again from its result:
 
-The compiler lowers pipelines into concrete internal adapters, then fuses common chains into loops. Every non-barrier combinator fuses into a single loop over the source — `v.map(f).filter(p).sum()` compiles to one loop with zero intermediate Vecs (ADR-029). A **barrier** needs the whole sequence before it can answer anything, so it is a runtime call rather than a fused stage: a chain ends at one and begins again from its result. `sorted`, `unique` and `frequencies` are implemented as barriers (REP-33). `chunks` and `windows` remain deferred — they answer `Vec[Vec[T]]`, which needs a rule for what the outer vector's element type is labelled with, and nothing in this document forces one.
+- `sorted`, `sorted_by_key`, `unique`, `frequencies`
+
+`sorted_by_key(|item| key)` is how a keyed collection orders its items: no composite is orderable (ADR-045), so a pipeline whose item is a pair has no `sorted`, and the closure extracts an orderable key from an item that is not.
+
+Conversions:
+
+- `to_vec()` — the item sequence as a `Vec`. On a `Vec` receiver this is the receiver itself, not a copy.
+- `to_set()` — a `Set[T]`, duplicates dropped and no order kept. `unique()` is the ordered answer to a different question: a `Vec[T]` in first-occurrence order.
+- `to_map()` — a `Map[K, V]`, on a pipeline whose item is a pair. Last wins.
+- `to_counter()` — a `Counter[T]`, on a pipeline whose item is a `(T, Int)` pair, taking each pair's count. `frequencies()` is the other direction: it *counts* occurrences rather than reading a count.
+- `to_deque()`, `to_min_heap()`, `to_max_heap()`, `to_bitset()` — the same for the remaining constructors. `to_bitset()` needs `Int` members and faults on a negative or oversized one, as `BitSet.insert` does.
+
+There is no `to_grid()`: a grid needs a width, and an item sequence does not carry one.
+
+```praxis
+var words = ["the", "cat", "the"]
+var tally = words.frequencies()
+var top = tally.to_vec().sorted_by_key(|p| 0 - p.1).take(5)
+var back = top.to_counter()
+```
+
+**There is no `collect`, and this is the one place the list is shorter than a Rust programmer expects.** A chain that ends on a streaming stage materializes on its own — `v.map(f)` *is* a `Vec[U]` — so the spelling named a step the compiler takes anyway (ADR-126). `to_vec` is not its return: for nine of its ten receivers it is the only way to reach a `Vec` at all.
+
+The compiler fuses every non-barrier chain into a single loop over the source (ADR-029). A receiver that indexes itself — `Vec`, `Deque`, `Range`, `Text` — is walked in place with no intermediate allocation; the rest are snapshotted once before the loop, which is what a `for` over them already does (ADR-127). `v.map(f).filter(p).sum()` is one loop with zero intermediate `Vec`s, and `v.map(f).to_set()` is one loop that inserts into the `Set` directly.
+
+`chunks` and `windows` remain deferred — they answer `Vec[Vec[T]]`, which needs a rule for what the outer vector's element type is labelled with, and nothing in this document forces one.
 
 ### 6.4 Grid
 

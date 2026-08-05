@@ -30,4 +30,6 @@ pub use prelude::{
     graph_helper, numeric_helper, GraphHelper, GraphParam, GraphResult, NumericHelper,
     GRAPH_HELPERS, NUMERIC_HELPERS, PRELUDE,
 };
-pub use type_pattern::{Bound, TypePattern};
+pub use type_pattern::{
+    is_pipeline_receiver, pattern_matches, Bound, TypePattern, PIPELINE_RECEIVERS,
+};

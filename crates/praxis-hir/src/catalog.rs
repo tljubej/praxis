@@ -75,40 +75,12 @@ pub fn lookup<'a>(
     catalog
         .entries()
         .iter()
-        .filter(|e| e.name == name && e.arity() == arity && pattern_matches(&e.receiver, &pattern))
+        .filter(|e| {
+            e.name == name
+                && e.arity() == arity
+                && praxis_stdlib::pattern_matches(&e.receiver, &pattern)
+        })
         .collect()
-}
-
-/// Whether a catalog receiver pattern accepts a concrete runtime pattern.
-///
-/// `Var("T")` in the catalog entry is a type-variable wildcard: it matches any
-/// concrete element (so `Vec[T].len()` matches `Vec[Int].len()`). All other
-/// variants require exact equality.
-fn pattern_matches(catalog_pat: &TypePattern, concrete_pat: &TypePattern) -> bool {
-    match (catalog_pat, concrete_pat) {
-        (TypePattern::Var { .. }, _) => true,
-        (
-            TypePattern::Collection { ctor: c1, args: a1 },
-            TypePattern::Collection { ctor: c2, args: a2 },
-        ) => {
-            c1 == c2
-                && a1.len() == a2.len()
-                && a1.iter().zip(a2).all(|(x, y)| pattern_matches(x, y))
-        }
-        // Tuples match element-wise (so a catalog `Tuple[Int, Int]` point
-        // pattern matches a concrete `(Int, Int)`).
-        (TypePattern::Tuple(a1), TypePattern::Tuple(a2)) => {
-            a1.len() == a2.len() && a1.iter().zip(a2).all(|(x, y)| pattern_matches(x, y))
-        }
-        // `Option[T]` matches through its argument, for the same reason a
-        // collection does. Spelled out rather than left to the equality
-        // fallback below so a catalog `Option[V]` accepts a concrete
-        // `Option[Int]`; `type_to_pattern` never produces one today (an enum
-        // is never a method receiver), and stating the rule is what keeps that
-        // from being an accident.
-        (TypePattern::Option(a), TypePattern::Option(b)) => pattern_matches(a, b),
-        _ => catalog_pat == concrete_pat,
-    }
 }
 
 fn map_scalar(s: praxis_types::ScalarType) -> PatternScalar {

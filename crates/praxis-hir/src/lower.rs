@@ -347,6 +347,17 @@ pub enum TypedExpr {
         receiver: Box<TypedExpr>,
         name: String,
         lowering_symbol: Option<praxis_stdlib::abi::RuntimeSymbol>,
+        /// Whether the resolved row's receiver is the generic
+        /// [`TypePattern::Iterable`](praxis_stdlib::TypePattern::Iterable)
+        /// (ADR-127).
+        ///
+        /// Only a row that is *also* a `lowering_symbol` reads it, and what it
+        /// says is: the wrapper needs a real `Vec` and the receiver may be any
+        /// of ten things, so MIR materializes it first. The alternative was a
+        /// list of barrier symbols in the MIR builder, which is a second
+        /// statement of a fact the catalog already holds — and the kind that
+        /// goes stale the day an eleventh row is added.
+        receiver_is_iterable: bool,
         args: Vec<TypedExpr>,
         purity: praxis_stdlib::Purity,
         ty: Type,
@@ -2295,6 +2306,7 @@ impl<'a> Lowerer<'a> {
                 receiver: Box::new(receiver),
                 name,
                 lowering_symbol: None,
+                receiver_is_iterable: false,
                 args,
                 purity: praxis_stdlib::Purity::Impure,
                 ty,
@@ -2328,6 +2340,10 @@ impl<'a> Lowerer<'a> {
             receiver: Box::new(receiver),
             name,
             lowering_symbol,
+            receiver_is_iterable: matches!(
+                resolved.entry.receiver,
+                praxis_stdlib::TypePattern::Iterable { .. }
+            ),
             args,
             purity: resolved.entry.purity,
             ty,
@@ -2530,6 +2546,7 @@ impl<'a> Lowerer<'a> {
                 receiver: Box::new(receiver),
                 name: praxis_stdlib::catalog::INDEX_READ.to_string(),
                 lowering_symbol: None,
+                receiver_is_iterable: false,
                 args,
                 purity: praxis_stdlib::Purity::Impure,
                 ty: self.node_ty(i.syntax()),
@@ -2550,6 +2567,10 @@ impl<'a> Lowerer<'a> {
             receiver: Box::new(receiver),
             name: praxis_stdlib::catalog::INDEX_READ.to_string(),
             lowering_symbol,
+            receiver_is_iterable: matches!(
+                resolved.entry.receiver,
+                praxis_stdlib::TypePattern::Iterable { .. }
+            ),
             args,
             purity: resolved.entry.purity,
             ty: self.deep(resolved.result),
@@ -3164,8 +3185,26 @@ fn pattern_to_type(db: &mut TypeDb, p: &TypePattern) -> Type {
             let elem = pattern_to_type(db, inner);
             db.option_of(elem)
         }
+        TypePattern::Iterable { .. } => iterable_is_not_a_type(),
         TypePattern::Opaque => db.fresh_var(),
     }
+}
+
+/// [`TypePattern::Iterable`] names ten types, so there is no one type to
+/// instantiate it as (ADR-127 decision 1).
+///
+/// Reaching here is a catalog authoring mistake and not a program's, and it is
+/// one `MethodCatalogBuilder::finish` already refuses: an `Iterable` may appear
+/// only as a row's receiver, and a receiver is bound by `Inferer::bind_receiver`
+/// — which unifies the row's *item* against `capability::iter_item` and never
+/// instantiates the receiver at all.
+fn iterable_is_not_a_type() -> ! {
+    unreachable!(
+        "internal compiler error: an `Iterable` pattern reached type \
+         instantiation. It is a receiver shape, never a parameter or a result — \
+         `MethodCatalogBuilder::finish` refuses a row that writes one elsewhere, \
+         and `Inferer::bind_receiver` is the only thing that reads one."
+    )
 }
 
 /// Like [`pattern_to_type`], but shares a single type variable for each named
@@ -3222,6 +3261,7 @@ fn pattern_to_type_named_impl(
             let elem = pattern_to_type_named_impl(db, inner, names);
             db.option_of(elem)
         }
+        TypePattern::Iterable { .. } => iterable_is_not_a_type(),
         TypePattern::Opaque => db.fresh_var(),
     }
 }

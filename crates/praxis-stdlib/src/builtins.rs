@@ -90,64 +90,56 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(grid_transpose())
         .entry(grid_rotate_left())
         .entry(grid_rotate_right())
-        // Pipeline combinators (M8-WS8, §6.3). These are intrinsics lowered by
-        // the compiler into fused loops; they accept a closure and return either
-        // a Seq[T] (streaming) or a scalar/Vec (sink). Defined on Vec[T] and
-        // Seq[T] receivers so `v.map(f)` works directly and chains fuse.
-        .entry(seq_map_on_vec())
-        .entry(seq_map_on_seq())
-        .entry(seq_filter_on_vec())
-        .entry(seq_filter_on_seq())
-        .entry(seq_fold_on_vec())
-        .entry(seq_fold_on_seq())
-        .entry(seq_sum_on_vec())
-        .entry(seq_sum_on_seq())
-        .entry(seq_count_on_vec())
-        .entry(seq_count_on_seq())
-        .entry(seq_count_if_on_vec())
-        .entry(seq_count_if_on_seq())
+        // Pipeline combinators (M8-WS8, §6.3, ADR-127). Intrinsics the compiler
+        // fuses into a single loop over the source. **One row apiece**, on the
+        // generic `Iterable` receiver: the language already had a complete answer
+        // to "what can I iterate and what does it yield" — `capability::iter_item`
+        // for eleven collections plus `Text` — and this is the pipeline reading
+        // it instead of keeping a second, much smaller one. The `Vec`/`Seq` pair
+        // these replace was forty-nine rows of which twenty-three were dead.
+        .entry(seq_map())
+        .entry(seq_filter())
+        .entry(seq_fold())
+        .entry(seq_sum())
+        .entry(seq_count())
+        .entry(seq_count_if())
         // The barrier combinators (§6.3). Runtime symbols rather than
-        // intrinsics, and on `Vec[T]` only — see the block comment above their
-        // definitions, including why `chunks`/`windows` are still absent.
-        .entry(seq_sorted_on_vec())
-        .entry(seq_unique_on_vec())
-        .entry(seq_frequencies_on_vec())
+        // intrinsics — see the block comment above their definitions, including
+        // why `chunks`/`windows` are still absent.
+        .entry(seq_sorted())
+        .entry(seq_sorted_by_key())
+        .entry(seq_unique())
+        .entry(seq_frequencies())
         // M8-WS11: the remaining non-barrier combinators. Each is an intrinsic
         // fused by the MIR pipeline recognizer.
-        .entry(seq_take_on_vec())
-        .entry(seq_take_on_seq())
-        .entry(seq_skip_on_vec())
-        .entry(seq_skip_on_seq())
-        .entry(seq_take_while_on_vec())
-        .entry(seq_take_while_on_seq())
-        .entry(seq_enumerate_on_vec())
-        .entry(seq_enumerate_on_seq())
-        .entry(seq_zip_on_vec())
-        .entry(seq_zip_on_seq())
-        .entry(seq_flat_map_on_vec())
-        .entry(seq_flat_map_on_seq())
-        .entry(seq_filter_map_on_vec())
-        .entry(seq_filter_map_on_seq())
-        .entry(seq_product_on_vec())
-        .entry(seq_product_on_seq())
-        .entry(seq_min_on_vec())
-        .entry(seq_min_on_seq())
-        .entry(seq_max_on_vec())
-        .entry(seq_max_on_seq())
-        .entry(seq_min_by_on_vec())
-        .entry(seq_min_by_on_seq())
-        .entry(seq_max_by_on_vec())
-        .entry(seq_max_by_on_seq())
-        .entry(seq_any_on_vec())
-        .entry(seq_any_on_seq())
-        .entry(seq_all_on_vec())
-        .entry(seq_all_on_seq())
-        .entry(seq_find_on_vec())
-        .entry(seq_find_on_seq())
-        .entry(seq_position_on_vec())
-        .entry(seq_position_on_seq())
-        .entry(seq_reduce_on_vec())
-        .entry(seq_reduce_on_seq())
+        .entry(seq_take())
+        .entry(seq_skip())
+        .entry(seq_take_while())
+        .entry(seq_enumerate())
+        .entry(seq_zip())
+        .entry(seq_flat_map())
+        .entry(seq_filter_map())
+        .entry(seq_product())
+        .entry(seq_min())
+        .entry(seq_max())
+        .entry(seq_min_by())
+        .entry(seq_max_by())
+        .entry(seq_any())
+        .entry(seq_all())
+        .entry(seq_find())
+        .entry(seq_position())
+        .entry(seq_reduce())
+        // The conversions (ADR-127 decision 4). Fused sinks, one per collection
+        // with a constructor — a pipeline's currency is `Vec`, and a program
+        // that wants a collection back says which one.
+        .entry(seq_to_vec())
+        .entry(seq_to_set())
+        .entry(seq_to_map())
+        .entry(seq_to_counter())
+        .entry(seq_to_deque())
+        .entry(seq_to_min_heap())
+        .entry(seq_to_max_heap())
+        .entry(seq_to_bitset())
         .entry(text_len())
         .entry(text_is_empty())
         .entry(text_get())
@@ -1805,20 +1797,29 @@ fn grid_rotate_right() -> MethodEntry {
     }
 }
 
-// --- Pipeline combinators (M8-WS8, §6.3) ---------------------------------
-// The functional-sequence pipeline. `Seq[T]` is a compiler-internal lazy type
-// (no runtime representation); the combinators are intrinsics the compiler
-// fuses into a single loop over the source. Streaming combinators (map/filter)
-// are defined on BOTH Vec[T] and Seq[T] so a chain can start on a concrete
-// collection and continue on Seq. Sinks (sum/count/fold) terminate, and a chain
-// that ends without one materializes anyway (ADR-126).
+// --- Pipeline combinators (M8-WS8, §6.3, ADR-127) -------------------------
+// The functional-sequence pipeline: intrinsics the compiler fuses into a single
+// loop over the source. Sinks (sum/count/fold) terminate, and a chain that ends
+// without one materializes anyway (ADR-126).
+//
+// **A pipeline's receiver is anything a `for` loop can walk**, and it yields
+// what the `for` loop's variable would bind (ADR-127 decision 1). One row per
+// combinator, on `TypePattern::Iterable`, whose ten accepted receivers are
+// `PIPELINE_RECEIVERS` plus `Text`. What replaced: a `Vec[T]` row and a `Seq[T]`
+// twin apiece, of which every `Seq` twin was dead — no catalog row ever answered
+// a `Seq`, so nothing could reach one.
+//
+// The receiver generalizes; **two parameters deliberately do not.** `zip`'s
+// argument is a `Vec[U]` and `flat_map`'s closure answers one, because the fused
+// loop indexes each of them with `praxis_vec_len`/`praxis_vec_get` directly and
+// neither has an `IterPlan` in scope. `m.zip(s)` on a `Set` is a unification
+// failure at the argument and the spelling is `m.zip(s.to_vec())`;
+// `MethodCatalogBuilder::finish` refuses a row that generalizes either.
 
-/// The `Seq[T]` receiver pattern (compiler-internal, §6.3).
-fn seq_of_t() -> TypePattern {
-    TypePattern::Collection {
-        ctor: CollectionCtor::Seq,
-        args: vec![TypePattern::var("T")],
-    }
+/// The generic pipeline receiver at an unconstrained item — `map`, `filter`,
+/// `count` and the rest of the twenty-three fused rows.
+fn iterable_of_t() -> TypePattern {
+    TypePattern::iterable(TypePattern::var("T"))
 }
 
 /// `(T) -> U` — the shape of `map`'s closure argument.
@@ -1861,22 +1862,9 @@ fn acc_t_to_acc() -> TypePattern {
     }
 }
 
-fn seq_map_on_vec() -> MethodEntry {
+fn seq_map() -> MethodEntry {
     MethodEntry {
-        receiver: vec_of_t(),
-        name: "map",
-        params: vec![t_to_u()],
-        result: vec_of_u(),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_map"),
-        doc: "Apply a function to each element, collecting into a Vec.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_map_on_seq() -> MethodEntry {
-    MethodEntry {
-        receiver: seq_of_t(),
+        receiver: iterable_of_t(),
         name: "map",
         params: vec![t_to_u()],
         result: vec_of_u(),
@@ -1897,9 +1885,9 @@ fn vec_of_u() -> TypePattern {
     }
 }
 
-fn seq_filter_on_vec() -> MethodEntry {
+fn seq_filter() -> MethodEntry {
     MethodEntry {
-        receiver: vec_of_t(),
+        receiver: iterable_of_t(),
         name: "filter",
         params: vec![t_to_bool()],
         result: vec_of_t(),
@@ -1910,22 +1898,9 @@ fn seq_filter_on_vec() -> MethodEntry {
     }
 }
 
-fn seq_filter_on_seq() -> MethodEntry {
+fn seq_fold() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_t(),
-        name: "filter",
-        params: vec![t_to_bool()],
-        result: vec_of_t(),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_filter"),
-        doc: "Keep elements satisfying a predicate, collecting into a Vec.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_fold_on_vec() -> MethodEntry {
-    MethodEntry {
-        receiver: vec_of_t(),
+        receiver: iterable_of_t(),
         name: "fold",
         params: vec![TypePattern::var("Acc"), acc_t_to_acc()],
         result: TypePattern::var("Acc"),
@@ -1936,22 +1911,9 @@ fn seq_fold_on_vec() -> MethodEntry {
     }
 }
 
-fn seq_fold_on_seq() -> MethodEntry {
+fn seq_sum() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_t(),
-        name: "fold",
-        params: vec![TypePattern::var("Acc"), acc_t_to_acc()],
-        result: TypePattern::var("Acc"),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_fold"),
-        doc: "Reduce elements left-to-right with an accumulator and combining closure.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_sum_on_vec() -> MethodEntry {
-    MethodEntry {
-        receiver: vec_of_int_elem(),
+        receiver: iterable_of_int_elem(),
         name: "sum",
         params: vec![],
         result: TypePattern::Scalar(ScalarType::Int),
@@ -1962,22 +1924,9 @@ fn seq_sum_on_vec() -> MethodEntry {
     }
 }
 
-fn seq_sum_on_seq() -> MethodEntry {
+fn seq_count() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_int_elem(),
-        name: "sum",
-        params: vec![],
-        result: TypePattern::Scalar(ScalarType::Int),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_sum"),
-        doc: "Sum the (Int) elements.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_count_on_vec() -> MethodEntry {
-    MethodEntry {
-        receiver: vec_of_t(),
+        receiver: iterable_of_t(),
         name: "count",
         params: vec![],
         result: TypePattern::Scalar(ScalarType::Int),
@@ -1992,41 +1941,15 @@ fn seq_count_on_vec() -> MethodEntry {
 /// (REP-18). A second *arity* of one name, which the catalog's
 /// `(receiver, name, arity)` key has always allowed: `count()` is the element
 /// count and `count(pred)` the matching-element count.
-fn seq_count_if_on_vec() -> MethodEntry {
+fn seq_count_if() -> MethodEntry {
     MethodEntry {
-        receiver: vec_of_t(),
+        receiver: iterable_of_t(),
         name: "count",
         params: vec![t_to_bool()],
         result: TypePattern::Scalar(ScalarType::Int),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_count"),
         doc: "Number of elements satisfying the predicate.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_count_if_on_seq() -> MethodEntry {
-    MethodEntry {
-        receiver: seq_of_t(),
-        name: "count",
-        params: vec![t_to_bool()],
-        result: TypePattern::Scalar(ScalarType::Int),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_count"),
-        doc: "Number of elements satisfying the predicate.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_count_on_seq() -> MethodEntry {
-    MethodEntry {
-        receiver: seq_of_t(),
-        name: "count",
-        params: vec![],
-        result: TypePattern::Scalar(ScalarType::Int),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_count"),
-        doc: "Number of elements.",
         stability: Stability::Stable,
     }
 }
@@ -2050,13 +1973,18 @@ fn seq_count_on_seq() -> MethodEntry {
 // "`sorted` at arity 0 lowers as an intrinsic and no runtime symbol, but the
 // pipeline recognizer declines it — it has no lowering".
 //
-// **Registered on `Vec[T]` only, not on `Seq[T]`.** A runtime wrapper needs a
-// materialized Vec, and no catalog row produces a `Seq` result today — every
-// combinator's result pattern is `vec_of_t`/`vec_of_u` — so the `*_on_seq`
-// half would be unreachable. `recognize_pipeline` already ends a fused chain at
-// an unclassified `MethodCall` and starts a fresh one from its result, which is
-// exactly what a barrier means: `pairs.map(f).sorted()` fuses the map into a
-// collect, calls the wrapper, and `sorted(…).zip(…)` starts again.
+// `recognize_pipeline` already ends a fused chain at an unclassified
+// `MethodCall` and starts a fresh one from its result, which is exactly what a
+// barrier means: `pairs.map(f).sorted()` fuses the map into a collect, calls the
+// wrapper, and `sorted(…).zip(…)` starts again.
+//
+// **The receiver is `Iterable` like everything else (ADR-127 decision 3), and
+// the lowering materializes it first.** A wrapper needs a real `VecPayload`, so
+// `build::emit_iter_vec` puts the plan's snapshot — or, for a receiver with no
+// snapshot symbol, a materializing walk — in front of the call. Leaving the
+// three on `Vec[T]` was the alternative and it was rejected: it makes
+// `set.map(f).sorted()` legal and `set.sorted()` a `Y110`, which is a rule
+// nobody can hold in their head.
 //
 // **`chunks` and `windows` are still deferred, and here is the reason.** Both
 // answer `Vec[Vec[T]]`, so their wrapper has to label the *outer* Vec with
@@ -2074,12 +2002,9 @@ fn seq_count_on_seq() -> MethodEntry {
 /// ordering rule lives — is applied to the receiver *type*, where it would be
 /// wrong. A `Vec` of unorderable things is a perfectly good `Vec` right up until
 /// someone sorts it.
-fn seq_sorted_on_vec() -> MethodEntry {
+fn seq_sorted() -> MethodEntry {
     MethodEntry {
-        receiver: TypePattern::Collection {
-            ctor: CollectionCtor::Vec,
-            args: vec![TypePattern::of_kind("T", crate::CapKind::Ord)],
-        },
+        receiver: TypePattern::iterable(TypePattern::of_kind("T", crate::CapKind::Ord)),
         name: "sorted",
         params: vec![],
         result: vec_of_t(),
@@ -2096,12 +2021,9 @@ fn seq_sorted_on_vec() -> MethodEntry {
 /// `HashStable` and not `Hash`: sameness is decided by the descriptor's `hash`
 /// and `equals`, so an element that can change after it has been seen would not
 /// be recognized the second time (D4, TY-32).
-fn seq_unique_on_vec() -> MethodEntry {
+fn seq_unique() -> MethodEntry {
     MethodEntry {
-        receiver: TypePattern::Collection {
-            ctor: CollectionCtor::Vec,
-            args: vec![TypePattern::of_kind("T", crate::CapKind::HashStable)],
-        },
+        receiver: TypePattern::iterable(TypePattern::of_kind("T", crate::CapKind::HashStable)),
         name: "unique",
         params: vec![],
         result: vec_of_t(),
@@ -2120,12 +2042,9 @@ fn seq_unique_on_vec() -> MethodEntry {
 /// allowed to hold anything, and it is the *result* that has keys. So the bound
 /// is written on the row, where `MethodCatalogBuilder::finish` will refuse it if
 /// it ever contradicts another.
-fn seq_frequencies_on_vec() -> MethodEntry {
+fn seq_frequencies() -> MethodEntry {
     MethodEntry {
-        receiver: TypePattern::Collection {
-            ctor: CollectionCtor::Vec,
-            args: vec![TypePattern::of_kind("T", crate::CapKind::HashStable)],
-        },
+        receiver: TypePattern::iterable(TypePattern::of_kind("T", crate::CapKind::HashStable)),
         name: "frequencies",
         params: vec![],
         result: counter_of_t(),
@@ -2159,9 +2078,9 @@ fn t_to_vec_u() -> TypePattern {
 
 // Streaming stages ---------------------------------------------------------
 
-fn seq_take_on_vec() -> MethodEntry {
+fn seq_take() -> MethodEntry {
     MethodEntry {
-        receiver: vec_of_t(),
+        receiver: iterable_of_t(),
         name: "take",
         params: vec![TypePattern::Scalar(ScalarType::Int)],
         result: vec_of_t(),
@@ -2172,22 +2091,9 @@ fn seq_take_on_vec() -> MethodEntry {
     }
 }
 
-fn seq_take_on_seq() -> MethodEntry {
+fn seq_skip() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_t(),
-        name: "take",
-        params: vec![TypePattern::Scalar(ScalarType::Int)],
-        result: vec_of_t(),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_take"),
-        doc: "Keep at most the first n elements.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_skip_on_vec() -> MethodEntry {
-    MethodEntry {
-        receiver: vec_of_t(),
+        receiver: iterable_of_t(),
         name: "skip",
         params: vec![TypePattern::Scalar(ScalarType::Int)],
         result: vec_of_t(),
@@ -2198,35 +2104,9 @@ fn seq_skip_on_vec() -> MethodEntry {
     }
 }
 
-fn seq_skip_on_seq() -> MethodEntry {
+fn seq_take_while() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_t(),
-        name: "skip",
-        params: vec![TypePattern::Scalar(ScalarType::Int)],
-        result: vec_of_t(),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_skip"),
-        doc: "Drop the first n elements.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_take_while_on_vec() -> MethodEntry {
-    MethodEntry {
-        receiver: vec_of_t(),
-        name: "take_while",
-        params: vec![t_to_bool()],
-        result: vec_of_t(),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_take_while"),
-        doc: "Keep elements until the predicate is false.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_take_while_on_seq() -> MethodEntry {
-    MethodEntry {
-        receiver: seq_of_t(),
+        receiver: iterable_of_t(),
         name: "take_while",
         params: vec![t_to_bool()],
         result: vec_of_t(),
@@ -2271,9 +2151,9 @@ fn vec_of_t_and_u() -> TypePattern {
     }
 }
 
-fn seq_enumerate_on_vec() -> MethodEntry {
+fn seq_enumerate() -> MethodEntry {
     MethodEntry {
-        receiver: vec_of_t(),
+        receiver: iterable_of_t(),
         name: "enumerate",
         params: vec![],
         result: vec_of_index_and_t(),
@@ -2284,22 +2164,9 @@ fn seq_enumerate_on_vec() -> MethodEntry {
     }
 }
 
-fn seq_enumerate_on_seq() -> MethodEntry {
+fn seq_zip() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_t(),
-        name: "enumerate",
-        params: vec![],
-        result: vec_of_index_and_t(),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_enumerate"),
-        doc: "Pair each element with its index.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_zip_on_vec() -> MethodEntry {
-    MethodEntry {
-        receiver: vec_of_t(),
+        receiver: iterable_of_t(),
         name: "zip",
         params: vec![vec_of_u()],
         result: vec_of_t_and_u(),
@@ -2310,22 +2177,9 @@ fn seq_zip_on_vec() -> MethodEntry {
     }
 }
 
-fn seq_zip_on_seq() -> MethodEntry {
+fn seq_flat_map() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_t(),
-        name: "zip",
-        params: vec![vec_of_u()],
-        result: vec_of_t_and_u(),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_zip"),
-        doc: "Pair elements with another sequence, stopping at the shorter length.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_flat_map_on_vec() -> MethodEntry {
-    MethodEntry {
-        receiver: vec_of_t(),
+        receiver: iterable_of_t(),
         name: "flat_map",
         params: vec![t_to_vec_u()],
         result: vec_of_u(),
@@ -2336,35 +2190,9 @@ fn seq_flat_map_on_vec() -> MethodEntry {
     }
 }
 
-fn seq_flat_map_on_seq() -> MethodEntry {
+fn seq_filter_map() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_t(),
-        name: "flat_map",
-        params: vec![t_to_vec_u()],
-        result: vec_of_u(),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_flat_map"),
-        doc: "Map each element to a Vec and concatenate the results.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_filter_map_on_vec() -> MethodEntry {
-    MethodEntry {
-        receiver: vec_of_t(),
-        name: "filter_map",
-        params: vec![t_to_option_u()],
-        result: vec_of_u(),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_filter_map"),
-        doc: "Map each element to an Option and keep the Some payloads.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_filter_map_on_seq() -> MethodEntry {
-    MethodEntry {
-        receiver: seq_of_t(),
+        receiver: iterable_of_t(),
         name: "filter_map",
         params: vec![t_to_option_u()],
         result: vec_of_u(),
@@ -2389,27 +2217,19 @@ fn seq_filter_map_on_seq() -> MethodEntry {
 // known* is pinned to `Int` rather than merely allowed: `v.map(f).sum()` pins the
 // closure's result.
 
-/// `Vec[Int]`, spelled as a bounded variable so the entry still *matches* a
-/// receiver whose element is `Bool` or `Float` and rejects it with
+/// An iterable of `Int`s, spelled as a bounded variable so the entry still
+/// *matches* a receiver whose item is `Bool` or `Float` and rejects it with
 /// `expected Int, found …` instead of "no method `sum` on this type".
-fn vec_of_int_elem() -> TypePattern {
-    TypePattern::Collection {
-        ctor: CollectionCtor::Vec,
-        args: vec![TypePattern::is_scalar("T", ScalarType::Int)],
-    }
+///
+/// Written once for all ten receivers rather than once per receiver, which is
+/// what keeps the bound from drifting between them (ADR-127 decision 1).
+fn iterable_of_int_elem() -> TypePattern {
+    TypePattern::iterable(TypePattern::is_scalar("T", ScalarType::Int))
 }
 
-/// The `Seq` half of [`vec_of_int_elem`].
-fn seq_of_int_elem() -> TypePattern {
-    TypePattern::Collection {
-        ctor: CollectionCtor::Seq,
-        args: vec![TypePattern::is_scalar("T", ScalarType::Int)],
-    }
-}
-
-fn seq_product_on_vec() -> MethodEntry {
+fn seq_product() -> MethodEntry {
     MethodEntry {
-        receiver: vec_of_int_elem(),
+        receiver: iterable_of_int_elem(),
         name: "product",
         params: vec![],
         result: TypePattern::Scalar(ScalarType::Int),
@@ -2420,22 +2240,9 @@ fn seq_product_on_vec() -> MethodEntry {
     }
 }
 
-fn seq_product_on_seq() -> MethodEntry {
+fn seq_min() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_int_elem(),
-        name: "product",
-        params: vec![],
-        result: TypePattern::Scalar(ScalarType::Int),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_product"),
-        doc: "Multiply the (Int) elements.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_min_on_vec() -> MethodEntry {
-    MethodEntry {
-        receiver: vec_of_int_elem(),
+        receiver: iterable_of_int_elem(),
         name: "min",
         params: vec![],
         result: TypePattern::Scalar(ScalarType::Int),
@@ -2446,22 +2253,9 @@ fn seq_min_on_vec() -> MethodEntry {
     }
 }
 
-fn seq_min_on_seq() -> MethodEntry {
+fn seq_max() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_int_elem(),
-        name: "min",
-        params: vec![],
-        result: TypePattern::Scalar(ScalarType::Int),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_min"),
-        doc: "Smallest (Int) element. Faults on an empty sequence (D1).",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_max_on_vec() -> MethodEntry {
-    MethodEntry {
-        receiver: vec_of_int_elem(),
+        receiver: iterable_of_int_elem(),
         name: "max",
         params: vec![],
         result: TypePattern::Scalar(ScalarType::Int),
@@ -2472,197 +2266,305 @@ fn seq_max_on_vec() -> MethodEntry {
     }
 }
 
-fn seq_max_on_seq() -> MethodEntry {
+fn seq_min_by() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_int_elem(),
-        name: "max",
+        receiver: iterable_of_t(),
+        name: "min_by",
+        params: vec![t_t_to_bool()],
+        result: TypePattern::var("T"),
+        purity: Purity::Pure,
+        lowering: MethodLowering::Intrinsic("seq_min_by"),
+        doc: "Smallest element per a (T,T)->Bool \"less-than\" comparator.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_max_by() -> MethodEntry {
+    MethodEntry {
+        receiver: iterable_of_t(),
+        name: "max_by",
+        params: vec![t_t_to_bool()],
+        result: TypePattern::var("T"),
+        purity: Purity::Pure,
+        lowering: MethodLowering::Intrinsic("seq_max_by"),
+        doc: "Largest element per a (T,T)->Bool \"less-than\" comparator.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_any() -> MethodEntry {
+    MethodEntry {
+        receiver: iterable_of_t(),
+        name: "any",
+        params: vec![t_to_bool()],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        lowering: MethodLowering::Intrinsic("seq_any"),
+        doc: "True if any element satisfies the predicate (short-circuits).",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_all() -> MethodEntry {
+    MethodEntry {
+        receiver: iterable_of_t(),
+        name: "all",
+        params: vec![t_to_bool()],
+        result: TypePattern::Scalar(ScalarType::Bool),
+        purity: Purity::Pure,
+        lowering: MethodLowering::Intrinsic("seq_all"),
+        doc: "True if all elements satisfy the predicate (short-circuits).",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_find() -> MethodEntry {
+    MethodEntry {
+        receiver: iterable_of_t(),
+        name: "find",
+        params: vec![t_to_bool()],
+        result: TypePattern::Option(Box::new(TypePattern::var("T"))),
+        purity: Purity::Pure,
+        lowering: MethodLowering::Intrinsic("seq_find"),
+        doc: "The first matching element, or None.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_position() -> MethodEntry {
+    MethodEntry {
+        receiver: iterable_of_t(),
+        name: "position",
+        params: vec![t_to_bool()],
+        result: TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Int))),
+        purity: Purity::Pure,
+        lowering: MethodLowering::Intrinsic("seq_position"),
+        doc: "The index of the first matching element, or None.",
+        stability: Stability::Stable,
+    }
+}
+
+fn seq_reduce() -> MethodEntry {
+    MethodEntry {
+        receiver: iterable_of_t(),
+        name: "reduce",
+        params: vec![acc_t_to_acc()],
+        result: TypePattern::var("T"),
+        purity: Purity::Pure,
+        lowering: MethodLowering::Intrinsic("seq_reduce"),
+        doc: "Reduce left-to-right, seeded with the first element.",
+        stability: Stability::Stable,
+    }
+}
+
+/// `sorted_by_key(f)` — a new `Vec` ordered by the key `f` extracts (ADR-127
+/// decision 5).
+///
+/// **A keyed collection cannot order its own items.** ADR-045 decided that no
+/// composite is orderable, because MIR had one integer compare and `(1, 2) < (1,
+/// 3)` would have compared two schema pointers — so the moment a pipeline's item
+/// is a pair, which is the moment its source is a `Map` or a `Counter`, `sorted`
+/// is unavailable and "the five most common values" has no spelling.
+///
+/// So the `Ord` bound is on the **extracted key** rather than on the element,
+/// and the composite-ordering question ADR-045 deferred stays deferred.
+///
+/// A barrier like `sorted`, and for the same reason: it needs the whole sequence
+/// before it can answer its first element. Its receiver is `Iterable`, so
+/// `build::emit_iter_vec` materializes it in front of the wrapper.
+fn seq_sorted_by_key() -> MethodEntry {
+    MethodEntry {
+        receiver: iterable_of_t(),
+        name: "sorted_by_key",
+        params: vec![TypePattern::Function {
+            params: vec![TypePattern::var("T")],
+            result: Box::new(TypePattern::of_kind("K", crate::CapKind::Ord)),
+        }],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecSortedByKey),
+        doc: "A new Vec ordered by the key the closure extracts.",
+        stability: Stability::Stable,
+    }
+}
+
+// --- the conversions (ADR-127 decision 4) ---------------------------------
+//
+// **A pipeline's currency is `Vec`**: every streaming stage answers one,
+// whatever the receiver was, and a program that wants a collection back says
+// which one. `set.filter(p)` is a `Vec[T]`; `set.filter(p).to_set()` is a
+// `Set[T]`. One sentence answers "what does `filter` return" for all ten
+// receivers, and it is answerable without knowing which receiver you are on —
+// which is what decision 6 declined `map_values` and the shape-preserving family
+// to keep.
+//
+// Each is a **fused sink**, not a barrier: `Sink::CollectInto`'s accumulator is
+// the target collection, so `v.map(f).to_set()` is one loop with no intermediate
+// `Vec`. The per-element step is one wrapper that already exists.
+//
+// **The set is closed at "every collection with a constructor", and that is the
+// point.** The ask named `Set`/`Map`/`Counter`; the last four are here because
+// leaving them out is what creates an asymmetry decision 6 would then have to
+// defend — `deque.filter(p)` answering a `Vec` with no way back to a `Deque`,
+// and no way to build a heap from a sequence without a `while` loop. `Grid` is
+// the one collection with no row: a grid needs a width, and a flat item sequence
+// does not carry one.
+
+/// `to_vec()` — the item sequence as a `Vec`.
+///
+/// **This is not `collect` coming back.** ADR-126 deleted `collect` because it
+/// "named a step the compiler takes anyway" — a chain ending on a stage already
+/// materializes. For nine of `to_vec`'s ten receivers it names a step the
+/// compiler does **not** take: `s.to_vec()` is the only way to get a `Vec[T]` out
+/// of a `Set`, and `m.to_vec()` the only way to get `Vec[(K, V)]` out of a `Map`,
+/// where `keys()` and `values()` answer two aligned halves and nothing joins
+/// them.
+///
+/// On a `Vec` receiver it degenerates to the identity, and it answers **the same
+/// reference**, not a copy. That is the second half of ADR-126 decision 2 kept:
+/// that decision declined to leave a shallow copy behind "under a name that does
+/// not mention it", and this name does not mention one either.
+fn seq_to_vec() -> MethodEntry {
+    MethodEntry {
+        receiver: iterable_of_t(),
+        name: "to_vec",
         params: vec![],
-        result: TypePattern::Scalar(ScalarType::Int),
+        result: vec_of_t(),
         purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_max"),
-        doc: "Largest (Int) element. Faults on an empty sequence (D1).",
+        lowering: MethodLowering::Intrinsic("seq_to_vec"),
+        doc: "The items as a Vec. On a Vec receiver this is the receiver itself.",
         stability: Stability::Stable,
     }
 }
 
-fn seq_min_by_on_vec() -> MethodEntry {
+/// `to_set()` — a `Set[T]`, duplicates dropped and no order kept.
+///
+/// `HashStable` for the reason every key rule is: an element that can change
+/// after it is stored moves its own bucket without moving the entry, and cannot
+/// be found again (D4, TY-32). The bound is the row's own because
+/// `require_collection_invariants` asks about the *receiver*, and here it is the
+/// **result** that has the keys — the same shape `frequencies` established.
+///
+/// Not the same question as `unique()`, and the reason is worth writing next to
+/// both: `unique` answers a `Vec` in first-occurrence order, and a `Set` has no
+/// order to preserve.
+fn seq_to_set() -> MethodEntry {
     MethodEntry {
-        receiver: vec_of_t(),
-        name: "min_by",
-        params: vec![t_t_to_bool()],
-        result: TypePattern::var("T"),
+        receiver: TypePattern::iterable(TypePattern::of_kind("T", crate::CapKind::HashStable)),
+        name: "to_set",
+        params: vec![],
+        result: set_of_t(),
         purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_min_by"),
-        doc: "Smallest element per a (T,T)->Bool \"less-than\" comparator.",
+        lowering: MethodLowering::Intrinsic("seq_to_set"),
+        doc: "A Set holding these items, duplicates dropped.",
         stability: Stability::Stable,
     }
 }
 
-fn seq_min_by_on_seq() -> MethodEntry {
+/// `to_map()` — a `Map[K, V]`, on a pipeline whose item is a pair.
+///
+/// **The receiver pattern says "a pair" rather than prose saying it**, so
+/// `[1, 2].to_map()` is a unification failure at the method name — "expected
+/// `(K, V)`, found `Int`" — and not a row that resolves and then faults. That is
+/// the whole of why `TypePattern::Iterable` carries an item pattern at all.
+///
+/// Duplicate keys resolve last-wins, which is `insert`'s existing rule.
+fn seq_to_map() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_t(),
-        name: "min_by",
-        params: vec![t_t_to_bool()],
-        result: TypePattern::var("T"),
+        receiver: TypePattern::iterable(TypePattern::Tuple(vec![
+            TypePattern::of_kind("K", crate::CapKind::HashStable),
+            TypePattern::var("V"),
+        ])),
+        name: "to_map",
+        params: vec![],
+        result: map_of_k_v(),
         purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_min_by"),
-        doc: "Smallest element per a (T,T)->Bool \"less-than\" comparator.",
+        lowering: MethodLowering::Intrinsic("seq_to_map"),
+        doc: "A Map built from (key, value) pairs. Duplicate keys: last wins.",
         stability: Stability::Stable,
     }
 }
 
-fn seq_max_by_on_vec() -> MethodEntry {
+/// `to_counter()` — a `Counter[T]` from `(T, Int)` pairs, taking each pair's
+/// count.
+///
+/// `frequencies()` is the other direction and neither expresses the other:
+/// `v.frequencies()` *counts* occurrences of each element, `pairs.to_counter()`
+/// *assigns* the count each pair carries. They are the two directions of one type
+/// change, so both stay.
+fn seq_to_counter() -> MethodEntry {
     MethodEntry {
-        receiver: vec_of_t(),
-        name: "max_by",
-        params: vec![t_t_to_bool()],
-        result: TypePattern::var("T"),
+        receiver: TypePattern::iterable(TypePattern::Tuple(vec![
+            TypePattern::of_kind("T", crate::CapKind::HashStable),
+            TypePattern::Scalar(ScalarType::Int),
+        ])),
+        name: "to_counter",
+        params: vec![],
+        result: counter_of_t(),
         purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_max_by"),
-        doc: "Largest element per a (T,T)->Bool \"less-than\" comparator.",
+        lowering: MethodLowering::Intrinsic("seq_to_counter"),
+        doc: "A Counter built from (key, count) pairs. Duplicate keys: last wins.",
         stability: Stability::Stable,
     }
 }
 
-fn seq_max_by_on_seq() -> MethodEntry {
+fn seq_to_deque() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_t(),
-        name: "max_by",
-        params: vec![t_t_to_bool()],
-        result: TypePattern::var("T"),
+        receiver: iterable_of_t(),
+        name: "to_deque",
+        params: vec![],
+        result: deque_of_t(),
         purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_max_by"),
-        doc: "Largest element per a (T,T)->Bool \"less-than\" comparator.",
+        lowering: MethodLowering::Intrinsic("seq_to_deque"),
+        doc: "A Deque holding these items, in order.",
         stability: Stability::Stable,
     }
 }
 
-fn seq_any_on_vec() -> MethodEntry {
+/// `to_min_heap()` — and [`seq_to_max_heap`], its dual.
+///
+/// The `Ord` bound is on the row for `to_set`'s reason: the heap being built is
+/// the *result*, and a heap orders its elements as it pushes them.
+fn seq_to_min_heap() -> MethodEntry {
     MethodEntry {
-        receiver: vec_of_t(),
-        name: "any",
-        params: vec![t_to_bool()],
-        result: TypePattern::Scalar(ScalarType::Bool),
+        receiver: TypePattern::iterable(TypePattern::of_kind("T", crate::CapKind::Ord)),
+        name: "to_min_heap",
+        params: vec![],
+        result: min_heap_of_t(),
         purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_any"),
-        doc: "True if any element satisfies the predicate (short-circuits).",
+        lowering: MethodLowering::Intrinsic("seq_to_min_heap"),
+        doc: "A MinHeap holding these items.",
         stability: Stability::Stable,
     }
 }
 
-fn seq_any_on_seq() -> MethodEntry {
+fn seq_to_max_heap() -> MethodEntry {
     MethodEntry {
-        receiver: seq_of_t(),
-        name: "any",
-        params: vec![t_to_bool()],
-        result: TypePattern::Scalar(ScalarType::Bool),
+        receiver: TypePattern::iterable(TypePattern::of_kind("T", crate::CapKind::Ord)),
+        name: "to_max_heap",
+        params: vec![],
+        result: max_heap_of_t(),
         purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_any"),
-        doc: "True if any element satisfies the predicate (short-circuits).",
+        lowering: MethodLowering::Intrinsic("seq_to_max_heap"),
+        doc: "A MaxHeap holding these items.",
         stability: Stability::Stable,
     }
 }
 
-fn seq_all_on_vec() -> MethodEntry {
+/// `to_bitset()` — a `BitSet` of `Int` members.
+///
+/// The receiver says `Int` the way `to_map` says "a pair", so a non-`Int` item is
+/// a type error at the method name. `praxis_bitset_insert` still faults on a
+/// negative or oversized member, which is a *value* question no type can answer.
+fn seq_to_bitset() -> MethodEntry {
     MethodEntry {
-        receiver: vec_of_t(),
-        name: "all",
-        params: vec![t_to_bool()],
-        result: TypePattern::Scalar(ScalarType::Bool),
+        receiver: iterable_of_int_elem(),
+        name: "to_bitset",
+        params: vec![],
+        result: bitset_receiver(),
         purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_all"),
-        doc: "True if all elements satisfy the predicate (short-circuits).",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_all_on_seq() -> MethodEntry {
-    MethodEntry {
-        receiver: seq_of_t(),
-        name: "all",
-        params: vec![t_to_bool()],
-        result: TypePattern::Scalar(ScalarType::Bool),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_all"),
-        doc: "True if all elements satisfy the predicate (short-circuits).",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_find_on_vec() -> MethodEntry {
-    MethodEntry {
-        receiver: vec_of_t(),
-        name: "find",
-        params: vec![t_to_bool()],
-        result: TypePattern::Option(Box::new(TypePattern::var("T"))),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_find"),
-        doc: "The first matching element, or None.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_find_on_seq() -> MethodEntry {
-    MethodEntry {
-        receiver: seq_of_t(),
-        name: "find",
-        params: vec![t_to_bool()],
-        result: TypePattern::Option(Box::new(TypePattern::var("T"))),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_find"),
-        doc: "The first matching element, or None.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_position_on_vec() -> MethodEntry {
-    MethodEntry {
-        receiver: vec_of_t(),
-        name: "position",
-        params: vec![t_to_bool()],
-        result: TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Int))),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_position"),
-        doc: "The index of the first matching element, or None.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_position_on_seq() -> MethodEntry {
-    MethodEntry {
-        receiver: seq_of_t(),
-        name: "position",
-        params: vec![t_to_bool()],
-        result: TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Int))),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_position"),
-        doc: "The index of the first matching element, or None.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_reduce_on_vec() -> MethodEntry {
-    MethodEntry {
-        receiver: vec_of_t(),
-        name: "reduce",
-        params: vec![acc_t_to_acc()],
-        result: TypePattern::var("T"),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_reduce"),
-        doc: "Reduce left-to-right, seeded with the first element.",
-        stability: Stability::Stable,
-    }
-}
-
-fn seq_reduce_on_seq() -> MethodEntry {
-    MethodEntry {
-        receiver: seq_of_t(),
-        name: "reduce",
-        params: vec![acc_t_to_acc()],
-        result: TypePattern::var("T"),
-        purity: Purity::Pure,
-        lowering: MethodLowering::Intrinsic("seq_reduce"),
-        doc: "Reduce left-to-right, seeded with the first element.",
+        lowering: MethodLowering::Intrinsic("seq_to_bitset"),
+        doc: "A BitSet holding these (Int) items. Faults on a negative or oversized member.",
         stability: Stability::Stable,
     }
 }
@@ -2779,14 +2681,183 @@ mod tests {
             }
         );
 
-        // `count` at two arities, on both receivers a pipeline can start from.
-        for (pat, what) in [(vec_of_t(), "Vec"), (seq_of_t(), "Seq")] {
-            let arities: Vec<usize> = cat
-                .by_receiver_and_name(&pat, "count")
+        // `count` at two arities — one pair of rows now, on the generic receiver
+        // every pipeline starts from (ADR-127).
+        let arities: Vec<usize> = cat
+            .by_receiver_and_name(&iterable_of_t(), "count")
+            .map(|e| e.arity())
+            .collect();
+        assert_eq!(arities.len(), 2, "count has two rows");
+        assert!(arities.contains(&0) && arities.contains(&1));
+    }
+
+    /// **ADR-127 decision 1.** Every §6.3 combinator is **one** row, on the
+    /// generic pipeline receiver.
+    ///
+    /// The shape this replaces was forty-nine rows: a `Vec[T]` row and a `Seq[T]`
+    /// twin apiece, of which every `Seq` twin was dead — ADR-126 recorded that
+    /// "no catalog row answers a `Seq` … so all twenty `Seq`-receiver rows are
+    /// dead", and nothing answered one in three milestones. So the assertion is
+    /// two-sided: each name is on `Iterable` and on nothing else, and no
+    /// `Seq`-receiver row is left anywhere in the table.
+    #[test]
+    fn every_pipeline_combinator_is_one_row_on_the_generic_receiver() {
+        let cat = builtin_catalog();
+        // The twenty-three fused stages and sinks, the four barriers, and the
+        // eight conversions. `count` is here once and checked at both arities
+        // by `a_keyed_collection_enumerates_and_count_has_two_arities`.
+        let combinators = [
+            "map",
+            "filter",
+            "filter_map",
+            "flat_map",
+            "take",
+            "skip",
+            "take_while",
+            "enumerate",
+            "zip",
+            "fold",
+            "reduce",
+            "sum",
+            "product",
+            "count",
+            "any",
+            "all",
+            "find",
+            "position",
+            "min",
+            "max",
+            "min_by",
+            "max_by",
+            "sorted",
+            "sorted_by_key",
+            "unique",
+            "frequencies",
+            "to_vec",
+            "to_set",
+            "to_map",
+            "to_counter",
+            "to_deque",
+            "to_min_heap",
+            "to_max_heap",
+            "to_bitset",
+        ];
+        for name in combinators {
+            let rows: Vec<_> = cat.entries().iter().filter(|e| e.name == name).collect();
+            assert!(!rows.is_empty(), "`{name}` has no row at all");
+            // One row per *arity*: `count()` is the element count and
+            // `count(pred)` the matching-element count, which the catalog's key
+            // has always allowed. Two at one arity would be the duplication this
+            // decision deleted.
+            let mut generic: Vec<usize> = rows
+                .iter()
+                .filter(|e| matches!(e.receiver, TypePattern::Iterable { .. }))
                 .map(|e| e.arity())
                 .collect();
-            assert_eq!(arities.len(), 2, "{what}.count has two rows");
-            assert!(arities.contains(&0) && arities.contains(&1), "{what}");
+            assert!(!generic.is_empty(), "`{name}` has no generic row");
+            let seen = generic.len();
+            generic.sort_unstable();
+            generic.dedup();
+            assert_eq!(
+                generic.len(),
+                seen,
+                "`{name}` has two generic rows at one arity — one receiver \
+                 getting a feature ten should have"
+            );
+            // A row that shares the *name* must be on a receiver the generic one
+            // does not accept, which the builder's collision check enforces and
+            // this restates from the reader's side. `Grid[T].find(value)` is the
+            // live example: §6.4's "where is this cell" is a different question
+            // from §6.3's "which element matches", and they can coexist because a
+            // `Grid` is not one of the ten.
+            for row in rows {
+                assert!(
+                    matches!(row.receiver, TypePattern::Iterable { .. })
+                        || !crate::is_pipeline_receiver(&row.receiver),
+                    "`{name}` also has a row on {}, which the generic row \
+                     accepts — both would match, and which one a call resolves \
+                     to would be insertion order",
+                    row.receiver
+                );
+            }
+        }
+
+        // `Grid[T].map` is the row §6.4 still owes, and the *absence* of a
+        // generic row claiming the name is what leaves room for it. The builder's
+        // collision check is the other half; this is the half that says the
+        // exclusion was deliberate.
+        assert!(
+            !crate::PIPELINE_RECEIVERS.contains(&CollectionCtor::Grid),
+            "a generic `map` would claim §6.4's name and answer a `Vec`"
+        );
+
+        // Nothing is registered on a `Seq` any more, which is what makes
+        // retiring `CollectionCtor::Seq` a mechanical follow-up.
+        for e in cat.entries() {
+            assert!(
+                !matches!(
+                    e.receiver,
+                    TypePattern::Collection {
+                        ctor: CollectionCtor::Seq,
+                        ..
+                    }
+                ),
+                "`{}` is still on a `Seq`, which has no values",
+                e.name
+            );
+        }
+    }
+
+    /// **ADR-127 decision 4.** There is a conversion for every collection with a
+    /// constructor, and exactly one collection with none.
+    ///
+    /// The set is closed at that boundary on purpose: the ask named
+    /// `Set`/`Map`/`Counter`, and leaving the other four out is what would create
+    /// the asymmetry decision 6 then has to defend — `deque.filter(p)` answering
+    /// a `Vec` with no way back to a `Deque`. `Grid` is the exception because a
+    /// grid needs a width and a flat item sequence does not carry one.
+    #[test]
+    fn a_conversion_exists_for_every_collection_that_can_be_constructed() {
+        let cat = builtin_catalog();
+        for (name, ctor) in [
+            ("to_vec", CollectionCtor::Vec),
+            ("to_set", CollectionCtor::Set),
+            ("to_map", CollectionCtor::Map),
+            ("to_counter", CollectionCtor::Counter),
+            ("to_deque", CollectionCtor::Deque),
+            ("to_min_heap", CollectionCtor::MinHeap),
+            ("to_max_heap", CollectionCtor::MaxHeap),
+            ("to_bitset", CollectionCtor::BitSet),
+        ] {
+            let row = cat
+                .entries()
+                .iter()
+                .find(|e| e.name == name)
+                .unwrap_or_else(|| panic!("`{name}` has no row"));
+            assert_eq!(row.arity(), 0, "`{name}` takes no arguments");
+            let built = match &row.result {
+                TypePattern::Collection { ctor, .. } => *ctor,
+                other => panic!("`{name}` answers {other}, not a collection"),
+            };
+            assert_eq!(built, ctor, "`{name}` builds the collection it names");
+        }
+        assert!(
+            cat.entries().iter().all(|e| e.name != "to_grid"),
+            "a grid needs a width, and an item sequence does not carry one"
+        );
+
+        // **The pair shape is in the receiver, not in prose.** That is what makes
+        // `[1, 2].to_map()` "expected `(K, V)`, found `Int`" at the method name
+        // rather than a row that resolves and then faults at runtime.
+        for name in ["to_map", "to_counter"] {
+            let row = cat.entries().iter().find(|e| e.name == name).unwrap();
+            let TypePattern::Iterable { item } = &row.receiver else {
+                panic!("`{name}` is not on the generic receiver")
+            };
+            assert!(
+                matches!(**item, TypePattern::Tuple(ref els) if els.len() == 2),
+                "`{name}` accepts a `Map` or a `Counter` by saying its item is a pair"
+            );
         }
     }
 

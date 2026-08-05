@@ -2048,3 +2048,193 @@ fn main() -> Int {
          dead = {dead_live}, kept alive = {kept_live}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// ADR-127: the pipeline over every iterable, end to end.
+// ---------------------------------------------------------------------------
+
+/// **Decision 2, as behaviour.** A pipeline over a `Set` and a `MinHeap`
+/// produces the right answer, which is the half the instruction-count test in
+/// `praxis_mir::build` cannot state.
+///
+/// The failure this rules out is not "the wrong number": reading a `Set`'s
+/// payload through `praxis_vec_get` hung or killed the process, and a
+/// `MinHeap`'s was a silently wrong answer — the two failure modes `IterPlan`
+/// exists to prevent, and the reason the pipeline had to stop opening its source
+/// with a hardcoded `Vec` accessor pair.
+#[test]
+fn a_pipeline_over_a_snapshotted_collection_answers_from_every_member() {
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  var s = Set()\n  s.insert(3)\n  s.insert(1)\n  \
+         s.insert(2)\n  s.map(|x| x * 2).sum()\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 12, "every member, doubled");
+
+    // A heap's backing array is heap-ordered only at its root, so a direct
+    // index walk reads the members in an order that is not the heap's — and
+    // reads whatever the array holds past its logical end.
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  var h = MinHeap()\n  h.push(5)\n  h.push(1)\n  \
+         h.push(9)\n  h.map(|x| x + 1).sum()\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 18);
+
+    // A `Map` yields pairs from two aligned snapshots, joined per step.
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  var m = Map()\n  m.insert(1, 10)\n  m.insert(2, 20)\n  \
+         m.map(|kv| kv.0 * kv.1).sum()\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 50, "the halves stayed aligned");
+
+    // A `Text` walks through its own accessors, so the item is the `Char`
+    // `t[i]` answers rather than a byte.
+    let (runtime, result) =
+        run_main("fn main() -> Int {\n  \"héllo\".count(|c| c == \"l\"[0])\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+/// **Decision 3.** A barrier over a non-`Vec` receiver answers over every
+/// member, in the deterministic order the snapshot fixes.
+///
+/// `praxis_vec_sorted` reads a `VecPayload`. Handing it a `Set` or a `Deque`
+/// directly is a wrong-type read; handing it the materialization is the whole of
+/// the decision.
+#[test]
+fn a_barrier_over_a_non_vec_receiver_sees_every_member() {
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  var s = Set()\n  s.insert(3)\n  s.insert(1)\n  \
+         s.insert(2)\n  s.sorted()[0]\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 1);
+
+    // A `Deque` has no snapshot symbol at all — it indexes itself but is not a
+    // `Vec` — so its materialization is the walk `to_vec` fuses.
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  var d = Deque()\n  d.push_back(3)\n  d.push_front(7)\n  \
+         d.sorted()[1]\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 7);
+
+    // …and a `Range`, whose members exist only as an arithmetic rule.
+    let (runtime, result) = run_main("fn main() -> Int {\n  (0..4).unique().len()\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 4);
+}
+
+/// **Decision 4.** Each conversion builds the collection it names, from every
+/// member of whatever it started on.
+#[test]
+fn a_conversion_builds_the_collection_it_names() {
+    for (expr, want) in [
+        // Out of a `Set`, which has no member accessor in the language at all.
+        ("s.to_vec().sum()", 6),
+        ("s.to_deque().len()", 3),
+        ("s.to_min_heap().pop()", 1),
+        ("s.to_max_heap().pop()", 3),
+        ("s.to_bitset().len()", 3),
+        ("s.to_set().len()", 3),
+        // A fused sink: no intermediate `Vec`, and the duplicates the map
+        // introduces are dropped by the `Set` rather than by a second pass.
+        ("s.map(|x| x % 2).to_set().len()", 2),
+    ] {
+        let src = format!(
+            "fn main() -> Int {{\n  var s = Set()\n  s.insert(3)\n  s.insert(1)\n  \
+             s.insert(2)\n  {expr}\n}}\n"
+        );
+        let (runtime, result) = run_main(&src);
+        assert!(
+            !runtime.has_pending_fault(),
+            "{expr} faulted: {:?}",
+            runtime.fault()
+        );
+        assert_eq!(result.as_int(), want, "{expr}");
+    }
+
+    // The two keyed conversions, which are the routes *back in*. `to_map` takes
+    // the item pair apart with the same `praxis_tuple_get` a `p.0` emits.
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  var m = Map()\n  m.insert(1, 10)\n  m.insert(2, 20)\n  \
+         m.map(|kv| (kv.0, kv.1 * 2)).to_map()[2]\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 40);
+
+    // `to_counter` *assigns* the count each pair carries, where `frequencies`
+    // counts occurrences — the two directions of one type change.
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(\"a\")\n  v.push(\"b\")\n  \
+         v.push(\"a\")\n  v.frequencies().to_vec().to_counter()[\"a\"]\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 2);
+
+    // `to_vec` on a `Vec` answers **the same reference**, not a copy (ADR-126
+    // decision 2's second half). A copy would leave the original at length 1.
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  var w = v.to_vec()\n  \
+         w.push(2)\n  v.len()\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 2, "`to_vec` on a `Vec` is the identity");
+
+    // `to_bitset` still faults on a member no `BitIndex` can hold — a *value*
+    // question, which the row's `Int` item type cannot answer.
+    let (runtime, _result) = run_main(
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(0 - 1)\n  v.to_bitset().len()\n}\n",
+    );
+    assert!(
+        runtime.has_pending_fault(),
+        "a negative member is `praxis_bitset_insert`'s fault to raise"
+    );
+}
+
+/// **Decision 5.** `sorted_by_key` orders by the key the closure extracts, and
+/// the sort is stable — so the answer is a function of the input alone.
+///
+/// The whole point is a pipeline whose item is a **pair**: no composite is
+/// orderable (ADR-045), so `sorted` is unavailable the moment the source is a
+/// `Map` or a `Counter`, and "the most common value" had no spelling.
+#[test]
+fn sorted_by_key_orders_a_pair_by_the_key_it_carries() {
+    let (runtime, result) = run_main(
+        "fn main() -> Text {\n  var v = Vec()\n  v.push(\"the\")\n  v.push(\"cat\")\n  \
+         v.push(\"the\")\n  v.push(\"cat\")\n  v.push(\"the\")\n  \
+         v.frequencies().to_vec().sorted_by_key(|p| 0 - p.1)[0].0\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_text(), "the");
+
+    // Stability: equal keys keep their input order, so the answer does not
+    // depend on the sort's internals.
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(10)\n  v.push(21)\n  v.push(30)\n  \
+         v.sorted_by_key(|x| x % 2)[0]\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 10);
+
+    // A `Text` key, which is the case a payload-bytes comparison gets wrong: a
+    // `Text` is a pointer-and-length structure, so ordering one by its first
+    // eight bytes compares *addresses* (P0-12). The key goes through the
+    // descriptor's `compare`, as `sorted` does.
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  var v = Vec()\n  v.push(3)\n  v.push(1)\n  v.push(2)\n  \
+         v.sorted_by_key(|x| \"abc\"[x - 1])[0]\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 1);
+
+    // The receiver is generic like every other barrier's, so a `Set` sorts too.
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  var s = Set()\n  s.insert(30)\n  s.insert(1)\n  \
+         s.insert(200)\n  s.sorted_by_key(|x| 0 - x)[0]\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 200);
+}

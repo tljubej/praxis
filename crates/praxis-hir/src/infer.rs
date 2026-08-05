@@ -479,8 +479,8 @@ impl Inferer {
         // — the same discipline `infer_method_call` uses when it can resolve at
         // the call site.
         let mut names = HashMap::new();
-        let receiver_param =
-            crate::lower::pattern_to_type_named(&mut self.db, &entry.receiver, &mut names);
+        let at = c.report_at();
+        self.bind_receiver(entry, receiver_ty, &mut names, range_of(c.at));
         let param_tys: Vec<Type> = entry
             .params
             .iter()
@@ -488,8 +488,6 @@ impl Inferer {
             .collect();
         let result_ty =
             crate::lower::pattern_to_type_named(&mut self.db, &entry.result, &mut names);
-        let at = c.report_at();
-        let _ = self.db.unify(receiver_param, receiver_ty);
         for (pattern_ty, arg_ty) in param_tys.iter().zip(params.iter()) {
             if let Err(e) = self.db.unify(*pattern_ty, *arg_ty) {
                 self.diag_unify(at, e);
@@ -685,6 +683,56 @@ impl Inferer {
                     self.require_cap(ty, Capability::Kind(kind), at);
                 }
             }
+        }
+    }
+
+    /// Relate a resolved catalog entry's receiver pattern to the receiver the
+    /// call site actually has, sharing `names` with the row's parameters and
+    /// result (ADR-127 decision 1).
+    ///
+    /// **One function because there are two doors.** `infer_catalog_call`
+    /// resolves at the call site and `resolve_deferred_method` resolves when the
+    /// channel says what the receiver is — `fn top(v) { v.map(f) }` goes through
+    /// the second — and the eight lines this replaces were written twice. A
+    /// second copy is a second place for the `Iterable` path to be missing.
+    ///
+    /// The two paths differ in what is unified:
+    ///
+    /// - An ordinary receiver pattern is **instantiated and unified**. That is
+    ///   what pins `T` in `Vec[T].push(T)`. The result is discarded because
+    ///   `lookup` already matched the shape; what can still fail is a *bound*,
+    ///   and `apply_bounds` reports that.
+    /// - A [`TypePattern::Iterable`] receiver is **not unified at all**: it
+    ///   accepts ten different constructors, and unifying against any one of
+    ///   them pins the other nine out. What is unified is the row's `item`,
+    ///   against `capability::iter_item` — the `for` loop's own answer to "what
+    ///   does this yield". That is what makes `Iterable { item: (K, V) }` mean
+    ///   "a `Map` or a `Counter`", and it is the *only* place `[1, 2].to_map()`
+    ///   can be reported: `lookup` matched the row, so the failure has to be a
+    ///   type error at the method name rather than a missing method.
+    fn bind_receiver(
+        &mut self,
+        entry: &praxis_stdlib::MethodEntry,
+        receiver_ty: Type,
+        names: &mut HashMap<String, Type>,
+        at: TextRange,
+    ) {
+        let praxis_stdlib::TypePattern::Iterable { item } = &entry.receiver else {
+            let receiver_param =
+                crate::lower::pattern_to_type_named(&mut self.db, &entry.receiver, names);
+            let _ = self.db.unify(receiver_param, receiver_ty);
+            return;
+        };
+        // `lookup` accepted this receiver, which means it is one of the ten —
+        // and every one of the ten is iterable, so `iter_item` has an answer.
+        // A `None` here is the two tables disagreeing about what the pipeline
+        // walks, which is a catalog bug and not a program's; leaving the item
+        // unpinned instead would be a wrong inference in silence.
+        let item_ty = crate::capability::iter_item(&mut self.db, receiver_ty)
+            .expect("an `Iterable` row matched a receiver that `iter_item` refuses");
+        let item_param = crate::lower::pattern_to_type_named(&mut self.db, item, names);
+        if let Err(e) = self.db.unify(item_param, item_ty) {
+            self.diag_unify(self.file_span(at), e);
         }
     }
 
@@ -3564,8 +3612,11 @@ impl Inferer {
         // Catalog `params` are exactly the user arguments (the receiver is
         // separate, in `entry.receiver`).
         let mut names = HashMap::new();
-        let receiver_param =
-            crate::lower::pattern_to_type_named(&mut self.db, &entry.receiver, &mut names);
+        // Bind the receiver *before* the parameters are instantiated, because
+        // that is what pins the element type `T` — and an argument closure whose
+        // parameter is the element type (`|inner| inner.len()` over
+        // `Vec[Vec[Int]]`) needs it pinned before its body is inferred.
+        self.bind_receiver(entry, receiver_ty, &mut names, key);
         let param_tys: Vec<Type> = entry
             .params
             .iter()
@@ -3573,8 +3624,6 @@ impl Inferer {
             .collect();
         let result_ty =
             crate::lower::pattern_to_type_named(&mut self.db, &entry.result, &mut names);
-        // Unify the receiver against its pattern. This pins the element type `T`.
-        let _ = self.db.unify(receiver_param, receiver_ty);
         // Infer each argument with its expected param type pushed down, unifying
         // it against its param IMMEDIATELY so a shared variable (e.g. fold's
         // `Acc`, which appears in the init arg and the closure's signature)
