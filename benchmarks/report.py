@@ -183,6 +183,40 @@ def main() -> None:
         "table from the last one."
     )
     w("")
+    w(
+        "The fourth is "
+        "[ADR-128](../docs/decisions/128-a-shadow-slot-is-a-live-range-not-a-name.md), "
+        "and it is one idea: **a shadow slot is a live range, not a name.** The "
+        "backend handed every `Gc` local its own slot for the collector to scan, so "
+        "`primes`\' `is_prime` declared a 33-slot frame to root **one** pointer, and "
+        "`vm`\'s entry point declared 185 to root ten. Colouring the interference "
+        "relation instead — two locals share a slot unless some safepoint needs both "
+        "— takes the summed declared width of `tests/aoc-corpus` from **1925 slots "
+        "to 216**. Every claimed slot is zeroed on entry, charged against the "
+        "recursion budget, and *read by `push_roots` at every collection*, and it is "
+        "the third of those that pays: the scan is one linear pass over "
+        "`[base, top)`, so a narrower frame is a cheaper scan on every live frame. "
+        "Paired `ab.py`, two independent passes, arms differing in that assignment "
+        "alone: **1.048× and 1.047×** on the geometric mean of the eight, with `vm` "
+        "**+14.0%** and `tree` **+11.4%**, and `mandelbrot` and `hashwork` the two "
+        "rows the clock could not resolve."
+    )
+    w("")
+    w(
+        "**No control survived that sweep, and that is a result rather than a "
+        "problem.** The record named `collatz` and `mandelbrot` as benchmarks the "
+        "change must not move; `ab.py` voided the first sweep because `collatz` moved "
+        "+2.3%. It was right to, and the reason is that colouring narrows *every* "
+        "frame — `collatz`\'s entry point goes 45 slots to 5 — so there is no "
+        "benchmark in this suite that is not a target. The table above is the whole "
+        "suite reported as results. The same record\'s other decision, replacing the "
+        "prologue\'s `memset` call with a run of word-sized stores, is **not** "
+        "measurable on this machine (−0.3% ± 0.4% on `primes`, colouring held "
+        "constant) and is kept for what it makes true rather than fast: no prologue "
+        "makes a call at any width, which is what let the per-function cap on `Gc` "
+        "locals rise from 192 to 4096."
+    )
+    w("")
     w("Two things are worth reading the tables for.")
     w("")
     w(
