@@ -13,5 +13,4 @@ gamma
 has space
 
     <tmp#2: Int> = 1
-    <tmp#3: Vec[Vec[Text]]> = Unit
     <tmp#4: Int> @ "(read sections(lines(word))).len()" = <uninit>

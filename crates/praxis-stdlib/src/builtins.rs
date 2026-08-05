@@ -141,6 +141,8 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(seq_to_max_heap())
         .entry(seq_to_bitset())
         .entry(text_len())
+        .entry(text_int())
+        .entry(text_float())
         .entry(text_is_empty())
         .entry(text_get())
         // Float methods (§4.12). Pure unary math, predicates, conversions, and
@@ -517,6 +519,51 @@ fn text_len() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::TextLen),
         doc: "Number of Unicode scalar values (chars) in the text.",
+        stability: Stability::Stable,
+    }
+}
+
+/// `Text.int() -> Option[Int]` — the one text-to-number conversion (ADR-136).
+///
+/// `Y001`'s help on `var count: Int = raw` has read "this is `Text`; call
+/// `.int()` on it (or use `read lines(int)`)" since it was written, and only the
+/// parenthesized half was true: `Text`'s rows were `len`, `is_empty` and `get`,
+/// so `raw.int()` reported `Y110`. Half of the help for the most common mistake
+/// in a puzzle program pointed at nothing.
+///
+/// `Option[Int]` rather than `Int`, for §4.7's reason and `Map.get`'s: a text
+/// that is not a number is *absence*, not a fault. Input is routinely not what a
+/// program hoped, and a panicking conversion would leave `"abc".int()` a crash
+/// with no way to ask first.
+fn text_int() -> MethodEntry {
+    MethodEntry {
+        receiver: text_receiver(),
+        name: "int",
+        params: vec![],
+        result: TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Int))),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::TextInt),
+        doc: "The Int this text spells as `Some(n)`, or `None` if it spells none.",
+        stability: Stability::Stable,
+    }
+}
+
+/// `Text.float() -> Option[Float]` — [`text_int`]'s twin (ADR-136).
+///
+/// Same shape and the same reason: a text that is not a number is *absence*, not
+/// a fault. The accepted set is §7.4's `float` atomic over the whole trimmed
+/// text, so `t.float()` and `parse(t, float)` cannot disagree — which means
+/// `"inf"` and `"nan"` are `None`, because neither is a token the input parser
+/// reads.
+fn text_float() -> MethodEntry {
+    MethodEntry {
+        receiver: text_receiver(),
+        name: "float",
+        params: vec![],
+        result: TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Float))),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::TextFloat),
+        doc: "The Float this text spells as `Some(x)`, or `None` if it spells none.",
         stability: Stability::Stable,
     }
 }
@@ -1862,6 +1909,24 @@ fn acc_t_to_acc() -> TypePattern {
     }
 }
 
+/// `(T, T) -> T` — the shape of `reduce`'s combining closure.
+///
+/// **`reduce` is `fold` without the seed**, so its accumulator *is* the element
+/// type; there is no second variable for it to be. It shared
+/// [`acc_t_to_acc`] with `fold`, and the free `Acc` that made sense there was
+/// the defect here: nothing tied the closure's first parameter to the element,
+/// so `["ab", "c"].reduce(|a, b| a.len())` type-checked with `a` unpinned —
+/// `len` resolved against a variable, the closure answered `Int`, and `reduce`
+/// answered `Text` at the same time. The two disagreeing is what reached MIR
+/// and tripped `build.rs`'s pipeline-recognizer assertion, which was right to
+/// fire (REP-68).
+fn t_t_to_t() -> TypePattern {
+    TypePattern::Function {
+        params: vec![TypePattern::var("T"), TypePattern::var("T")],
+        result: Box::new(TypePattern::var("T")),
+    }
+}
+
 fn seq_map() -> MethodEntry {
     MethodEntry {
         receiver: iterable_of_t(),
@@ -2348,7 +2413,7 @@ fn seq_reduce() -> MethodEntry {
     MethodEntry {
         receiver: iterable_of_t(),
         name: "reduce",
-        params: vec![acc_t_to_acc()],
+        params: vec![t_t_to_t()],
         result: TypePattern::var("T"),
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_reduce"),
@@ -3268,6 +3333,36 @@ mod tests {
             TypePattern::Scalar(ScalarType::Int),
             "§6.2: a Counter's absent values read as zero, deliberately"
         );
+    }
+
+    /// **ADR-136, the catalog half.** `Text.int()` and `Text.float()` exist and
+    /// each answers an `Option`.
+    ///
+    /// `Y001`'s help has promised `.int()` since it was written, and `Text`'s
+    /// rows were `len`, `is_empty` and `get` — so half of the help for the most
+    /// common mistake in a puzzle program sent the reader to a `Y110`. Pure
+    /// data, so this goes red on the catalog edit alone.
+    ///
+    /// The two are asserted together because the pair is the decision: a
+    /// language with a text-to-`Int` conversion and no text-to-`Float` one is a
+    /// language where "read a number out of text" has a different answer per
+    /// type, which is the asymmetry `parse(t, int)`/`parse(t, float)` does not
+    /// have.
+    #[test]
+    fn text_int_and_float_answer_options() {
+        let cat = builtin_catalog();
+        for (name, scalar) in [("int", ScalarType::Int), ("float", ScalarType::Float)] {
+            let entry = cat
+                .by_receiver_and_name(&TypePattern::Scalar(ScalarType::Text), name)
+                .next()
+                .unwrap_or_else(|| panic!("`Text.{name}()` exists"));
+            assert_eq!(
+                entry.result,
+                TypePattern::Option(Box::new(TypePattern::Scalar(scalar))),
+                "a text that is not a number is absence, not a fault (\u{00a7}4.7)"
+            );
+            assert!(entry.params.is_empty(), "`{name}` takes no arguments");
+        }
     }
 
     /// **ADR-086, the catalog half.** `t[i]` and `t.get(i)` answer a `Char`.

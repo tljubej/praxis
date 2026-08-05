@@ -15,5 +15,5 @@ Backtrace:
     <tmp#7: Unit> = Unit
     <tmp#9: Text> @ ""no route from "" = no route from 
     <tmp#10: Text> @ ""no route from " + node" = no route from start
-    <tmp#11> @ "panic("no route from " + node)" = Unit
+    <tmp#11> @ "panic("no route from " + node)" = <uninit>
     <tmp#12: Unit> @ "// `panic` and `assert` put their message on the fault line itself. var node = "start" var visited = [1, 2] panic("no route from " + node)" = <uninit>

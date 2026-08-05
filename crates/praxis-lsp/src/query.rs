@@ -474,6 +474,44 @@ mod tests {
         );
     }
 
+    /// **ADR-133, at the surface the user reported it from.** The editor
+    /// publishes exactly this list, so a diagnostic missing here is a program the
+    /// compiler refuses and the editor calls fine.
+    ///
+    /// Each of these was reported by `praxis run` and by nothing else, because it
+    /// was raised while the program was being lowered and this query does not
+    /// lower. The first two are the user's own report.
+    #[test]
+    fn the_editor_sees_every_diagnostic_run_refuses_a_program_for() {
+        for (src, want) in [
+            (
+                "enum Bla { A(Int), B, C }\nvar bla = A(3)\nmatch bla { A(i, j) => {} B => {} C => {} }\n",
+                "Y124",
+            ),
+            (
+                "enum Bla { A(Int), B, C }\nvar bla = A(3)\nmatch bla { A => {} B => {} C => {} }\n",
+                "Y124",
+            ),
+            ("var x = 99999999999999999999999\nout(x)\n", "Y013"),
+            (
+                "struct Point { x: Int, y: Int }\nvar pts = [Point{x: 0, y: 1}]\n\
+                 for Point { x: 0, y } in pts {\n    out(y)\n}\n",
+                "Y125",
+            ),
+        ] {
+            let s = snap(src);
+            let diags = s.diagnostics();
+            assert!(
+                diags.iter().any(|d| d.code().to_string() == want),
+                "{src}\nmust publish {want}, got {:?}",
+                diags
+                    .iter()
+                    .map(|d| d.code().to_string())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
     /// `type_of` answers the **innermost** expression covering the offset, which
     /// is not always the one a reader has in mind: on the callee name it is the
     /// callee, and on the call it is the call.

@@ -200,6 +200,22 @@ pub enum DiagCode {
     /// inference and not at lowering, because a literal on a non-`struct` head used
     /// to pass `praxis check` and produce a value with no representation.
     NotARecordLiteralHead,
+    /// `N009` — a **retired keyword** written where a statement starts (REP-71).
+    ///
+    /// `let` is the only one so far. It was the binding keyword until ADR-125
+    /// replaced it with `var`, and every document written before then opens with
+    /// one — so it is the first thing a reader of an old example meets.
+    ///
+    /// Not `N001`: it is not a name that happens to be missing, and treating it
+    /// as one produced the wrong help. The suggestion budget is `max(1, len/3)`,
+    /// `let` is three characters, so the budget is 1 — and the nearest name in
+    /// scope one edit away is `Set`. The rule is right in general (it is
+    /// rustc's); the outcome for a retired keyword is not, because the answer is
+    /// known exactly and is not a spelling correction.
+    ///
+    /// `let` stays a legal **identifier** (`var let = 5` compiles), which is why
+    /// this is raised where a statement starts rather than in the lexer.
+    RetiredKeyword,
 
     // --- Type (`Y0xx`), the user block ---
     /// `Y001` — two types that could not be unified.
@@ -251,10 +267,11 @@ pub enum DiagCode {
     /// (REP-08): a receiver that is not a tuple, or an index past its arity.
     ///
     /// Not `Y112` ("no field on this type"): a tuple has no field *names*, so a
-    /// message about a missing field would name the wrong thing, and `Y112` is a
-    /// lowering diagnostic — `praxis check` never runs lowering, so a program
-    /// reported only there is clean under `check` and fails under `run` (REP-12's
-    /// asymmetry). This one is emitted in inference.
+    /// message about a missing field would name the wrong thing. Both are
+    /// emitted in inference and both reach `praxis check` — the contrast this
+    /// used to draw, that `Y112` was lowering-only, was true when it was written
+    /// and stopped being true when ADR-093 moved the member diagnostics. The
+    /// reason for the separate code is the *message*, and that reason stands.
     NoTupleElement,
     /// `Y020` — a subscript on a type that has none (REP-16), in either
     /// direction: `s[0]` on a `Set`, `t[0] = c` on a `Text` (which can be read
@@ -263,9 +280,11 @@ pub enum DiagCode {
     /// `grid[x, y]` is the spelling §6.4 gives.
     ///
     /// Not `Y110` ("no such method"): a subscript names no method, so a message
-    /// about one would name something the program did not write — and `Y110` is a
-    /// lowering diagnostic, where this is emitted in inference so `praxis check`
-    /// sees it (REP-12's asymmetry).
+    /// about one would name something the program did not write. Both are
+    /// emitted in inference and both reach `praxis check` — `Y110` moved there
+    /// with ADR-093, so the "lowering-only" contrast this used to draw is stale.
+    /// The reason for the separate code is the *message*, and that reason
+    /// stands.
     NotIndexable,
     /// `Y021` — an assignment whose left side names no storage (REP-16):
     /// `f() = 1`, `a + b[0] = 1`. A **field** is a place and no longer among
@@ -275,6 +294,20 @@ pub enum DiagCode {
     /// distinguished from `Y009`, "assignment to something that is not a `var`";
     /// that code is retired and every binding is now writable — ADR-125.)
     NotAnAssignmentTarget,
+    /// `Y022` — a prelude builtin or an enum constructor named without being
+    /// called (REP-70).
+    ///
+    /// [`GenericFunctionAsValue`](DiagCode::GenericFunctionAsValue)'s neighbour,
+    /// one symbol kind over. A user `fn` in value position becomes a closure
+    /// over its adapter (ADR-061); a builtin and a constructor have no adapter to
+    /// close over, and nothing was ever built for them — the name lowered to
+    /// `Unit`. `var h = abs` then `out(h(-3))` printed nothing and exited 0,
+    /// which is the worst answer a compiler can give.
+    ///
+    /// `out(pi)` is the shape a reader meets first: `pi` is a nullary function,
+    /// so the missing parentheses are the whole mistake, and printing `Unit` was
+    /// the least useful way to say so.
+    NameHasNoFunctionValue,
     /// `Y023` — a backtick parser template written where a value is expected
     /// (REP-47, ADR-084). §7.1 says the parser-expression sublanguage is entered
     /// at `read` or at `parse(text, …)` and nowhere else, so `` `n = {int}` ``
@@ -337,12 +370,22 @@ pub enum DiagCode {
     /// A binding has no second arm for an item to fall through to, so a pattern
     /// that tests would silently skip the steps it does not match.
     RefutableBinding,
-    /// `Y124` — a pattern naming more sub-patterns than the variant has payload
-    /// slots (REP-05).
+    /// `Y124` — a pattern whose sub-patterns do not fit the variant's payload
+    /// (REP-05, ADR-134).
     ///
-    /// Only *more*: naming fewer is legal and is padded with wildcards, so
-    /// `Some`, `Some(_)` and `Some(n)` are one test (HIR-06).
-    TooManySubPatterns,
+    /// Two shapes reach this code, and the second one used to compile:
+    ///
+    /// - **More** sub-patterns than the variant has slots. `Wrap(a, b)` against
+    ///   a one-slot variant would read a payload the object does not have.
+    /// - A **bare variant name** for a variant that carries a payload. `A => …`
+    ///   against `A(Int)` says nothing about the value `A` holds, and it reads
+    ///   like a payload-less variant to anyone who did not check the
+    ///   declaration. Write `A(_)` to say "any payload" out loud.
+    ///
+    /// Naming *fewer* inside parentheses stays legal and is padded with
+    /// wildcards, so `Some(_)` and `Some(n)` are one test (HIR-06). Bare `Some`
+    /// is no longer the third spelling of it.
+    PayloadArityMismatch,
 
     // --- Input (`I0xx`) ---
     /// `I000` — a parser expression the lowerer cannot read at all.
@@ -406,6 +449,7 @@ impl DiagCode {
             RecursiveTypeDeclaration => DiagnosticCode::new(Name, 6),
             FunctionReadsOuterBinding => DiagnosticCode::new(Name, 7),
             NotARecordLiteralHead => DiagnosticCode::new(Name, 8),
+            RetiredKeyword => DiagnosticCode::new(Name, 9),
 
             TypeMismatch => DiagnosticCode::new(Type, 1),
             InfiniteType => DiagnosticCode::new(Type, 2),
@@ -428,6 +472,7 @@ impl DiagCode {
             NoTupleElement => DiagnosticCode::new(Type, 19),
             NotIndexable => DiagnosticCode::new(Type, 20),
             NotAnAssignmentTarget => DiagnosticCode::new(Type, 21),
+            NameHasNoFunctionValue => DiagnosticCode::new(Type, 22),
             ParserTemplateOutsideRead => DiagnosticCode::new(Type, 23),
             CallArityMismatch => DiagnosticCode::new(Type, 24),
 
@@ -443,7 +488,7 @@ impl DiagCode {
             UnreachableArm => DiagnosticCode::new(Type, 121),
             UnknownEnumVariant => DiagnosticCode::new(Type, 122),
             NotAPatternForType => DiagnosticCode::new(Type, 123),
-            TooManySubPatterns => DiagnosticCode::new(Type, 124),
+            PayloadArityMismatch => DiagnosticCode::new(Type, 124),
             RefutableBinding => DiagnosticCode::new(Type, 125),
 
             MalformedParserExpression => DiagnosticCode::new(Input, 0),
@@ -486,6 +531,7 @@ impl DiagCode {
             RecursiveTypeDeclaration,
             FunctionReadsOuterBinding,
             NotARecordLiteralHead,
+            RetiredKeyword,
             TypeMismatch,
             InfiniteType,
             AnnotationConflict,
@@ -506,6 +552,7 @@ impl DiagCode {
             NoTupleElement,
             NotIndexable,
             NotAnAssignmentTarget,
+            NameHasNoFunctionValue,
             ParserTemplateOutsideRead,
             InternalMissingType,
             NoMethodOnType,
@@ -517,7 +564,7 @@ impl DiagCode {
             UnreachableArm,
             UnknownEnumVariant,
             NotAPatternForType,
-            TooManySubPatterns,
+            PayloadArityMismatch,
             RefutableBinding,
             MalformedParserExpression,
             ParserConversion,
@@ -922,7 +969,7 @@ mod tests {
         // `ALL` holds each variant once, so its length is the variant count.
         // Update both together; the exhaustive match in `code()` is what makes
         // adding a variant a compile error in the first place.
-        assert_eq!(DiagCode::ALL.len(), 66);
+        assert_eq!(DiagCode::ALL.len(), 68);
         let unique: std::collections::HashSet<_> = DiagCode::ALL.iter().collect();
         assert_eq!(
             unique.len(),

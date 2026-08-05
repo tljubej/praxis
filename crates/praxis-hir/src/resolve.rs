@@ -229,8 +229,16 @@ impl Resolver {
     /// (ADR-132) — the most common mistake in the language, and the one the
     /// resolver is uniquely placed to answer: it is holding the scope chain at
     /// the moment the lookup fails.
-    fn unresolved(&mut self, scope: ScopeId, range: TextRange, name: &str) {
+    ///
+    /// A **retired keyword** at the head of a statement is `N009` instead, and
+    /// is not offered the near-miss list: see [`Self::retired_keyword`].
+    fn unresolved(&mut self, scope: ScopeId, tok: &praxis_syntax::SyntaxToken, name: &str) {
+        let range = tok.text_range();
         let span = range_to_span(range);
+        if let Some(diag) = self.retired_keyword(tok, name) {
+            self.out.diagnostics.push(diag);
+            return;
+        }
         let mut diag = unresolved_name(self.file_span(span), name);
         let visible = self.out.scopes.visible_names(scope);
         if let Some(near) = praxis_source::nearest(name, visible.iter().copied()) {
@@ -242,6 +250,57 @@ impl Resolver {
             );
         }
         self.out.diagnostics.push(diag);
+    }
+
+    /// `N009` — a keyword the language retired, written where a statement starts
+    /// (REP-71).
+    ///
+    /// `let` is the whole table so far. It bound values until ADR-125 replaced
+    /// it with `var`, and every document written before then opens with one, so
+    /// it is the first thing a reader of an old example hits.
+    ///
+    /// It used to be an `N001` with a spelling suggestion, and the suggestion
+    /// was `Set`: the budget is `max(1, len/3)`, `let` is three characters, so
+    /// the budget is 1 and `Set` is one edit away. The budget rule is right in
+    /// general and it is rustc's; what is wrong is asking it a question whose
+    /// answer is already known. A retired keyword is not a typo, and the fix for
+    /// it is exact.
+    ///
+    /// **Only at the head of a statement**, which is the condition that keeps
+    /// `let` a legal identifier: `var let = 5` declares it, `out(let)` reads it,
+    /// and neither is a binding anyone meant to write with `let`. That is also
+    /// why this is here and not in the lexer — a lexer that knows the word knows
+    /// it everywhere.
+    fn retired_keyword(
+        &self,
+        tok: &praxis_syntax::SyntaxToken,
+        name: &str,
+    ) -> Option<praxis_source::Diagnostic> {
+        /// Each retired keyword and what replaced it.
+        const RETIRED: &[(&str, &str)] = &[("let", "var")];
+
+        let (_, replacement) = RETIRED.iter().find(|(old, _)| *old == name)?;
+        let start = tok.text_range().start();
+        if !tok
+            .parent_ancestors()
+            .any(|n| n.kind() == SyntaxKind::EXPR_STMT && n.text_range().start() == start)
+        {
+            return None;
+        }
+        let span = self.file_span(range_to_span(tok.text_range()));
+        Some(
+            praxis_source::Diagnostic::new(
+                praxis_source::Severity::Error,
+                praxis_source::DiagCode::RetiredKeyword,
+                format!("`{name}` is not a keyword; a binding is written with `{replacement}`"),
+                span,
+            )
+            .with_suggestion(
+                span,
+                *replacement,
+                format!("replace it with `{replacement}`"),
+            ),
+        )
     }
 
     // --- prelude (§16.1) ----------------------------------------------------
@@ -974,7 +1033,7 @@ impl Resolver {
                 Some(symbol)
             }
             None => {
-                self.unresolved(scope, range, &name);
+                self.unresolved(scope, tok, &name);
                 None
             }
         }

@@ -195,7 +195,7 @@ Backtrace:
     m: Map[Text, Int] = {ada: 36}
     k: Text = grace
   temps:
-    <tmp#3: Int> @ "m[k]" = Unit
+    <tmp#3: Int> @ "m[k]" = <uninit>
 ```
 
 The fault kind is `IndexOutOfBounds` — an index the collection does not hold.

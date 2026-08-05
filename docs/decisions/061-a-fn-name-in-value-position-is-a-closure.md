@@ -9,10 +9,15 @@
 ```praxis
 fn double(n: Int) -> Int { n * 2 }
 fn main() -> Int {
-    let f = double
+    var f = double
     f(3)
 }
 ```
+
+<!-- The example was written `let f = double`. `let` was retired by ADR-125;
+     the spelling is updated here because current documentation links to this
+     entry, so a reader arrives at a keyword the compiler refuses. The prose
+     below still quotes the original line where it is describing history. -->
 
 `praxis check` accepted this and `praxis run` **aborted the host with a SIGBUS**.
 Three things were each individually reasonable:

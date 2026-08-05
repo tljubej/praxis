@@ -7,5 +7,5 @@ Backtrace:
     <tmp#1: Int> @ "0" = 0
     <tmp#2: (Int) -> Vec[Int]> @ "steps" = <closure:0>
     <tmp#3: (Int, Int) -> Int> @ "|a, b| -1" = <closure:0>
-    <tmp#4: Map[Int, Int]> @ "dijkstra(0, steps, |a, b| -1)" = Unit
+    <tmp#4: Map[Int, Int]> @ "dijkstra(0, steps, |a, b| -1)" = <uninit>
     <tmp#5: Int> @ "dijkstra(0, steps, |a, b| -1).len()" = <uninit>

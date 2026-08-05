@@ -371,17 +371,48 @@ error[Y001]: expected Int, found Text
   2 | var count: Int = raw
     |                  ^^^ expected Int, found Text
 
-help: this is `Text`; call `.int()` on it (or use `read lines(int)`)
+help: this is `Text`; `.int()` answers `Option[Int]`, so take it apart with `match` (or use `read lines(int)`)
 
 praxis: 1 error(s)
 ```
 
-**The `.int()` that help names does not exist.** `Text` has three methods of its
-own — `len`, `is_empty` and `get` — plus a subscript and the
-[pipeline](../language/pipelines.md) combinators every iterable receiver carries.
-None of them converts, and writing `raw.int()` gets you a `Y110`. The parenthesis
-is the half that works — a number is read by the input parser, either inside a
-`read` or from a `Text` you already have:
+Both halves of that help are real, and they answer different questions.
+
+`Text.int()` reads the number a text spells, and `Text.float()` is its twin.
+Both answer an [`Option`](../language/enums.md#option) rather than the scalar,
+because a text that is not a number is *absence* and not a fault — input is
+routinely not what a program hoped, and a conversion that crashed would give you
+no way to ask first.
+
+```praxis
+var raw = "12"
+var count = match raw.int() { Some(n) => n, None => 0 }
+out(count + 1)
+
+// Whitespace is trimmed; anything that is not a number is `None`.
+out(" 42 ".int())
+out("abc".int())
+out("1.5".float())
+```
+
+```text
+13
+Some(42)
+None
+Some(1.5)
+```
+
+What counts as a number is **the input parser's answer**, not a second one: the
+two methods run the same scanner the `int` and `float`
+[atoms](../input/atoms.md) do, over the whole trimmed text. So `"1 2"`,
+`"12abc"`, `"0x10"` and a value past `Int`'s range are `None` — and so are
+`"+5".int()` and `"inf".float()`, which surprise people until you know where the
+rule comes from.
+
+The other half is the [input parser](../input/reading.md), and it is the one to
+reach for when the text came from input in the first place: `read lines(int)`
+never produces the value at all if the line is not a number, and reports where
+it broke.
 
 ```praxis
 var raw = "12"

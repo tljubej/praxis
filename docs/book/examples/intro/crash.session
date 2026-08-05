@@ -15,7 +15,7 @@ Backtrace:
     <tmp#7: Int> @ "values[start] + values[start + 1]" = 48
     <tmp#8: Int> @ "2" = 2
     <tmp#9: Int> @ "start + 2" = 3
-    <tmp#10: Int> @ "values[start + 2]" = Unit
+    <tmp#10: Int> @ "values[start + 2]" = <uninit>
     <tmp#11: Int> @ "values[start] + values[start + 1] + values[start + 2]" = <uninit>
 Entered crash debugger. 2 frame(s). Type `help` for commands.
 Praxis crash> #0   window_sum

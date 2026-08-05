@@ -11,5 +11,4 @@ Backtrace:
 3 => 4
 
     <tmp#2: Int> = 1
-    <tmp#3: Vec[{ from: Int, to: Int }]> = Unit
     <tmp#4: Int> @ "read lines(`{from:int} -> {to:int}`).len()" = <uninit>

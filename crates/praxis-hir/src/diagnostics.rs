@@ -458,7 +458,7 @@ pub(crate) fn not_numeric(at: FileSpan, ty: &str) -> Diagnostic {
 /// `ty` is `None` for the one shape where there is no receiver type to name:
 /// nothing has pinned the receiver, and the call is refused anyway because the
 /// catalog holds that name at that arity on **no** receiver. Rendering the
-/// receiver there would print `?a` — a type variable's leaked name — into a
+/// receiver there would print `?T` — a type variable's leaked name — into a
 /// message §5.4 requires to be concrete, and it would be the least useful half
 /// of the sentence. The name and the arity are the whole answer.
 pub(crate) fn unknown_method(
@@ -572,6 +572,23 @@ pub(crate) fn missing_record_fields(
             },
             missing.join(", ")
         ),
+        at,
+    )
+}
+
+/// `Y013` — an integer literal outside the range of `Int` (TY-28).
+///
+/// An `Int` is signed 64-bit (§4.3). The literal used to saturate to `i64::MAX`
+/// silently, on the theory that the arithmetic would fault — it does not, and
+/// the program runs with a number nobody wrote.
+///
+/// Two positions raise it, an expression and a literal pattern, and they share
+/// this wording because they are one mistake read at two places.
+pub(crate) fn int_literal_out_of_range(at: FileSpan, text: &str) -> Diagnostic {
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::IntLiteralOutOfRange,
+        format!("`{text}` is outside the range of `Int`"),
         at,
     )
 }
@@ -728,6 +745,35 @@ pub(crate) fn generic_function_as_value(at: FileSpan, name: &str) -> Diagnostic 
             "`{name}` is generic, so it has no single function value; \
              write `|x| {name}(x)` to fix its type arguments at the call"
         ),
+        at,
+    )
+}
+
+/// `Y022` — a builtin or a constructor named without being called (REP-70).
+///
+/// [`generic_function_as_value`]'s neighbour, and its wording follows the same
+/// rule: name the remedy, because there is one and it is exact. A nullary name
+/// wants its parentheses — which is the whole of `out(pi)` — and one that takes
+/// arguments wants the closure, for the reason `Y018` gives.
+///
+/// `what` says which kind it is, because the two read differently to whoever
+/// wrote them: a builtin is a name from the prelude, a constructor is one the
+/// program's own `enum` declared.
+pub(crate) fn name_has_no_function_value(
+    at: FileSpan,
+    name: &str,
+    what: &str,
+    arity: usize,
+) -> Diagnostic {
+    let remedy = if arity == 0 {
+        format!("call it: `{name}()`")
+    } else {
+        format!("write `|x| {name}(x)` to call it")
+    };
+    Diagnostic::new(
+        Severity::Error,
+        DiagCode::NameHasNoFunctionValue,
+        format!("`{name}` is {what}, so it has no function value; {remedy}"),
         at,
     )
 }

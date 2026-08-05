@@ -87,8 +87,11 @@ Two things fall out and both are deliberate:
   is identical and three copies of it is three places for a fall-through to go
   missing.
 - **A field the pattern does not name is a wildcard**, which is HIR-06's padding
-  rule at a second kind of composite: `Some`, `Some(_)` and `Some(n)` are one test
-  for the same reason `P { x }` and `P { x, y: _ }` are. The one-sidedness is the
+  rule at a second kind of composite: `Some(_)` and `Some(n)` are one test
+  for the same reason `P { x }` and `P { x, y: _ }` are. (Bare `Some` was the
+  third spelling here until ADR-134 made it `Y124`. A record pattern has no
+  equivalent: `P { }` names the record, and every field it leaves out is visibly
+  left out.) The one-sidedness is the
   same too — a field the record *does not have* is reported, and it is the
   literal's own `Y114`, because it is the literal's own mistake read in the other
   direction. A field named twice is `Y115`: the second sub-pattern would silently

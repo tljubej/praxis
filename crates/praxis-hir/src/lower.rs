@@ -1724,26 +1724,19 @@ impl<'a> Lowerer<'a> {
         };
         match tok.kind() {
             SyntaxKind::IntLit => {
-                let text = tok.text();
-                // Strip any `_` digit separators; parse as i64. An `Int` is
-                // signed 64-bit (§4.3), so a literal outside that range names a
-                // value the language cannot represent — it used to become
-                // `i64::MAX` silently, on the theory that "the backend will
-                // fault on the actual arithmetic anyway". It does not: the
+                // An `Int` is signed 64-bit (§4.3), so a literal outside that
+                // range names a value the language cannot represent — it used to
+                // become `i64::MAX` silently, on the theory that "the backend
+                // will fault on the actual arithmetic anyway". It does not: the
                 // saturated value is a perfectly good `Int` and the program runs
                 // with a number nobody wrote (TY-28).
-                let cleaned = praxis_syntax::numeric::strip_digit_separators(text);
-                let value = match cleaned.parse::<i64>() {
-                    Ok(v) => v,
-                    Err(_) => {
-                        self.diag(
-                            tok.text_range(),
-                            DiagCode::IntLiteralOutOfRange,
-                            format!("`{text}` is outside the range of `Int`"),
-                        );
-                        0
-                    }
-                };
+                //
+                // **Inference reports it** (ADR-133), and `run` renders analysis
+                // before it lowers, so this is not silence — it is the same
+                // report, one pass earlier, where `check` and the editor can see
+                // it too. Substituting `0` here keeps the typed tree buildable
+                // for a caller that lowers anyway.
+                let value = praxis_syntax::numeric::parse_int_literal(tok.text()).unwrap_or(0);
                 TypedExpr::Lit {
                     value: Lit::Int(value),
                     ty,

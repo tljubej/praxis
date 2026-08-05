@@ -12,8 +12,27 @@ carries the command that produces it and the output that came back. Paths in the
 transcripts are shortened for reading — the compiler prints whatever path it was
 given.
 
-Nothing here is fixed. The defects are ordered by what they cost a user, not by
-how hard they are.
+**All of them are fixed**, along with a ninth a user reported against the same
+build (a bare variant name for a variant that carries a payload compiled, and
+`Y124` in an editor did not appear at all). Each entry keeps its reproduction
+and gains a **Fixed** line naming the change and the gate. The defects are
+ordered by what they cost a user, not by how hard they are.
+
+The reproductions below are what the compiler *did*; run them against the
+current binary and you get the new answer, which is the point of leaving them
+in.
+
+| # | What it was | Where it went |
+|---|---|---|
+| 1 | `check` exits 0 on programs `run` refuses | [ADR-133](../decisions/133-every-diagnostic-a-well-formed-program-can-earn-is-analysiss.md) |
+| — | a bare `A` matches `A(Int)` (user report) | [ADR-134](../decisions/134-a-payload-carrying-variant-says-so-in-the-pattern.md) |
+| 2 | `reduce` with a mistyped closure body ICEs | REP-68 |
+| 3 | `(1,)` aborts MIR verification | REP-69 |
+| 4 | `out` accepts a function value and prints `Unit` | [ADR-136](../decisions/136-a-text-becomes-a-number-through-an-option.md), REP-70 |
+| 5 | `let x = 1` suggests `Set` | REP-71 |
+| 6 | the faulting temp renders `Unit`, not `<uninit>` | [ADR-135](../decisions/135-a-debug-slot-is-written-on-the-path-the-value-was-produced-on.md), REP-72 |
+| 7 | a `help:` names a method that does not exist | [ADR-136](../decisions/136-a-text-becomes-a-number-through-an-option.md) |
+| 8 | the CLI misfiles two commands under Milestone 0 | REP-73 |
 
 ## Reproducing
 
@@ -96,6 +115,27 @@ on a literal is the same story from a different caller.
 and the editor run the same query; a fix that only helps the CLI reintroduces
 exactly the divergence ADR-097 removed.
 
+**Fixed** ([ADR-133](../decisions/133-every-diagnostic-a-well-formed-program-can-earn-is-analysiss.md)),
+along the shape this entry describes. `exhaustive::check_matches` keeps the
+builder's sink instead of throwing it away, minus whatever inference has already
+said at the same caret; `pattern::check_binding_patterns` walks the two binding
+positions the coverage pass did not; and `Y013` is decided in `infer_literal`,
+where nothing about the range needs the typed tree. `check` still does not
+lower. `Y099` stays where it is and the ADR says why: no well-formed program
+earns it. Gates:
+`coverage_tests::a_program_run_refuses_is_a_program_check_refuses`,
+`a_diagnostic_two_passes_agree_on_is_reported_once`, and
+`every_pattern_position_is_checked_by_analysis` — the last of which fails if a
+fourth pattern position is ever added to the grammar without being walked.
+
+A user reported the same shape from the other end, and it is why this entry
+moved first: `match bla { A(i, j) => … }` on `enum Bla { A(Int), … }` refused to
+run and the editor said nothing. The neighbouring half of that report —
+`match bla { A => … }` **compiling** — is
+[ADR-134](../decisions/134-a-payload-carrying-variant-says-so-in-the-pattern.md):
+a bare variant name is a pattern only for a variant that carries no payload, and
+`A(_)` is how you say "any payload" now.
+
 The book documents the current behaviour honestly
 ([tooling/diagnostics.md](../book/src/tooling/diagnostics.md) has a run-only
 table). **That table should be deleted when this is fixed**, and
@@ -143,6 +183,16 @@ inference. Anything that makes the mismatch a `Y001` before lowering closes it.
 lets the closure body through. The assertion at `build.rs:1437` is correct and
 should stay — it caught this.
 
+**Fixed** (REP-68), and the inference path was the catalog. `seq_reduce`'s
+parameter was `acc_t_to_acc()` — `(Acc, T) -> Acc`, which is **`fold`'s** shape,
+shared with it. `reduce` is `fold` without the seed, so its accumulator *is* the
+element type; the free `Acc` meant nothing tied the closure's first parameter to
+the element, `a` was an unpinned variable, `len` resolved against no receiver at
+all, and the closure answered `Int` while `reduce` answered `Text`. It is
+`t_t_to_t()` now, the mismatch is a `Y001` before lowering, and the assertion
+stays. Gate: `infer_tests::reduces_accumulator_is_the_element_type`, which also
+pins that the receiver is now concrete enough for `Y110` to name its type.
+
 ---
 
 ## 3. A one-element tuple aborts MIR verification
@@ -172,6 +222,17 @@ and `t.0` is a type error.
 one-element tuple everywhere (and `t.0` works, and it prints `(1,)`), or the
 trailing comma is not tuple syntax at arity one and the parser rejects it. The
 verifier is doing its job here; do not weaken it.
+
+**Fixed** (REP-69), the second way. `TupleElems` refuses to represent a
+one-element tuple and the pattern position already said so (`a tuple pattern
+names two elements or more`), so the type does not exist and the expression
+spelling is refused at the comma: `P001: a tuple has two elements or more, so
+this comma names nothing`. The node recovers as `PAREN_EXPR`, which is the
+grouping the author most likely meant, so nothing downstream sees the shape that
+does not exist. `(Int,)` in type position goes the same way — it used to
+resolve quietly to `Int`. `(1, 2,)` is untouched: a trailing comma is
+punctuation at every arity the type has. The verifier is unchanged. Gate:
+`parse::tests::a_one_element_tuple_is_refused_at_the_comma`.
 
 ---
 
@@ -205,6 +266,19 @@ was rendered as if it were the unit value. Two things to settle:
   It is a function; the entry should say so, or `pi` should become a real
   constant. The doc string is what hover shows, so this one is user-visible in
   the editor.
+
+**Fixed** ([ADR-136](../decisions/136-a-text-becomes-a-number-through-an-option.md),
+REP-70), and the defect was bigger than `out`. Following it past `out(pi)`:
+`var h = abs` then `out(h(-3))` **printed nothing and exited 0**, and
+`out([pi])` faulted with "value does not have the declared type". A prelude
+builtin and a payload-carrying enum constructor both lowered to the unit value
+in value position — neither has an adapter to close over, the way ADR-061 gives
+a user `fn` one. So `out` does not need a rule about function values: the name
+itself is now `Y022`, reported where it is written, naming the remedy the arity
+calls for. The test is the *type*, not a list of names, which is what keeps
+`None` and every payload-less variant working with no exception. `pi` and `e`'s
+doc strings say they are nullary functions. Gate:
+`infer_tests::a_builtin_or_constructor_used_as_a_value_is_reported`.
 
 ---
 
@@ -240,6 +314,16 @@ Two candidate fixes, and the second is better:
    established. `let` is still a legal identifier (`var let = 5` compiles and
    prints), so the special case belongs at the point where `N001` is raised for a
    name in statement position, not in the lexer.
+
+**Fixed** (REP-71), the second way, and with its own code. `N009` — "`let` is
+not a keyword; a binding is written with `var`" — is raised in
+`Resolver::retired_keyword`, at the head of a statement, with `var` as a
+machine-applicable replacement. It is `N001`'s neighbour rather than a variation
+on it because it is not a name that happens to be missing: the answer is known
+exactly, and asking the near-miss budget a question it cannot answer well is
+what produced `Set`. The suggestion budget is untouched. `var let = 5` still
+compiles, which is what the head-of-a-statement condition is for. Gate:
+`infer_tests::the_retired_let_keyword_is_named_rather_than_guessed_at`.
 
 ---
 
@@ -280,6 +364,22 @@ who wrote that slot.
 A reader debugging this program has to know that `Unit` here means "nothing
 happened", which is the one thing the debugger exists to make obvious.
 
+**Fixed** ([ADR-135](../decisions/135-a-debug-slot-is-written-on-the-path-the-value-was-produced-on.md),
+REP-72), and the renderer was indeed not where it went. The slot held the Unit
+sentinel `praxis_vec_get` returns after setting `pending_fault`: `def_var`
+stored it and ADR-104's debug store, immediately behind, recorded it. The store
+now comes after the *step* rather than after the instruction, and a faultable
+instruction's `Inst::CheckFault` is part of its step — so the store lands in the
+check's fall-through block, and the fault path leaves the slot at the `None` the
+frame's claim starts with. Generated code is unchanged: same stores, same order,
+one basic block later on one path. Gate:
+`run.rs::the_destination_of_a_faulting_instruction_is_uninit`, which asserts the
+faulting temp *and* its seven neighbours.
+
+The book's `<uninit>` and `Unit` section
+([debugger/faults.md](../book/src/debugger/faults.md)) taught the distinction and
+has been rewritten: there is one answer now.
+
 ---
 
 ## 7. A `help:` names a method that does not exist
@@ -314,6 +414,16 @@ Either add the `Text.int()` the help promises, or rewrite the help to name what
 exists. The book currently documents the wart
 ([types/errors.md](../book/src/types/errors.md), "Text and numbers") and that
 passage should be deleted when this is fixed.
+
+**Fixed** ([ADR-136](../decisions/136-a-text-becomes-a-number-through-an-option.md))
+by adding the method. `Text.int()` answers `Option[Int]`, for §4.7's reason and
+`Map.get`'s: a text that is not a number is *absence*, not a fault, and input is
+routinely not what a program hoped. It trims and then reads an optional sign and
+digits; `"1 2"`, `"0x10"`, `"1_000"`, `""` and anything past `Int`'s range are
+`None`. The help is rewritten to say what the call gives you rather than
+implying it is the whole fix. The book's wart passage is gone and the chapter
+documents the method instead. Gates: `builtins::text_int_answers_an_option`
+(catalog) and `jit::text_int_parses_a_number_or_answers_none` (runtime).
 
 ---
 
@@ -354,6 +464,15 @@ lsp    Start the language server over stdio (§15, M11). ...
 A reader of `--help` has no idea what `§7.1` or `M6` is. The notes are worth
 keeping; they belong in a `//` comment beside the doc comment, not in it.
 
+**Fixed** (REP-73), both halves and exactly as described. `not_implemented` takes
+no milestone: a number nobody maintains reads as a commitment and never goes
+red, and neither `watch` (§19 M-later) nor `repl` (unscheduled) has one worth
+printing. The `§`/`M` markers moved into `//` comments beside the doc comments.
+The `--input` question on `Command::Watch` is recorded in a comment at the
+variant rather than answered, because answering it is a decision about a command
+nobody has built. Gates: `check.rs::no_help_page_leaks_an_implementation_marker`
+over all six help pages, and `a_stub_command_does_not_name_a_milestone`.
+
 ---
 
 ## Comments and documents that are wrong
@@ -361,6 +480,11 @@ keeping; they belong in a `//` comment beside the doc comment, not in it.
 Each of these was checked against the behaviour it describes. None is a code
 defect — they are all one-line edits, and each one is a trap for whoever reads it
 next. They are grouped by where the truth is.
+
+**All corrected.** Two of them were corrected by *changing the code* rather than
+the comment, because the defect entries above changed what is true: `pi`'s
+prelude entry (defect 4) and the `Text.int()` the `Y001` help promises (defect
+7). The rest are edits at the site.
 
 | Where | What it says | What is true |
 |---|---|---|
@@ -382,11 +506,19 @@ to run and no `main` function" and never reaches the JIT. The number may be
 measuring something other than what it names; it could not be reproduced on an
 arm64 darwin host.
 
+**Corrected in place**, and the bullet now says which of the two things it
+measures — the smallest program that reaches the JIT — and records that the
+figure itself does not reproduce here: `/usr/bin/time -l` reports 5.5 MiB for
+`out(1)` and 3.4 MiB for the empty file. Both are *below* 7.3, so the decision's
+argument survives with room to spare; the specific number does not travel, and
+the bullet says so rather than being quietly restated.
+
 ---
 
 ## After you fix one
 
-Two gates, and the second is the one people forget.
+Two gates, and the second is the one people forget. Both were run for every
+entry above; the book work each fix implied is described in the entry.
 
 ```bash
 just ci

@@ -4710,13 +4710,22 @@ fn a_missing_case_is_named_by_the_value_that_is_missing() {
     );
 }
 
-/// A bare constructor name and that constructor at every-wildcard are the same
-/// test, because lowering pads a variant pattern to its payload arity (HIR-06).
-/// The matrix pairs each column with a type; a row narrower than the payload
-/// would pair them off by one.
+/// A constructor at every-wildcard and that constructor with its payload named
+/// are the same test, because the builder pads a variant pattern to its payload
+/// arity (HIR-06). The matrix pairs each column with a type; a row narrower than
+/// the payload would pair them off by one.
+///
+/// (Named `a_bare_constructor_name_is_that_constructor_at_any_payload` until
+/// ADR-134, which is the spelling that left.)
+///
+/// The **bare** name used to be the third spelling of it and is `Y124` now
+/// (ADR-134) — see
+/// [`a_bare_name_for_a_variant_that_carries_a_payload_is_reported`]. The padding
+/// is unchanged: the arm still covers `Some` for coverage purposes, so the only
+/// thing that changed is that the program is asked to say so.
 #[test]
-fn a_bare_constructor_name_is_that_constructor_at_any_payload() {
-    for arm in ["Some", "Some(_)", "Some(n)"] {
+fn a_constructor_at_wildcards_is_that_constructor_at_any_payload() {
+    for arm in ["Some(_)", "Some(n)"] {
         let src = format!(
             "fn main() -> Int {{ var o = Some(1)\n  match o {{ {arm} => 1, None => 0 }} }}"
         );
@@ -4725,7 +4734,9 @@ fn a_bare_constructor_name_is_that_constructor_at_any_payload() {
             "`{arm}` plus `None` is all of Option[Int]"
         );
     }
-    // …and without the `None` arm none of them is.
+    // …and without the `None` arm none of them is. Bare `Some` is in this half
+    // too: it is padded before coverage runs, so `Y120` is still the answer
+    // about what it leaves out, alongside the `Y124` about how it is written.
     for arm in ["Some", "Some(_)", "Some(n)"] {
         let src = format!("fn main() -> Int {{ var o = Some(1)\n  match o {{ {arm} => 1 }} }}");
         let diags = analyze_and_lower_diags(&src);
@@ -4734,6 +4745,66 @@ fn a_bare_constructor_name_is_that_constructor_at_any_payload() {
             "`{arm}` alone leaves `None`: {diags:?}"
         );
     }
+}
+
+/// **ADR-134.** A bare variant name for a variant that *carries* a payload is
+/// `Y124`, and `A(_)` is how you say "any payload" now.
+///
+/// `match bla { A => …, B => …, C => … }` over `enum Bla { A(Int), B, C }`
+/// compiled: the bare name was padded to the variant's arity and the arm said
+/// nothing at all about the value `A` holds. Three arms, three variants, one
+/// exhaustive match — and an arm that reads exactly like `B` and `C`, which
+/// carry nothing, to anyone who has not gone and read the declaration.
+///
+/// Naming *fewer* inside parentheses is still the padding rule: `Pair(a)` on a
+/// two-slot variant is legal, because the parentheses are the place the author
+/// said what they were doing.
+#[test]
+fn a_bare_name_for_a_variant_that_carries_a_payload_is_reported() {
+    for src in [
+        "enum Bla { A(Int), B, C }\nvar bla = A(3)\nmatch bla { A => {} B => {} C => {} }",
+        // At one slot and at two, and nested inside another pattern.
+        "enum P { Pair(Int, Int) }\nfn main() -> Int { var p = Pair(1, 2)\n match p { Pair => 1 } }",
+        "fn main() -> Int { var o = Some(Some(1))\n \
+         match o { Some(Some) => 1, Some(None) => 2, None => 0 } }",
+        // A `for` header is a pattern position too. (A closure parameter is not
+        // reachable this way: `|Wrap|` is a parameter *named* `Wrap` — the
+        // grammar reads a bare name in that position as a name, not a pattern.)
+        "enum W { Wrap(Int) }\nfor Wrap in [Wrap(1)] { out(0) }",
+    ] {
+        let diags = analyze_and_lower_diags(src);
+        assert!(
+            diags.iter().any(|d| d.code().to_string() == "Y124"),
+            "{src} must be Y124, got {diags:?}"
+        );
+    }
+
+    // The fix is machine-applicable, and it names one `_` per slot (ADR-132).
+    let diags = analyze_and_lower_diags(
+        "enum P { Pair(Int, Int) }\nfn main() -> Int { var p = Pair(1, 2)\n match p { Pair => 1 } }",
+    );
+    let y124 = diags
+        .iter()
+        .find(|d| d.code().to_string() == "Y124")
+        .expect("Y124");
+    assert_eq!(
+        y124.suggestions()
+            .first()
+            .and_then(|s| s.replacement.as_deref()),
+        Some("Pair(_, _)"),
+        "the fix writes a wildcard per slot: {y124:?}"
+    );
+
+    // A payload-*less* variant is untouched: there is nothing to name.
+    assert!(is_clean_with_lower(
+        "enum T { Empty, Wall }\nfn main() -> Int { var t = Empty\n match t { Empty => 1, Wall => 0 } }"
+    ));
+    // And a bare name that is *not* a variant of the scrutinee's enum is still a
+    // binding, which is HIR-07's rule and not this one.
+    assert!(is_clean_with_lower(
+        "enum T { Empty, Wall, Number(Int) }\n\
+         fn main() -> Int { var t = Empty\n match t { Empty => 1, other => 2 } }"
+    ));
 }
 
 /// TY-32/D4 as the **rule**, not the four exit cases. The question a key has to
@@ -5055,6 +5126,67 @@ fn a_generic_fn_used_as_a_value_is_reported_rather_than_run() {
     ));
 }
 
+/// **REP-70.** A builtin or a constructor named without being called is `Y022`,
+/// because there is no value for the name to be.
+///
+/// `Y018`'s neighbour, one symbol kind over, and a blunter failure: a
+/// monomorphic user `fn` at least *has* a value (a closure over its adapter,
+/// ADR-061). A builtin has no adapter and a constructor is built at its call, so
+/// both lowered to `Unit` — `out(pi)` printed `Unit`, and `var h = abs` followed
+/// by `h(-3)` printed nothing at all and exited 0.
+#[test]
+fn a_builtin_or_constructor_used_as_a_value_is_reported() {
+    for src in [
+        // The reported shape: `pi` is a nullary function, not a constant.
+        "fn main() -> Unit { out(pi) }",
+        "fn main() -> Int { var h = abs\n h(-3) }",
+        "fn main() -> Unit { out(Some) }",
+        "enum E { A(Int), B }\nfn main() -> Unit { var f = A\n out(f(1)) }",
+        // Inside a composite, and as an argument, which is where it faulted
+        // rather than printed.
+        "fn main() -> Unit { out([pi]) }",
+        "fn main() -> Unit { out([1, 2].map(abs)) }",
+    ] {
+        let diags = analyze(src).diagnostics;
+        assert!(
+            diags.iter().any(|d| d.code().to_string() == "Y022"),
+            "{src} must be Y022, got {diags:?}"
+        );
+    }
+
+    // The wording names the remedy, and which remedy depends on the arity.
+    let nullary = analyze("fn main() -> Unit { out(pi) }").diagnostics;
+    assert!(
+        nullary[0].message().contains("call it: `pi()`"),
+        "{}",
+        nullary[0].message()
+    );
+    let unary = analyze("fn main() -> Unit { out(Some) }").diagnostics;
+    assert!(
+        unary[0].message().contains("write `|x| Some(x)`"),
+        "{}",
+        unary[0].message()
+    );
+
+    // Calling them is untouched, which is the whole point…
+    for src in [
+        "fn main() -> Unit { out(pi()) }",
+        "fn main() -> Unit { out(abs(-3)) }",
+        "fn main() -> Unit { out(Some(1)) }",
+        "fn main() -> Unit { out([1, 2].map(|n| abs(n))) }",
+    ] {
+        assert!(!has_type_error(src), "{src} must be accepted");
+    }
+    // …and a **payload-less** variant is an ordinary value, not a function. The
+    // type is what tells them apart, which is why `None` needs no exception.
+    for src in [
+        "fn main() -> Unit { out(None) }",
+        "enum E { A(Int), B }\nfn main() -> Unit { var f = B\n out(f) }",
+    ] {
+        assert!(!has_type_error(src), "{src} must be accepted");
+    }
+}
+
 /// **REP-06.** A `struct`/`enum` inside a function body is reported where it is
 /// written, not left silent.
 ///
@@ -5102,7 +5234,7 @@ fn a_nested_type_declaration_is_reported_at_the_declaration() {
 }
 
 /// **REP-05.** A pattern naming more sub-patterns than the variant holds is
-/// reported; naming fewer is still the padding rule.
+/// reported; naming fewer *inside parentheses* is still the padding rule.
 ///
 /// `match w { Wrap(a, b) => a }` against a one-slot variant **compiled and ran**,
 /// answering the payload: `b` was lowered (so a mistake inside it still reported)
@@ -5131,10 +5263,10 @@ fn a_pattern_naming_more_values_than_the_variant_holds_is_reported() {
         "a payload-less variant names zero values: {diags:?}"
     );
 
-    // …and naming *fewer* is legal at every count — HIR-06's padding rule, which
-    // is why the check is one-sided.
+    // …and naming *fewer inside parentheses* is legal at every count — HIR-06's
+    // padding rule. The bare spelling left this list at ADR-134; it is the other
+    // half of `Y124` now.
     for src in [
-        "enum W { Wrap(Int) }\nfn main() -> Int { var w = Wrap(7)\n match w { Wrap => 1 } }",
         "enum W { Wrap(Int) }\nfn main() -> Int { var w = Wrap(7)\n match w { Wrap(_) => 1 } }",
         "enum W { Wrap(Int) }\nfn main() -> Int { var w = Wrap(7)\n match w { Wrap(n) => n } }",
         "enum P { Pair(Int, Int) }\nfn main() -> Int { var p = Pair(1, 2)\n match p { Pair(a) => a } }",
@@ -7378,4 +7510,100 @@ fn sorted_by_key_orders_what_sorted_cannot() {
     assert!(!has_type_error(
         "fn main() -> Unit { var s = Set()\n s.insert(\"a\")\n out(s.sorted_by_key(|t| t.len())) }"
     ));
+}
+
+/// **REP-68.** `reduce`'s accumulator *is* the element type, so its closure is
+/// `(T, T) -> T` and a body that answers anything else is `Y001`.
+///
+/// It shared `fold`'s `(Acc, T) -> Acc` shape, and the free `Acc` that `fold`
+/// needs — its seed is a separate argument and may be a separate type — was the
+/// defect here. Nothing tied the closure's first parameter to the element, so
+/// `["ab", "c"].reduce(|a, b| a.len())` type-checked: `a` was an unpinned
+/// variable, `len` resolved against no receiver at all, and the closure answered
+/// `Int` while `reduce` answered `Text`. The two disagreeing reached MIR and
+/// panicked the compiler.
+#[test]
+fn reduces_accumulator_is_the_element_type() {
+    // The reproduction, and the neighbouring shapes that share its cause: a
+    // literal body and a method body are the same mistake.
+    for src in [
+        "fn main() -> Unit { out([\"ab\", \"c\"].reduce(|a, b| a.len())) }",
+        "fn main() -> Unit { out([\"ab\", \"c\"].reduce(|a, b| 1)) }",
+        "fn main() -> Unit { out([1, 2].reduce(|a, b| a > b)) }",
+    ] {
+        assert!(has_type_error(src), "{src} must be Y001");
+    }
+
+    // The receiver is *pinned* now, which is the other half: an unknown method
+    // on it can name the type it is not on. It used to say "no type has a
+    // method `to_text`", because there was no type in hand to name.
+    let diags = analyze("fn main() -> Unit { out([1, 2].reduce(|a, b| a.to_text())) }").diagnostics;
+    let y110 = diags
+        .iter()
+        .find(|d| d.code().to_string() == "Y110")
+        .unwrap_or_else(|| panic!("expected Y110, got {diags:?}"));
+    assert!(
+        y110.message().contains("on type `Int`"),
+        "the receiver is pinned by the element type: {}",
+        y110.message()
+    );
+
+    // …and the shapes that are right are still right, at two element types.
+    for src in [
+        "fn main() -> Unit { out([1, 2, 7].reduce(|a, b| a + b)) }",
+        "fn main() -> Unit { out([1, 2, 7].reduce(|a, b| max(a, b))) }",
+        "fn main() -> Unit { out([\"a\", \"b\"].reduce(|a, b| a + b)) }",
+    ] {
+        assert!(!has_type_error(src), "{src} must be accepted");
+    }
+
+    // `fold` keeps the separate accumulator — that is the whole difference
+    // between them, and it is why the seed is an argument.
+    assert!(!has_type_error(
+        "fn main() -> Unit { out([1, 2, 7].fold(\"\", |acc, n| acc)) }"
+    ));
+}
+
+/// **REP-71.** `let` is a retired keyword, not a typo, and it gets `N009` with
+/// the fix it actually needs.
+///
+/// It used to be `N001` with `help: did you mean `Set`?` — the suggestion budget
+/// is `max(1, len/3)`, `let` is three characters, so the budget is 1 and `Set`
+/// is one edit away. The budget is rustc's rule and it is right in general; what
+/// was wrong is asking it about a word whose replacement is known exactly.
+#[test]
+fn the_retired_let_keyword_is_named_rather_than_guessed_at() {
+    for src in ["let x = 1\n", "fn f() -> Int {\n    let y = 2\n    y\n}\n"] {
+        let diags = analyze(src).diagnostics;
+        let n009 = diags
+            .iter()
+            .find(|d| d.code().to_string() == "N009")
+            .unwrap_or_else(|| panic!("{src} must be N009, got {diags:?}"));
+        assert!(
+            n009.message().contains("written with `var`"),
+            "{}",
+            n009.message()
+        );
+        assert_eq!(
+            n009.suggestions()
+                .first()
+                .and_then(|s| s.replacement.as_deref()),
+            Some("var"),
+            "the fix is machine-applicable"
+        );
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.code().to_string() == "N001" && d.message().contains("`let`")),
+            "and it replaces the N001 rather than joining it: {diags:?}"
+        );
+    }
+
+    // `let` stays a legal **identifier**, which is what makes the head-of-a-
+    // statement condition necessary: this declares one and reads it.
+    assert!(!has_name_error("var let = 5\nout(let)\n"));
+
+    // An ordinary near miss is untouched — the budget rule is not what was
+    // wrong.
+    assert!(has_name_error("out(lets)\n"));
 }

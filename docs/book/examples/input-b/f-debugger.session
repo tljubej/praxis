@@ -16,7 +16,6 @@ three
 4
 
     <tmp#3: Int> = 1
-    <tmp#4: Vec[Int]> = Unit
     <tmp#7: (Int) -> Bool> @ "|v| v < limit" = <uninit>
 Entered crash debugger. 2 frame(s). Type `help` for commands.
 Praxis crash> #0   shipping

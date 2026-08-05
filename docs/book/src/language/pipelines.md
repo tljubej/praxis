@@ -449,7 +449,6 @@ Backtrace:
     <tmp#1: Vec[Int]> @ "[]" = []
     <tmp#3: Int> = 0
     <tmp#4: Int> = 0
-    <tmp#6: Unit> = Unit
     <tmp#8: Unit> @ "out(scores.min())" = <uninit>
 ```
 

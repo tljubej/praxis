@@ -1751,8 +1751,12 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
             // moved to its one untrusted caller, this one has nowhere to go: an
             // `i64` that is not a Unicode scalar arrives from `Int.to_char()`
             // at run time (ADR-086), not from a literal. There is no
-            // char-literal syntax today (ADR-107), so this arm is reached only
-            // from a synthesized `Lit::Char`.
+            // char-literal syntax today (ADR-107), and nothing in the tree
+            // constructs a `Lit::Char` either — every mention of it is a match
+            // arm — so this arm is currently unreachable from any source
+            // program. It is kept because `Lit` is the shape lowering answers
+            // for, and an arm that panics instead would be a panic waiting for
+            // the first char literal.
             b.alloc(dst, AllocKind::Char { value: scalar });
             dst
         }

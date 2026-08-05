@@ -7,4 +7,4 @@ Backtrace:
   locals:
     n: Int = 55296
   temps:
-    <tmp#2: Char> @ "n.to_char()" = Unit
+    <tmp#2: Char> @ "n.to_char()" = <uninit>

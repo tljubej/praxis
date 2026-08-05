@@ -1,11 +1,11 @@
-error[N001]: `let` is not defined
+error[N009]: `let` is not a keyword; a binding is written with `var`
 
   let-is-gone.px:1:1
   1 | let x = 5
-    | ^^^ `let` is not defined
+    | ^^^ `let` is not a keyword; a binding is written with `var`
 
-help: did you mean `Set`?
-      Set
+help: replace it with `var`
+      var
 
 error[P002]: expected `;` or a line break between statements
 

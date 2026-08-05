@@ -165,3 +165,7 @@ verifier rule only. Its decision must not claim the elision.
 - [ADR-130: A match's coverage is analysis's answer, and the pattern shape is built once](./130-a-matchs-coverage-is-analysis-answer-and-the-pattern-is-built-once.md)
 - [ADR-131: A rename is safe when re-resolution is unchanged](./131-a-rename-is-safe-when-re-resolution-is-unchanged.md)
 - [ADR-132: A code action is a diagnostic's machine-applicable suggestion](./132-a-code-action-is-a-diagnostics-machine-applicable-suggestion.md)
+- [ADR-133: Every diagnostic a well-formed program can earn is analysis's](./133-every-diagnostic-a-well-formed-program-can-earn-is-analysiss.md)
+- [ADR-134: A payload-carrying variant says so in the pattern](./134-a-payload-carrying-variant-says-so-in-the-pattern.md)
+- [ADR-135: A debug slot is written on the path the value was produced on](./135-a-debug-slot-is-written-on-the-path-the-value-was-produced-on.md)
+- [ADR-136: A text becomes a number through an `Option`, and a name with no value says so](./136-a-text-becomes-a-number-through-an-option.md)

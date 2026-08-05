@@ -50,7 +50,7 @@ Backtrace:
     <tmp#6: Int> @ "3" = 3
     <tmp#7: Unit> = Unit
     <tmp#9: Int> @ "9" = 9
-    <tmp#10: Int> @ "v[9]" = Unit
+    <tmp#10: Int> @ "v[9]" = <uninit>
     <tmp#11: Unit> @ "out(v[9])" = <uninit>
     <tmp#12: Unit> @ "var v = [1, 2, 3] out(v[9])" = <uninit>
 Entered crash debugger. 1 frame(s). Type `help` for commands.
@@ -557,7 +557,7 @@ wrapper of its own to fault, while `sorted` and `sorted_by_key` do — and
 | `min_by((T, T) -> Bool)` | `T` | — | yes | Smallest element per a `(T, T) -> Bool` "less-than" comparator. |
 | `position((T) -> Bool)` | `Option[Int]` | — | no | The index of the first matching element, or None. |
 | `product()` | `Int` | items are `Int` | yes | Multiply the (Int) elements. |
-| `reduce((Acc, T) -> Acc)` | `T` | — | yes | Reduce left-to-right, seeded with the first element. |
+| `reduce((T, T) -> T)` | `T` | — | yes | Reduce left-to-right, seeded with the first element. |
 | `sum()` | `Int` | items are `Int` | yes | Sum the (Int) elements. |
 
 `count` is the one name in the catalog that carries two arities on a *single*
@@ -595,7 +595,6 @@ Backtrace:
     <tmp#1: Vec[Int]> = []
     <tmp#3: Int> = 0
     <tmp#4: Int> = 0
-    <tmp#6: Unit> = Unit
     <tmp#8: Unit> @ "out(v.min())" = <uninit>
     <tmp#9: Unit> @ "var v: Vec[Int] = Vec() out(v.min())" = <uninit>
 ```
@@ -764,6 +763,8 @@ conversions and the explicit-overflow family.
 | Method | Result | Mutates | Faults | Allocates | What it does |
 |---|---|---|---|---|---|
 | `get(Int)` | `Char` | no | yes | yes | The `Char` at `index`; faults if out of range. `t[index]` is the same row and the same answer. |
+| `float()` | `Option[Float]` | no | no | yes | The Float this text spells as `Some(x)`, or `None` if it spells none. |
+| `int()` | `Option[Int]` | no | no | yes | The Int this text spells as `Some(n)`, or `None` if it spells none. |
 | `is_empty()` | `Bool` | no | no | no | True iff the text has no chars. |
 | `len()` | `Int` | no | no | yes | Number of Unicode scalar values (chars) in the text. |
 
@@ -775,6 +776,10 @@ out(line.is_empty())
 out(line.get(1))
 out(line.get(1).to_int())
 out((233).to_char())
+out(" 42 ".int())
+out("héllo".int())
+out("1.5".float())
+out("inf".float())
 ```
 
 ```text
@@ -783,12 +788,36 @@ false
 é
 233
 é
+Some(42)
+None
+Some(1.5)
+None
 ```
 
 `len()` counts Unicode scalar values and `get`/`t[i]` index by them, not by
 bytes — which is why `"héllo".len()` is 5 and `line.get(1)` is `é`. `Char.to_int`
 and `Int.to_char` are the round trip out of and back into a character, and they
 are `Int` and `Char` rows rather than `Text` ones.
+
+`int()` and `float()` trim the text and then read **exactly what the input
+parser's `int` and `float` atomics read** ([§7.4](../input/atoms.md)), over the
+whole of what is left. They share the parser's own scanner, so `t.int()` and
+`parse(t, int)` cannot disagree about what a number is. Anything the run does not
+cover is `None` — `"1 2"`, `"12abc"`, `"1."` — because a text that is not a
+number is absence rather than a fault
+([ADR-136](../../../decisions/136-a-text-becomes-a-number-through-an-option.md)).
+
+Two answers surprise people, and both follow from that rule:
+
+- `"+5".int()` is `None`. The `int` atomic takes a leading `-` and not a `+`.
+  `"+5.0".float()` *is* a value, because the `float` atomic does take one.
+- `"inf".float()` and `"nan".float()` are `None`. `Float` has those values —
+  `1.0 / 0.0` is one, and `to_text()` prints them — but no text spells one.
+
+A value past `Int`'s range is `None` too. The [input parser](../input/reading.md)
+is the other way to get a number out of text, and the one to reach for when the
+text came from input in the first place: it reports where the parse broke instead
+of answering `None`.
 
 There is no `split`, no `chars` and no `to_upper`: all three are `Y110`. `for ch
 in text` is how a `Text` is walked, and the pipeline rows above apply to it
@@ -976,7 +1005,7 @@ Backtrace:
     <tmp#4: Int> @ "1" = 1
     <tmp#5: Unit> @ "m.insert("a", 1)" = Unit
     <tmp#6: Text> @ ""b"" = b
-    <tmp#7: Int> @ "m["b"]" = Unit
+    <tmp#7: Int> @ "m["b"]" = <uninit>
     <tmp#8: Unit> @ "out(m["b"])" = <uninit>
     <tmp#9: Unit> @ "var m = Map() m.insert("a", 1) out(m["b"])" = <uninit>
 ```

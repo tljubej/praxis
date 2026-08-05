@@ -60,9 +60,10 @@ var m = Step(1, 2)
 out(m)
 out(match m { Step(dx, dy) => dx * 10 + dy, Stay => 0 })
 
-// A variant named without its payload means "any payload": `Step`, `Step(_)`
-// and `Step(_, _)` are one test.
-out(match m { Step => 1, Stay => 0 })
+// A wildcard stands in for a payload slot the arm does not need, and `Step(_,
+// _)` is how you say "any payload". A bare `Step` is not: a variant that
+// carries a payload has to say so in the pattern.
+out(match m { Step(_, _) => 1, Stay => 0 })
 
 var at = (0, 0)
 for step in [Step(1, 0), Step(0, 2), Stay, Step(3, 4)] {
@@ -81,15 +82,17 @@ Step(1, 2)
 (4, 6)
 ```
 
-Naming fewer sub-patterns than the payload has is not an error: the rest are
-wildcards. Naming *more* is `Y124`:
+Inside the parentheses you may name **fewer** sub-patterns than the payload has:
+the rest are wildcards, so `Step(dx)` binds the first slot and ignores the
+second.
+
+Two things are `Y124`. Naming **more** than the payload has:
 
 ```praxis
 enum Wrapped { Wrap(Int) }
 
-// Naming *more* sub-patterns than the payload has is `Y124`. It comes from
-// lowering rather than from analysis, so `praxis check` is silent about it and
-// `praxis run` reports it.
+// Naming *more* sub-patterns than the payload has is `Y124`, from analysis —
+// so `praxis check`, `praxis run` and the editor all report it.
 fn value(w: Wrapped) -> Int {
     match w { Wrap(a, b) => a + b }
 }
@@ -99,22 +102,29 @@ out(value(Wrap(1)))
 
 ```console
 $ praxis check docs/book/examples/records-enums/match-too-many-sub-patterns.px
-$ praxis run docs/book/examples/records-enums/match-too-many-sub-patterns.px
 error[Y124]: `Wrap` in `Wrapped` holds 1 value(s), but this pattern names 2
 
-  match-too-many-sub-patterns.px:7:15
-  7 |     match w { Wrap(a, b) => a + b }
+  match-too-many-sub-patterns.px:6:15
+  6 |     match w { Wrap(a, b) => a + b }
     |               ^^^^ `Wrap` in `Wrapped` holds 1 value(s), but this pattern names 2
 
 praxis: 1 error(s)
 ```
 
-That silence from `praxis check` is what "emitted by lowering" means: the
-message names the variant and the enum it belongs to, but nothing sees it until
-the file runs. `Y124` is not the only pattern mistake in that position — `Y125`,
-a pattern that can fail where the language needs one that always fits, is
-lowering's too. Both are
-[at the end of the pattern chapter](pattern-matching.md#where-the-check-runs).
+…and naming a payload-carrying variant with **no parentheses at all**. `Stay` is
+a pattern because `Stay` carries nothing; a bare `Step` is not:
+
+```text
+error[Y124]: `Step` in `Move` holds 2 value(s), but this pattern names 0
+
+help: name the payload, or `_` for each slot you do not need
+      Step(_, _)
+```
+
+The parentheses are where you said what you were doing. A bare name says
+nothing about the value the variant holds, and reads exactly like the
+payload-less `Stay` beside it — which is the whole reason it is refused. See
+[ADR-134](../../../decisions/134-a-payload-carrying-variant-says-so-in-the-pattern.md).
 
 An enum declaration is not generic — a variant's payload types are concrete —
 and a declaration that reaches itself through a payload type is the same `N006`

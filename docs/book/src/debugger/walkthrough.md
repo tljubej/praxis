@@ -79,7 +79,7 @@ Backtrace:
     <tmp#7: Int> @ "depths[i] + depths[i + 1]" = 523
     <tmp#8: Int> @ "2" = 2
     <tmp#9: Int> @ "i + 2" = 10
-    <tmp#10: Int> @ "depths[i + 2]" = Unit
+    <tmp#10: Int> @ "depths[i + 2]" = <uninit>
     <tmp#11: Int> @ "depths[i] + depths[i + 1] + depths[i + 2]" = <uninit>
 Entered crash debugger. 3 frame(s). Type `help` for commands.
 ```
@@ -87,10 +87,9 @@ Entered crash debugger. 3 frame(s). Type `help` for commands.
 An honest reading of that, before touching anything: an index went out of
 bounds, in `window`, with `i` at 8 and a ten-element vector. The last three
 temporaries say where it stopped. `<tmp#9> @ "i + 2" = 10` computed the index
-10; `<tmp#10> @ "depths[i + 2]" = Unit` is the indexing itself, holding the
-sentinel a faulting operation returns instead of a value; and `<tmp#11>`, the
-three-term sum that would have consumed it, is `<uninit>` — never written at
-all.
+10; `<tmp#10> @ "depths[i + 2]"` is the indexing itself and is `<uninit>`,
+because it faulted and never produced a value; and `<tmp#11>`, the three-term
+sum that would have consumed it, is `<uninit>` for the same reason.
 
 The temps are why the banner is worth reading rather than skipping. Most are
 labelled with the source expression that produced them as well as the value they
@@ -126,7 +125,7 @@ Praxis crash> locals
     <tmp#7: Int> @ "depths[i] + depths[i + 1]" = 523
     <tmp#8: Int> @ "2" = 2
     <tmp#9: Int> @ "i + 2" = 10
-    <tmp#10: Int> @ "depths[i + 2]" = Unit
+    <tmp#10: Int> @ "depths[i + 2]" = <uninit>
     <tmp#11: Int> @ "depths[i] + depths[i + 1] + depths[i + 2]" = <uninit>
 ```
 

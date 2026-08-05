@@ -11,6 +11,6 @@ Backtrace:
     <tmp#4: Int> @ "1" = 1
     <tmp#5: Unit> @ "m.insert("a", 1)" = Unit
     <tmp#6: Text> @ ""b"" = b
-    <tmp#7: Int> @ "m["b"]" = Unit
+    <tmp#7: Int> @ "m["b"]" = <uninit>
     <tmp#8: Unit> @ "out(m["b"])" = <uninit>
     <tmp#9: Unit> @ "var m = Map() m.insert("a", 1) out(m["b"])" = <uninit>

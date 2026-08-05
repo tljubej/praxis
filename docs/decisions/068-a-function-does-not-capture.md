@@ -7,14 +7,18 @@
 ## Context
 
 ```praxis
-let x = 1
+var x = 1
 fn f() { x }
 out(f())          // Unit
 
-let y = 5
+var y = 5
 fn g() { |n| n + y }
 out(g()(1))       // 4388746929
 ```
+
+<!-- The two bindings were written `let`. `let` was retired by ADR-125; the
+     spelling is updated here because current documentation links to this
+     entry, so a reader arrives at a keyword the compiler refuses. -->
 
 Both passed `praxis check`. Resolution resolved the name to the top-level symbol
 and inference typed it; MIR had no slot for it inside the function, so the read

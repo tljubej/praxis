@@ -13,7 +13,7 @@ Backtrace:
     <tmp#2: Int> = 1
     <tmp#3: Vec[Int]> = [1, 2, 3]
     <tmp#5: Int> @ "99" = 99
-    <tmp#6: Int> @ "depths[99]" = Unit
+    <tmp#6: Int> @ "depths[99]" = <uninit>
     <tmp#7: Unit> @ "out(depths[99])" = <uninit>
     <tmp#8: Unit> @ "// The input parses. The fault comes later, from the program. var depths = read lines(int) out(depths[99])" = <uninit>
 Entered crash debugger. 1 frame(s). Type `help` for commands.

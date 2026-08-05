@@ -386,11 +386,16 @@ arm_sep      := "," | NEWLINE
 [the second ambiguity rule](#a-record-literal-is-legal-wherever-the-brace-cannot-be-a-block).
 
 A `(` with no comma in it is a grouping; the first comma makes it a tuple, and a
-trailing comma closes the list. There is no one-element tuple *type*: `(1,)`
-parses as a tuple node holding one element and inference collapses that back to
-`Int`, so the type says `Int` while the value the program builds is a
-one-element tuple. Nothing in the language needs one; do not write it. An
-empty `()` parses and evaluates to `Unit`. A `[` always builds a list, at every
+trailing comma closes the list. **A tuple has two elements or more**, so `(1,)`
+is refused at the comma — `P001: a tuple has two elements or more, so this comma
+names nothing` — and the node recovers as the grouping `(1)`. The same rule
+holds in type position: `(Int,)` is refused where `(Int, Text,)` is fine.
+
+It used to parse as a tuple node holding one element, which put two passes in
+disagreement about the same node: inference collapsed the arity-one tuple back
+to `Int` while lowering, reading the node kind, built a tuple object. MIR
+verification caught it, as an abort with no source span, three passes past the
+comma. An empty `()` parses and evaluates to `Unit`. A `[` always builds a list, at every
 arity including the empty `[]`, whose element type comes from its use.
 
 `type_arg_list` is legal after exactly eleven names — `Vec`, `Deque`, `Map`,

@@ -9,9 +9,10 @@ var m = Step(1, 2)
 out(m)
 out(match m { Step(dx, dy) => dx * 10 + dy, Stay => 0 })
 
-// A variant named without its payload means "any payload": `Step`, `Step(_)`
-// and `Step(_, _)` are one test.
-out(match m { Step => 1, Stay => 0 })
+// A wildcard stands in for a payload slot the arm does not need, and `Step(_,
+// _)` is how you say "any payload". A bare `Step` is not: a variant that
+// carries a payload has to say so in the pattern.
+out(match m { Step(_, _) => 1, Stay => 0 })
 
 var at = (0, 0)
 for step in [Step(1, 0), Step(0, 2), Stay, Step(3, 4)] {

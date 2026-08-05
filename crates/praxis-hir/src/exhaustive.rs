@@ -90,10 +90,17 @@ fn zero_span(file: FileId) -> FileSpan {
 /// program does not need.
 ///
 /// The patterns come from [`crate::pattern::PatternBuilder`], the same builder
-/// lowering uses, and its diagnostics are **discarded here**: inference has
-/// already walked these patterns and reported the shape mistakes (`Y122`,
-/// `Y123`), and lowering reports what only it can see. Reporting them a third
-/// time from this pass would put the same message under the same caret twice.
+/// lowering uses, and **its diagnostics are kept** (ADR-133) — minus whatever
+/// inference has already said at the same caret, which
+/// [`crate::pattern::merge_pattern_diagnostics`] is what decides.
+///
+/// They used to be discarded, on the theory that inference had already walked
+/// these patterns and reported the shape mistakes. Two of the four codes are
+/// nobody else's: inference never decodes an integer literal and never counts a
+/// payload, so a `Y013` or a `Y124` inside a match arm was reachable only from
+/// lowering — and lowering is the pass `praxis check` and the editor do not run.
+/// `match bla { A(i, j) => … }` therefore checked clean in the editor and
+/// refused to run, which is exactly the divergence ADR-130 exists to close.
 pub(crate) fn check_matches(
     file: FileId,
     root: &praxis_ast::SourceFile,
@@ -119,7 +126,7 @@ pub(crate) fn check_matches(
             continue;
         };
 
-        let mut discarded = Vec::new();
+        let mut built = Vec::new();
         let mut arms = Vec::new();
         let mut arm_spans = Vec::new();
         for arm in m.arms() {
@@ -128,7 +135,7 @@ pub(crate) fn check_matches(
                     file,
                     db,
                     decls,
-                    diagnostics: &mut discarded,
+                    diagnostics: &mut built,
                 }
                 .build(&pat, scrutinee_ty),
                 None => TypedPattern::Wildcard,
@@ -146,6 +153,8 @@ pub(crate) fn check_matches(
                 },
             });
         }
+
+        crate::pattern::merge_pattern_diagnostics(built, out);
 
         check(
             db,

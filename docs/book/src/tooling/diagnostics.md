@@ -130,8 +130,9 @@ an old message and a new one come to answer to the same name.
 | `N006` | `` `{name}` refers to itself, and a self-referring type is not supported ``, `` `{name}` refers to itself through `{other}`, and … `` | A `struct` or `enum` declaration in a reference cycle, directly or through other declarations. `Vec[Node]` inside `Node` is the same cycle: what is missing is the language feature, not the values. |
 | `N007` | `` `{fn}` cannot use `{name}`: a function does not capture the bindings around it (pass `{name}` as a parameter, or use a closure) `` | A `fn` body naming a binding declared outside it. A closure captures; a function does not. |
 | `N008` | `` `{name}` is {kind}, so `{name} { … }` does not build a record `` | A record literal whose head names something that is not a `struct` — an `enum`, a value, a builtin. |
+| `N009` | `` `{name}` is not a keyword; a binding is written with `{replacement}` `` | A keyword the language retired, written where a statement starts. `let` is the whole table. It is not a misspelling of anything, so it gets an exact fix rather than the near-miss search that answers `N001`. `let` is still a legal identifier, which is why the position matters. |
 
-`N009` is the next free Name code.
+`N010` is the next free Name code.
 
 ## Type — `Y0xx`, the user block
 
@@ -148,7 +149,7 @@ an old message and a new one come to answer to the same name.
 | `Y010` | `` values of type `{ty}` do not support this operation `` | A compound assignment (`+=`, `-=`, …) whose target is not numeric. |
 | `Y011` | `` `return` outside a function `` | A `return` at the top level of a file. |
 | `Y012` | `` `{break\|continue}` outside a loop `` | A `break` or `continue` with no loop to leave. A closure is a function boundary, so a loop outside a closure is not one a `break` inside it can leave. |
-| `Y013` | `` `{literal}` is outside the range of `Int` `` | An integer literal too large for a 64-bit signed integer. **Reported at lowering** — see [Which command sees what](#which-command-sees-what). |
+| `Y013` | `` `{literal}` is outside the range of `Int` `` | An integer literal too large for a 64-bit signed integer, in an expression or in a pattern. |
 | `Y014` | `` a value of type `{ty}` can change after it is stored, so it cannot be used as a key `` | A mutable value used as a `Map` key or `Set` element. It would hash to a different bucket than the one holding it once it changed, and the entry would become unreachable. Carries a `help:` naming what to use instead. |
 | `Y015` | `` values of type `{ty}` cannot be used in arithmetic `` | Arithmetic on a type that has none. |
 | `Y016` | `` `{op}` is not defined for `{ty}` `` | An operator the language does not define for this operand type. Not a mismatch: both operands agree, and the operation still has no meaning. |
@@ -157,10 +158,12 @@ an old message and a new one come to answer to the same name.
 | `Y019` | `` values of type `{ty}` have no element `{n}` — only a tuple does ``, `` a tuple of {arity} elements has no element `{n}` — its elements are `0` to `{arity-1}` `` | A `.n` element access on a non-tuple, or past the end of a tuple. One code, two messages: the arity is the useful thing to say when there is one. |
 | `Y020` | `` values of type `{ty}` cannot be indexed with {n} index(es) ``, `` … cannot be assigned through {n} index(es) ``, `` … cannot be updated with `{min=\|max=}` through {n} index(es) `` | A subscript a type does not have, in any of three directions. The wrong *arity* on a receiver that does index is here too: `grid[x]` where §6.4 spells it `grid[x, y]`. Three messages because the sets differ — a `Text` reads through `t[0]` and has no element store, and a `Counter` has a store but no updating store. |
 | `Y021` | ``the left side of an assignment must be a name, a field, or an index`` | An assignment whose left side is not a place at all: `f() = 1`, `a + b[0] = 1`. A field is a place, so `p.x = 1` is fine. |
+| `Y022` | `` `{name}` is {a builtin\|an enum constructor}, so it has no function value; {call it: `{name}()`\|write `\|x\| {name}(x)` to call it} `` | A prelude builtin or an enum constructor named without being called. `Y018`'s neighbour, one symbol kind over: a monomorphic `fn` at least *has* a value, and these have none, so `out(pi)` used to print `Unit` and `var h = abs` then `h(-3)` printed nothing at all. Which remedy the message names depends on the arity. |
 | `Y023` | `` a backtick template is a parser expression; write `read` before it, or pass it to `parse(text, ...)` `` | A backtick template written where a value is expected. The parser sublanguage is entered at `read` or `parse(text, …)` and nowhere else. |
 | `Y024` | ``this function takes {expected} argument(s), but {found} were given`` | A call whose argument count does not match. A name in Praxis has exactly one signature — no overloading, no default parameters — so a count mismatch is never a candidate for some other signature. |
 
-`Y022` is free. `Y009` is retired and is not reissued.
+`Y025` is the next free code in this block. `Y009` is retired and is not
+reissued.
 
 ## Type — `Y09x`, internal
 
@@ -190,8 +193,8 @@ a range they never were. `Y116` is the next free member code.
 | `Y121` | ``unreachable match arm`` | An arm an earlier arm already covers entirely. |
 | `Y122` | `` `{Type}` has no variant `{name}` `` | A pattern naming a variant the scrutinee's enum does not have. |
 | `Y123` | `` `{ … }` is not a pattern for `{ty}` ``, `` `{name}` is `{ty}`, which has no fields to match ``, ``a tuple pattern names two elements or more``, `` `{ … }` cannot tell which record it matches here; name the record (`P { … }`) or annotate the value `` | A pattern whose shape cannot match: a record pattern against a non-record, a one-element tuple pattern, or an anonymous record pattern in a position where nothing says which record it is. |
-| `Y124` | `` `{Variant}` in `{Enum}` holds {want} value(s), but this pattern names {got} `` | A variant pattern naming more sub-patterns than the variant holds. Only *more* — naming fewer is legal and padded with wildcards, so `Some`, `Some(_)` and `Some(n)` are one test. **Reported at lowering.** |
-| `Y125` | `` a `for` binding must match every item, and {reason} does not ``, `` a closure parameter must match every argument, and {reason} does not `` | A pattern that can fail, in a position that has no second arm to fall through to. **Reported at lowering.** |
+| `Y124` | `` `{Variant}` in `{Enum}` holds {want} value(s), but this pattern names {got} `` | A variant pattern whose sub-patterns do not fit the payload: more than the variant holds, or a **bare** name for a variant that holds some. Naming fewer *inside parentheses* is legal and padded with wildcards, so `Some(_)` and `Some(n)` are one test; bare `Some` is not the third spelling of it. Carries a fix that writes one `_` per slot. |
+| `Y125` | `` a `for` binding must match every item, and {reason} does not ``, `` a closure parameter must match every argument, and {reason} does not `` | A pattern that can fail, in a position that has no second arm to fall through to. |
 
 `Y126` is the next free match code.
 
@@ -246,18 +249,12 @@ they carry a fault kind rather than a code, and they open the
 
 `praxis check` and the editor run the same front end and report the same set —
 they share one query layer, so a diagnostic in one and not the other is not
-representable. Four codes are the exception, and they are the exception for the
-same reason: they are raised while the program is being **lowered**, and neither
-`praxis check` nor the language server lowers.
+representable.
 
-| Code | Seen by |
-|---|---|
-| `Y013` | `praxis run` only |
-| `Y099` | `praxis run` only (internal) |
-| `Y124` | `praxis run` only |
-| `Y125` | `praxis run` only |
-
-So this file checks clean and refuses to run:
+That is the whole answer now. It was not always: for a while four codes were
+raised while the program was being **lowered**, and neither `praxis check` nor
+the language server lowers, so a file could check clean and refuse to run. This
+one did.
 
 ```praxis
 enum Shape { Circle(Int), Square(Int) }
@@ -268,28 +265,27 @@ for Circle(r) in shapes {
 }
 ```
 
-```console
-$ praxis check lowering-only.px
-$ echo $?
-0
-```
-
-`praxis run` on the same file prints this and exits 1, without running a line of
-it:
+`praxis check` exited 0 on it, and `praxis run` printed this and exited 1
+without running a line of it. Both print it now:
 
 ```text
 error[Y125]: a `for` binding must match every item, and a variant pattern does not
 
-  lowering-only.px:4:5
+  once-lowering-only.px:4:5
   4 | for Circle(r) in shapes {
     |     ^^^^^^^^^ a `for` binding must match every item, and a variant pattern does not
 
 praxis: 1 error(s)
 ```
 
-Everything else in this chapter is reported by `praxis check`, including
-non-exhaustive matches (`Y120`) and unknown enum variants (`Y122`), both of
-which used to be lowering-only.
+`Y120` and `Y122` were the first two moved ([ADR-130]); `Y013`, `Y124` and
+`Y125` followed ([ADR-133]). The one code left in lowering is `Y099`, and it is
+not an exception to the rule: it says inference recorded no type for a node
+lowering reached, which is a compiler bug rather than a mistake in your program.
+No program you can write earns it.
+
+[ADR-130]: ../../../decisions/130-a-matchs-coverage-is-analysis-answer-and-the-pattern-is-built-once.md
+[ADR-133]: ../../../decisions/133-every-diagnostic-a-well-formed-program-can-earn-is-analysiss.md
 
 ## Adding a code
 

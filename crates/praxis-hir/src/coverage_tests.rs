@@ -191,3 +191,142 @@ fn the_fix_copies_the_files_indentation() {
         .expect("a fix");
     assert_eq!(replacement, "\n\t\tB => panic(\"todo\")");
 }
+
+// --- ADR-133: the codes ADR-130 did not move -------------------------------
+
+/// **The gate.** Every diagnostic a *well-formed* program can earn is analysis's,
+/// because analysis is what `praxis check` and the editor run.
+///
+/// Each program here checked clean and then refused to run: the diagnostic was
+/// lowering's alone, and lowering is the one pass `Snapshot::diagnostics` does
+/// not reach. "A file could check clean and fail to run" is ADR-130's own
+/// statement of the problem, and these are the codes it did not move.
+#[test]
+fn a_program_run_refuses_is_a_program_check_refuses() {
+    for (src, want) in [
+        // `Y013` at an expression, which was `lower_lit`'s.
+        (
+            "var x = 99999999999999999999999\nout(x)\n",
+            DiagCode::IntLiteralOutOfRange,
+        ),
+        // …and at a literal *pattern*, which was the builder's under a sink the
+        // coverage pass threw away.
+        (
+            "fn f(n: Int) -> Int { match n { 99999999999999999999 => 1, _ => 0 } }\nout(f(1))\n",
+            DiagCode::IntLiteralOutOfRange,
+        ),
+        // `Y124`, the user-reported half: `A(i, j)` on a one-slot variant.
+        (
+            "enum Bla { A(Int), B, C }\nvar bla = A(3)\nmatch bla { A(i, j) => {} B => {} C => {} }\n",
+            DiagCode::PayloadArityMismatch,
+        ),
+        // `Y125` at a `for` header…
+        (
+            "struct Point { x: Int, y: Int }\nvar pts = [Point{x: 0, y: 1}]\n\
+             for Point { x: 0, y } in pts {\n    out(y)\n}\n",
+            DiagCode::RefutableBinding,
+        ),
+        // …and at a destructuring closure parameter, the third pattern position.
+        (
+            "var f = |Some(n)| n\nout(f(Some(1)))\n",
+            DiagCode::RefutableBinding,
+        ),
+    ] {
+        let analysis = analyze(src);
+        assert!(
+            !codes(&analysis, want).is_empty(),
+            "{src}\nmust report {want:?} from analysis, got {:?}",
+            analysis
+                .diagnostics
+                .iter()
+                .map(|d| format!("{} {}", d.code(), d.message()))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// …and exactly once. Inference and the pattern builder walk the same patterns,
+/// and the two codes they *both* decide — a variant the enum has not (`Y122`)
+/// and a shape the scrutinee cannot take (`Y123`) — must not arrive twice now
+/// that the builder's sink is kept.
+#[test]
+fn a_diagnostic_two_passes_agree_on_is_reported_once() {
+    for (src, want) in [
+        (
+            "enum E { A, B }\nfn f(e: E) -> Int { match e { A => 1, Nope(x) => 2, B => 3 } }\n",
+            DiagCode::UnknownEnumVariant,
+        ),
+        // A `for` header is the other walk, and it must agree the same way. A
+        // *bare* `Nope` would be a binding (HIR-07), so this names one that can
+        // only be a variant pattern.
+        (
+            "enum E { A, B }\nvar e = A\nfor Nope(x) in [e] { out(0) }\n",
+            DiagCode::UnknownEnumVariant,
+        ),
+    ] {
+        let analysis = analyze(src);
+        assert_eq!(
+            codes(&analysis, want).len(),
+            1,
+            "{src}\n{:?}",
+            analysis
+                .diagnostics
+                .iter()
+                .map(|d| format!("{} {}", d.code(), d.message()))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// **Every place the grammar puts a pattern is a place analysis checks one.**
+///
+/// The three positions — a match arm, a `for` header, a closure parameter — are
+/// walked by hand across two passes, so a *fourth* one added to the grammar
+/// would silently be checked by lowering alone and reintroduce this whole class.
+/// This fails the moment the parser produces a top-level `PATTERN` anywhere
+/// else; the fix is to walk it in `check_binding_patterns`, not to widen the set
+/// here.
+#[test]
+fn every_pattern_position_is_checked_by_analysis() {
+    use praxis_syntax::SyntaxKind;
+    let src = "struct P { x: Int, y: Int }\n\
+               enum E { A(Int), B }\n\
+               var ps = [P { x: 1, y: 2 }]\n\
+               for P { x, y } in ps { out(x + y) }\n\
+               var f = |(a, b)| a + b\n\
+               out(f((1, 2)))\n\
+               var e = A(1)\n\
+               out(match e { A(n) => n, B => 0 })\n";
+    let map = SourceMap::new();
+    let id = map.intern("pattern_positions.px", src);
+    let parsed = parse(id, src);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "the sample must parse: {:?}",
+        parsed.diagnostics
+    );
+
+    let mut parents: Vec<SyntaxKind> = parsed
+        .tree
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::PATTERN)
+        // Only the *outermost* pattern of each position: a sub-pattern is
+        // reached by recursion, not by a walk.
+        .filter(|n| {
+            n.parent()
+                .is_none_or(|p| !matches!(p.kind(), SyntaxKind::PATTERN | SyntaxKind::PATTERN_FIELD))
+        })
+        .filter_map(|n| n.parent().map(|p| p.kind()))
+        .collect();
+    parents.sort_by_key(|k| format!("{k:?}"));
+    parents.dedup();
+    assert_eq!(
+        parents,
+        vec![
+            SyntaxKind::FOR_EXPR,
+            SyntaxKind::MATCH_ARM,
+            SyntaxKind::PARAM
+        ],
+        "a pattern position analysis does not walk"
+    );
+}

@@ -722,10 +722,13 @@ mod tests {
     /// `verify::check_fault_observed` would refuse the function.
     ///
     /// **Hand-built, because no source program reaches this shape.** ADR-107
-    /// gives the language no char-literal syntax, so `Lit::Char` is synthesized
-    /// by the input parser alone and `build.rs`'s comment at the `AllocKind::Char`
-    /// site says so. A gate whose only witness is a program that cannot be
-    /// written is still a gate the pass has to hold, and this is what holds it.
+    /// gives the language no char-literal syntax, and nothing in the tree
+    /// constructs a `Lit::Char` at all — every mention of it is a match arm, so
+    /// `build.rs`'s `AllocKind::Char` site is reachable only from an
+    /// `Int.to_char()` at run time, never from a literal. (This comment used to
+    /// say the input parser synthesized one; it does not.) A gate whose only
+    /// witness is a program that cannot be written is still a gate the pass has
+    /// to hold, and this is what holds it.
     #[test]
     fn a_char_box_is_not_forwarded_because_its_check_fault_would_be_orphaned() {
         use crate::ir::{LocalDebugKind, LocalKind, MirType};

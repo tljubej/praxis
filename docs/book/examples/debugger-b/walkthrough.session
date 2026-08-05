@@ -16,7 +16,7 @@ Backtrace:
     <tmp#7: Int> @ "depths[i] + depths[i + 1]" = 523
     <tmp#8: Int> @ "2" = 2
     <tmp#9: Int> @ "i + 2" = 10
-    <tmp#10: Int> @ "depths[i + 2]" = Unit
+    <tmp#10: Int> @ "depths[i + 2]" = <uninit>
     <tmp#11: Int> @ "depths[i] + depths[i + 1] + depths[i + 2]" = <uninit>
 Entered crash debugger. 3 frame(s). Type `help` for commands.
 Praxis crash> #0   window
@@ -34,7 +34,7 @@ Praxis crash>   locals:
     <tmp#7: Int> @ "depths[i] + depths[i + 1]" = 523
     <tmp#8: Int> @ "2" = 2
     <tmp#9: Int> @ "i + 2" = 10
-    <tmp#10: Int> @ "depths[i + 2]" = Unit
+    <tmp#10: Int> @ "depths[i + 2]" = <uninit>
     <tmp#11: Int> @ "depths[i] + depths[i + 1] + depths[i + 2]" = <uninit>
 Praxis crash> 8
 Praxis crash> 10

@@ -75,7 +75,6 @@ Backtrace:
     <tmp#1> = 1->2
 
     <tmp#2: Int> = 1
-    <tmp#3: { a: Int, b: Int }> = Unit
     <tmp#7: Int> @ "pair.a + pair.b" = <uninit>
 ```
 
@@ -104,7 +103,6 @@ Backtrace:
     <tmp#1> =  x:1
 
     <tmp#2: Int> = 1
-    <tmp#3: { a: Int }> = Unit
 ```
 
 That does *not* mean a bare `,` refuses every space near it, and the reason is
@@ -179,7 +177,6 @@ Backtrace:
     <tmp#1> = 1->2
 
     <tmp#2: Int> = 1
-    <tmp#3: { a: Int, b: Int }> = Unit
     <tmp#7: Int> @ "pair.a + pair.b" = <uninit>
 ```
 
@@ -383,7 +380,6 @@ Backtrace:
 2
 
     <tmp#2: Int> = 1
-    <tmp#3: Vec[Int]> = Unit
     <tmp#4: Int> @ "(read lines(int)).len()" = <uninit>
 ```
 
@@ -450,7 +446,6 @@ gamma
 has space
 
     <tmp#2: Int> = 1
-    <tmp#3: Vec[Vec[Text]]> = Unit
     <tmp#4: Int> @ "(read sections(lines(word))).len()" = <uninit>
 ```
 

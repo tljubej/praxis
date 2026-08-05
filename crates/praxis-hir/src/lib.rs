@@ -188,6 +188,19 @@ pub fn analyze(file: FileId, root: &SourceFile) -> Analysis {
         &inference.expr_types,
         &mut inference.diagnostics,
     );
+    // The other two pattern positions (ADR-133). A `for` header and a
+    // destructuring closure parameter are checked here for the same reason a
+    // match arm is: lowering asked, and lowering is the pass `check` and the
+    // editor do not run.
+    pattern::check_binding_patterns(
+        file,
+        root,
+        &mut inference.db,
+        &inference.names,
+        &inference.decls,
+        &inference.ref_types,
+        &mut inference.diagnostics,
+    );
     Analysis {
         db: inference.db,
         names: inference.names,

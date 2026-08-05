@@ -14,7 +14,7 @@ Backtrace:
     <tmp#6: Int> @ "3" = 3
     <tmp#7: Unit> = Unit
     <tmp#9: Int> @ "9" = 9
-    <tmp#10: Int> @ "v[9]" = Unit
+    <tmp#10: Int> @ "v[9]" = <uninit>
     <tmp#11: Unit> @ "out(v[9])" = <uninit>
     <tmp#12: Unit> @ "var v = [1, 2, 3] out(v[9])" = <uninit>
 Entered crash debugger. 1 frame(s). Type `help` for commands.

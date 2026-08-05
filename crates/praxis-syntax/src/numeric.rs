@@ -58,6 +58,20 @@ pub fn strip_digit_separators(s: &str) -> Cow<'_, str> {
     }
 }
 
+/// The `i64` an `IntLit` token's text names, or `None` when it names a value
+/// outside `Int` (§4.3).
+///
+/// Three passes decode an integer literal — inference, which is where `Y013` is
+/// decided; the pattern builder, at a literal pattern; and lowering, which puts
+/// the value in the typed tree — and "out of range" has to mean the same thing
+/// in all three or one of them reports a literal another one accepts. The strip
+/// and the `parse` are one line each; keeping them together is what makes the
+/// range one rule instead of three copies of it.
+#[must_use]
+pub fn parse_int_literal(text: &str) -> Option<i64> {
+    strip_digit_separators(text).parse::<i64>().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +107,19 @@ mod tests {
         assert_eq!(strip_digit_separators("3.141_592"), "3.141592");
         assert!(matches!(strip_digit_separators("1000"), Cow::Borrowed(_)));
         assert!(matches!(strip_digit_separators("1_000"), Cow::Owned(_)));
+    }
+
+    /// The range is one rule: separators come out first, and the boundary is
+    /// `i64`'s own. Everything past it is `None`, which is what `Y013` is.
+    #[test]
+    fn an_int_literal_decodes_through_the_range_or_not_at_all() {
+        assert_eq!(parse_int_literal("0"), Some(0));
+        assert_eq!(parse_int_literal("1_000"), Some(1000));
+        assert_eq!(parse_int_literal("9223372036854775807"), Some(i64::MAX));
+        assert_eq!(parse_int_literal("9223372036854775808"), None);
+        // The separated spelling is the same literal and the same answer — the
+        // half of REP-11 that made this one function instead of three.
+        assert_eq!(parse_int_literal("9_223_372_036_854_775_808"), None);
+        assert_eq!(parse_int_literal("99999999999999999999999"), None);
     }
 }

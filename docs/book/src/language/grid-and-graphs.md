@@ -283,7 +283,7 @@ Backtrace:
     <tmp#3: Grid[Char]> = [a, b, c, d]
     <tmp#5: Int> @ "4" = 4
     <tmp#6: Int> @ "0" = 0
-    <tmp#7: Char> @ "g[4, 0]" = Unit
+    <tmp#7: Char> @ "g[4, 0]" = <uninit>
     <tmp#8: Unit> @ "out(g[4, 0])" = <uninit>
     <tmp#9: Unit> @ "var g = read grid(char) out(g[4, 0])" = <uninit>
 ```
@@ -633,7 +633,7 @@ Backtrace:
     <tmp#1: Int> @ "0" = 0
     <tmp#2: (Int) -> Vec[Int]> @ "steps" = <closure:0>
     <tmp#3: (Int, Int) -> Int> @ "|a, b| -1" = <closure:0>
-    <tmp#4: Map[Int, Int]> @ "dijkstra(0, steps, |a, b| -1)" = Unit
+    <tmp#4: Map[Int, Int]> @ "dijkstra(0, steps, |a, b| -1)" = <uninit>
     <tmp#5: Int> @ "dijkstra(0, steps, |a, b| -1).len()" = <uninit>
 ```
 

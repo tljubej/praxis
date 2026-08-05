@@ -11,6 +11,6 @@ Backtrace:
     <tmp#4: Int> @ "36" = 36
     <tmp#5> @ "ages["ada"] = 36" = Unit
     <tmp#6: Text> @ ""alan"" = alan
-    <tmp#7: Int> @ "ages["alan"]" = Unit
+    <tmp#7: Int> @ "ages["alan"]" = <uninit>
     <tmp#8: Unit> @ "out(ages["alan"])" = <uninit>
     <tmp#9: Unit> @ "var ages = Map[Text, Int]() ages["ada"] = 36 out(ages["alan"])" = <uninit>

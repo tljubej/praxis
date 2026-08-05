@@ -14,7 +14,6 @@ Backtrace:
 4,4
 
     <tmp#2: Int> = 1
-    <tmp#3: Vec[{ x: Int, y: Int }]> = Unit
     <tmp#5: Int> @ "points.len()" = <uninit>
     <tmp#6: Unit> @ "out(points.len())" = <uninit>
     <tmp#7: Unit> @ "// Every line of the input is meant to be `x,y`. One of them is not. var points = read lines(`{x:int},{y:int}`) out(points.len())" = <uninit>

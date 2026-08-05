@@ -35,7 +35,7 @@ Praxis crash>   locals:
     <tmp#11: Int> @ "1" = 1
     <tmp#12: Unit> = Unit
     <tmp#14: Int> @ "9" = 9
-    <tmp#15: Int> @ "xs[9]" = Unit
+    <tmp#15: Int> @ "xs[9]" = <uninit>
     <tmp#16: Unit> @ "out(xs[9])" = <uninit>
 Praxis crash> two
 Praxis crash> Text

@@ -27,9 +27,25 @@ resident set** while being 3× faster than it — 44 to 130 MiB where CPython us
 Peak RSS decomposes as **`floor + live set + collection threshold`**, and only
 the third term is large:
 
-* **The floor is 7.3 MiB.** `praxis run` on a size-0 program, whole process,
-  including the JIT. CPython's floor — `python3 -c pass` — is **15.2 MiB**. The
-  process Praxis starts is less than half the size of the one CPython starts.
+* **The floor is 7.3 MiB.** `praxis run` on the smallest program that runs,
+  whole process, including the JIT. CPython's floor — `python3 -c pass` — is
+  **15.2 MiB**. The process Praxis starts is less than half the size of the one
+  CPython starts.
+
+  This bullet said "a size-0 program … including the JIT", and those two cannot
+  both be true: an empty file exits at "no statements to run and no `main`
+  function" and never reaches the JIT at all. So the number was measuring one of
+  the two things its sentence named, and the sentence did not say which. It is
+  stated as the smaller of the two now — the smallest program that reaches the
+  JIT, `out(1)`.
+
+  **The figure itself could not be reproduced on an arm64 darwin host**, where
+  `/usr/bin/time -l` reports 5.5 MiB for `out(1)` and 3.4 MiB for the empty file
+  that exits early. Both are *below* 7.3, so the decision's argument — that the
+  process Praxis starts is much smaller than CPython's — holds on this host with
+  room to spare; what does not survive is the specific number, which was taken
+  on the host the round was measured on and is not portable. Re-measure before
+  quoting it.
 * **The live sets are smaller than CPython's.** Driving the collector's headroom
   to its floor (`bounded:64K:1`, where the threshold is `live` and peak RSS is
   therefore `floor + 2 × live`) and backing the model out: `tree` holds 16.0 MiB

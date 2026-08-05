@@ -1,0 +1,8 @@
+var raw = "12"
+var count = match raw.int() { Some(n) => n, None => 0 }
+out(count + 1)
+
+// Whitespace is trimmed; anything that is not a number is `None`.
+out(" 42 ".int())
+out("abc".int())
+out("1.5".float())

@@ -224,15 +224,19 @@ impl<'a> Lexer<'a> {
     }
 
     /// Lex a numeric literal starting at `start` (the first digit). Recognizes
-    /// both integers (`42`) and floats (`3.14`, `2.`, `1e10`, `1.5e-3`).
+    /// both integers (`42`) and floats (`3.14`, `1e10`, `1.5e-3`).
     ///
     /// A `.` is consumed as part of the literal only when it begins a fraction
     /// — i.e. the byte after the integer part is `.` AND the byte after that is
     /// a digit. This excludes range syntax: `1..5` and `1..=5` lex as `IntLit`
-    /// `1` followed by `DOT2` / `DOT2EQ`, never as a malformed float. A trailing
-    /// dot with no following digit (`2.`) is a valid float iff the integer part
-    /// is nonempty — handled by the `2..` case below still being a range (the
-    /// second `.` breaks the fraction).
+    /// `1` followed by `DOT2` / `DOT2EQ`, never as a malformed float.
+    ///
+    /// **A trailing dot is not part of the literal.** `2.` lexes as `IntLit` `2`
+    /// followed by `DOT`, so `var x = 2.` parses as a method call on `2` with no
+    /// method name and reports. This comment used to claim the opposite — that
+    /// `2.` was "a valid float iff the integer part is nonempty" — and the code
+    /// below has always required the digit. The float spellings are `2.0` and
+    /// `2e0`.
     ///
     /// A leading-dot float (`.5`) is not reachable here because the dispatch
     /// routes on the first byte: `.` is `Punct`. Leading-dot floats are not

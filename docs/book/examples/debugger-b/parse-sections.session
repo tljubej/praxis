@@ -14,7 +14,6 @@ Backtrace:
 7,8,x
 
     <tmp#2: Int> = 1
-    <tmp#3: Vec[Vec[Vec[Int]]]> = Unit
     <tmp#5: Int> @ "groups.len()" = <uninit>
     <tmp#6: Unit> @ "out(groups.len())" = <uninit>
     <tmp#7: Unit> @ "// Blank-line-separated sections of comma-separated integers. var groups = read sections(lines(csv(int))) out(groups.len())" = <uninit>

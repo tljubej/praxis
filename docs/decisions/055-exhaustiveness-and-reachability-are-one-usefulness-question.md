@@ -54,6 +54,12 @@ sub-pattern per payload slot: a pattern that names fewer is padded with
 wildcards, and one that names *more* is truncated after its extras have been
 lowered (so anything wrong inside them still reports).
 
+<!-- ADR-134 later removed the *bare* spelling: `Some` on a variant that
+     carries a payload is `Y124`, and `Some(_)` is how you say "any payload".
+     The padding rule this decision is about is unchanged — the pattern is
+     still built at the variant's arity, after the report — so the argument
+     below stands; only one of the three spellings is gone. -->
+
 The matrix pairs each pattern column with a type, and a row narrower than its
 payload would pair them off by one. Padding is also the safer MIR: an
 over-supplied sub-pattern used to make `emit_subpattern_tests` read a payload

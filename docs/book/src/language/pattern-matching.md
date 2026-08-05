@@ -526,7 +526,9 @@ coverage answer given against a type variable would be a `Y120` demanding a `_`
 the program does not need. See
 [ADR-130](../../../decisions/130-a-matchs-coverage-is-analysis-answer-and-the-pattern-is-built-once.md).
 
-Two pattern mistakes are still lowering's alone and so are invisible to `praxis
-check`: naming more sub-patterns than a variant's payload has (`Y124`), and a
-pattern that can fail in a `for` header or a closure parameter (`Y125`). Both
-report when you run the file.
+So does every other pattern mistake, including the two that used to be
+lowering's alone and invisible to `praxis check`: a payload the pattern does not
+fit (`Y124`), and a pattern that can fail in a `for` header or a closure
+parameter (`Y125`). Both are analysis's now, so the editor underlines them as
+you type. See
+[ADR-133](../../../decisions/133-every-diagnostic-a-well-formed-program-can-earn-is-analysiss.md).

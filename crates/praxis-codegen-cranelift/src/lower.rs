@@ -713,20 +713,28 @@ fn lower_function_capturing<M: Module>(
         }
         for step in steps(&mir_block.insts) {
             match step.kind {
-                StepKind::Lone => lower_inst(
-                    &mut builder,
-                    &step.insts[0],
-                    ctx_val,
-                    &vars,
-                    &spill,
-                    &blocks,
-                    module,
-                    &mut import_cache,
-                    user_funcs,
-                    &mut user_func_cache,
-                    db,
-                    generation,
-                )?,
+                // One instruction, or a faultable one and the check that
+                // observes it — each lowered as itself, in order. The pair is a
+                // step so the debugger's store below lands after the check's
+                // branch (ADR-135), not so it emits anything different.
+                StepKind::Lone => {
+                    for inst in step.insts {
+                        lower_inst(
+                            &mut builder,
+                            inst,
+                            ctx_val,
+                            &vars,
+                            &spill,
+                            &blocks,
+                            module,
+                            &mut import_cache,
+                            user_funcs,
+                            &mut user_func_cache,
+                            db,
+                            generation,
+                        )?;
+                    }
+                }
                 // The fused pair (ADR-117): the raise's cold blocks jump to the
                 // fault epilogue and the `Inst::CheckFault` at `step.insts[1]`
                 // is never handed to `lower_inst`, so it emits nothing. It is
@@ -756,15 +764,13 @@ fn lower_function_capturing<M: Module>(
             // `SpillCtx::store_debug_defs` for why the two produce the same
             // slot contents at every point a snapshot can be taken.
             //
-            // Over the step's instructions rather than one, so a fused pair is
-            // not a pair of instructions one of which nobody asked about. It
-            // emits nothing either way today: a `CheckFault` defines no local,
-            // and an `IntBinOp`'s `dst` is a `Scalar` local, which has no debug
-            // slot. If it ever did, folding would move that store off the
-            // raising path — which is the direction ADR-104 already argues for:
-            // the faulting operation's result was never produced, so `<uninit>`
-            // is the honest rendering and the converging shape stored the
-            // wrapped value instead.
+            // Over the step's instructions rather than one, and **after** the
+            // whole step, which is what puts it past a fused raise's branch and
+            // past an unfused `Inst::CheckFault`'s (ADR-135). A faulting
+            // instruction's destination is therefore not written on the path
+            // where the fault happened: the value was never produced, so
+            // `<uninit>` is the honest rendering, and "the wrapper's Unit
+            // sentinel" was the least honest one available.
             for inst in step.insts {
                 spill.store_debug_defs(&mut builder, inst, &vars);
             }
@@ -1698,7 +1704,12 @@ struct Step<'a> {
 
 /// What a [`Step`] emits.
 enum StepKind {
-    /// The step's one instruction, lowered as itself by [`lower_inst`].
+    /// The step's instructions, each lowered as itself by [`lower_inst`].
+    ///
+    /// Usually one. **Two** when the second is the `Inst::CheckFault` that
+    /// observes the first: the check creates its own fall-through block, so the
+    /// debugger's store for the first instruction's definitions then lands on
+    /// the path where those definitions actually happened (ADR-135).
     Lone,
     /// Checked `Int` arithmetic whose overflow — and, for `Div`/`Rem`, whose
     /// zero divisor — branches straight to `on_fault` (ADR-117).
@@ -1762,7 +1773,28 @@ fn steps(insts: &[Inst]) -> Vec<Step<'_>> {
                 _ => None,
             }
         };
-        let width = if fused.is_some() { 2 } else { 1 };
+        // An unfused faultable instruction and its check are still **one step**,
+        // and the reason is the debugger rather than the code (ADR-135). A
+        // wrapper that faults sets `pending_fault` and returns the Unit
+        // sentinel; the caller's `def_var` then stores that sentinel, and the
+        // debug store right behind it recorded it — so the destination of the
+        // instruction that faulted rendered `= Unit` while its own consumer, one
+        // line below, rendered `<uninit>`. Both were never produced, and only
+        // one of them said so.
+        //
+        // Covering the check keeps the store *after* the branch, which puts it
+        // in the fall-through block: the path on which the definition happened.
+        // The fault path leaves the slot holding what it held before, which for
+        // a fresh temp is the `None` the frame's claim starts with. That is
+        // exactly the argument `store_debug_defs` already makes for the fused
+        // arithmetic case, at the shape ADR-117 could not fold.
+        //
+        // Either way the step is two instructions wide; what differs is whether
+        // the second one still emits anything.
+        let takes_its_check = fused.is_some()
+            || (!matches!(insts[i], Inst::CheckFault { .. })
+                && matches!(insts.get(i + 1), Some(Inst::CheckFault { .. })));
+        let width = if takes_its_check { 2 } else { 1 };
         out.push(Step {
             insts: &insts[i..i + width],
             kind: fused.unwrap_or(StepKind::Lone),
@@ -6513,26 +6545,37 @@ mod tests {
         assert_eq!(dst, LocalId(0), "and the arithmetic's own destination");
     }
 
-    /// A check after anything else keeps its own step, and so emits the load,
-    /// load and branch. That is the *majority* of the corpus — a wrapper that
-    /// faults returns normally, and reading the slot is the only way generated
-    /// code can learn it happened.
+    /// A check after anything else is **covered** by the same step and still
+    /// lowered as itself — the load, the load and the branch. That is the
+    /// *majority* of the corpus: a wrapper that faults returns normally, and
+    /// reading the slot is the only way generated code can learn it happened.
+    ///
+    /// The pair is one step for the debugger's sake and not the code's
+    /// (ADR-135). The store the block loop emits after a step then lands in the
+    /// check's fall-through block, so the call's destination is written on the
+    /// path where the call returned a value — and left alone on the path where
+    /// it returned the fault sentinel.
     #[test]
-    fn a_check_after_a_faulting_call_is_its_own_step() {
-        assert_eq!(fused(&[call(), check()]), vec![false, false]);
+    fn a_check_after_a_faulting_call_is_covered_by_the_call_s_step() {
+        let insts = vec![call(), check()];
+        let steps = steps(&insts);
+        assert_eq!(steps.len(), 1, "one step");
+        assert_eq!(steps[0].insts.len(), 2, "covering both instructions");
+        assert!(
+            matches!(steps[0].kind, StepKind::Lone),
+            "and each is lowered as itself — the pair is not fused"
+        );
     }
 
     /// `Overflow::Bounded` emits no raise at all, so there is no branch for a
     /// check to fold into — and the verifier rejects a check after one anyway
     /// (`VerifyError::RedundantFaultCheck`). Both readings agree here, and this
     /// pins that they do: a fused bounded site would be a fault target the
-    /// lowering silently drops.
+    /// lowering silently drops. (It is still *covered* by the step, like every
+    /// other unfused check.)
     #[test]
     fn a_bounded_int_binop_is_never_fused() {
-        assert_eq!(
-            fused(&[add(Overflow::Bounded), check()]),
-            vec![false, false]
-        );
+        assert_eq!(fused(&[add(Overflow::Bounded), check()]), vec![false]);
     }
 
     /// A checked site with no check after it lowers to ADR-102's converging
@@ -6573,7 +6616,9 @@ mod tests {
             .collect();
         let expected: Vec<*const Inst> = insts.iter().map(std::ptr::from_ref).collect();
         assert_eq!(covered, expected, "the steps concatenate back to the block");
-        assert_eq!(fused(&insts), vec![false, true, false, false, true]);
+        // Four steps: the bounded add takes its check along unfused, the two
+        // checked adds fuse theirs, and the call takes its check along unfused.
+        assert_eq!(fused(&insts), vec![false, true, false, true]);
     }
 
     /// A fault check is two loads and a branch: through `ctx.pending_fault`,

@@ -14,6 +14,6 @@ Backtrace:
     <tmp#6: Int> @ "30" = 30
     <tmp#7: Unit> = Unit
     <tmp#9: Int> @ "3" = 3
-    <tmp#10: Int> @ "xs[3]" = Unit
+    <tmp#10: Int> @ "xs[3]" = <uninit>
     <tmp#11: Unit> @ "out(xs[3])" = <uninit>
     <tmp#12: Unit> @ "var xs = [10, 20, 30] out(xs[3])" = <uninit>

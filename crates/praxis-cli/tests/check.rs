@@ -267,3 +267,65 @@ fn an_unterminated_template_names_its_own_line_and_nothing_else() {
         "the caret must cover the template, not the file: {width} carets in {caret:?}"
     );
 }
+
+/// **REP-73.** `--help` is user-facing text, and it names nothing only the
+/// implementers can read.
+///
+/// The clap doc comments *are* the implementation notes, so `praxis --help`
+/// printed `run … (Milestone 4+)`, `lsp … (§15, M11)`, `--input … (§7.1, M6)`
+/// and `--debug … (§9.6, M10)`. A reader of `--help` has no idea what `§7.1` or
+/// `M6` is, and no way to find out from there. The notes are worth keeping and
+/// they now live in a plain `//` comment beside the doc comment, where clap
+/// cannot reach them.
+///
+/// Every help page, not just the root: the two worst offenders were flags, and
+/// clap prints those under `run --help`.
+#[test]
+fn no_help_page_leaks_an_implementation_marker() {
+    for args in [
+        vec!["--help"],
+        vec!["run", "--help"],
+        vec!["check", "--help"],
+        vec!["watch", "--help"],
+        vec!["repl", "--help"],
+        vec!["lsp", "--help"],
+    ] {
+        let out = Command::new(bin_path())
+            .args(&args)
+            .output()
+            .expect("failed to run praxis");
+        let help = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        for marker in ["§", "Milestone", "(M1", "M6)", "M10)", "M11)"] {
+            assert!(
+                !help.contains(marker),
+                "`praxis {}` prints `{marker}`:\n{help}",
+                args.join(" ")
+            );
+        }
+    }
+}
+
+/// …and the stub commands do not name a milestone either.
+///
+/// Both call sites passed a hardcoded `0` to `not_implemented`, so the message
+/// read "planned for Milestone 0" — a milestone that completed long ago. `watch`
+/// is §19 M-later and `repl` is scheduled nowhere, so the honest message names
+/// no number at all.
+#[test]
+fn a_stub_command_does_not_name_a_milestone() {
+    for args in [vec!["repl"], vec!["watch", "prog.px"]] {
+        let out = Command::new(bin_path())
+            .args(&args)
+            .output()
+            .expect("failed to run praxis");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains("not implemented"), "{stderr}");
+        assert!(
+            !stderr.contains("Milestone"),
+            "`praxis {}` names a milestone: {stderr}",
+            args.join(" ")
+        );
+    }
+}

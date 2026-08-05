@@ -4,6 +4,6 @@ error[Y001]: expected Int, found Text
   2 | var count: Int = raw
     |                  ^^^ expected Int, found Text
 
-help: this is `Text`; call `.int()` on it (or use `read lines(int)`)
+help: this is `Text`; `.int()` answers `Option[Int]`, so take it apart with `match` (or use `read lines(int)`)
 
 praxis: 1 error(s)

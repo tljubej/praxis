@@ -106,7 +106,7 @@ Backtrace:
     name: Text = run
   temps:
     <tmp#4: Text> @ ""stopping here on purpose"" = stopping here on purpose
-    <tmp#5> @ "panic("stopping here on purpose")" = Unit
+    <tmp#5> @ "panic("stopping here on purpose")" = <uninit>
 Entered crash debugger. 2 frame(s). Type `help` for commands.
 Praxis crash> type values
 Vec[Int]

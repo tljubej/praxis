@@ -11,5 +11,4 @@ Backtrace:
     <tmp#1> = 1->2
 
     <tmp#2: Int> = 1
-    <tmp#3: { a: Int, b: Int }> = Unit
     <tmp#7: Int> @ "pair.a + pair.b" = <uninit>

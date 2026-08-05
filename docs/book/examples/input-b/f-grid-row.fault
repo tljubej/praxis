@@ -12,5 +12,4 @@ Backtrace:
 678
 
     <tmp#2: Int> = 1
-    <tmp#3: Grid[Int]> = Unit
     <tmp#4: Int> @ "read grid(digit).width()" = <uninit>

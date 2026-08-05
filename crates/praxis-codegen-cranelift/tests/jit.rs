@@ -3592,22 +3592,28 @@ fn a_padded_payload_wildcard_selects_its_arm_at_runtime() {
         assert_eq!(result.as_int(), 5, "`{arm}` must take the first arm");
     }
 
-    // A *bare* constructor name for a variant that has a payload is padded to
-    // `Val(_)`, so it emits a payload read it never used to. The value it
-    // selects must be unchanged, and the discarded slot must not fault.
+    // A wildcard in a *nested* payload slot emits a payload read the arm never
+    // uses. The value it selects must be unchanged, and the discarded slot must
+    // not fault. (This was written `Wrapped(Val)` until ADR-134 made the bare
+    // spelling `Y124`; `Val(_)` is the same pattern and the same padding, said
+    // out loud.)
     let src = format!(
         "{enums}fn main() -> Int {{\n  var v = Wrapped(Val(7))\n  \
-         match v {{\n    Wrapped(Nil) => 1\n    Wrapped(Val) => 2\n    Bare => 3\n  }}\n}}\n"
+         match v {{\n    Wrapped(Nil) => 1\n    Wrapped(Val(_)) => 2\n    Bare => 3\n  }}\n}}\n"
     );
     let (rt, result) = run_main(&src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    assert_eq!(result.as_int(), 2, "a bare `Val` is `Val(_)`");
+    assert_eq!(
+        result.as_int(),
+        2,
+        "`Val(_)` reads and discards the payload"
+    );
 
     // …and the padded arm is still a *test*: the other payload constructor
     // takes its own arm rather than falling into the padded one.
     let src = format!(
         "{enums}fn main() -> Int {{\n  var v = Wrapped(Nil)\n  \
-         match v {{\n    Wrapped(Val) => 2\n    Wrapped(Nil) => 1\n    Bare => 3\n  }}\n}}\n"
+         match v {{\n    Wrapped(Val(_)) => 2\n    Wrapped(Nil) => 1\n    Bare => 3\n  }}\n}}\n"
     );
     let (rt, result) = run_main(&src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -9496,4 +9502,111 @@ fn a_binding_nothing_writes_is_captured_by_value() {
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 23);
+}
+
+/// **ADR-136, the runtime half.** `Text.int()` answers the number the text
+/// spells, and `None` for every text that spells none.
+///
+/// `Y001`'s help has named `.int()` since it was written and `Text` did not have
+/// it, so the second half of the help for the most common mistake in a puzzle
+/// program reported `Y110`. The signature is `Option[Int]` and not `Int` for
+/// §4.7's reason — a text that is not a number is absence, not a fault — so the
+/// rejections below are values the program can take apart, not crashes.
+///
+/// **The accepted set is §7.4's `int` atomic** over the whole trimmed text, so
+/// `t.int()` and `parse(t, int)` cannot disagree. `"+5"` is in the rejected list
+/// for that reason and no other: `i64::from_str` takes it and the atomic does
+/// not, and the first cut of this method used `from_str`.
+#[test]
+fn text_int_parses_a_number_or_answers_none() {
+    // The accepted spelling, including the surrounding space a line read off
+    // input carries.
+    for (text, want) in [("12", 12), ("  42 ", 42), ("-7", -7), ("0", 0)] {
+        let src = format!(
+            "fn main() -> Int {{\n  match \"{text}\".int() {{ Some(n) => n, None => -999 }}\n}}\n"
+        );
+        let (rt, result) = run_main(&src);
+        assert!(
+            !rt.has_pending_fault(),
+            "`{text}` faulted: {:?}",
+            rt.fault()
+        );
+        assert_eq!(result.as_int(), want, "`{text}`");
+    }
+
+    // Everything else is `None`, and none of it faults. `"99…9"` is `Y013`'s
+    // rule at run time — a value outside `Int` is not a saturated answer — and
+    // `"+5"`, `"12abc"` and `"12.5"` are each a text `parse(t, int)` refuses.
+    for text in [
+        "abc",
+        "",
+        "1 2",
+        "12abc",
+        "+5",
+        "0x10",
+        "1_000",
+        "12.5",
+        "99999999999999999999999",
+    ] {
+        let src = format!(
+            "fn main() -> Int {{\n  match \"{text}\".int() {{ Some(n) => n, None => -999 }}\n}}\n"
+        );
+        let (rt, result) = run_main(&src);
+        assert!(
+            !rt.has_pending_fault(),
+            "`{text}` faulted: {:?}",
+            rt.fault()
+        );
+        assert_eq!(result.as_int(), -999, "`{text}` spells no Int");
+    }
+}
+
+/// **ADR-136's twin.** `Text.float()` reads §7.4's `float` atomic over the whole
+/// trimmed text, and answers `None` for everything else.
+///
+/// The rejections are the interesting half, and each names a way this could have
+/// been written to disagree with `parse(t, float)`: `f64::from_str` accepts
+/// `"inf"`, `"infinity"`, `"nan"` and `"1."`, and §7.4's `float` accepts none of
+/// them. `Float` still has infinities and NaN — `1.0 / 0.0` is one, and
+/// `Float.to_text()` prints them — what has no spelling is reading one back out
+/// of arbitrary text.
+///
+/// Compared as *text* rather than as a number: an equality test against a
+/// `Float` would pass for a `None` mapped to `0.0`.
+#[test]
+fn text_float_parses_a_number_or_answers_none() {
+    for (text, want) in [
+        ("1.5", "1.5"),
+        ("  -2 ", "-2.0"),
+        ("+5.0", "5.0"),
+        ("1e10", "10000000000.0"),
+        ("3", "3.0"),
+        ("0.0", "0.0"),
+    ] {
+        let src = format!(
+            "fn main() -> Text {{\n  match \"{text}\".float() {{ Some(x) => x.to_text(), None => \"none\" }}\n}}\n"
+        );
+        let (rt, result) = run_main(&src);
+        assert!(
+            !rt.has_pending_fault(),
+            "`{text}` faulted: {:?}",
+            rt.fault()
+        );
+        assert_eq!(result.as_text(), want, "`{text}`");
+    }
+
+    for text in [
+        "1.", "1e", "inf", "infinity", "nan", "abc", "", "1 2", "1.5x",
+    ] {
+        let src = format!(
+            "fn main() -> Text {{\n  match \"{text}\".float() {{ Some(x) => x.to_text(), None => \"none\" }}\n}}\n"
+        );
+        let (rt, result) = run_main(&src);
+        assert!(
+            !rt.has_pending_fault(),
+            "`{text}` faulted: {:?}",
+            rt.fault()
+        );
+        assert_eq!(result.as_text(), "none", "`{text}` spells no Float");
+    }
 }

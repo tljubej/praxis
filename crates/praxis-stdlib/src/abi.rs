@@ -381,6 +381,8 @@ runtime_symbols! {
     StructEq = "praxis_struct_eq": (Ctx, Gc, Gc) -> RawI64, Pure;
     TextConcat = "praxis_text_concat": (Ctx, Gc, Gc) -> Gc, Allocates;
     TextGet = "praxis_text_get": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    TextFloat = "praxis_text_float": (Ctx, Gc) -> Gc, Allocates;
+    TextInt = "praxis_text_int": (Ctx, Gc) -> Gc, Allocates;
     TextIsEmpty = "praxis_text_is_empty": (Ctx, Gc) -> Gc, Pure;
     TextLen = "praxis_text_len": (Ctx, Gc) -> Gc, Allocates;
     TupleGet = "praxis_tuple_get": (Ctx, Gc, RawI64) -> Gc, Pure;

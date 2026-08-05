@@ -935,7 +935,16 @@ impl Inferer {
             (
                 TypeData::Scalar(praxis_types::ScalarType::Int),
                 TypeData::Scalar(praxis_types::ScalarType::Text),
-            ) => Some("this is `Text`; call `.int()` on it (or use `read lines(int)`)".into()),
+                // Both halves of this name something that exists, which the first
+                // half did not until ADR-136 added `Text.int()`. It answers an
+                // `Option[Int]` — a text that is not a number is absence, not a
+                // fault (§4.7) — so the help says how to get the `Int` out rather
+                // than implying the call is the whole fix.
+            ) => Some(
+                "this is `Text`; `.int()` answers `Option[Int]`, so take it apart \
+                 with `match` (or use `read lines(int)`)"
+                    .into(),
+            ),
             _ => None,
         }
     }
@@ -2584,7 +2593,22 @@ impl Inferer {
             None => return self.db.fresh_var(),
         };
         match tok.kind() {
-            SyntaxKind::IntLit => self.db.int(),
+            SyntaxKind::IntLit => {
+                // An `Int` is signed 64-bit (§4.3), so a literal outside that
+                // range names a value the language cannot represent (TY-28).
+                //
+                // Decided **here** and not at lowering, which is where it used to
+                // be: lowering is the pass `praxis check` and the editor do not
+                // run, so `var x = 99999999999999999999999` checked clean and
+                // then refused to run (ADR-133). Nothing about the range needs
+                // the typed tree — the token's own text is the whole question.
+                if praxis_syntax::numeric::parse_int_literal(tok.text()).is_none() {
+                    let at = self.file_span(tok.text_range());
+                    self.diagnostics
+                        .push(crate::diagnostics::int_literal_out_of_range(at, tok.text()));
+                }
+                self.db.int()
+            }
             SyntaxKind::FloatLit => self.db.float(),
             SyntaxKind::TextLit => self.db.text(),
             SyntaxKind::KW_TRUE | SyntaxKind::KW_FALSE => self.db.bool(),
@@ -2643,6 +2667,24 @@ impl Inferer {
                     self.diagnostics
                         .push(crate::diagnostics::generic_function_as_value(site, &name));
                 }
+                // A **builtin** or a **constructor** in value position has no
+                // function value either, and for a blunter reason than `Y018`'s:
+                // nothing was ever built for it. `out(pi)` printed `Unit`, and
+                // `var h = abs` then `h(-3)` printed nothing at all and exited 0
+                // — the name lowered to the unit value and the call went nowhere
+                // (REP-70). Reported here, where the name is written, so `check`
+                // and the editor see it.
+                if let Some((what, arity)) = self.no_function_value(resolved.symbol, ty) {
+                    let name = self
+                        .names
+                        .get(resolved.symbol)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default();
+                    self.diagnostics
+                        .push(crate::diagnostics::name_has_no_function_value(
+                            site, &name, what, arity,
+                        ));
+                }
                 return ty;
             }
         }
@@ -2661,6 +2703,34 @@ impl Inferer {
     fn is_generic_fn(&self, symbol: SymbolId, scheme: &praxis_types::Scheme) -> bool {
         self.names.get(symbol).map(|s| s.kind) == Some(SymbolKind::Fn)
             && !scheme.binders().is_empty()
+    }
+
+    /// Whether `symbol` names something that has **no** function value at all,
+    /// and what to call it in the report (REP-70).
+    ///
+    /// Two kinds qualify, and the test is the same for both: the name is a
+    /// builtin or an enum constructor, and the type it instantiated to is a
+    /// function. A user `fn` is not here — ADR-061 gives it a real value, a
+    /// closure over its adapter. A builtin has no adapter, and a constructor's
+    /// `Wrap(7)` is built at the call rather than by a function anything can
+    /// hold, so in value position both lowered to `Unit`.
+    ///
+    /// The type is what decides, not a list of names: a **payload-less** variant
+    /// (`None`, `Empty`) instantiates to the enum type and is an ordinary value,
+    /// which is exactly what distinguishes it from `Some`. Answering "is it a
+    /// function" instead of "is it one of these thirty names" is what keeps a
+    /// prelude entry added later from silently rejoining the broken set.
+    fn no_function_value(&mut self, symbol: SymbolId, ty: Type) -> Option<(&'static str, usize)> {
+        let what = match self.names.get(symbol).map(|s| s.kind) {
+            Some(SymbolKind::Builtin) => "a builtin",
+            Some(SymbolKind::EnumVariant) => "an enum constructor",
+            _ => return None,
+        };
+        let resolved = self.db.follow(ty);
+        match self.db.data(resolved) {
+            praxis_types::TypeData::Func { params, .. } => Some((what, params.len())),
+            _ => None,
+        }
     }
 
     /// `a..b` / `a..=b` (§4.11, ADR-059). Both bounds must be `Int`; the range
@@ -3619,8 +3689,16 @@ impl Inferer {
                 // A misspelled method is the same mistake as a misspelled
                 // constructor and gets the same fix (ADR-132). The candidates
                 // are the rows dispatch would have searched — this receiver's,
-                // not the whole catalog's — so `v.lenght()` is offered `len`
-                // and never a `Map` method a `Vec` does not have.
+                // not the whole catalog's — so `v.is_emty()` is offered
+                // `is_empty` and never a `Map` method a `Vec` does not have.
+                //
+                // The example used to be `v.lenght()` → `len`, and it is not:
+                // `lenght` is six characters, so `suggest`'s budget is 2 and the
+                // distance to `len` is 3. That name draws no suggestion at all.
+                // The claim about *which* candidates are searched is the one
+                // this comment is making and it is correct; only the example was
+                // wrong, and an example that does not fire is the one kind of
+                // comment a reader cannot check by reading.
                 if let Some(near) = self.nearest_method(receiver_ty, name) {
                     diag = diag.with_suggestion(
                         self.file_span(key),

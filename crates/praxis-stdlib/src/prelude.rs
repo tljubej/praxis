@@ -28,8 +28,15 @@ pub const PRELUDE: &[PreludeEntry] = &[
     PreludeEntry::new("clamp", "Clamp a value into an inclusive range."),
     PreludeEntry::new("gcd", "Greatest common divisor of two integers."),
     PreludeEntry::new("lcm", "Least common multiple of two integers."),
-    PreludeEntry::new("pi", "The constant π as a Float."),
-    PreludeEntry::new("e", "Euler's number as a Float."),
+    // Nullary **functions**, not constants: `pi()` is the value and `pi` is
+    // `() -> Float`. The doc string is what hover shows, so calling them
+    // constants here put the wrong thing in front of the one reader who had
+    // asked (§4.12).
+    PreludeEntry::new("pi", "π as a Float. A nullary function: write `pi()`."),
+    PreludeEntry::new(
+        "e",
+        "Euler's number as a Float. A nullary function: write `e()`.",
+    ),
     // Collections
     PreludeEntry::new("Vec", "Grow, iterate, and pipeline over an ordered list."),
     PreludeEntry::new("Deque", "Double-ended queue."),
@@ -51,9 +58,11 @@ pub const PRELUDE: &[PreludeEntry] = &[
     // error channel"). Returned by the `optional(P)` parser, by `Map.get` and
     // `Grid.find` (D1), and by the graph walks that may not reach their goal.
     //
-    // NOT by `find`/`position` on a sequence, which this used to claim: those
-    // answer an `Int` index with a `-1` miss sentinel. That is a separate
-    // question from D1's and is not S18's to change.
+    // Also by `find`/`position` on a sequence, as of ADR-082: `find` answers
+    // the *element* as an `Option[T]` and `position` its index as an
+    // `Option[Int]`. This comment used to say the opposite — that they answered
+    // an `Int` with a `-1` miss sentinel — which was true before ADR-082 and
+    // has not been since; the catalog rows and a run both say `Some(4)`.
     PreludeEntry::new("Option", "Optional value: Some(T) or None."),
     PreludeEntry::variant("Some", "Wrap a value in an Option."),
     PreludeEntry::variant("None", "The absent Option value."),
@@ -236,8 +245,8 @@ pub fn graph_helper(name: &str) -> Option<GraphHelper> {
 /// capability on its own binder and pick a lowering per instantiation, and
 /// nothing needs that yet.
 ///
-/// `pi` and `e` are not here either. They are `Float` constants, not `Int`
-/// functions, and they already had schemes and dispatch.
+/// `pi` and `e` are not here either. They are nullary `Float` functions rather
+/// than `Int` ones, and they already had schemes and dispatch.
 pub const NUMERIC_HELPERS: &[NumericHelper] = &[
     NumericHelper::new("abs", RuntimeSymbol::IntAbs),
     NumericHelper::new("sign", RuntimeSymbol::IntSign),

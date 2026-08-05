@@ -547,6 +547,8 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::StructEq => praxis_struct_eq as *const (),
         RuntimeSymbol::TextConcat => praxis_text_concat as *const (),
         RuntimeSymbol::TextGet => praxis_text_get as *const (),
+        RuntimeSymbol::TextFloat => praxis_text_float as *const (),
+        RuntimeSymbol::TextInt => praxis_text_int as *const (),
         RuntimeSymbol::TextIsEmpty => praxis_text_is_empty as *const (),
         RuntimeSymbol::TextLen => praxis_text_len as *const (),
         RuntimeSymbol::TupleGet => praxis_tuple_get as *const (),
@@ -5527,6 +5529,108 @@ pub unsafe extern "C" fn praxis_text_len(ctx: *mut RuntimeContext, text: GcRef) 
         // SAFETY: caller guarantees `text` is Text.
         let len = unsafe { crate::text::text_char_count(text_payload(text)) } as i64;
         unsafe { int_ref(ctx, len) }
+    })
+}
+
+/// The whole of `text`, trimmed, if `run` accepts all of it — the shared half of
+/// [`praxis_text_int`] and [`praxis_text_float`] (ADR-136).
+///
+/// **`run` is the input parser's own scanner** (`parser::take_int_run`,
+/// `parser::take_float_run`), and that is the point rather than a convenience.
+/// `parse(t, int)` and `t.int()` are two spellings of "read a number out of
+/// text", and a program that gets different answers from them has found a defect
+/// in one of them. Sharing the scanner makes the disagreement unrepresentable.
+///
+/// The difference between the method and the atomic is *how much* must match,
+/// not what: an atomic stops where its run stops and hands the rest of the line
+/// to the template, and a method has no rest to hand anywhere — so a run that
+/// covers less than the whole trimmed text is `None`. That is what makes
+/// `"1 2"`, `"12abc"` and `"1."` rejections rather than partial answers.
+///
+/// Trimming is the one liberty taken, and it is what makes a line read off input
+/// usable without a second call.
+fn whole_trimmed(s: &str, run: fn(&[u8]) -> (&str, usize)) -> Option<&str> {
+    let trimmed = s.trim();
+    let (text, len) = run(trimmed.as_bytes());
+    (!text.is_empty() && len == trimmed.len()).then_some(trimmed)
+}
+
+/// The `Int` `text` spells, as `Some(n)`, or `None` when it spells no `Int`
+/// (ADR-136).
+///
+/// `Y001`'s help on `var count: Int = raw` has named `.int()` since it was
+/// written, and `Text` did not have it: half of the most common mistake in a
+/// puzzle program's help line sent the reader to a method that reported `Y110`.
+///
+/// `Option[Int]` and not `Int`, for §4.7's reason: a text that is not a number
+/// is *absence*, not a fault. Input arrives as text and is routinely not what
+/// the program hoped, so a panicking conversion would make `"abc".int()` a crash
+/// the program has no way to prevent — where `read lines(int)`, the other half
+/// of that help, reports at the parser and never produces the value at all.
+///
+/// The accepted spelling is **§7.4's `int` atomic** over the whole trimmed text:
+/// an optional `-` and then digits (see [`whole_trimmed`]). `"1 2"`, `"0x10"`,
+/// `"1_000"`, `"+5"` and `""` are all `None`, and so is a value outside `Int`'s
+/// range — for the reason `Y013` exists: a saturated answer is a number nobody
+/// wrote.
+///
+/// # Safety
+/// `ctx` must be live and wired; `text` must be a valid `Text` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_text_int(ctx: *mut RuntimeContext, text: GcRef) -> GcRef {
+    abi_guard!("praxis_text_int", ctx, {
+        // SAFETY: caller guarantees `text` is Text.
+        let s = unsafe { text_str(text) };
+        match whole_trimmed(s, crate::parser::take_int_run).and_then(|t| t.parse::<i64>().ok()) {
+            // SAFETY: `ctx` is live and wired; `int_ref` allocates the payload
+            // and `option_some` roots it across the enum allocation.
+            Some(n) => unsafe {
+                let boxed = int_ref(ctx, n);
+                option_some(ctx, boxed)
+            },
+            // SAFETY: `ctx` is live and wired.
+            None => unsafe { option_none(ctx) },
+        }
+    })
+}
+
+/// The `Float` `text` spells, as `Some(x)`, or `None` when it spells no `Float`
+/// (ADR-136).
+///
+/// [`praxis_text_int`]'s twin, over §7.4's `float` atomic: an optional sign,
+/// digits, an optional `.` **with** a fraction, and an optional complete
+/// exponent. `"1.5"`, `"-2"`, `"+5.0"` and `"1e10"` are values; `"1."`, `"1e"`,
+/// `"inf"`, `"nan"` and `""` are `None`, because none of them is a token the
+/// input parser reads either.
+///
+/// `inf` and `nan` are the answer worth stating: Rust's `f64::from_str` accepts
+/// both, §7.4's `float` accepts neither, and a method that took them would be a
+/// second opinion about what a number is. `Float` still *has* those values —
+/// `1.0 / 0.0` is one — and `Float.to_text()` prints them; what has no spelling
+/// is reading one back out of arbitrary text.
+///
+/// The leading `+` this accepts and [`praxis_text_int`] does not is §7.4's own
+/// asymmetry, carried over rather than papered over: changing an atomic's
+/// accepted set is a change to the input language.
+///
+/// # Safety
+/// `ctx` must be live and wired; `text` must be a valid `Text` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_text_float(ctx: *mut RuntimeContext, text: GcRef) -> GcRef {
+    abi_guard!("praxis_text_float", ctx, {
+        // SAFETY: caller guarantees `text` is Text.
+        let s = unsafe { text_str(text) };
+        match whole_trimmed(s, crate::parser::take_float_run).and_then(|t| t.parse::<f64>().ok()) {
+            // SAFETY: `ctx` is live and wired. `praxis_alloc_float` takes the
+            // bit pattern the uniform scalar ABI carries (§4.3), and
+            // `option_some` roots the box across the enum allocation.
+            Some(x) => unsafe {
+                let boxed = praxis_alloc_float(ctx, x.to_bits() as i64);
+                option_some(ctx, boxed)
+            },
+            // SAFETY: `ctx` is live and wired.
+            None => unsafe { option_none(ctx) },
+        }
     })
 }
 

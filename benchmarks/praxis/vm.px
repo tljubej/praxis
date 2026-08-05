@@ -6,7 +6,7 @@
 // instruction stream it cannot see, plus a payload read out of an enum and a
 // bounds-checked index into the program vector. This is what a puzzle's
 // "simulate this machine" part looks like, and it is the least
-// arithmetic-shaped of the seven.
+// arithmetic-shaped of the eight.
 //
 // The interpreted program computes a rolling modular hash over 0..limit; the
 // interpreter reports its result and the number of instructions it retired.

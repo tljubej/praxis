@@ -1,7 +1,7 @@
 error[Y124]: `Wrap` in `Wrapped` holds 1 value(s), but this pattern names 2
 
-  match-too-many-sub-patterns.px:7:15
-  7 |     match w { Wrap(a, b) => a + b }
+  match-too-many-sub-patterns.px:6:15
+  6 |     match w { Wrap(a, b) => a + b }
     |               ^^^^ `Wrap` in `Wrapped` holds 1 value(s), but this pattern names 2
 
 praxis: 1 error(s)

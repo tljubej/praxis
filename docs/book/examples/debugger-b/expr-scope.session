@@ -9,7 +9,7 @@ Backtrace:
     grid: Vec[Int] = [1, 2, 3, 4, 5, 6]
     at: Int = 6
   temps:
-    <tmp#3: Int> @ "grid[at]" = Unit
+    <tmp#3: Int> @ "grid[at]" = <uninit>
 Entered crash debugger. 3 frame(s). Type `help` for commands.
 Praxis crash> #0   cell
 #1   edge

@@ -576,7 +576,6 @@ Backtrace:
 foo
 
     <tmp#2: Int> = 1
-    <tmp#3: { a: Vec[Int], b: Text }> = Unit
     <tmp#5: Int> @ "read block(`h:`, a: csv(int), b: word).a.len()" = <uninit>
 ```
 

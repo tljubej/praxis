@@ -139,7 +139,7 @@ Backtrace:
     <tmp#6: Int> @ "30" = 30
     <tmp#7: Unit> = Unit
     <tmp#9: Int> @ "3" = 3
-    <tmp#10: Int> @ "xs[3]" = Unit
+    <tmp#10: Int> @ "xs[3]" = <uninit>
     <tmp#11: Unit> @ "out(xs[3])" = <uninit>
     <tmp#12: Unit> @ "var xs = [10, 20, 30] out(xs[3])" = <uninit>
 ```
@@ -167,7 +167,7 @@ Backtrace:
     <tmp#4: Int> @ "36" = 36
     <tmp#5> @ "ages["ada"] = 36" = Unit
     <tmp#6: Text> @ ""alan"" = alan
-    <tmp#7: Int> @ "ages["alan"]" = Unit
+    <tmp#7: Int> @ "ages["alan"]" = <uninit>
     <tmp#8: Unit> @ "out(ages["alan"])" = <uninit>
     <tmp#9: Unit> @ "var ages = Map[Text, Int]() ages["ada"] = 36 out(ages["alan"])" = <uninit>
 ```
@@ -205,7 +205,6 @@ Backtrace:
     <tmp#1: Vec[Int]> = []
     <tmp#3: Int> = 0
     <tmp#4: Int> = 0
-    <tmp#6: Unit> = Unit
     <tmp#8: Unit> @ "out(readings.min())" = <uninit>
     <tmp#9: Unit> @ "var readings = Vec[Int]() out(readings.min())" = <uninit>
 ```
@@ -237,7 +236,7 @@ Backtrace:
     <tmp#1: Int> @ "41" = 41
     <tmp#3: Int> @ "42" = 42
     <tmp#4: Bool> @ "checksum == 42" = false
-    <tmp#5: Unit> @ "assert(checksum == 42)" = Unit
+    <tmp#5: Unit> @ "assert(checksum == 42)" = <uninit>
     <tmp#6: Unit> @ "out(checksum)" = <uninit>
     <tmp#7: Unit> @ "var checksum = 41 assert(checksum == 42) out(checksum)" = <uninit>
 ```
@@ -267,7 +266,7 @@ Backtrace:
     <tmp#1: Text> @ ""diagonal"" = diagonal
     <tmp#3: Text> @ ""unsupported mode: "" = unsupported mode: 
     <tmp#4: Text> @ ""unsupported mode: " + mode" = unsupported mode: diagonal
-    <tmp#5> @ "panic("unsupported mode: " + mode)" = Unit
+    <tmp#5> @ "panic("unsupported mode: " + mode)" = <uninit>
     <tmp#6: Unit> @ "var mode = "diagonal" panic("unsupported mode: " + mode)" = <uninit>
 ```
 
@@ -312,7 +311,6 @@ Backtrace:
 alan oops
 
     <tmp#2: Int> = 1
-    <tmp#3: Vec[{ name: Text, score: Int }]> = Unit
     <tmp#5: Int> @ "rows.len()" = <uninit>
     <tmp#6: Unit> @ "out(rows.len())" = <uninit>
     <tmp#7: Unit> @ "var rows = read lines(`{name:word} {score:int}`) out(rows.len())" = <uninit>
@@ -372,7 +370,7 @@ Backtrace:
   temps:
     <tmp#1: BitSet> = {}
     <tmp#3: Int> @ "1000000000000000000" = 1000000000000000000
-    <tmp#4: Unit> @ "seen.insert(1000000000000000000)" = Unit
+    <tmp#4: Unit> @ "seen.insert(1000000000000000000)" = <uninit>
     <tmp#5: Int> @ "seen.len()" = <uninit>
     <tmp#6: Unit> @ "out(seen.len())" = <uninit>
     <tmp#7: Unit> @ "var seen = BitSet() seen.insert(1000000000000000000) out(seen.len())" = <uninit>
@@ -384,31 +382,34 @@ but no Praxis source reaches it: `Grid()` takes no arguments and builds a 0×0
 grid, and a `read grid(…)` builds its payload from the input it already read.
 `BitSet` is the one that faults from a program you would write.
 
-## `<uninit>` and `Unit`: how the faulting operation shows itself
+## `<uninit>`: the value that was never produced
 
-Look again at the temp for the faulting expression. `budget / people` and
-`total + 1` are `<uninit>`. `xs[3]` and `ages["alan"]` are `Unit` — in slots the
-same line types `Int`. The difference is not cosmetic, and it tells you how the
-operation failed.
+Look again at the temp for the faulting expression. `budget / people`, `total +
+1`, `xs[3]` and `ages["alan"]` are all `<uninit>`, and so is every temp above
+them that was waiting on one. **`<uninit>` means the value was never produced**,
+and it is the same answer however the operation failed.
 
-Checked `Int` arithmetic is compiled to inline machine code with an inline
-overflow test and a branch to a cold block, and that cold block goes straight to
-the fault epilogue. The operation is not a call whose result gets stored; on the
-faulting path nothing is ever stored into the destination slot, and the debugger
-finds it empty. **`<uninit>` means the value was never produced**
+The two ways it can fail are worth knowing anyway, because they are why the
+debugger can say this at all. Checked `Int` arithmetic is inline machine code
+with an inline overflow test and a branch to a cold block, and that cold block
+goes straight to the fault epilogue — the operation is not a call whose result
+gets stored, so on the faulting path nothing is stored into the destination slot
 ([ADR-102](../../../decisions/102-a-check-is-a-branch-not-a-call.md),
 [ADR-117](../../../decisions/117-a-raise-that-branches-is-its-own-observation.md)).
-
 Everything else — indexing, `min`, `insert`, `to_int` — is a call into a runtime
-wrapper. A wrapper that raises still has to return *something* across the ABI
-boundary, and what it returns is the `Unit` sentinel. So the slot holds `Unit`
-even though the compiler typed it `Int`, which is why `<tmp#10: Int> … = Unit` is
-not a contradiction: the type on the left is the compiler's, and the value on
-the right is the runtime's. (A slot whose type genuinely *is* `Unit` — the temp
-for a `seen.insert(…)` statement, say — tells you nothing either way.)
+wrapper, and a wrapper that raises still has to return *something* across the ABI
+boundary. The debugger's store for the destination comes after the fault check
+rather than before it, so the sentinel the wrapper returned is never written down
+([ADR-135](../../../decisions/135-a-debug-slot-is-written-on-the-path-the-value-was-produced-on.md)).
 
-Two shapes, one rule. `<uninit>` is a checked branch that never wrote; `Unit` in
-a slot whose printed type is not `Unit` is a call that raised.
+It used to be written down, and the two shapes read differently: `xs[3]` showed
+`= Unit` in a slot the same line typed `Int`. That was the sentinel, not a value
+the program computed, and telling the two apart meant knowing which operations
+are calls. Now the frame says it directly.
+
+A slot whose type genuinely *is* `Unit` and whose value is `Unit` — the temp for
+a `seen.insert(…)` statement that ran, say — is an ordinary value and tells you
+nothing either way.
 
 ## What is not a fault
 

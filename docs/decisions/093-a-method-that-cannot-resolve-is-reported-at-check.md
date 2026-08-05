@@ -151,7 +151,7 @@ refused because the catalog holds the name nowhere — gets its own wording:
 no type has a method `nope` taking 0 argument(s)
 ```
 
-Rendering the receiver there would print `?a`, a type variable's leaked internal
+Rendering the receiver there would print `?T`, a type variable's leaked internal
 name, into a message required to be concrete, and it would be the least useful
 half of the sentence. The name and the arity are the whole answer.
 

@@ -180,7 +180,6 @@ Backtrace:
   temps:
     <tmp#1> = <unreadable>
     <tmp#2: Int> = 1
-    <tmp#3: Int> = Unit
     <tmp#4: Unit> @ "out(read int)" = <uninit>
 ```
 

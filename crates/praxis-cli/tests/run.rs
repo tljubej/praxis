@@ -1580,3 +1580,42 @@ fn run_pass_enum_renders_its_variant_name() {
         "Empty\nWall\nNumber(7)\nSome(3)\nNone\nSome(x)",
     );
 }
+
+/// **REP-72.** The destination of the instruction that *faulted* renders
+/// `<uninit>`, not the sentinel its wrapper returned.
+///
+/// A faulting runtime wrapper sets `pending_fault` and returns the Unit
+/// sentinel — it has to return something, and `Inst::CheckFault` right behind
+/// it is what makes the value unreachable. But `def_var` stored that sentinel
+/// and the debug store behind it recorded it, so the subscript that faulted
+/// rendered `= Unit` while its own consumer one line below rendered
+/// `<uninit>`. Both were never produced; only one of them said so, and the
+/// difference is invisible unless you know that `Unit` here means "nothing
+/// happened" — which is the one thing the debugger exists to make obvious.
+///
+/// ADR-135 covers the check with its instruction's step, so the store lands in
+/// the check's fall-through block. The neighbours are asserted too: this is a
+/// change to *where* a store is emitted, and a version of it that moved the
+/// store off every path would turn the whole frame `<uninit>` and still pass an
+/// assertion about one line.
+#[test]
+fn the_destination_of_a_faulting_instruction_is_uninit() {
+    let (code, out) = run_repl_with_cmds("faulting_subscript.px", "locals\nquit\n");
+    assert_eq!(code, 1, "the index fault exits 1 after the REPL quits");
+    assert!(
+        out.contains("@ \"values[start + 2]\" = <uninit>"),
+        "the subscript that faulted produced no value: {out}"
+    );
+    for expected in [
+        // Everything before the fault still renders what it computed.
+        "@ \"values[start]\" = 7",
+        "@ \"start + 1\" = 2",
+        "@ \"values[start + 1]\" = 41",
+        "@ \"values[start] + values[start + 1]\" = 48",
+        "@ \"start + 2\" = 3",
+        "values: Vec[Int] = [12, 7, 41]",
+        "start: Int = 1",
+    ] {
+        assert!(out.contains(expected), "missing `{expected}`: {out}");
+    }
+}

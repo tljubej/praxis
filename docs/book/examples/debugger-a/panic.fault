@@ -9,5 +9,5 @@ Backtrace:
     <tmp#1: Text> @ ""diagonal"" = diagonal
     <tmp#3: Text> @ ""unsupported mode: "" = unsupported mode: 
     <tmp#4: Text> @ ""unsupported mode: " + mode" = unsupported mode: diagonal
-    <tmp#5> @ "panic("unsupported mode: " + mode)" = Unit
+    <tmp#5> @ "panic("unsupported mode: " + mode)" = <uninit>
     <tmp#6: Unit> @ "var mode = "diagonal" panic("unsupported mode: " + mode)" = <uninit>

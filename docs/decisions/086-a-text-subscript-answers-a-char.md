@@ -109,14 +109,22 @@ is a lexer, a parser arm, and `lower_lit`. Nothing else.
 
 ### Why not `Char.to_text()`, and why not the character-class family
 
-- **`Char.to_text()`** is one third of a gap §4.13 already records in the design
-  doc's own words: `Int` has no `to_text()` either, and §8.1's interpolation is
-  specified and unimplemented, so "building a `Text` out of a number is not yet
-  possible in any spelling." Answering that for the one type that did not ask
-  leaves the other two open and creates a *second* spelling for "is this
-  character a `#`" (`t[i].to_text() == "#"` beside `t[i] == "#"[0]`). Two
-  spellings for one question is what ADR-077 refused for accessors. The `to_text`
-  family is one decision and wants taking whole.
+- **`Char.to_text()`** is one third of a gap §4.13 records in the design doc's
+  own words: "building a `Text` out of a number is not yet possible in any
+  spelling." Answering that for the one type that did not ask leaves the other
+  two open and creates a *second* spelling for "is this character a `#`"
+  (`t[i].to_text() == "#"` beside `t[i] == "#"[0]`). Two spellings for one
+  question is what ADR-077 refused for accessors. The `to_text` family is one
+  decision and wants taking whole.
+
+  **The quoted sentence is no longer true as written**, and the argument above
+  survives it. `Float.to_text()` exists and prints `5.0`; `Int.to_text()` still
+  reports `Y110`, and §8.1's interpolation is still specified and unimplemented.
+  So the family is two thirds open rather than three, and the reason for taking
+  it whole is unchanged. (The traffic in the *other* direction was answered
+  separately: `Text.int()`/`Text.float()` are ADR-136, and they are not part of
+  this family — they read a number out of a text rather than writing one into
+  it.)
 - **`is_digit`, `is_alpha`, `to_upper`, `to_lower`** have no design-doc surface
   asking for them, and `to_int()` expresses every one. Inventing four rows here
   is exactly what REP-46 refused to do with `wrapping_sub`/`wrapping_mul`.

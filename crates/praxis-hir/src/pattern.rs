@@ -17,10 +17,23 @@
 //! # The diagnostics this emits
 //!
 //! A pattern whose *shape* cannot fit its scrutinee (`Y123`), a variant the enum
-//! has not (`Y122`), a payload named past its arity (`Y124`) and an out-of-range
-//! literal (`Y013`). The coverage pass runs this builder with a sink it throws
-//! away, because inference has already reported those same mistakes from its own
-//! walk over the same patterns — see [`crate::exhaustive::check_matches`].
+//! has not (`Y122`), a payload the pattern does not fit (`Y124`) and an
+//! out-of-range literal (`Y013`).
+//!
+//! **They are analysis's answer**, which they were not until ADR-133. The
+//! coverage pass ran this builder with a sink it *threw away* — on the theory
+//! that inference had already reported the same mistakes from its own walk over
+//! the same patterns. That is true of `Y122` and `Y123` and false of the other
+//! two: inference never decodes a literal and never counts a payload, so a
+//! `Y013` or a `Y124` in a pattern was reachable only from lowering, and
+//! lowering is the one pass `praxis check` and the editor do not run. Both were
+//! "checks clean, refuses to run" — the exact failure ADR-130 was written to
+//! close, still open for the codes it did not move.
+//!
+//! So the sink is kept now, minus whatever inference has already said at the
+//! same caret ([`crate::exhaustive::check_matches`]), and the **binding**
+//! positions — a `for` header and a destructuring closure parameter — are walked
+//! here by [`check_binding_patterns`] for the same reason.
 
 use std::collections::HashMap;
 
@@ -71,18 +84,17 @@ impl PatternBuilder<'_> {
                 };
                 let value = match tok.kind() {
                     SyntaxKind::IntLit => {
-                        let cleaned = praxis_syntax::numeric::strip_digit_separators(tok.text());
                         // Out of range in a *pattern* is the same mistake as in
                         // an expression (TY-28): a saturated literal would match
-                        // a value the program never named.
-                        match cleaned.parse::<i64>() {
-                            Ok(v) => Lit::Int(v),
-                            Err(_) => {
-                                let text = tok.text().to_string();
-                                self.diag(
-                                    tok.text_range(),
-                                    DiagCode::IntLiteralOutOfRange,
-                                    format!("`{text}` is outside the range of `Int`"),
+                        // a value the program never named. Inference reports the
+                        // expression's; this one is the builder's, because
+                        // inference never decodes a pattern's literal.
+                        match praxis_syntax::numeric::parse_int_literal(tok.text()) {
+                            Some(v) => Lit::Int(v),
+                            None => {
+                                let at = self.file_span(tok.text_range());
+                                self.diagnostics.push(
+                                    crate::diagnostics::int_literal_out_of_range(at, tok.text()),
                                 );
                                 Lit::Int(0)
                             }
@@ -119,16 +131,41 @@ impl PatternBuilder<'_> {
                 // the scrutinee's enum type (the WS5 fix).
                 let resolved = self.db.follow(scrutinee_ty);
                 if let praxis_types::TypeData::Enum { def, .. } = self.db.data(resolved) {
-                    let edef = self.db.enum_def(*def);
+                    let def = *def;
+                    let edef = self.db.enum_def(def);
                     if let Some(idx) = edef.variant(&name) {
-                        // A bare name naming a variant *with* a payload means
-                        // "any payload", so it is padded to the variant's arity
-                        // (HIR-06). The usefulness matrix pairs each column
-                        // with a type, and a row narrower than the payload
-                        // would pair them off by one.
                         let arity = edef.variants[idx].payload.len();
+                        // A bare name naming a variant that **carries** a payload
+                        // is `Y124` (ADR-134). It used to mean "any payload" — `Step`,
+                        // `Step(_)` and `Step(_, _)` were one test — and the cost
+                        // of that spelling is that the arm says nothing about the
+                        // value the variant holds, and reads exactly like a
+                        // payload-less variant to anyone who has not gone and
+                        // looked at the declaration. `Step(_)` says it out loud
+                        // and is one character longer.
+                        //
+                        // The pattern is still **padded** to the variant's arity
+                        // after the report: the usefulness matrix pairs each
+                        // column with a type, and a row narrower than the payload
+                        // would pair them off by one — so a second, wrong
+                        // diagnostic about coverage would land on top of this one.
+                        if arity > 0 {
+                            let rendered = self.db.render(resolved);
+                            let at = pat
+                                .name_token()
+                                .map(|t| t.text_range())
+                                .unwrap_or_else(|| pat.syntax().text_range());
+                            let diag = self
+                                .arity_diag(at, &name, &rendered, arity, 0)
+                                .with_suggestion(
+                                    self.file_span(at),
+                                    format!("{name}({})", vec!["_"; arity].join(", ")),
+                                    "name the payload, or `_` for each slot you do not need",
+                                );
+                            self.diagnostics.push(diag);
+                        }
                         return TypedPattern::EnumVariant {
-                            enum_def_id: *def,
+                            enum_def_id: def,
                             variant_idx: idx as u32,
                             subpatterns: vec![TypedPattern::Wildcard; arity],
                             ty: scrutinee_ty,
@@ -197,25 +234,24 @@ impl PatternBuilder<'_> {
                     subpatterns.push(self.build(sub, sub_ty));
                 }
                 // Exactly one sub-pattern per payload slot (HIR-06). A pattern
-                // that names fewer is padded with wildcards — `Some` and
-                // `Some(_)` are the same test — and one that names *more* is
-                // reported and then truncated (REP-05): the extras are lowered
-                // above so anything wrong inside them still reports, truncating
-                // is what keeps MIR from reading a payload index past the object,
-                // and the report is what stops `Wrap(a, b)` on a one-slot variant
-                // from *compiling and running*.
+                // written with parentheses that names fewer is padded with
+                // wildcards — `Some(_)` and `Some(n)` are the same test — and one
+                // that names *more* is reported and then truncated (REP-05): the
+                // extras are lowered above so anything wrong inside them still
+                // reports, truncating is what keeps MIR from reading a payload
+                // index past the object, and the report is what stops
+                // `Wrap(a, b)` on a one-slot variant from *compiling and
+                // running*.
+                //
+                // The **bare** spelling is the other side of the same code, and
+                // it is handled at `PatternKind::Name` — see there for why it
+                // stopped being the third spelling of `Some(_)`.
                 if sub_pats.len() > payload_types.len() {
                     let rendered = self.db.render(resolved);
                     let want = payload_types.len();
                     let got = sub_pats.len();
-                    self.diag(
-                        at,
-                        DiagCode::TooManySubPatterns,
-                        format!(
-                            "`{vname}` in `{rendered}` holds {want} value(s), \
-                             but this pattern names {got}"
-                        ),
-                    );
+                    let diag = self.arity_diag(at, &vname, &rendered, want, got);
+                    self.diagnostics.push(diag);
                 }
                 subpatterns.resize(payload_types.len(), TypedPattern::Wildcard);
                 TypedPattern::EnumVariant {
@@ -323,12 +359,182 @@ impl PatternBuilder<'_> {
     }
 
     fn diag(&mut self, at: TextRange, code: DiagCode, msg: impl Into<String>) {
-        self.diagnostics.push(Diagnostic::new(
+        let at = self.file_span(at);
+        self.diagnostics
+            .push(Diagnostic::new(Severity::Error, code, msg.into(), at));
+    }
+
+    /// `Y124`'s wording, for both shapes that reach it: `got` is how many
+    /// sub-patterns the pattern named, and a bare variant name named zero.
+    ///
+    /// One sentence, so the two are not two different complaints about the same
+    /// mismatch — the reader needs the same two numbers either way.
+    fn arity_diag(
+        &self,
+        at: TextRange,
+        variant: &str,
+        rendered: &str,
+        want: usize,
+        got: usize,
+    ) -> Diagnostic {
+        Diagnostic::new(
             Severity::Error,
-            code,
-            msg.into(),
+            DiagCode::PayloadArityMismatch,
+            format!(
+                "`{variant}` in `{rendered}` holds {want} value(s), but this pattern names {got}"
+            ),
+            self.file_span(at),
+        )
+    }
+
+    fn file_span(&self, at: TextRange) -> FileSpan {
+        FileSpan::new(
+            self.file,
+            Span::new(
+                praxis_source::BytePos::from(u32::from(at.start())),
+                praxis_source::BytePos::from(u32::from(at.end())),
+            ),
+        )
+    }
+}
+
+/// Add `built` to `out`, minus every diagnostic `out` already carries under the
+/// same code at the same caret.
+///
+/// The builder and inference walk the same patterns and overlap on two codes: a
+/// variant the enum has not (`Y122`) and a shape the scrutinee cannot take
+/// (`Y123`) are decided by both. Keeping the builder's sink is what puts `Y013`
+/// and `Y124` in front of `praxis check` at all; keeping *all* of it would put
+/// the two shared messages under the same caret twice.
+///
+/// Same code and same span is the test, and it is the right one: a diagnostic is
+/// identified by what it says and where, and two passes that agree on both have
+/// made one report, not two. It is deliberately not a message comparison — the
+/// two wordings of `Y122` are byte-identical today and nothing keeps them so.
+pub(crate) fn merge_pattern_diagnostics(built: Vec<Diagnostic>, out: &mut Vec<Diagnostic>) {
+    let mut seen: std::collections::HashSet<(DiagCode, FileSpan)> =
+        out.iter().map(|d| (d.kind(), d.primary())).collect();
+    for d in built {
+        if seen.insert((d.kind(), d.primary())) {
+            out.push(d);
+        }
+    }
+}
+
+/// Check every **binding** pattern in the file — a `for` header and a
+/// destructuring closure parameter — at the end of analysis (REP-25, ADR-133).
+///
+/// A binding has no second arm, so a pattern that can *fail* is `Y125`, and the
+/// pattern's own shape mistakes (`Y013`, `Y124`) are the builder's. Lowering
+/// asked both questions and lowering is the pass `praxis check` and the editor
+/// do not run, so `for Point { x: 0, y } in pts` checked clean and refused to
+/// run — ADR-130's own statement of the problem, at the two positions it did not
+/// move.
+///
+/// Match arms are **not** here: [`crate::exhaustive::check_matches`] already
+/// builds those patterns for coverage, and building them twice would report
+/// twice. The three positions together are every place the grammar puts a
+/// pattern, which `every_pattern_position_is_checked_by_analysis` is what keeps
+/// true.
+pub(crate) fn check_binding_patterns(
+    file: FileId,
+    root: &praxis_ast::SourceFile,
+    db: &mut praxis_types::TypeDb,
+    names: &crate::NameTable,
+    decls: &HashMap<TextRange, SymbolId>,
+    ref_types: &HashMap<TextRange, Type>,
+    out: &mut Vec<Diagnostic>,
+) {
+    for node in root.syntax().descendants() {
+        if let Some(f) = praxis_ast::ForExpr::cast(node.clone()) {
+            // The item type is recorded on the binding *pattern*'s range: a
+            // `for` binding is not an expression, so this is a `ref_types` read
+            // and not an `expr_types` one. A miss means inference did not reach
+            // this header, and a report about it would be about a program that
+            // does not exist.
+            let Some(pat) = f.binding() else { continue };
+            let Some(item_ty) = ref_types.get(&pat.syntax().text_range()).copied() else {
+                continue;
+            };
+            check_binding(
+                file,
+                db,
+                decls,
+                &pat,
+                item_ty,
+                "a `for` binding must match every item",
+                out,
+            );
+            continue;
+        }
+        let Some(c) = praxis_ast::ClosureExpr::cast(node.clone()) else {
+            continue;
+        };
+        for p in c.params() {
+            // A named parameter binds its whole argument, and `|_|` binds
+            // nothing (ADR-049 D7): neither takes anything apart.
+            if p.name().is_some() {
+                continue;
+            }
+            let Some(pat) = p.pattern() else { continue };
+            if matches!(pat.kind(), praxis_ast::PatternKind::Wildcard) {
+                continue;
+            }
+            let Some(symbol) = decls.get(&pat.syntax().text_range()).copied() else {
+                continue;
+            };
+            // A symbol with no scheme errored during inference and is already
+            // reported; a shape answer about it would be a second complaint.
+            let Some(param_ty) = names
+                .get(symbol)
+                .and_then(|s| s.scheme.as_ref())
+                .map(|s| s.body())
+            else {
+                continue;
+            };
+            check_binding(
+                file,
+                db,
+                decls,
+                &pat,
+                param_ty,
+                "a closure parameter must match every argument",
+                out,
+            );
+        }
+    }
+}
+
+/// One binding position: build the pattern, keep what the builder found, and
+/// report `Y125` when the pattern can fail.
+///
+/// `must` is the half of the sentence that names the position — the rest of it
+/// is the same at both, because it is the same rule.
+fn check_binding(
+    file: FileId,
+    db: &mut praxis_types::TypeDb,
+    decls: &HashMap<TextRange, SymbolId>,
+    pat: &praxis_ast::Pattern,
+    ty: Type,
+    must: &str,
+    out: &mut Vec<Diagnostic>,
+) {
+    let mut built = Vec::new();
+    let pattern = PatternBuilder {
+        file,
+        db,
+        decls,
+        diagnostics: &mut built,
+    }
+    .build(pat, ty);
+    if let Some(reason) = crate::lower::refutable_reason(&pattern) {
+        let at = pat.syntax().text_range();
+        built.push(Diagnostic::new(
+            Severity::Error,
+            DiagCode::RefutableBinding,
+            format!("{must}, and {reason} does not"),
             FileSpan::new(
-                self.file,
+                file,
                 Span::new(
                     praxis_source::BytePos::from(u32::from(at.start())),
                     praxis_source::BytePos::from(u32::from(at.end())),
@@ -336,4 +542,5 @@ impl PatternBuilder<'_> {
             ),
         ));
     }
+    merge_pattern_diagnostics(built, out);
 }

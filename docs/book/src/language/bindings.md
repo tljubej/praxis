@@ -44,19 +44,27 @@ out(x)
 ```
 
 ```text
-error[N001]: `let` is not defined
+error[N009]: `let` is not a keyword; a binding is written with `var`
 
   let-is-gone.px:1:1
   1 | let x = 5
-    | ^^^ `let` is not defined
+    | ^^^ `let` is not a keyword; a binding is written with `var`
 
-help: did you mean `Set`?
-      Set
+help: replace it with `var`
+      var
 ```
+
+`N009` is its own code, and the reason is the fix. `let` is not a misspelling of
+anything — it is a word this language used to have — so the near-miss search
+that answers `totl` with `total` has nothing useful to say about it. It used to
+be asked anyway, and its answer was `did you mean `Set`?`: the budget is one
+edit for a three-letter name, and `Set` is one edit away. The rule is right in
+general; the question was the wrong one to ask.
 
 That is the first of four errors from those two lines: `let` and `x` run
 together with no separator (`P002`), and `x` is then never declared, so both
-mentions of it are `N001` too. `var let = 5` compiles, if you want the word.
+mentions of it are `N001`. `var let = 5` compiles, if you want the word — which
+is why this is reported where a statement *starts* rather than in the lexer.
 
 ## Assignment keeps the type
 

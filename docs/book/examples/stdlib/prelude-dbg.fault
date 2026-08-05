@@ -11,5 +11,5 @@ Backtrace:
     <tmp#2: Int> @ "dbg(21)" = 21
     <tmp#3: Int> @ "2" = 2
     <tmp#4: Int> @ "dbg(21) * 2" = 42
-    <tmp#6> @ "panic(doubled)" = Unit
+    <tmp#6> @ "panic(doubled)" = <uninit>
     <tmp#7: Unit> @ "var doubled = dbg(21) * 2 panic(doubled)" = <uninit>

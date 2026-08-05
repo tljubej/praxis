@@ -2507,7 +2507,14 @@ fn trim_leading_ws(bytes: &[u8]) -> &[u8] {
 
 /// Take a run of integer characters (optional `-` + digits), returning the text
 /// and the byte length consumed.
-fn take_int_run(bytes: &[u8]) -> (&str, usize) {
+///
+/// `pub(crate)` for `Text.int()` (ADR-136), which is the second caller and the
+/// reason this is a shared function rather than a local one: `parse(t, int)` and
+/// `t.int()` are two spellings of "read a number out of text", and a program
+/// that gets different answers from them has found a defect in one of us. The
+/// method requires the run to cover the *whole* trimmed text; the atomic stops
+/// where the run stops and hands the rest to the template.
+pub(crate) fn take_int_run(bytes: &[u8]) -> (&str, usize) {
     let mut end = 0;
     if end < bytes.len() && bytes[end] == b'-' {
         end += 1;
@@ -2523,7 +2530,14 @@ fn take_int_run(bytes: &[u8]) -> (&str, usize) {
 /// Take a run of decimal floating-point characters (optional `-`, digits, an
 /// optional `.` and fraction, an optional `e±NN` exponent), returning the text
 /// and the byte length consumed (§7.4 `float`).
-fn take_float_run(bytes: &[u8]) -> (&str, usize) {
+///
+/// `pub(crate)` for `Text.float()`, for the reason [`take_int_run`] gives.
+///
+/// Note that this accepts a leading `+` and [`take_int_run`] does not. That
+/// asymmetry is §7.4's as implemented, and it is carried into the two methods
+/// rather than papered over there: changing an atomic's accepted set is a
+/// change to the input language, and it wants its own decision.
+pub(crate) fn take_float_run(bytes: &[u8]) -> (&str, usize) {
     let mut end = 0;
     if end < bytes.len() && (bytes[end] == b'-' || bytes[end] == b'+') {
         end += 1;
@@ -2740,6 +2754,50 @@ mod tests {
     // `split_lines`/`split_sections` are covered by `cursor.rs`'s own tests
     // now: they produce `ByteRegion`s over an `Input`, so their gates live
     // beside the types whose invariants they establish.
+
+    /// **ADR-136.** `t.int()`/`t.float()` and `parse(t, int)`/`parse(t, float)`
+    /// read the same set, because they run the same scanner.
+    ///
+    /// This is the gate on that claim, and it is written as the *difference from
+    /// the obvious implementation*: every row below is a text where
+    /// `i64::from_str`/`f64::from_str` — which is what the first cut of
+    /// `Text.int()` used — disagrees with §7.4's atomic. A regression to
+    /// `from_str` turns each of them red.
+    ///
+    /// `abi::whole_trimmed` is the method side; it requires the run to cover the
+    /// whole trimmed text, which is the only difference between a method and an
+    /// atomic (an atomic hands the rest of the line to its template).
+    #[test]
+    fn a_method_and_an_atomic_read_the_same_number() {
+        fn whole(s: &str, run: fn(&[u8]) -> (&str, usize)) -> bool {
+            let t = s.trim();
+            let (text, len) = run(t.as_bytes());
+            !text.is_empty() && len == t.len()
+        }
+
+        // `from_str` takes these; §7.4 does not, so neither does the method.
+        for s in ["+5", "1_000"] {
+            assert!(s.parse::<i64>().is_ok() || s == "1_000");
+            assert!(!whole(s, take_int_run), "`{s}` is not an `int`");
+        }
+        for s in ["1.", "inf", "infinity", "nan", "NaN", "-inf"] {
+            assert!(s.parse::<f64>().is_ok(), "`{s}` is a Rust float");
+            assert!(!whole(s, take_float_run), "`{s}` is not a §7.4 `float`");
+        }
+
+        // …and the ordinary spellings are read by both, trimmed.
+        for s in ["12", " -7 ", "0"] {
+            assert!(whole(s, take_int_run), "`{s}` is an `int`");
+        }
+        for s in ["1.5", " -2 ", "+5.0", "1e10", "3"] {
+            assert!(whole(s, take_float_run), "`{s}` is a `float`");
+        }
+
+        // A run that stops short is a rejection for the method and a *partial*
+        // read for the atomic — the one place the two differ, stated directly.
+        assert_eq!(take_int_run(b"12abc"), ("12", 2));
+        assert!(!whole("12abc", take_int_run));
+    }
 
     #[test]
     fn take_int_run_parses_negative() {

@@ -3,3 +3,7 @@ false
 é
 233
 é
+Some(42)
+None
+Some(1.5)
+None

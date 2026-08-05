@@ -12,7 +12,6 @@ Backtrace:
 alan oops
 
     <tmp#2: Int> = 1
-    <tmp#3: Vec[{ name: Text, score: Int }]> = Unit
     <tmp#5: Int> @ "rows.len()" = <uninit>
     <tmp#6: Unit> @ "out(rows.len())" = <uninit>
     <tmp#7: Unit> @ "var rows = read lines(`{name:word} {score:int}`) out(rows.len())" = <uninit>

@@ -1311,7 +1311,8 @@ impl<'t> Parser<'t> {
         let cp = self.checkpoint_lhs();
         self.bump(); // `(`
         if self.at(SyntaxKind::R_PAREN) {
-            // Empty `()`: a degenerate paren expr; type checking rejects it.
+            // Empty `()`: a degenerate paren expr, and it is `Unit` — the same
+            // type `()` names in an annotation, and the value `out(())` prints.
             self.expect(SyntaxKind::R_PAREN, "`)`");
             self.start_node_at(cp, SyntaxKind::PAREN_EXPR);
             self.finish_node();
@@ -1319,29 +1320,53 @@ impl<'t> Parser<'t> {
         }
         self.parse_expr(); // first element
         let is_tuple = self.at(SyntaxKind::COMMA);
-        let kind = if is_tuple {
-            SyntaxKind::TUPLE_EXPR
-        } else {
-            SyntaxKind::PAREN_EXPR
-        };
-        self.start_node_at(cp, kind);
+        let mut elements = 1usize;
+        let mut trailing_comma = None;
         if is_tuple {
             // Collect the remaining elements.
             loop {
                 let before = self.meaningful_index();
+                let comma = self.current_span();
                 if !self.eat(SyntaxKind::COMMA) {
                     break;
                 }
                 if self.at(SyntaxKind::R_PAREN) {
                     // Trailing comma: `(a, b, )` — stop without another element.
+                    trailing_comma = Some(comma);
                     break;
                 }
                 self.parse_expr();
+                elements += 1;
                 // Guarantee termination on any input.
                 self.ensure_progress(before);
             }
         }
+        // **A tuple has two elements or more** (§4.4, F5). `(1,)` is the one
+        // spelling that reaches here with fewer, and the language has nothing
+        // for it to mean: `TupleElems` refuses to represent a one-element tuple,
+        // so `tuple_or_degenerate` typed it as its element — `Int` — while
+        // lowering, reading the node kind, still built a tuple object. The two
+        // disagreeing is what MIR verification caught, and it caught it as an
+        // abort, three passes past the comma that caused it (REP-69).
+        //
+        // So the comma is refused here, and the node recovers as the grouping
+        // the author most likely meant. `(1, 2,)` is untouched — a trailing
+        // comma is punctuation at every arity the type exists at.
+        let one_element_tuple = is_tuple && elements < 2;
+        if one_element_tuple {
+            let at = trailing_comma.unwrap_or_else(|| self.current_span());
+            self.error(
+                at,
+                "a tuple has two elements or more, so this comma names nothing",
+            );
+        }
+        let kind = if is_tuple && !one_element_tuple {
+            SyntaxKind::TUPLE_EXPR
+        } else {
+            SyntaxKind::PAREN_EXPR
+        };
         self.expect(SyntaxKind::R_PAREN, "`)`");
+        self.start_node_at(cp, kind);
         self.finish_node();
     }
 
@@ -1698,26 +1723,44 @@ impl<'t> Parser<'t> {
             }
             self.parse_type(); // first element
             let is_tuple = self.at(SyntaxKind::COMMA);
-            let kind = if is_tuple {
-                SyntaxKind::TUPLE_TYPE
-            } else {
-                SyntaxKind::TYPE_REF
-            };
-            self.start_node_at(cp, kind);
+            let mut elements = 1usize;
+            let mut trailing_comma = None;
             if is_tuple {
                 loop {
                     let before = self.meaningful_index();
+                    let comma = self.current_span();
                     if !self.eat(SyntaxKind::COMMA) {
                         break;
                     }
                     if self.at(SyntaxKind::R_PAREN) {
-                        break; // trailing comma
+                        trailing_comma = Some(comma); // trailing comma
+                        break;
                     }
                     self.parse_type();
+                    elements += 1;
                     self.ensure_progress(before);
                 }
             }
+            // `(Int,)` is the type-position spelling of `(1,)`, refused for the
+            // same reason: a tuple has two elements or more (§4.4, F5), so this
+            // annotation names a type the language does not have. It resolved to
+            // `Int` and accepted quietly, which meant `var t: (Int,) = 1` was a
+            // program whose annotation and whose value agreed by accident.
+            let one_element_tuple = is_tuple && elements < 2;
+            if one_element_tuple {
+                let at = trailing_comma.unwrap_or_else(|| self.current_span());
+                self.error(
+                    at,
+                    "a tuple has two elements or more, so this comma names nothing",
+                );
+            }
+            let kind = if is_tuple && !one_element_tuple {
+                SyntaxKind::TUPLE_TYPE
+            } else {
+                SyntaxKind::TYPE_REF
+            };
             self.expect(SyntaxKind::R_PAREN, "`)`");
+            self.start_node_at(cp, kind);
             self.finish_node();
             return;
         }
@@ -2773,6 +2816,59 @@ mod tests {
         let pair = construct_names(&parse_text("(1, 2)").tree);
         assert!(pair.contains(&SyntaxKind::TUPLE_EXPR));
         assert!(!pair.contains(&SyntaxKind::PAREN_EXPR));
+    }
+
+    /// **REP-69.** A tuple has two elements or more (§4.4, F5), so `(1,)` is
+    /// refused *here*, at the comma.
+    ///
+    /// It used to parse as a one-element `TUPLE_EXPR`, which put two passes in
+    /// disagreement about the same node: `tuple_or_degenerate` typed it as its
+    /// element (`Int`) because `TupleElems` will not represent a one-element
+    /// tuple, and lowering — reading the node kind — built a tuple object. MIR
+    /// verification is what noticed, and it noticed as an abort with no source
+    /// span, three passes past the comma.
+    ///
+    /// The node recovers as `PAREN_EXPR`, the grouping the author most likely
+    /// meant, so nothing downstream sees the shape that does not exist.
+    #[test]
+    fn a_one_element_tuple_is_refused_at_the_comma() {
+        let parsed = parse_text("var t = (1,)\n");
+        assert_eq!(
+            parsed.diagnostics.len(),
+            1,
+            "one report, at the comma: {:?}",
+            parsed.diagnostics
+        );
+        assert!(
+            parsed.diagnostics[0].message().contains("two elements"),
+            "{}",
+            parsed.diagnostics[0].message()
+        );
+        let kinds = construct_names(&parsed.tree);
+        assert!(kinds.contains(&SyntaxKind::PAREN_EXPR));
+        assert!(!kinds.contains(&SyntaxKind::TUPLE_EXPR));
+
+        // A trailing comma at an arity the type *has* is punctuation, untouched.
+        let trailing = parse_text("var t = (1, 2,)\n");
+        assert!(
+            trailing.diagnostics.is_empty(),
+            "{:?}",
+            trailing.diagnostics
+        );
+        assert!(construct_names(&trailing.tree).contains(&SyntaxKind::TUPLE_EXPR));
+
+        // The same rule in type position, where it read as a quiet `Int`.
+        let annotated = parse_text("var t: (Int,) = 1\n");
+        assert_eq!(
+            annotated.diagnostics.len(),
+            1,
+            "{:?}",
+            annotated.diagnostics
+        );
+        assert!(!construct_names(&annotated.tree).contains(&SyntaxKind::TUPLE_TYPE));
+        assert!(parse_text("var t: (Int, Text,) = (1, \"a\")\n")
+            .diagnostics
+            .is_empty());
     }
 
     #[test]

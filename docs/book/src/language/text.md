@@ -107,7 +107,7 @@ Backtrace:
     t: Text = ab
   temps:
     <tmp#2: Int> @ "3" = 3
-    <tmp#3: Char> @ "t[3]" = Unit
+    <tmp#3: Char> @ "t[3]" = <uninit>
 ```
 
 There is **no store**: `t[0] = c` is `Y020 values of type Text cannot be
@@ -171,7 +171,7 @@ Backtrace:
   locals:
     n: Int = 55296
   temps:
-    <tmp#2: Char> @ "n.to_char()" = Unit
+    <tmp#2: Char> @ "n.to_char()" = <uninit>
 ```
 
 A `Char` is not an arithmetic type: `c - 48` does not compile. `c.to_int() - 48`

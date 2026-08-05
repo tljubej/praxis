@@ -52,7 +52,6 @@ three
 4
 
     <tmp#2: Int> = 1
-    <tmp#3: Vec[Int]> = Unit
 ```
 
 Four things are on that first block and each is worth naming.
@@ -117,7 +116,6 @@ Backtrace:
     <tmp#1> = 12junk
 
     <tmp#2: Int> = 1
-    <tmp#3: Vec[Int]> = Unit
     <tmp#4: Int> @ "read lines(int).len()" = <uninit>
 ```
 
@@ -172,7 +170,6 @@ Backtrace:
 678
 
     <tmp#2: Int> = 1
-    <tmp#3: Grid[Int]> = Unit
     <tmp#4: Int> @ "read grid(digit).width()" = <uninit>
 ```
 
@@ -211,7 +208,6 @@ Backtrace:
 3 => 4
 
     <tmp#2: Int> = 1
-    <tmp#3: Vec[{ from: Int, to: Int }]> = Unit
     <tmp#4: Int> @ "read lines(`{from:int} -> {to:int}`).len()" = <uninit>
 ```
 
@@ -256,7 +252,6 @@ Backtrace:
     <tmp#1> = mul(2,x)
 
     <tmp#2: Int> = 1
-    <tmp#3: Vec[{ Multiply({ left: Int, right: Int }) | Enable(Unit) }]> = Unit
     <tmp#4: Int> @ "read lines(choice( Multiply: `mul({left:int},{right:int})`, Enable: `do()`, )).len()" = <uninit>
 ```
 
@@ -309,7 +304,6 @@ three
 4
 
     <tmp#3: Int> = 1
-    <tmp#4: Vec[Int]> = Unit
     <tmp#7: (Int) -> Bool> @ "|v| v < limit" = <uninit>
 Entered crash debugger. 2 frame(s). Type `help` for commands.
 Praxis crash> bt

@@ -236,7 +236,6 @@ Backtrace:
     <tmp#1> = -5
 
     <tmp#2: Int> = 1
-    <tmp#3: Int> = Unit
     <tmp#4: Unit> @ "out(read uint)" = <uninit>
 ```
 
