@@ -639,18 +639,24 @@ impl BlockLayout {
 /// tests), then grows under whichever [`Pacer`] the heap was built with.
 pub const INITIAL_COLLECT_THRESHOLD: usize = 1 << 16; // 64 KiB
 
-/// The ceiling on the *speculative* half of the pacing rule: ten doublings of
-/// [`INITIAL_COLLECT_THRESHOLD`] and then no more (ADR-112).
+/// The ceiling on the *speculative* half of the pacing rule: six doublings of
+/// [`INITIAL_COLLECT_THRESHOLD`] and then no more (ADR-112, amended by ADR-129).
 ///
-/// Chosen by measurement, not by derivation — 8/16/64/256 MiB were swept and
-/// 64 MiB is the knee: the time cost falls into the machine's own noise there
-/// and the memory saving is still ~16×, where 256 MiB gives back only 4× and
-/// 8 MiB costs 4% (ADR-112's Measurements). A figure derived from physical RAM
-/// would be more principled, but this workspace has no platform code for
-/// `sysctl hw.memsize` / `sysconf(_SC_PHYS_PAGES)`, and a constant is honest
-/// and testable where a derivation would make every Praxis program's schedule
-/// depend on the machine that ran it.
-pub const MAX_COLLECT_THRESHOLD: usize = INITIAL_COLLECT_THRESHOLD << 10; // 64 MiB
+/// Chosen by measurement, not by derivation — and **re-measured once the cost it
+/// prices had changed**. ADR-112 swept 8/16/64/256 MiB against its own build and
+/// put the knee at 64 MiB, where 8 MiB cost 4%. The only ceiling-dependent cost
+/// is the *per-collection fixed cost* — ADR-112's own prediction, and the reason
+/// total sweep work is independent of this constant — and ADR-114 and ADR-128
+/// cut precisely that, the first by taking two `malloc`s out of the rooting call
+/// and the second by narrowing the frame `push_roots` scans at every collection.
+/// So the knee moved: on this tree 8 MiB costs 1.6% and 4 MiB costs 1.9%, and
+/// 4 MiB peaks 3.3× lower — the suite goes from 3.6× CPython's resident set to
+/// 1.1× (ADR-129's Measurements). A figure derived from physical RAM would be
+/// more principled, but this workspace has no platform code for `sysctl
+/// hw.memsize` / `sysconf(_SC_PHYS_PAGES)`, and a constant is honest and
+/// testable where a derivation would make every Praxis program's schedule depend
+/// on the machine that ran it.
+pub const MAX_COLLECT_THRESHOLD: usize = INITIAL_COLLECT_THRESHOLD << 6; // 4 MiB
 
 /// How many times the measured live set the threshold must leave room for.
 ///
@@ -2887,14 +2893,18 @@ mod tests {
         assert_eq!(heap.collect_threshold.get(), INITIAL_COLLECT_THRESHOLD);
     }
 
-    /// The flip ADR-112's Measurements bought. The exact ceiling and factor are
-    /// pinned here rather than left implicit, so a future re-tuning is a visible
-    /// edit to a test that names the numbers, not a silent change to every
-    /// Praxis program's memory profile.
+    /// The flip ADR-112's Measurements bought, at the ceiling ADR-129 re-measured
+    /// it to. The exact ceiling and factor are pinned here rather than left
+    /// implicit, so a future re-tuning is a visible edit to a test that names the
+    /// numbers, not a silent change to every Praxis program's memory profile.
+    ///
+    /// It has already earned that once: ADR-129 lowered the ceiling 64 MiB → 4
+    /// MiB, and this assertion is what made the change announce itself. The
+    /// factor is unchanged and ADR-129 prices the direction ADR-112 did not.
     #[test]
     fn the_default_pacer_is_bounded_at_the_measured_ceiling() {
         assert_eq!(Pacer::from_spec(None), Pacer::DEFAULT);
-        assert_eq!(Pacer::DEFAULT, Pacer::bounded(64 << 20, 2));
+        assert_eq!(Pacer::DEFAULT, Pacer::bounded(4 << 20, 2));
         assert_eq!(
             Pacer::DEFAULT.next_threshold(1 << 30, 0),
             MAX_COLLECT_THRESHOLD

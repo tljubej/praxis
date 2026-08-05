@@ -121,7 +121,7 @@ def main() -> None:
     )
     w("")
     w(
-        "**Three rounds of work stand behind these numbers, and none of them "
+        "**Five rounds of work stand behind these numbers, and none of them "
         "changed one language semantic or touched §4.3.** The first is the six "
         "findings in "
         "[`docs/handovers/21-where-the-time-goes.md`](../docs/handovers/21-where-the-time-goes.md). "
@@ -217,6 +217,43 @@ def main() -> None:
         "locals rise from 192 to 4096."
     )
     w("")
+    w(
+        "The fifth is "
+        "[ADR-129](../docs/decisions/129-the-ceiling-is-worth-what-a-collection-costs.md), "
+        "and it is the **memory** column rather than the time one: this suite peaked "
+        "at **3.6× CPython's resident set** while running three times faster than it. "
+        "Peak RSS decomposes as `floor + live set + collection threshold`, and only "
+        "the third term was large. The floor is **7.3 MiB** where `python3 -c pass` "
+        "is 15.2, and the live sets are *smaller* than CPython's — `tree` holds "
+        "16.0 MiB against ~18.6, `pipeline` 38.6 against ~39.8 — so §4.3's uniform "
+        "boxing costs less here than a 28-byte `int` does there. The gap was one "
+        "constant: the four benchmarks that hold nothing at all were holding 64 MiB "
+        "of garbage because the pacer's ceiling had told them to. Lowering it to "
+        "**4 MiB** costs **1.9%** on the geometric mean and peaks **3.3× lower**, "
+        "taking the suite from 3.6× CPython to **1.09×**, with five of the eight now "
+        "peaking *below* it. The four that hold nothing get faster as well as "
+        "smaller, and every one of the 1.9% is paid by the four that hold something, "
+        "during the growth phase where the ceiling rather than `live × 2` is setting "
+        "the schedule."
+    )
+    w("")
+    w(
+        "**That constant was correct when it was measured and stale by the time it "
+        "was read, and the mechanism is worth more than the number.** ADR-112 put "
+        "the knee at 64 MiB on its own build, and its own prediction said why a "
+        "ceiling is priced the way it is: total sweep work is independent of it, so "
+        "the only ceiling-dependent cost is the *per-collection fixed cost*. "
+        "[ADR-114](../docs/decisions/114-the-native-roots-are-one-store-and-only-their-depth-is-bounded.md) "
+        "and "
+        "[ADR-128](../docs/decisions/128-a-shadow-slot-is-a-live-range-not-a-name.md) "
+        "then cut precisely that — two `malloc`s out of the rooting call, and the "
+        "frame `push_roots` scans at every collection down from 1925 slots to 216 — "
+        "and neither was aimed at the pacer. Halving what a collection costs halves "
+        "what a ceiling buys. A constant chosen at a knee is only valid while the "
+        "curve it sat on is, and this one outlived its curve by two packages with "
+        "nothing in the tree to say so."
+    )
+    w("")
     w("Two things are worth reading the tables for.")
     w("")
     w(
@@ -233,20 +270,22 @@ def main() -> None:
     )
     w("")
     w(
-        "**The collector's pacer is bounded, and the memory column is a different "
-        "kind of number now.** `collect_threshold` used to double after every paced "
+        "**The collector's pacer is bounded, and the memory column is CPython's "
+        "number now.** `collect_threshold` used to double after every paced "
         "collection with nothing to stop it, so peak resident set was a function of "
         "how long a program had run rather than of how much it was holding — this "
         "suite peaked between 0.5 and 3.2 GiB while six of its eight benchmarks held "
-        "essentially nothing. It is now `max(min(previous × 2, 64 MiB), live × 2)`, "
+        "essentially nothing. It is now `max(min(previous × 2, 4 MiB), live × 2)`, "
         "where `live` is the block bytes the sweep just measured "
-        "([ADR-112](../docs/decisions/112-the-pacer-has-a-ceiling-and-the-live-set-may-exceed-it.md)), "
+        "([ADR-112](../docs/decisions/112-the-pacer-has-a-ceiling-and-the-live-set-may-exceed-it.md), "
+        "ceiling re-measured by "
+        "[ADR-129](../docs/decisions/129-the-ceiling-is-worth-what-a-collection-costs.md)), "
         "so resident set is bounded by what the program holds plus a constant. The "
-        "suite got **faster** in the process — see the appendix, which is the "
-        "measurement rather than a hypothesis, and which replaces an earlier "
-        "experiment that said the opposite for a reason that no longer exists. The "
-        "sizes in `sizes.json` were chosen when these workloads peaked near 6 GiB and "
-        "have deliberately not been re-tuned."
+        "suite got **faster** when the ceiling first appeared — see the appendix, "
+        "which is the measurement rather than a hypothesis, and which replaces an "
+        "earlier experiment that said the opposite for a reason that no longer "
+        "exists. The sizes in `sizes.json` were chosen when these workloads peaked "
+        "near 6 GiB and have deliberately not been re-tuned."
     )
     w("")
 
@@ -393,9 +432,12 @@ def main() -> None:
     w("")
     w(
         "The rule is now "
-        "`max(min(previous × 2, 64 MiB), live × 2, 64 KiB)`, where `live` is the block "
+        "`max(min(previous × 2, 4 MiB), live × 2, 64 KiB)`, where `live` is the block "
         "bytes the sweep that just ran measured "
-        "([ADR-112](../docs/decisions/112-the-pacer-has-a-ceiling-and-the-live-set-may-exceed-it.md)). "
+        "([ADR-112](../docs/decisions/112-the-pacer-has-a-ceiling-and-the-live-set-may-exceed-it.md); "
+        "the ceiling was 64 MiB until "
+        "[ADR-129](../docs/decisions/129-the-ceiling-is-worth-what-a-collection-costs.md) "
+        "re-measured it). "
         "The ceiling clamps only the doubling term. That is the whole design: the "
         "doubling is a *guess about the future* and may be capped, while `live × 2` is "
         "a *statement about the present* and must be allowed to exceed the cap — "
@@ -504,6 +546,17 @@ def main() -> None:
             "always ran second. Every run's output was checked against this suite's "
             "checksums. `benchmarks/pacer_ab.py` is the harness and "
             "`benchmarks/gcfix.json` holds both arms."
+        )
+        w("")
+        w(
+            "**The `Bounded` column here is the 64 MiB ceiling this step originally "
+            "shipped**, which is why its figures do not match the memory table above. "
+            "[ADR-129](../docs/decisions/129-the-ceiling-is-worth-what-a-collection-costs.md) "
+            "has since re-run this same sweep against a build whose per-collection "
+            "fixed cost two later packages had cut, found the knee had moved, and "
+            "lowered the ceiling to 4 MiB — which is what the memory table reports. "
+            "This appendix is the record of the original step and is left at the "
+            "numbers it was measured at."
         )
         w("")
         w("| Benchmark | Unbounded doubling | Bounded | Time | Peak RSS unbounded | Bounded | Memory |")
