@@ -155,8 +155,19 @@ pub enum DiagCode {
     UnexpectedCharacter,
     /// `T004` — a text literal with no closing quote.
     UnterminatedTextLiteral,
-    /// `T005` — a `\` escape the lexer does not recognize.
+    /// `T005` — a `\` escape the lexer does not recognize. Shared by both
+    /// literal spellings, with one message each: the escape tables of `"…"` and
+    /// `'…'` are the same table (ADR-141), so a `\x` is the same mistake in
+    /// either.
     InvalidEscape,
+    /// `T006` — a character literal with no closing quote.
+    UnterminatedCharLiteral,
+    /// `T007` — a character literal that does not name exactly one character.
+    ///
+    /// Two messages under one code, because `''` and `'ab'` are one rule broken
+    /// in two directions. This is the code that closes `"##"[0]`'s silent
+    /// truncation at the front end (ADR-141 Decision 2).
+    CharLiteralIsNotOneCharacter,
 
     // --- Parse (`P0xx`) ---
     /// `P001` — a token that cannot appear here.
@@ -192,6 +203,12 @@ pub enum DiagCode {
     /// what is wrong is *where* it was declared relative to what reads it. A `fn`
     /// does not capture (§4.9/§4.10 — closures do, functions do not), so the
     /// binding has no storage the body can reach.
+    ///
+    /// It has two message forms. The usual one names both ways out, a parameter
+    /// or a closure. When the `fn` is recursive — directly or mutually — it names
+    /// only the parameter and carries an advisory `help:` line saying why: a
+    /// closure cannot name itself, which is `N001`. One code either way, because
+    /// it is the same mistake with one fewer way out.
     FunctionReadsOuterBinding,
     /// `N008` — a record literal whose head does not name a `struct` (REP-26).
     ///
@@ -436,6 +453,8 @@ impl DiagCode {
             UnexpectedCharacter => DiagnosticCode::new(Lex, 3),
             UnterminatedTextLiteral => DiagnosticCode::new(Lex, 4),
             InvalidEscape => DiagnosticCode::new(Lex, 5),
+            UnterminatedCharLiteral => DiagnosticCode::new(Lex, 6),
+            CharLiteralIsNotOneCharacter => DiagnosticCode::new(Lex, 7),
 
             UnexpectedToken => DiagnosticCode::new(Parse, 1),
             ExpectedStatementSeparator => DiagnosticCode::new(Parse, 2),
@@ -520,6 +539,8 @@ impl DiagCode {
             UnexpectedCharacter,
             UnterminatedTextLiteral,
             InvalidEscape,
+            UnterminatedCharLiteral,
+            CharLiteralIsNotOneCharacter,
             UnexpectedToken,
             ExpectedStatementSeparator,
             InternalNotASourceFile,
@@ -969,7 +990,7 @@ mod tests {
         // `ALL` holds each variant once, so its length is the variant count.
         // Update both together; the exhaustive match in `code()` is what makes
         // adding a variant a compile error in the first place.
-        assert_eq!(DiagCode::ALL.len(), 68);
+        assert_eq!(DiagCode::ALL.len(), 70);
         let unique: std::collections::HashSet<_> = DiagCode::ALL.iter().collect();
         assert_eq!(
             unique.len(),

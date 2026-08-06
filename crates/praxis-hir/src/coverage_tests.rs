@@ -330,3 +330,80 @@ fn every_pattern_position_is_checked_by_analysis() {
         "a pattern position analysis does not walk"
     );
 }
+
+// --- the character literal (ADR-141) ---
+
+/// **`exhaustive.rs` needed no code change and this is what says so.** `Char`
+/// falls through `signature()` to `Signature::Open` exactly as `Int` does, so a
+/// `match` over one is never exhaustive without a `_` — the rule the language
+/// already had for every scalar with more values than anyone can enumerate.
+#[test]
+fn a_match_on_a_char_needs_a_wildcard() {
+    let analysis = analyze(
+        "fn f(c: Char) -> Int {\n    match c {\n        '#' => 1\n        '.' => 2\n    }\n}\n",
+    );
+    let found = codes(&analysis, DiagCode::NonExhaustiveMatch);
+    assert_eq!(found.len(), 1, "{:?}", analysis.diagnostics);
+    assert_eq!(
+        found[0].message(),
+        "non-exhaustive match: missing a `_` catch-all arm"
+    );
+
+    // …and the same match *with* a `_` is clean, which is the half that stops
+    // this from passing for the wrong reason.
+    let analysis = analyze(
+        "fn f(c: Char) -> Int {\n    match c {\n        '#' => 1\n        '.' => 2\n        _ => 0\n    }\n}\n",
+    );
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:?}",
+        analysis.diagnostics
+    );
+}
+
+/// `LitKey::render` has printed a `Char` witness as `'x'` since ADR-130 — years
+/// ahead of there being anything in the language spelled that way. The witness
+/// is now a program the reader can paste.
+#[test]
+fn a_char_witness_renders_with_single_quotes() {
+    let analysis = analyze(
+        "enum W { Cell(Char) }\nfn f(w: W) -> Int {\n    match w {\n        Cell('#') => 1\n    }\n}\n",
+    );
+    let found = codes(&analysis, DiagCode::NonExhaustiveMatch);
+    assert_eq!(found.len(), 1, "{:?}", analysis.diagnostics);
+    let fix = found[0]
+        .suggestions()
+        .iter()
+        .find_map(|s| s.replacement.as_deref())
+        .expect("a machine-applicable fix");
+    assert!(
+        !fix.contains("\"#\""),
+        "a Char witness is not a Text literal: {fix}"
+    );
+}
+
+/// A repeated `'#'` arm is unreachable, which only works because `LitKey::Char`
+/// compares by code point — the same equality the pattern test lowers to.
+#[test]
+fn a_repeated_char_arm_is_unreachable() {
+    let analysis = analyze(
+        "fn f(c: Char) -> Int {\n    match c {\n        '#' => 1\n        '#' => 2\n        _ => 0\n    }\n}\n",
+    );
+    assert_eq!(
+        codes(&analysis, DiagCode::UnreachableArm).len(),
+        1,
+        "{:?}",
+        analysis.diagnostics
+    );
+
+    // Two *different* characters are two arms, not one — the failure a key that
+    // ignored its payload would produce.
+    let analysis = analyze(
+        "fn f(c: Char) -> Int {\n    match c {\n        '#' => 1\n        '.' => 2\n        _ => 0\n    }\n}\n",
+    );
+    assert!(
+        codes(&analysis, DiagCode::UnreachableArm).is_empty(),
+        "{:?}",
+        analysis.diagnostics
+    );
+}

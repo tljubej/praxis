@@ -41,6 +41,44 @@ fn let_stmt_exposes_name_and_init() {
     }
 }
 
+/// A `'#'` is a literal token like any other (ADR-141). `Literal::token`'s set
+/// is one of four token lists this kind has to appear in, and this is the one a
+/// reader checks first.
+#[test]
+fn a_char_literal_is_a_literal_token() {
+    let tree = root("var c = '#'");
+    let file = SourceFile::cast(tree).unwrap();
+    let var_binding = crate::VarStmt::cast(file.stmts().next().unwrap()).unwrap();
+    match var_binding.init() {
+        Some(Expr::Literal(lit)) => {
+            let tok = lit.token().unwrap();
+            assert_eq!(tok.kind(), SyntaxKind::CharLit);
+            assert_eq!(tok.text(), "'#'");
+        }
+        other => panic!("expected literal init, got {other:?}"),
+    }
+}
+
+/// **The `Pattern::kind` half, which is the one that fails silently.** Miss the
+/// `CharLit` row in the literal probe and a `'#'` pattern falls past every other
+/// probe onto the `Wildcard` tail — an irrefutable arm that matches everything
+/// and makes every arm below it unreachable (HIR-07's class).
+#[test]
+fn a_char_pattern_is_a_literal_pattern_and_not_a_wildcard() {
+    let tree = root("var r = match c { '#' => 1, _ => 2 }");
+    let pattern = tree
+        .descendants()
+        .find(|n| n.kind() == SyntaxKind::PATTERN)
+        .and_then(crate::Pattern::cast)
+        .expect("a PATTERN node");
+    assert_eq!(pattern.kind(), crate::PatternKind::Literal);
+    let tok = pattern
+        .literal_token()
+        .expect("the pattern's literal token");
+    assert_eq!(tok.kind(), SyntaxKind::CharLit);
+    assert_eq!(tok.text(), "'#'");
+}
+
 #[test]
 fn var_stmt_exposes_name_and_init() {
     let tree = root("var score = 0");

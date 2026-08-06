@@ -232,7 +232,7 @@ type does not have, rather than `Y020`, a subscript nobody wrote.
 | `I013` | IP-07 | S19 | an unknown parser constructor |
 | `I014` | IP-07 | S19 | a constructor argument that is invalid or in excess |
 | `I023` | IP-10 | S19 | an empty separator |
-| `I028` | IP-09 | S19 | a misplaced or repeated `repeated(...)` tail |
+| `I028` | IP-09 | S19 | a misplaced or duplicated **unbounded** `repeated(...)` tail |
 
 `I023` fills the hole rather than extending the block, because it belongs to the
 validation family the `I02x` block already holds.

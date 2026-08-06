@@ -1,0 +1,18 @@
+[12, 40, 7, 118]
+[12, 40, 7, 118]
+{shelf: 12, trench: 118}
+{shelf: 12, trench: 118}
+[., #, ., ., ., .]
+[., #, ., ., ., .]
+[Wall, Marked(3)]
+[Wall, Marked(3)]
+{ site: trench, depth: 118 }
+{ site: trench, depth: 118 }
+(7, 118)
+(7, 118)
+depths: [12, 40, 7, 118]
+trench at 118m, span 7..118 (111 wide), 4 readings, deepest 118, verdict deep
+order 123, seen [1, 2, 3]
+base+0m
+base+40m
+a hole is {expr}, and a bare } is just a brace

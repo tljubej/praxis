@@ -1,0 +1,7 @@
+// A character literal names exactly one character. These are lexical errors,
+// which is the whole point: `"##"[0]` was a well-typed program that quietly
+// meant `#`, and `""[0]` was a fault at run time.
+var two = '##'
+var none = ''
+out(two)
+out(none)

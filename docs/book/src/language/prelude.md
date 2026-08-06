@@ -170,20 +170,34 @@ praxis: 1 error(s)
 
 ## Collection constructors
 
-Nine names, each of which builds an empty collection. All of them take no
-arguments; the element type comes from what you then put in.
+Nine names. Called with no arguments, each builds an empty collection and the
+element type comes from what you then put in. Two of them — `Vec` and `Grid` —
+also take a **size and a fill**, and the argument count is what chooses between
+the two shapes
+([ADR-146](../../../decisions/146-a-collection-constructors-arity-is-its-shape.md)).
 
 | Name | Signature | Notes |
 |---|---|---|
 | `Vec` | `() -> Vec[T]` | Ordered, growable, indexed from 0. |
+| `Vec` | `(Int, T) -> Vec[T]` | `n` slots, every one the fill. |
 | `Deque` | `() -> Deque[T]` | Double-ended queue. |
 | `Map` | `() -> Map[K, V]` | Hash map. |
 | `Set` | `() -> Set[T]` | Hash set. |
 | `Counter` | `() -> Counter[T]` | A map whose absent values read as zero. |
 | `MinHeap` | `() -> MinHeap[T]` | Priority queue, smallest first. |
 | `MaxHeap` | `() -> MaxHeap[T]` | Priority queue, largest first. |
-| `Grid` | `() -> Grid[T]` | 2D grid. `Grid()` is 0 × 0 — a grid with cells comes from `read grid(...)`. |
+| `Grid` | `() -> Grid[T]` | 2D grid. `Grid()` is the empty 0 × 0 one. |
+| `Grid` | `(Int, Int, T) -> Grid[T]` | A `w` × `h` board, every cell the fill. |
 | `BitSet` | `() -> BitSet` | Compact set of non-negative integers. Takes no type argument. |
+
+**Only those two are sized**, and the rest of the language has no arity
+overloading at all — `Set(3, 0)` is an error that says the function takes zero
+arguments. The two exceptions are the collections whose contents are addressed
+by position, which is what makes "n of them" mean something;
+[ADR-146](../../../decisions/146-a-collection-constructors-arity-is-its-shape.md)
+records why that is a deliberate narrowing of
+[ADR-089](../../../decisions/089-a-name-has-one-signature.md) rather than a hole
+in it.
 
 ```praxis
 var v = Vec()
@@ -209,6 +223,9 @@ hi.push(5)
 
 var g = Grid()
 
+var sized = Vec(3, 0)
+var board = Grid(3, 2, '.')
+
 var b = BitSet()
 b.insert(3)
 
@@ -221,6 +238,9 @@ out(lo.peek())
 out(hi.peek())
 out(g.width())
 out(b)
+out(sized)
+out(board)
+out(board.width())
 ```
 
 ```text
@@ -233,6 +253,9 @@ out(b)
 5
 0
 {3}
+[0, 0, 0]
+[., ., ., ., ., .]
+3
 ```
 
 `[1, 2, 3]` is a `Vec` literal, so `Vec()` is only needed when you want an empty
@@ -385,12 +408,16 @@ Most prelude names cannot fail. The ones that can:
 | `gcd` | integer overflow | Only for `Int`'s minimum with itself, whose answer is 2⁶³. |
 | `lcm` | integer overflow | The multiple does not fit an `Int`, which happens easily. |
 | the six graph walks | whatever the closures raise | Your neighbour, weight, heuristic or goal function faulted. |
+| `Vec(n, fill)` | size or extent out of range | `n` is negative, or larger than the runtime will allocate at a stroke (2²⁸). |
+| `Grid(w, h, fill)` | size or extent out of range | An extent is negative, or `w × h` is past 2²⁸ cells. |
 
 `out`, `dbg`, `sign`, `min`, `max`, `pi`, `e` and `Some` cannot fault, and
-neither can any collection constructor: the only one whose wrapper declares a
-fault at all is `Grid`, whose check is on the width and height, and `Grid()`
-asks for 0 × 0. See [the fault model](../debugger/faults.md) for what happens
-after a fault.
+neither can any collection constructor called with **no arguments** — there is
+nothing you gave it for it to refuse. The two sized forms are the exception, and
+the size is the reason: it is an ordinary `Int` computed at run time, so a
+negative or absurd one cannot be caught at `praxis check` and is a fault instead
+([ADR-041](../../../decisions/041-bounded-extents-fault-instead-of-aborting.md)).
+See [the fault model](../debugger/faults.md) for what happens after a fault.
 
 ## They are ordinary bindings
 

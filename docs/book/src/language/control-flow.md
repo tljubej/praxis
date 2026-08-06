@@ -133,18 +133,22 @@ b
 
 Each iterable's order is the one its own accessors already promise, and every
 one is deterministic — a hash-backed collection is walked in ascending order of
-its rendered members, not in hash order, so two runs of the same program agree.
-A `MinHeap` is walked in pop order, which is why `3, 1, 2` came back as
-`1, 2, 3`.
+its members, not in hash order, so two runs of the same program agree. A
+`MinHeap` is walked in pop order, which is why `3, 1, 2` came back as `1, 2, 3`.
 
 | Iterable | Order |
 |---|---|
 | `Vec`, `Deque`, `Range`, `Text` | in place, by index |
-| `Set` | ascending by rendered member |
-| `Map`, `Counter` | ascending by rendered key |
+| `Set` | ascending by member |
+| `Map`, `Counter` | ascending by key |
 | `BitSet` | ascending bit |
 | `MinHeap`, `MaxHeap` | pop order |
 | `Grid` | row-major |
+
+"Ascending" is the type's own order, the same one `sorted()` uses: numeric for
+`Int`, `Byte` and `Float`, code-point for `Char` and `Text`, and element-wise
+left to right for a tuple, a record or an enum. So a `Set[Int]` holding 2 and 10
+is walked `2, 10`, and `out(s)` prints that same sequence.
 
 A `for` is `Unit`. It runs its body; it does not collect anything. To build a
 value out of a sequence, use a [pipeline](pipelines.md).
@@ -184,7 +188,7 @@ out(xs)
 ```text
 1
 2
-{1, 11, 12, 2}
+{1, 2, 11, 12}
 1
 2
 3
@@ -339,11 +343,17 @@ out(ran)
 
 for i in 0..0 { ran = ran + 1 }
 out(ran)
+
+// Counting down is a reversed range, which is a Vec and not a Range.
+for i in (0..3).reversed() { out(i) }
 ```
 
 ```text
 5..5
 0
+0
+2
+1
 0
 ```
 
@@ -351,7 +361,15 @@ out(ran)
 up to `start`. No range with a negative length exists, so a `for` reading a
 range's length can never get a bound that runs the loop backwards. The case that
 decides it is `0..n` with `n == 0`: that has to run zero times, not `n` times in
-reverse. To count down, iterate up and subtract.
+reverse.
+
+**The countdown is `(0..n).reversed()`**, a [pipeline barrier](pipelines.md#barriers)
+that answers a `Vec[Int]`. It does not make a descending `Range` — there is no
+such value, and the clamp above is why. Writing `5..0` still earns no
+diagnostic: it is a legal empty collection, and the language has no warnings to
+give it
+([ADR-145](../../../decisions/145-a-reversal-needs-the-whole-sequence-so-it-is-a-barrier.md)
+decision 5).
 
 [ADR-059](../../../decisions/059-a-range-is-a-value-and-a-descending-one-is-empty.md)
 has the rest, including why the bounds are `Int` only.

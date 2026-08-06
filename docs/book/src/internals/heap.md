@@ -144,6 +144,13 @@ descriptors — the six scalars, `Text`, the nine collections, `Range`, and the
 generic `Record`, `Tuple`, `Enum`, `Closure` and `VarCell` shapes. They are
 `static`, because descriptor *pointer* identity is what the runtime compares.
 
+`compare` is carried by exactly the eleven a `Map` key or `Set` member can be —
+the scalars, `Text`, `Range`, `Record`, `Tuple` and `Enum` — and is `None` on the
+nine collections, `Closure` and `VarCell`, none of which can ever be a key. That
+is what makes the order a container walks its keys in total
+([ADR-138](../../../decisions/138-a-container-orders-by-the-value-and-not-by-its-printing.md)),
+and it is a deliberately wider set than the source language's `<`.
+
 An `Int` is therefore 24 bytes: 16 of header and 8 of payload.
 
 ## Pages

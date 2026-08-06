@@ -102,6 +102,19 @@ fn walk_expr(e: &TypedExpr) -> Result<(), String> {
             }
             Ok(())
         }
+        // An interpolated literal allocates a `Text` and renders each hole
+        // through the value's `format` callback (§8.1, ADR-147). Both halves are
+        // `Range`'s and `ListLit`'s kind of read-only: the only object either
+        // touches is the one this node just made, and `format` is the same
+        // callback the debugger's own renderer already calls on every value it
+        // prints. A hole whose *expression* mutates is still rejected, by the
+        // recursion.
+        TypedExpr::Interp { parts, .. } => {
+            for (_, hole) in parts {
+                walk_expr(hole)?;
+            }
+            Ok(())
+        }
         TypedExpr::FieldGet { receiver, .. } => walk_expr(receiver),
         // Reading a tuple element allocates nothing and mutates nothing, exactly
         // as reading a record field does.

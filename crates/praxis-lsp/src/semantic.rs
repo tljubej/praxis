@@ -277,7 +277,20 @@ fn classify_token(token: &SyntaxToken, analysis: &praxis_hir::Analysis) -> Optio
     }
     match kind {
         SyntaxKind::IntLit | SyntaxKind::FloatLit => return Some("number"),
-        SyntaxKind::TextLit => return Some("string"),
+        // A `CharLit` is a `string` too: the fallback TextMate grammar paints it
+        // `string.quoted.single.praxis`, and a file must not change colour when
+        // the server attaches.
+        // An interpolation fragment is `string` too, and only the fragment: the
+        // hole between two of them holds ordinary expression tokens, which fall
+        // through to the classification every other expression gets (§8.1,
+        // ADR-147). A name in a hole is therefore painted as the *name* it is —
+        // coloured by what it resolves to, renamable, and hoverable — which is
+        // the editor-side dividend of the hole being a real subtree.
+        SyntaxKind::TextLit
+        | SyntaxKind::CharLit
+        | SyntaxKind::InterpOpen
+        | SyntaxKind::InterpMiddle
+        | SyntaxKind::InterpClose => return Some("string"),
         SyntaxKind::Ident => {}
         _ => return None,
     }

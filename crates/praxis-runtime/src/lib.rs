@@ -32,6 +32,10 @@ pub mod heaps;
 pub mod immortal;
 pub mod input;
 pub mod maps;
+/// The order a hash-backed collection walks and prints its keys in (ADR-138).
+/// Crate-private — it is `Map`/`Set`/`Counter`'s internal sort key, and nothing
+/// outside the runtime picks one.
+pub(crate) mod ordering;
 /// Size-class pages: the storage and the liveness bitmaps behind [`Heap`]
 /// (ADR-103). Crate-private — a page is the collector's business and nothing
 /// outside it has a reason to name one.

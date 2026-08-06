@@ -9,6 +9,9 @@
 //! The modules:
 //! - [`kind`] — the single `SyntaxKind` enum (tokens, trivia, tree nodes).
 //! - [`ident`] — the one identifier character class (§4.1).
+//! - [`interp`] — the one rule for where a `"…"` literal ends and where its
+//!   interpolation holes are (§8.1, ADR-147), shared by the lexer's pre-scan
+//!   and its resume path.
 //! - [`literal`] — the one text-literal decoder (§4.3, IP-08).
 //! - [`numeric`] — the one digit-separator rule for numeric literals (§4.3).
 //! - [`template`] — the one rule for where a backtick template ends (§7.2,
@@ -21,6 +24,7 @@
 //! [`SyntaxNode`]: language::SyntaxNode
 
 pub mod ident;
+pub mod interp;
 pub mod kind;
 pub mod language;
 pub mod literal;
@@ -45,6 +49,21 @@ use praxis_source::Span;
 ///
 /// The bound is far above anything a person writes.
 pub const MAX_TEMPLATE_NESTING: usize = 32;
+
+/// How deeply `"…"` literals may nest inside each other's interpolation holes
+/// (§8.1, ADR-147).
+///
+/// A hole holds a full expression, so `"{f("{y}")}"` is one literal containing
+/// another and [`interp::text_end`] is recursive with the file's own text. The
+/// bound is what keeps adversarial input off the stack.
+///
+/// Unlike [`MAX_TEMPLATE_NESTING`], reaching this bound does not change what a
+/// delimiter *means* — it refuses to enter, and the literal is reported as
+/// unterminated. That difference is deliberate: the lexer's resume path only
+/// ever runs for a literal the pre-scan proved closes, so a bound that answered
+/// "closed, measured differently" would put the two on different rules at
+/// exactly the depth nobody writes.
+pub const MAX_INTERPOLATION_NESTING: usize = 32;
 
 /// A token the lexer emits before it is folded into the lossless tree: its kind,
 /// the source span it covers, and whether a line break sits in front of it.

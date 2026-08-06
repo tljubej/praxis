@@ -450,8 +450,7 @@ puzzle wrapped across lines for no reason of its own.
 //
 // `chars(P, skip: newlines)` folds the command stream back into one sequence:
 // `newlines` is the broader policy — it passes over spaces, tabs and line
-// endings alike. There is no character literal, so `"#"[0]` is how a program
-// names one.
+// endings alike. A character the program chooses is a literal, `'#'`.
 var data = read sections(
     map: grid(char),
     moves: chars(one_of("^v<>"), skip: newlines),

@@ -47,13 +47,24 @@
 //! is what makes a future widening fail here rather than in the heap.
 //!
 //! **There is no `SMALL_CHAR_MIN`,** because 0 is the floor of the payload type
-//! and a constant zero only invites a `code - MIN` that cannot be checked. And
-//! there is no `SMALL_CHAR_STRIDE`: [`crate::small_int`] has one because the
-//! Cranelift lowering of `Inst::ConstGc` indexes that table with a compile-time
-//! byte offset, and nothing indexes this one from generated code — the language
-//! has no character literal, so there is no `GcConst::Char` (ADR-107 Decision 2).
-//! For the same reason this range is stated for one crate rather than three, and
-//! is not re-exported from the crate root.
+//! and a constant zero only invites a `code - MIN` that cannot be checked.
+//!
+//! There **is** a [`SMALL_CHAR_STRIDE`], and this paragraph used to say there
+//! was not. ADR-107 Decision 2's reasoning was exact and its premise expired:
+//! `crate::small_int` had a stride because the Cranelift lowering of
+//! `Inst::ConstGc` indexes that table with a compile-time byte offset, and
+//! nothing indexed this one from generated code — the language had no character
+//! literal, so there was no `GcConst::Char`. ADR-141 is that literal, and
+//! `GcConst::Char` reads this table exactly the way `GcConst::SmallInt` reads
+//! the other. The stride is declared here, beside the array it measures, rather
+//! than written as an `8` in the backend, for [`index_of`]'s reason: a table and
+//! the arithmetic that walks it are one statement or they are two answers.
+//!
+//! It stays un-re-exported from the crate root, where `small_int`'s constants
+//! are re-exported: the backend reaches it as
+//! `praxis_runtime::small_char::SMALL_CHAR_STRIDE`, which names the table it
+//! belongs to at the use site. `small_int`'s re-export predates this module and
+//! is not worth reversing; a second one is not worth adding.
 
 /// The highest code point the runtime interns: the last ASCII scalar.
 ///
@@ -68,6 +79,13 @@ pub const SMALL_CHAR_MAX: u32 = 127;
 /// [`Immortals::small_chars`](crate::Immortals) and the bound every index
 /// derived from [`index_of`] respects.
 pub const SMALL_CHAR_COUNT: usize = SMALL_CHAR_MAX as usize + 1;
+
+/// The size of one table element, for the backend's element-offset arithmetic.
+///
+/// The Cranelift `Inst::ConstGc { GcConst::Char }` lowering indexes the table
+/// with a compile-time constant byte offset, so it needs the stride — the same
+/// two loads a small `Int` literal costs (ADR-100, ADR-141).
+pub const SMALL_CHAR_STRIDE: usize = std::mem::size_of::<crate::GcRef>();
 
 /// `code`'s index in the interned table, or `None` if `code` is outside the
 /// range and the caller must allocate.

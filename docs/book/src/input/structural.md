@@ -41,7 +41,8 @@ A wrong argument is a compile error, never an argument that is quietly dropped.
 | `choice(Name: P, …)` | named arguments only, at least one |
 | `optional(P)` | one parser |
 | `scan(P)` | one parser |
-| `repeated(P)` | only as the final named argument of a `sections` call |
+| `repeated(P)` | a named argument of a `sections` call, and only its last one |
+| `repeated(P, N)` | exactly N sections; may be any named argument of a `sections` call |
 
 `repeated` is in the table so that misusing it is a specific complaint rather
 than "unknown constructor". It is a marker, not a parser in its own right.
@@ -172,9 +173,53 @@ out(bingo.boards.get(1))
 [5, 6, 7, 8]
 ```
 
-A tail may only be last, there may only be one, and its name is a field name
-like any other. All three are checked, because a tail that was silently moved to
-the end compiled into a different parser than the one written.
+An *unbounded* tail may only be last, there may only be one, and its name is a
+field name like any other. All three are checked, because a tail that was
+silently moved to the end compiled into a different parser than the one written.
+
+"Only last" is an argument about greed, not about the marker: `repeated(P)`
+takes every section that is left, so nothing after it could ever match. When you
+know how many sections the group has, say so — `repeated(P, N)` takes exactly N
+and leaves the rest, so a field may follow it.
+
+```praxis
+// `repeated(P, N)` takes exactly N sections, so a field can follow it.
+var data = read sections(
+    shapes: repeated(lines(int), 2),
+    regions: lines(int),
+)
+
+out(data.shapes.len())
+out(data.shapes.get(0))
+out(data.shapes.get(1))
+out(data.regions)
+```
+
+```text
+1
+2
+
+3
+4
+
+10
+20
+30
+```
+
+```text
+2
+[1, 2]
+[3, 4]
+[10, 20, 30]
+```
+
+The count is a number written in the program, never a variable: the parser plan
+is built when the program is compiled, and there is no value in scope then to
+read one from. It must be at least 1 — a group of no sections parses nothing —
+and fewer sections than the count is a parse fault, the same as too few sections
+for a fixed field. A group of six that finds four is input that did not match, not
+a `Vec` of four.
 
 ## `csv(P)`
 

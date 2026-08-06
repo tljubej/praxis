@@ -1,0 +1,82 @@
+// AoC corpus fixture: a catalog method on a value *derived* from an
+// unannotated parameter (ADR-137).
+//
+// Every helper below strips the annotations off a shape a real solve wrote —
+// day 12's `search` double-subscripts one of its ten parameters — and each one
+// was `praxis check` exit 0 followed by `praxis run` panicking with an
+// `internal compiler error` before ADR-137. The cause was that discharging a
+// constraint is what makes the *next* one dischargeable, and the pass drained
+// one batch: `t[i]` resolved and `t[i][j]` was dropped on the floor. There is no
+// polymorphism anywhere here — every function has exactly one call site at one
+// concrete type — so the fixture is about rounds and not about generalization.
+//
+// The rows are the handover's own table, and the last two are the ones that
+// already worked; they are here so a regression that trades one shape for
+// another is caught by the same file.
+//
+// No input. Output: one line per row, in the order the rows are called.
+
+// The two lines the defect was reported as.
+fn pick(t, i, j) {
+    t[i][j]
+}
+
+// A subscript of a subscript, without the intermediate call.
+fn second_of_first(v) {
+    v[0][1]
+}
+
+// A catalog method on a subscript result.
+fn width_of_first(v) {
+    v[0].len()
+}
+
+// A catalog method on a *method* result — `get` answers the element, and the
+// element is what `len` is asked for.
+fn width_via_get(v) {
+    v.get(0).len()
+}
+
+// A catalog method on a `for` item. This is ADR-062's own claim — the item is
+// pinned "for the same reason a method receiver is" — tested with a method
+// rather than with arithmetic, which is the combination its book example misses.
+fn widths(rows) {
+    for row in rows {
+        out(row.len())
+    }
+}
+
+// Binding the intermediate first is the same program, so it must behave the
+// same way. It did not: it ICEd identically, which is what ruled out expression
+// chaining as the cause.
+fn pick_bound(t, i, j) {
+    var row = t[i]
+    row[j]
+}
+
+// Three links deep. Two rounds resolve the two subscripts and still drop the
+// `len`, so this is the row that distinguishes a fixpoint from a second round.
+fn deep_width(v) {
+    v[0][0].len()
+}
+
+// A method on the parameter itself, which always worked.
+fn size(v) {
+    v.len()
+}
+
+// A pipeline stage on a derived value, which always worked for its own reason:
+// the pipeline recognizer claims the node and never needs a catalog row.
+fn doubled_first(v) {
+    v[0].map(|x| x * 2)
+}
+
+out(pick([[7, 8], [9, 10]], 0, 0))
+out(second_of_first([[1, 2, 3]]))
+out(width_of_first([[1, 2, 3], [4, 5]]))
+out(width_via_get([[1, 2, 3, 4]]))
+widths([[1, 2, 3], [4, 5]])
+out(pick_bound([[7, 8], [9, 10]], 1, 1))
+out(deep_width([[[1, 2, 3]]]))
+out(size([1, 2, 3, 4, 5]))
+out(doubled_first([[1, 2, 3]]))

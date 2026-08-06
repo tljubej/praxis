@@ -1,0 +1,20 @@
+// A hole renders its value exactly as `out` does — whatever type it holds.
+var part2 = 42
+out("Part 2: {part2}")
+
+var a = 3
+var b = 4
+out("{a} + {b} = {a + b}")
+
+// Any type at all, not only the ones with a `to_text()`.
+var splits = [10, 20, 30]
+var pair = (1, "x")
+out("splits: {splits}, pair: {pair}, third: {splits[2]}, how many: {splits.len()}")
+
+// A hole is a full expression, and a `"` inside one opens a literal of its own.
+var scores = Map[Text, Int]()
+scores["ada"] = 7
+out("ada scored {scores["ada"]}, which is {if scores["ada"] > 5 { "a lot" } else { "not much" }}")
+
+// `\{` is a literal brace.
+out("a hole looks like \{name\}")

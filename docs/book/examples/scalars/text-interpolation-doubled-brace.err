@@ -1,0 +1,13 @@
+error[P001]: `{{` is not an escape for a literal brace: write `\{` for a `{`, or a value to render between single braces
+
+  text-interpolation-doubled-brace.px:5:8
+  5 | out("a{{}}b")
+    |        ^ `{{` is not an escape for a literal brace: write `\{` for a `{`, or a value to render between single braces
+
+error[P001]: `{{` is not an escape for a literal brace: write `\{` for a `{`, or a value to render between single braces
+
+  text-interpolation-doubled-brace.px:6:14
+  6 | out("count: {{n}}")
+    |              ^ `{{` is not an escape for a literal brace: write `\{` for a `{`, or a value to render between single braces
+
+praxis: 2 error(s)

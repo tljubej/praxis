@@ -26,6 +26,17 @@
 //!
 //! `lower_module` then runs unchanged on the expanded module (it is a clean 1:1
 //! map of `TypedItem::Fn → Function`).
+//!
+//! ## What "generic" does *not* cover
+//!
+//! Step 5 drops what `Scheme::is_polymorphic()` calls polymorphic, which is
+//! "has binders" and nothing else. A function whose receiver ADR-057 decision 5
+//! pinned has **no** binders — pinning is what keeps `fn total(values) {
+//! values.sum() }` a monotype — so it is not generic here and is not dropped,
+//! even when nothing ever calls it. That is why the uncalled body whose receiver
+//! no call site pinned is answered in MIR and not by widening this filter
+//! (ADR-137 decision 3, correcting ADR-093 §3). Widening it would be wrong
+//! anyway: `var g = f` on an uncalled `f` still needs the symbol to exist.
 
 use std::collections::{HashMap, HashSet};
 
@@ -391,6 +402,12 @@ fn resolve_expr(db: &mut TypeDb, binders: &[VarId], args: &[Type], e: &mut Typed
     // error here rather than a slot the specialization silently skips.
     match e {
         TypedExpr::Lit { ty, .. }
+        // An interpolated literal is always `Text`, so specializing its own type
+        // is a no-op — but it is listed rather than skipped, because the *holes*
+        // it carries are ordinary expressions with ordinary types, and those are
+        // reached by the generic child walk below on the same terms as any
+        // other variant's.
+        | TypedExpr::Interp { ty, .. }
         | TypedExpr::Path { ty, .. }
         // A function value carries only its own `Func` type; the function it
         // names is specialized (or not) by its own call sites, and a *generic*

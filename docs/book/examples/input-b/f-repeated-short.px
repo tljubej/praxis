@@ -1,0 +1,10 @@
+// The count is a promise about the input, so two sections where the program
+// said three is a parse fault — not a `Vec` of two. The message names the
+// group that came up short, because the number is written in the program and
+// "which one" is the only thing left to say.
+var data = read sections(
+    shapes: repeated(lines(int), 3),
+    regions: lines(int),
+)
+
+out(data.shapes.len())

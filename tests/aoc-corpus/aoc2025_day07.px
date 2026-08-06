@@ -17,11 +17,11 @@
 // the initial row of 1s and the two out-of-bounds arms say.
 
 var manifold = read grid(char)
-var splitter = "^"[0]
+var splitter = '^'
 var width = manifold.width()
 var height = manifold.height()
 
-var source = match manifold.find("S"[0]) {
+var source = match manifold.find('S') {
     Some(p) => p,
     None => panic("the manifold has no source"),
 }

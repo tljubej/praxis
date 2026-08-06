@@ -1,0 +1,11 @@
+// A name in a hole is an ordinary reference, so a closure captures it like any
+// other — the hole is a real part of the program, not text scanned later.
+var label = "total"
+var n = 7
+
+var describe = |extra| "{label} = {n + extra}"
+out(describe(0))
+out(describe(3))
+
+// It counts as a capture, which `out` on the closure makes visible.
+out(describe)

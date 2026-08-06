@@ -210,6 +210,13 @@ pub fn heap(
 /// old `name != "<tmp>"` string match (the codegen no longer emits `"<tmp>"`;
 /// temps now carry an empty name and the `Temp` kind).
 ///
+/// "A binding the programmer wrote" is ADR-125's set, not the narrower one this
+/// used to mean in practice. A `for` variable and a `match` arm's payload
+/// reached the frame nameless or temp-classified, so this filter dropped them
+/// and `p item` answered "`item` is not defined" for a name in plain sight;
+/// naming those slots in MIR (ADR-139) is what admits them here, and this
+/// filter is the contract that made it a one-sided change.
+///
 /// The type is derived primarily from **what the value itself records** (via
 /// [`praxis_repr::type_for_value`]), which is always concrete — the static
 /// `type_id` (WS1) is only a fallback. This is necessary because Praxis's

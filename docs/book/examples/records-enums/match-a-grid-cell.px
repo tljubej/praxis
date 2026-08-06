@@ -1,0 +1,20 @@
+// Dispatching on a character is what a character literal is for: a `match` over
+// a grid cell, with the coverage check that an `if`/`else if` chain against
+// pre-bound variables could never have.
+fn cell(c: Char) -> Text {
+    match c {
+        '#' => "wall"
+        '.' => "open"
+        'S' => "start"
+        _ => "unknown"
+    }
+}
+
+var row = "#.S?"
+for c in row {
+    out(cell(c))
+}
+
+// A `Char` is what a text subscript already answered, so the two spellings are
+// the same value.
+out('#' == row[0])

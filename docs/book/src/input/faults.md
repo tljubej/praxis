@@ -133,6 +133,7 @@ its own wording, and the wording tells you which one bounded the region:
 | `expected a grid row of the same cell count as the first` | `grid` |
 | `expected rectangular matrix row` | `matrix`'s width check |
 | `expected section header` | a named `sections` with too few sections |
+| ``expected 6 sections for `shapes` `` | a `repeated(P, 6)` group with too few sections |
 
 Whitespace is the exception, and it is the one rule the whole parser shares: a
 leftover run the child could not read is forgiven, so `lines(int)` over `"1 \n"`
@@ -177,6 +178,54 @@ Backtrace:
 complaint is about the data ("a row of the same cell count as the first"), not
 about a file convention, which is what makes it actionable: either the row is
 short or the grid is ragged and wants `grid(P, ragged, fill: v)`.
+
+### A group that came up short
+
+```praxis
+// The count is a promise about the input, so two sections where the program
+// said three is a parse fault — not a `Vec` of two. The message names the
+// group that came up short, because the number is written in the program and
+// "which one" is the only thing left to say.
+var data = read sections(
+    shapes: repeated(lines(int), 3),
+    regions: lines(int),
+)
+
+out(data.shapes.len())
+```
+
+```text
+1
+
+2
+```
+
+```text
+error: program faulted: input parse mismatch
+       at input offset 0..5: expected 3 sections for `shapes`
+       actual: 1⏎⏎2⏎
+
+Backtrace:
+#0   <entry>
+
+  locals:
+    data: { shapes: Vec[Vec[Int]], regions: Vec[Int] } = <uninit>
+  temps:
+    <tmp#1> = 1
+
+2
+
+    <tmp#2: Int> = 1
+    <tmp#6: Int> @ "data.shapes.len()" = <uninit>
+    <tmp#7: Unit> @ "out(data.shapes.len())" = <uninit>
+    <tmp#8: Unit> @ "// The count is a promise about the input, so two sections where the program // said three is a parse fault — not a `Vec` of two. The message names the // group that came up short, because the number is written in the program and // "which one" is the only thing left to say. var data = read sections( shapes: repeated(lines(int), 3), regions: lines(int), ) out(data.shapes.len())" = <uninit>
+```
+
+`repeated(P, N)` is the one place the program states a *number* of sections, so
+the fault states which group the number belonged to rather than the generic
+`expected section header` a fixed field gets. Two sections cannot be three, and
+answering with a `Vec` of two would be the one outcome the program could not
+notice.
 
 ### A literal that was looked for and not found
 
@@ -403,9 +452,10 @@ not a silent fall back to the default.
 ### Values that have no representation, and a marker in the wrong place
 
 ```praxis
-// `repeated(...)` is a marker on the final named argument of a `sections`
-// call, not a parser; `sep` needs a separator that advances; `grid`'s ragged
-// form is written with both `ragged` and `fill:`.
+// `repeated(...)` is a marker on a named argument of a `sections` call, not a
+// parser, and the uncounted form is greedy so it must be last; `sep` needs a
+// separator that advances; `grid`'s ragged form is written with both `ragged`
+// and `fill:`.
 var a = read sections(boards: repeated(matrix(int)), draws: csv(int))
 var b = read repeated(int)
 var c = read sep("", int)
@@ -417,28 +467,28 @@ $ praxis check f-err-marker.px --color never
 ```
 
 ```text
-error[I028]: a `repeated(...)` tail may appear only as the final named argument (§7.5): it consumes every remaining section, so nothing can follow it
-
-  f-err-marker.px:4:14
-  4 | var a = read sections(boards: repeated(matrix(int)), draws: csv(int))
-    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ a `repeated(...)` tail may appear only as the final named argument (§7.5): it consumes every remaining section, so nothing can follow it
-
-error[I028]: `repeated(...)` is only the final named argument of a `sections` call (§7.5)
+error[I028]: an unbounded `repeated(...)` tail may appear only as the final named argument (§7.5): it consumes every remaining section, so nothing can follow it — write `repeated(P, N)` for a group of N sections, which can
 
   f-err-marker.px:5:14
-  5 | var b = read repeated(int)
-    |              ^^^^^^^^^^^^^ `repeated(...)` is only the final named argument of a `sections` call (§7.5)
+  5 | var a = read sections(boards: repeated(matrix(int)), draws: csv(int))
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ an unbounded `repeated(...)` tail may appear only as the final named argument (§7.5): it consumes every remaining section, so nothing can follow it — write `repeated(P, N)` for a group of N sections, which can
+
+error[I028]: `repeated(...)` is only a named argument of a `sections` call (§7.5)
+
+  f-err-marker.px:6:14
+  6 | var b = read repeated(int)
+    |              ^^^^^^^^^^^^^ `repeated(...)` is only a named argument of a `sections` call (§7.5)
 
 error[I023]: `sep` needs a non-empty separator: an empty one never advances
 
-  f-err-marker.px:6:14
-  6 | var c = read sep("", int)
+  f-err-marker.px:7:14
+  7 | var c = read sep("", int)
     |              ^^^^^^^^^^^^ `sep` needs a non-empty separator: an empty one never advances
 
 error[I014]: `grid`'s ragged form is written `grid(P, ragged, fill: value)` — `ragged` and `fill:` come together or not at all (§7.5)
 
-  f-err-marker.px:7:14
-  7 | var d = read grid(char, fill: ".")
+  f-err-marker.px:8:14
+  8 | var d = read grid(char, fill: ".")
     |              ^^^^^^^^^^^^^^^^^^^^^ `grid`'s ragged form is written `grid(P, ragged, fill: value)` — `ragged` and `fill:` come together or not at all (§7.5)
 
 praxis: 4 error(s)
@@ -515,5 +565,5 @@ codes](../tooling/diagnostics.md).
 | `I025` | a `sections` or `choice` with no field or case at all |
 | `I026` | a positional `block` item returning a scalar with no name |
 | `I027` | a `choice` case declared twice |
-| `I028` | a misplaced or repeated `repeated(...)` tail |
+| `I028` | a misplaced or duplicated **unbounded** `repeated(...)` tail |
 | `I030` | a backtick template the scanner could not read |

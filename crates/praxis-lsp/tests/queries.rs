@@ -256,10 +256,17 @@ fn typing_set_dot_offers_the_pipeline_and_a_grid_still_does_not() {
     let s = snap(src);
     let labels = labels_at(&s, at(src, "s.\n}") + 2);
 
-    // The twenty-three fused rows, the four barriers and the eight conversions
+    // The twenty-three fused rows, the six barriers and the eight conversions
     // all reach a `Set` now. A spread of them, including the ones a `Set` could
     // never have offered before: it has no member accessor in the language at
     // all, so `to_vec` is the first spelling that reads one.
+    //
+    // `join` is offered on a `Set[Int]` on purpose. `pattern_matches`'s
+    // `Iterable` arm looks at the receiver's *shape* and not at its item, so the
+    // row matches and the item bound is reported by the compiler at the call —
+    // `expected Text, found Int` — rather than by the completion list going
+    // quiet. That is the documented split, and offering only what would
+    // type-check would mean re-deriving unification inside the LSP.
     for offered in [
         "map",
         "filter",
@@ -271,7 +278,9 @@ fn typing_set_dot_offers_the_pipeline_and_a_grid_still_does_not() {
         "sorted",
         "sorted_by_key",
         "unique",
+        "reversed",
         "frequencies",
+        "join",
         "to_vec",
         "to_map",
         "to_counter",
@@ -300,13 +309,31 @@ fn typing_set_dot_offers_the_pipeline_and_a_grid_still_does_not() {
     let grid_src = "fn main() -> Unit {\n  var grid = read grid(char)\n  grid.\n}\n";
     let s = snap(grid_src);
     let labels = labels_at(&s, at(grid_src, "grid.\n") + 5);
-    for absent in ["map", "filter", "sum", "to_set", "sorted_by_key"] {
+    for absent in [
+        "map",
+        "filter",
+        "sum",
+        "to_set",
+        "sorted_by_key",
+        "reversed",
+        "join",
+    ] {
         assert!(
             !labels.contains(&absent.to_string()),
             "`grid.{absent}` would claim §6.4's shape-preserving name; got {labels:?}"
         );
     }
     assert!(labels.contains(&"cells".to_string()), "{labels:?}");
+
+    // A `Vec` offers `to_text`, which no `Iterable` row carries: it is a
+    // concrete `Vec[Char]` row, and `receiver_accepts` has to match a bounded
+    // element the same way `pattern_matches` does or the two have diverged
+    // (ADR-144).
+    let vec_src = "fn main() -> Unit {\n  var v = [1, 2]\n  v.\n}\n";
+    let s = snap(vec_src);
+    let labels = labels_at(&s, at(vec_src, "v.\n}") + 2);
+    assert!(labels.contains(&"to_text".to_string()), "{labels:?}");
+    assert!(labels.contains(&"reversed".to_string()), "{labels:?}");
 }
 
 /// Completion in parser-expression mode offers §7.4's atomics and §7.5's
@@ -714,5 +741,111 @@ fn a_list_literal_offers_vec_methods() {
     assert!(
         !names.contains(&"insert"),
         "a Set/Map method, got {names:?}"
+    );
+}
+
+/// **ADR-147, editor side.** Inside an interpolated literal the *fragments* are
+/// string and the *hole* is code.
+///
+/// This is the dividend of the hole being a real subtree rather than a substring
+/// of one opaque token: the name in it is classified by what it resolves to, so
+/// it is coloured, hoverable and renamable like any other reference. An
+/// implementation that kept the literal whole would classify the whole thing
+/// `string` and there would be nothing here to assert.
+#[test]
+fn a_hole_is_code_and_the_fragments_around_it_are_string() {
+    let src = "fn main() -> Unit {\n  var total = 3\n  out(\"n = {total}!\")\n}\n";
+    let s = snap(src);
+    assert!(s.diagnostics().is_empty(), "{:?}", s.diagnostics());
+    let tokens = praxis_lsp::semantic::classify(&s);
+    let find = |offset: u32| {
+        tokens
+            .iter()
+            .find(|t| t.span.start().to_u32() == offset)
+            .map(|t| t.ty.name())
+    };
+    assert_eq!(
+        find(at(src, "\"n = {")),
+        Some("string"),
+        "the opening fragment is a string"
+    );
+    assert_eq!(
+        find(at(src, "total}!")),
+        Some("variable"),
+        "the name in the hole is the local it resolves to, not string"
+    );
+    assert_eq!(
+        find(at(src, "}!\"")),
+        Some("string"),
+        "the closing fragment is a string"
+    );
+}
+
+/// **ADR-147, the rest of the editor surface.** A hole is a real subtree, so
+/// every query that is keyed on a resolved name's *range* answers inside one
+/// without being taught about interpolation at all.
+///
+/// That is the claim worth pinning, because it is the one an implementation
+/// could plausibly get wrong and still pass the semantic-token test above: a
+/// design that re-lexed holes out of one opaque `TextLit` would paint them
+/// correctly and still have nothing for hover, definition, references or rename
+/// to attach to. Each assertion below names a query and the answer it must give
+/// for the name `count`, which appears once as a declaration and twice in holes.
+#[test]
+fn every_name_query_answers_inside_a_hole() {
+    let src = "var count = 3\nvar label = \"n={count} again={count}\"\nout(label)\n";
+    let s = snap(src);
+    // The two occurrences inside holes, found past the declaration.
+    let first_hole = at(src, "{count}") + 1;
+    let second_hole = at(src, "again={count}") + u32::try_from("again={".len()).unwrap();
+
+    // Hover answers the binding's type, not the enclosing literal's `Text`.
+    let h = praxis_lsp::hover::hover(&s, first_hole, Encoding::Utf16)
+        .expect("hover answers inside a hole");
+    assert!(
+        hover_text(&h).contains("Int"),
+        "hover in a hole answers the name's own type, got {:?}",
+        hover_text(&h)
+    );
+
+    // Go-to-definition lands on the `var`, not on the literal.
+    let target = praxis_lsp::navigation::goto_definition(&s, first_hole, &uri(), Encoding::Utf16)
+        .expect("a hole's name has a definition");
+    assert_eq!(
+        target.range.start.line, 0,
+        "the definition is the `var count` on line 0, got {target:?}"
+    );
+
+    // The name in a hole resolves to the *same symbol* as the declaration, which
+    // is what makes references and rename whole-file rather than per-occurrence.
+    let sym = praxis_lsp::navigation::symbol_at(&s, first_hole).expect("a hole's name is a symbol");
+    let ranges = praxis_lsp::navigation::reference_ranges(&s, sym);
+    assert_eq!(
+        ranges.len(),
+        3,
+        "the declaration and both holes are references to one symbol, got {ranges:?}"
+    );
+
+    // Rename rewrites both holes. A rename that missed them would silently
+    // change the program's meaning while leaving it compiling.
+    let edit = praxis_lsp::rename::rename(&s, first_hole, "total", &uri(), Encoding::Utf16)
+        .expect("a name in a hole is renameable");
+    let edits = edit
+        .changes
+        .as_ref()
+        .and_then(|c| c.get(&uri()))
+        .expect("edits for this file");
+    assert_eq!(
+        edits.len(),
+        3,
+        "rename touches the declaration and both holes, got {edits:?}"
+    );
+
+    // And the second hole is reached independently, so this is not one lucky
+    // offset: `symbol_at` answers there too.
+    assert_eq!(
+        praxis_lsp::navigation::symbol_at(&s, second_hole),
+        Some(sym),
+        "both holes name the same binding"
     );
 }

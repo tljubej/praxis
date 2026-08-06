@@ -221,6 +221,12 @@ pub fn constructor_signatures(ctor: Constructor) -> Vec<(String, Vec<String>)> {
         ArgShape::StringThenParser => vec![one(&["\"separator\"", "parser"], result)],
         ArgShape::OneString => vec![one(&["\"characters\""], result)],
         ArgShape::ParserWithSkip => vec![one(&["parser", "skip: policy"], result)],
+        // Both forms, because which one a reader wants is the whole question:
+        // the counted one may be followed by another field and the unbounded
+        // one may not.
+        ArgShape::ParserWithOptionalCount => {
+            vec![one(&["parser"], result), one(&["parser", "count"], result)]
+        }
         ArgShape::GridMaybeRagged => vec![
             one(&["parser"], result),
             one(&["parser", "ragged", "fill: value"], result),
@@ -281,6 +287,17 @@ mod tests {
             constructor_signatures(Constructor::Lines)[0].0,
             "lines(parser) -> Vec[T]"
         );
+    }
+
+    /// `repeated` has two forms and the editor offers both, because the choice
+    /// between them is the one a reader is actually making: a counted group is
+    /// bounded, so a field may follow it, and an uncounted one is not.
+    #[test]
+    fn repeated_offers_the_counted_form_beside_the_greedy_one() {
+        let repeated = constructor_signatures(Constructor::Repeated);
+        assert_eq!(repeated.len(), 2);
+        assert_eq!(repeated[0].0, "repeated(parser) -> Vec[T]");
+        assert_eq!(repeated[1].0, "repeated(parser, count) -> Vec[T]");
     }
 
     /// Every §7.5 constructor has a signature, because the derivation is a sweep

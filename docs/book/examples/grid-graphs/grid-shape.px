@@ -31,3 +31,8 @@ map[0, 0] = rock
 map.set(0, 2, rock)
 out(map.row(0))
 out(map.row(2))
+
+// A row prints as a Vec; `to_text()` draws it back as the line it was read as.
+for y in 0..map.height() {
+    out(map.row(y).to_text())
+}

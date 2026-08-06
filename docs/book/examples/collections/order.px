@@ -1,5 +1,5 @@
-// A hashed collection walks its members ascending by *rendered* form, so 10
-// sorts before 2. The order is fixed and seed-independent; it is not numeric.
+// A hashed collection walks its members in the *value's* order, not in the
+// order they print: 2 before 10, and the same sequence on every run.
 var seen = Set()
 for n in [1, 2, 10, 20, 3] {
     seen.insert(n)
@@ -22,10 +22,17 @@ for kv in m {
     out(kv.1)
 }
 
-// Printing a keyed collection sorts the rendered *entry*; keys(), values() and
-// a `for` sort the rendered *key*. The two orders can disagree.
+// A keyed collection prints in the order it iterates: one order, not two.
 var names = Map()
 names["a"] = 1
 names["a1"] = 2
 out(names)
 out(names.keys())
+
+// A tuple key orders element-wise, left to right — which is what makes a
+// Map[(Int, Int), V] over a grid come out in reading order.
+var grid = Map()
+grid[(1, 10)] = "b"
+grid[(1, 9)] = "a"
+grid[(0, 100)] = "z"
+out(grid)

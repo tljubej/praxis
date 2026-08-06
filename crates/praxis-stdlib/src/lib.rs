@@ -27,8 +27,8 @@ pub use catalog::{
 };
 pub use completion::{completion_data, CompletionItem};
 pub use prelude::{
-    graph_helper, numeric_helper, GraphHelper, GraphParam, GraphResult, NumericHelper,
-    GRAPH_HELPERS, NUMERIC_HELPERS, PRELUDE,
+    graph_helper, numeric_helper, sized_ctor, GraphHelper, GraphParam, GraphResult, NumericHelper,
+    SizedCtor, GRAPH_HELPERS, NUMERIC_HELPERS, PRELUDE, SIZED_CTORS,
 };
 pub use type_pattern::{
     is_pipeline_receiver, pattern_matches, Bound, TypePattern, PIPELINE_RECEIVERS,

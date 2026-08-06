@@ -57,7 +57,7 @@ The fault line is always `error: program faulted: ` followed by one of these.
 | `stack overflow (recursion limit)` | recursion that exhausts the native-stack budget |
 | `float-to-int conversion out of range` | `Float.to_int()` on NaN, ±infinity, or a value outside the `Int` range |
 | `not a Unicode scalar value` | a code point that is negative, above `0x10FFFF`, or a surrogate |
-| `size or extent out of range` | a `BitSet` member the runtime cannot index — negative, or too large to address |
+| `size or extent out of range` | a size the runtime cannot serve: a `BitSet` member, or a `Vec(n, …)` or `Grid(w, h, …)` extent — negative, or too large to address |
 | `value does not have the declared type` | a value stored where its destination declared another type |
 | `panic: <message>` | `panic(value)` |
 | `assertion failed` | `assert(condition)` with a false condition |
@@ -376,11 +376,15 @@ Backtrace:
     <tmp#7: Unit> @ "var seen = BitSet() seen.insert(1000000000000000000) out(seen.len())" = <uninit>
 ```
 
-A negative member raises it too. The runtime carries the same guard on `Grid`
-extents — a negative side, or a `width * height` past its cap of 2^28 cells —
-but no Praxis source reaches it: `Grid()` takes no arguments and builds a 0×0
-grid, and a `read grid(…)` builds its payload from the input it already read.
-`BitSet` is the one that faults from a program you would write.
+A negative member raises it too. The same guard covers the sized collection
+constructors, and there it is the ordinary way to reach this fault: `Vec(n, fill)`
+and `Grid(w, h, fill)` take extents the program computes, so a negative one — or a
+`width * height` past the cap of 2^28 cells — stops the program the same way
+([ADR-146](../../../decisions/146-a-collection-constructors-arity-is-its-shape.md)).
+It cannot be a `check`-time refusal: a size is an `Int` like any other, and its
+value is not known until it runs. `Grid()` and a `read grid(…)` never raise it —
+the first asks for 0×0, and the second builds its payload from input it has
+already read.
 
 ## `<uninit>`: the value that was never produced
 

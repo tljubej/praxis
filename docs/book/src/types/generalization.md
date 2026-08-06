@@ -320,3 +320,51 @@ The report is at the call, because `for i in items` is correct for every other
 instantiation of `show_all`; the note says which operation imposed the
 requirement. That two-span shape is the general form for anything a scheme
 carried — see [Capabilities](capabilities.md).
+
+A method *on the item* resolves exactly the same way, which is worth writing
+down because it is the combination the example above does not cover — it does
+arithmetic on the item rather than calling anything:
+
+```praxis
+fn widths(rows) {
+    for row in rows {
+        out(row.len())
+    }
+}
+
+widths([[1, 2, 3], [4, 5]])
+```
+
+```text
+3
+2
+```
+
+### …and a value derived from a pinned receiver is pinned too
+
+The pin reaches further than the parameter. A subscript's result, a method's
+result and a `for`'s item are all pinned by the same rule, so a helper can
+subscript twice with no annotation anywhere:
+
+```praxis
+fn pick(t, i, j) {
+    t[i][j]
+}
+
+out(pick([[7, 8], [9, 10]], 0, 0))
+```
+
+```text
+7
+```
+
+`pick` is `(Vec[Vec[Int]], Int, Int) -> Int`, reconstructed from two subscripts
+and one call. And because the derived receiver is pinned, `pick` refuses a
+second element type for exactly the reason `total` does above — calling it on a
+`Vec[Vec[Text]]` in the same program is a `Y001` at the second call, not a
+second clone.
+
+This is [ADR-137](../../../decisions/137-a-deferred-receiver-resolves-in-rounds-and-the-channel-runs-to-a-fixpoint.md).
+Resolving a deferred method *produces* the receiver's result type, and that
+result is what the next link waits on, so the constraint channel discharges in
+rounds until nothing is left to answer.

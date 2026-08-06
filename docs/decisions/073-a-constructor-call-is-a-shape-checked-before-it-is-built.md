@@ -179,6 +179,17 @@ All three are `I028`, and `build_call` refuses to build rather than building
 something else. A bare `read repeated(int)` is the same code: it is a marker,
 not a parser, and there is nothing outside `sections` for it to repeat over.
 
+*Amended 2026-08-06 ([ADR-140](./140-a-counted-repeated-is-bounded-so-something-can-follow-it.md)).*
+The position rule above is the **unbounded** `repeated(P)`'s, and the argument
+for it is greed: a field after a parser that takes every remaining section can
+never match. `repeated(P, N)` takes exactly N and leaves the rest, so it is a
+named argument like any other — it may sit anywhere, including last, and only
+the uncounted form is `I028` out of position. The name rule and the at-most-one
+rule are unchanged for the unbounded form. `build_repeated_tail`'s hand-rolled
+`args.len() != 1` is also gone: it now routes through `check_call` like every
+other builder, which is Decision 1's own thesis applied to the one call it
+exempted.
+
 ## Decision 4: a separator that cannot advance has no representation
 
 `sep("", P)` is not a parser that matches nothing. It is a cursor that never

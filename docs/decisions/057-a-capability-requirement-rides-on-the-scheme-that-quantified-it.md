@@ -61,8 +61,9 @@ The lifecycle is four steps and each has exactly one home:
    written in the generic body's terms and would otherwise be shared between
    unrelated call sites.
 4. **Discharge.** `take_dischargeable` drains the constraints whose variable has
-   since **resolved**. What survives all four belongs to a variable nothing
-   pinned, which inference has already reported as itself.
+   since **resolved**, and the caller repeats until it comes back empty. What
+   survives all four belongs to a variable nothing pinned, which inference has
+   already reported as itself.
 
 **Where discharge happens is the discipline, not an implementation detail.**
 Inference drains after a function body and *before* that function generalizes,
@@ -70,6 +71,16 @@ so what is still pending at that moment is precisely what the scheme is about to
 own. Draining after would report a generic body's requirement against a variable
 nothing had pinned yet; draining before the body is finished would report it
 against a variable the body had not finished constraining.
+
+**And each of those two points runs to a fixpoint**, which the original text got
+wrong by describing a single drain
+([ADR-137](./137-a-deferred-receiver-resolves-in-rounds-and-the-channel-runs-to-a-fixpoint.md)).
+A capability discharged by *resolving* — decision 5's `HasMethod`, ADR-062's
+`Iterable`, REP-28's `HasField` — answers by unifying a type, and that
+unification is what makes the *next* constraint dischargeable. One batch is
+therefore one round, and `fn pick(t, i, j) { t[i][j] }` needs two: draining once
+resolved `t[i]` and dropped `t[i][j]`, which `check` never mentioned and MIR met
+as an `internal compiler error`.
 
 ## Decision 2: the report goes to the use site, with the requirement as a note
 
@@ -273,6 +284,15 @@ unified — is a compile error to add halfway.
   capability whose discharge writes to `method_refs` rather than answering a
   yes/no. Its gate is
   `collection_method_constrains_unannotated_receiver_parameter`.
+- **Decision 5's pin applies to the *result* variable too**, and always did:
+  `require_method` pins the receiver, every parameter and the result, so that a
+  call site cannot instantiate a fresh result while discharge unifies the
+  original. A receiver *derived* from a pinned one — a subscript result, a
+  method result — was therefore pinned all along. What was missing until
+  [ADR-137](./137-a-deferred-receiver-resolves-in-rounds-and-the-channel-runs-to-a-fixpoint.md)
+  was the second discharge round that looks at it, not a second pin. Decision 5's
+  own text stands unchanged: there is one lowered body per source function, and
+  `total` is still `Vec[Int] -> Int`.
 - ~~**`Iterable`'s `item` is not unified at discharge.** `check` answers the
   yes/no; which item type a receiver yields is established where the `for` is
   inferred. A constraint that resolves to a *differently*-itemed iterable would

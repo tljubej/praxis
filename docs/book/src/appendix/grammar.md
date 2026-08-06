@@ -81,8 +81,24 @@ IntLit    := digits
 FloatLit  := digits "." digits exponent?
            | digits exponent
 exponent  := ("e" | "E") ("+" | "-")? digits
-TextLit   := '"' (char | escape)* '"'
+TextLit   := '"' (char | escape)* '"'          -- no unescaped "{" in it
+CharLit   := "'" (char | escape) "'"
+
+interp    := InterpOpen expr (InterpMiddle expr)* InterpClose
+InterpOpen   := '"' (char | escape)* "{"
+InterpMiddle := "}" (char | escape)* "{"
+InterpClose  := "}" (char | escape)* '"'
 ```
+
+A `{` in a text literal opens an **interpolation hole** (§8.1), so a literal
+holding one is not a `TextLit` at all: it lexes as the fragment run above, with
+the hole's ordinary expression tokens between the fragments. Each fragment
+carries a delimiter at both ends, so the token stream still tiles the source.
+A `\{` is a literal brace and opens nothing; a `}` outside a hole closes nothing
+and needs no escape. A literal that does not close on its line is one `TextLit`
+plus `T004`, holes or not — the lexer splits only a literal it has already
+proved closes
+([ADR-147](../../../decisions/147-a-hole-renders-anything-because-the-program-wrote-the-hole.md)).
 
 A `_` between digits belongs to the literal: `1_000`, `3.141_592` and `1e1_0`
 are each one token. A trailing `_` is not — `1_` is `1` followed by the
@@ -100,6 +116,15 @@ Three rules keep a `.` out of a number where it should not be:
 
 A text literal's escapes are `\"`, `\\`, `` \` ``, `\n`, `\r`, `\t`, `\0`. Any
 other backslash is `T005`. A raw newline inside a text literal is not allowed.
+
+A character literal holds **exactly one** Unicode scalar value, and takes a text
+literal's escapes plus `\'` — there are no `\x` or `\u{…}` forms, because there
+are none there
+([ADR-141](../../../decisions/141-a-character-is-one-token-and-a-literal-is-a-load.md)).
+`'é'` is one character, not two bytes. A body that names no character (`''`) or
+more than one (`'ab'`) is `T007`, and an unterminated literal is `T006` naming
+its own line — the same rule a template follows. Those two codes are where
+`"##"[0]`'s silent truncation and `""[0]`'s run-time index fault went.
 
 A backtick template is **one token**, interior and all. It ends at the first
 backtick at brace depth zero — so a capture may hold a nested template
@@ -346,6 +371,7 @@ postfix      := "(" arg_list? ")"           -- same line as what it follows
 arg_list     := expr ("," expr)* ","?
 
 atom         := literal
+              | interp                      -- "a{expr}b" (§8.1)
               | "(" ")"                     -- Unit
               | "(" expr ")"                -- grouping
               | "(" expr ("," expr)* ","? ")"  -- tuple: the first "," makes it one
@@ -355,7 +381,11 @@ atom         := literal
               | break_expr | continue_expr | return_expr | match_expr
               | name_or_call
 
-literal      := IntLit | FloatLit | TextLit | BacktickTemplate | "true" | "false"
+literal      := IntLit | FloatLit | TextLit | CharLit | BacktickTemplate
+              | "true" | "false"
+
+-- `interp` is an atom, not a literal: its holes are expression subtrees, so it
+-- has children where a literal is a leaf.
 
 name_or_call := "parse" "(" expr "," parser_expr ")"
               | Ident type_arg_list? "(" arg_list? ")"
@@ -444,7 +474,7 @@ Assignment is **not** an infix operator. `=` and `+=` are statement-level, so
 
 ```text
 pattern       := "_"
-               | IntLit | TextLit | "true" | "false"
+               | IntLit | TextLit | CharLit | "true" | "false"
                | Ident                                       -- bind, or a payload-less variant
                | Ident "(" pattern ("," pattern)* ","? ")"   -- variant with payload
                | Ident "{" pattern_field_list "}"            -- record
@@ -586,7 +616,7 @@ the `repeated(P)` marker below the table:
 |---|---|
 | `lines(P)` | one parser |
 | `sections(P)` | one parser (homogeneous) |
-| `sections(name: P, …)` | named arguments only (heterogeneous); the last may be `name: repeated(P)` |
+| `sections(name: P, …)` | named arguments only (heterogeneous); any may be `name: repeated(P, N)`, and the last may be `name: repeated(P)` |
 | `csv(P)` | one parser |
 | `ws(P)` | one parser |
 | `sep("s", P)` | a string literal, then a parser |
@@ -599,13 +629,17 @@ the `repeated(P)` marker below the table:
 | `choice(Name: P, …)` | named arguments only, at least one |
 | `optional(P)` | one parser |
 | `scan(P)` | one parser |
+| `repeated(P)` | a `sections` named argument, and only its last: it takes every section left |
+| `repeated(P, N)` | any `sections` named argument: it takes exactly N sections |
 
 `skip:` takes `none`, `whitespace` or `newlines`. `fill:` takes a non-empty
 literal, which is the text a short row is padded with — it is not checked
 against the cell parser, so `grid(char, ragged, fill: 0)` pads with the
-character `0`. `repeated(P)` is not a parser in its own right: outside the
-final named argument of a `sections` call it is `I028: repeated(...) is only the
-final named argument of a sections call`.
+character `0`. `repeated(...)` is not a parser in its own right: outside a named
+argument of a `sections` call it is `I028`. The uncounted `repeated(P)` is
+greedy, so it is also `I028` anywhere but last; `repeated(P, N)` is bounded and
+may be followed. `N` is a whole-number literal of at least 1 — the parser plan is
+built when the program is compiled, so a count read from a value cannot exist.
 
 A constructor's argument-list *shape* is checked before anything is built, so a
 wrong argument is reported rather than dropped.
@@ -616,11 +650,12 @@ Appendix A of `praxis_technical_design.md` sketches this grammar. It is
 labelled "illustrative EBNF, not the final parser source", and four things in
 it are no longer true of the implementation:
 
-- **`argument := parser_expr | IDENT ":" parser_expr`** misses two forms. A
+- **`argument := parser_expr | IDENT ":" parser_expr`** misses three forms. A
   string literal is a positional argument in its own right (`sep(",", int)`,
-  `one_of("LR")`), and a named argument's value may be a **literal** rather than
-  a parser expression (`fill: 0`, `fill: "-"`). Both are productions the sketch
-  has no rule for.
+  `one_of("LR")`); a positional whole number is one too (`repeated(lines(int), 6)`);
+  and a named argument's value may be a **literal** rather than a parser
+  expression (`fill: 0`, `fill: "-"`). All three are productions the sketch has
+  no rule for.
 - **`template_part := template_literal | capture`** misses the whitespace-policy
   escapes. `\s*`, `\s+`, `\n`, `\t` and `\x20` each scan into a part of their
   own, which is what makes a leading or trailing space run in a literal mean
@@ -637,3 +672,11 @@ it are no longer true of the implementation:
 
 The sketch is otherwise accurate, including the part that reads most like an
 aspiration: a capture body really is a full `parser_expr`.
+
+Appendix A's expression grammar has one drift of its own, in the other
+direction: it has no production for an interpolated text literal, because §8.1's
+interpolation was specified in prose and unimplemented when the sketch was
+written. It is implemented now, and the `interp` production above is the shape
+of it. Note that an interpolated literal is deliberately **not** a `pattern`:
+a pattern tests a constant, and `match s { "{x}" => … }` is reported rather
+than read as a binding.

@@ -566,10 +566,11 @@ directions — `Char.to_int()` never faults, and `Int.to_char()` faults
 `Float`/`Int` rule with a third type in it, exactly as `+` above is §4.12's
 operand rule with a third type in it (ADR-086).
 
-There is no character literal (that is open decision **D19**), so **`"#"[0]` is
-how a program names a particular character**. That spelling is what makes a
-`Grid[Char]` cell comparable to a character a program chose, rather than only to
-another cell.
+A character literal is written `'#'` — one Unicode scalar, a text literal's
+escapes plus `\'` (ADR-141) — and **`"#"[0]` remains the spelling for a
+character read out of a text the program did not write down**. Either is what
+makes a `Grid[Char]` cell comparable to a character a program chose, rather than
+only to another cell.
 
 **A `Text` is iterable and yields those same `Char`s** (§4.11, ADR-099):
 
@@ -586,11 +587,18 @@ about indexing by Unicode scalar rather than by byte. There is deliberately no
 `Text.chars()`: the `for` is the spelling, and two spellings for one question is
 what ADR-077 refused.
 
-Two related gaps are open rather than answered: `Int` has no `to_text()` (only
-`Float` does, §4.12), and §8.1's interpolation is specified and unimplemented.
-Building a `Text` out of a number is not yet possible in any spelling. `Char`
-deliberately has no `to_text()` either, for that reason: the `to_text` family is
-one decision and wants taking whole (ADR-086).
+The `to_text` family was taken whole and is `Int`, `Float` and `Char`: each
+answers exactly the characters `out` writes, because the method and the printer
+share one renderer per scalar (ADR-143). `Bool` has no row and there is no
+universal `T.to_text()` — that is §8.1's question, and §8.1 answers it. A hole
+in a text literal renders **any** value, through the same `format` callback `out`
+dispatches to, so a labelled line is `out("n = {n}")` whatever `n` is (ADR-147).
+That is not a coercion for `+`: `"n = " + n` is still a type error, because a
+hole is a rendering site the program wrote and an operator is not.
+
+A sequence goes the other way through two rows rather than one (ADR-144):
+`seq.join(sep)` on a sequence of `Text`, and `chars.to_text()` on a `Vec[Char]`,
+which is how a `Grid` row is rendered back as the line it was read from.
 
 ---
 
@@ -871,7 +879,7 @@ Streaming stages and sinks:
 
 Barriers — they need the whole sequence before answering, so they are runtime calls rather than fused stages, and a chain ends at one and begins again from its result:
 
-- `sorted`, `sorted_by_key`, `unique`, `frequencies`
+- `sorted`, `sorted_by_key`, `unique`, `frequencies`, `reversed`, `join`
 
 `sorted_by_key(|item| key)` is how a keyed collection orders its items: no composite is orderable (ADR-045), so a pipeline whose item is a pair has no `sorted`, and the closure extracts an orderable key from an item that is not.
 
@@ -1188,12 +1196,26 @@ Result:
 }
 ```
 
-`repeated(parser)` may appear only as the final named argument and consumes all remaining sections:
+`repeated(parser)` consumes all remaining sections, so it may appear only as the
+final named argument:
 
 ```praxis
 var bingo = read sections(
     draws: csv(int),
     boards: repeated(matrix(int)),
+)
+```
+
+`repeated(parser, N)` consumes exactly `N` consecutive sections. It is bounded,
+so it may be any named argument and other fields may follow it. `N` is a
+whole-number literal of at least 1: the parser plan is built when the program is
+compiled, so there is no value in scope to read a count from. Fewer than `N`
+sections is a parse fault, as too few sections for a fixed field already is.
+
+```praxis
+var data = read sections(
+    shapes: repeated(block(`{i:int}:`, rows: grid(char)), 6),
+    regions: lines(`{w:int}x{h:int}: {counts:ws(int)}`),
 )
 ```
 
@@ -1426,7 +1448,7 @@ ParserExpr
   Template(parts)
   Lines(child)
   SectionsHomogeneous(child)
-  SectionsNamed(fields, repeated_tail?)
+  SectionsNamed(fields, repeated_tail?)   // each field is One(name, P) or Counted(name, N, P)
   Csv(child)
   WhitespaceSeparated(child)
   Separated(separator, child)
@@ -1961,7 +1983,8 @@ HIR resolves names and removes surface sugar:
 - `for` becomes explicit sequence iteration.
 - Pattern matching becomes a structured decision representation.
 - `read` and `parse` parser expressions become typed parser plans.
-- String interpolation becomes formatting nodes.
+- String interpolation becomes an `Interp` node: the literal fragments' decoded
+  text paired with the holes' expressions (ADR-147).
 
 ### 13.4 Typed HIR
 

@@ -75,7 +75,7 @@ yes
 
 ```text
 pattern := "_"                                            // wildcard
-         | literal                                        // Int, Text, true, false
+         | literal                                        // Int, Text, Char, true, false
          | Ident                                          // binding, or payload-less variant
          | Ident "(" [pattern ("," pattern)*] ")"         // enum variant
          | Ident "{" [pattern_field ("," pattern_field)*] "}"  // record
@@ -86,10 +86,9 @@ pattern_field := Ident [":" pattern]
 
 That is the whole grammar. Some notes on the edges:
 
-- **Literals** are integers, text, `true` and `false`. There is no float pattern,
-  no character pattern (the language has no character literal), and no negative
-  literal — `-1` in pattern position is a parse error, because `-` is an operator
-  and a pattern has no operators.
+- **Literals** are integers, text, characters, `true` and `false`. There is no
+  float pattern, and no negative literal — `-1` in pattern position is a parse
+  error, because `-` is an operator and a pattern has no operators.
 - **`_` binds nothing.** It is not an identifier named `_`: it declares no
   symbol, so two `_` arms are not a duplicate declaration (the second is merely
   unreachable), and `_` has no expression form — reading one is `P001: expected
@@ -112,6 +111,46 @@ That is the whole grammar. Some notes on the edges:
 
 **There are no guards.** `A if n > 3 => …` does not parse. Put the condition in
 the arm body, or match on the condition.
+
+## Matching on a character
+
+A `Char` pattern is a character literal, written `'#'`
+([scalars](./scalars.md)). This is the shape a grid puzzle is made of, and it is
+the reason the literal exists: before it, a `Char` had no pattern form at all —
+`"#"` in a pattern is a `Text`, and the scrutinee is a `Char`, so the arm was
+`Y001` and there was no third thing to write.
+
+```praxis
+fn cell(c: Char) -> Text {
+    match c {
+        '#' => "wall"
+        '.' => "open"
+        'S' => "start"
+        _ => "unknown"
+    }
+}
+
+var row = "#.S?"
+for c in row {
+    out(cell(c))
+}
+
+out('#' == row[0])
+```
+
+```text
+wall
+open
+start
+unknown
+true
+```
+
+`Char` is an **open** type, like `Int` and `Text`, so the `_` is required —
+there are more characters than a match can enumerate. The last line is the
+equivalence that makes this a change of spelling rather than a new type: `'#'`
+and `"#"[0]` are the same value, and subscripting a text is still how you get a
+character out of one you did not write down.
 
 ## Patterns are not only for `match`
 

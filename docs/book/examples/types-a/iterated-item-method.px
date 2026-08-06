@@ -1,0 +1,7 @@
+fn widths(rows) {
+    for row in rows {
+        out(row.len())
+    }
+}
+
+widths([[1, 2, 3], [4, 5]])

@@ -15,7 +15,10 @@
 //! no scattered type switches. A single `TUPLE`-shaped descriptor serves every
 //! tuple because the per-shape knowledge lives in the schema referenced from the
 //! payload. Structural equality and hashing (§5.5) recurse element-wise; a tuple
-//! is equatable/hashable iff every element is.
+//! is equatable/hashable iff every element is. The ordering a container imposes
+//! (ADR-138) recurses the same way — a `Map[(Int, Int), V]` walks its keys
+//! element-wise — which is a different question from the source-level `<`, and
+//! `(1, 2) < (1, 3)` is still refused at check time.
 
 use std::fmt;
 
@@ -186,10 +189,54 @@ unsafe fn tuple_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     }
 }
 
-/// Descriptor for the `Tuple` value type (M7, §4.5). Structural equality and
-/// hashing (§5.5) recurse element-wise through the per-shape schema's element
-/// descriptors. A tuple is equatable/hashable iff every element is; functions
-/// never are, so a tuple containing a function is neither.
+unsafe fn tuple_compare(a: *const u8, b: *const u8) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    // SAFETY: caller guarantees both pointers point at initialized TuplePayloads.
+    let pa = unsafe { &*(a as *const TuplePayload) };
+    let pb = unsafe { &*(b as *const TuplePayload) };
+    // A null schema is a producer bug rather than a user-reachable state, but it
+    // still has to get an answer, and the answer has to be the same one twice —
+    // so it sorts first, by a rule and not by whatever the hash table happened
+    // to yield (ADR-138).
+    match (pa.schema.is_null(), pb.schema.is_null()) {
+        (true, true) => return Ordering::Equal,
+        (true, false) => return Ordering::Less,
+        (false, true) => return Ordering::Greater,
+        (false, false) => {}
+    }
+    // Arity first, so a prefix orders before its extension — the same reason
+    // `tuple_hash` writes the length first, and what keeps `(1,)` and `(1, 0)`
+    // from colliding on their shared first element.
+    match pa.items.len().cmp(&pb.items.len()) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // SAFETY: both checked non-null above.
+    let (schema_a, schema_b) = unsafe { (&*pa.schema, &*pb.schema) };
+    // Element-wise, short-circuiting at the first difference. Each side is
+    // dispatched through *its own* schema slot, falling back to the value's own
+    // descriptor for a null one, exactly as `tuple_equals` and `tuple_format`
+    // do — and `slot_cmp` separates two slots of different types by descriptor
+    // id before it reads either payload, so a mismatched pair is ordered rather
+    // than misread.
+    for (i, (x, y)) in pa.items.iter().zip(pb.items.iter()).enumerate() {
+        let dx = schema_a.descriptor_at(i, *x);
+        let dy = schema_b.descriptor_at(i, *y);
+        // SAFETY: each element's payload matches the descriptor its schema slot
+        // names, or its own header's when the slot is null.
+        match unsafe { crate::ordering::slot_cmp(*x, *y, dx, dy) } {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    Ordering::Equal
+}
+
+/// Descriptor for the `Tuple` value type (M7, §4.5). Structural equality,
+/// hashing (§5.5) and the container ordering (ADR-138) all recurse element-wise
+/// through the per-shape schema's element descriptors. A tuple is
+/// equatable/hashable iff every element is; functions never are, so a tuple
+/// containing a function is neither.
 pub static TUPLE: TypeDescriptor = TypeDescriptor::builtin::<TuplePayload>(
     BuiltinTypeId::Tuple,
     "Tuple",
@@ -198,8 +245,10 @@ pub static TUPLE: TypeDescriptor = TypeDescriptor::builtin::<TuplePayload>(
     tuple_format,
     Some(tuple_equals),
     Some(tuple_hash),
-    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
-    None,
+    // A tuple is the workhorse composite key — `Map[(Int, Int), V]` is how a
+    // grid memo is spelled — so a container has to order one (ADR-138).
+    // `(1, 2) < (1, 3)` in source is still Y006: see `capability::supports_ord`.
+    Some(tuple_compare),
 )
 .with_owned_bytes(tuple_owned_bytes);
 
@@ -366,5 +415,74 @@ mod tests {
             left.equals(&right),
             "equivalent (Int, Int) schemas from runtime and codegen must describe the same tuple type"
         );
+    }
+
+    /// A tuple's container order is arity first, then element-wise left to
+    /// right (ADR-138). Arity first is what keeps `(1,)` ahead of `(1, 0)` — a
+    /// prefix before its extension, the same reason `tuple_hash` writes the
+    /// length first — and element-wise is what makes a `Map[(Int, Int), V]`
+    /// come out in reading order instead of by the printed pair.
+    #[test]
+    fn tuple_compare_is_arity_first_then_element_wise() {
+        let mut rt = crate::Runtime::new();
+        let ints = |n: usize| -> &'static TupleSchema {
+            Box::leak(Box::new(TupleSchema {
+                descriptors: Box::leak(
+                    vec![&crate::scalars::INT as *const TypeDescriptor; n].into_boxed_slice(),
+                ),
+            }))
+        };
+        let one_slot = ints(1);
+        let two_slots = ints(2);
+        let unknown: &'static TupleSchema = Box::leak(Box::new(TupleSchema {
+            descriptors: Box::leak(vec![std::ptr::null(); 1].into_boxed_slice()),
+        }));
+
+        let values: Vec<GcRef> = [1_i64, 0, 1, 2, 10]
+            .iter()
+            .map(|&n| rt.alloc_int(n))
+            .collect();
+        let text = rt.alloc_text("hi");
+        let mut ctx = rt.context();
+        let build =
+            |ctx: &mut crate::RuntimeContext, schema: &'static TupleSchema, items: &[GcRef]| {
+                // SAFETY: a live context, and each value matches the slot the
+                // schema names (or the slot is null and the value answers).
+                unsafe {
+                    let t = praxis_alloc_tuple(ctx, schema);
+                    for (i, v) in items.iter().enumerate() {
+                        praxis_tuple_set(ctx, t, i as i64, *v);
+                    }
+                    t
+                }
+            };
+        let cmp = |a: GcRef, b: GcRef| unsafe {
+            tuple_compare(
+                a.payload::<u8>() as *const u8,
+                b.payload::<u8>() as *const u8,
+            )
+        };
+
+        // Arity first: a one-element tuple precedes any two-element one.
+        let single = build(&mut ctx, one_slot, &[values[0]]);
+        let pair = build(&mut ctx, two_slots, &[values[0], values[1]]);
+        assert_eq!(cmp(single, pair), std::cmp::Ordering::Less);
+        assert_eq!(cmp(pair, single), std::cmp::Ordering::Greater);
+
+        // Then element-wise, through each element's own order: `(1, 2)` before
+        // `(1, 10)`, which the rendered pair would reverse.
+        let low = build(&mut ctx, two_slots, &[values[2], values[3]]);
+        let high = build(&mut ctx, two_slots, &[values[2], values[4]]);
+        assert_eq!(cmp(low, high), std::cmp::Ordering::Less);
+        assert_eq!(cmp(low, low), std::cmp::Ordering::Equal);
+
+        // A null slot whose two values are of different types is separated by
+        // descriptor id rather than read as one another's layout — the same
+        // rule `tuple_equals` applies, arriving at an order instead of `false`.
+        let an_int = build(&mut ctx, unknown, &[values[0]]);
+        let a_text = build(&mut ctx, unknown, &[text]);
+        assert_eq!(cmp(an_int, a_text), cmp(an_int, a_text));
+        assert_eq!(cmp(an_int, a_text), cmp(a_text, an_int).reverse());
+        assert_ne!(cmp(an_int, a_text), std::cmp::Ordering::Equal);
     }
 }

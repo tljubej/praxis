@@ -9,7 +9,7 @@ out(bits.len())
 out(bits.contains(64))
 out(bits.contains(65))
 
-// Members come out in ascending numeric order, not by rendered form.
+// Members come out in ascending numeric order.
 for n in bits {
     out(n)
 }

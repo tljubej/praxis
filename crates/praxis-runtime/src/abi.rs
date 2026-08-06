@@ -404,6 +404,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::BoolLoad => praxis_bool_load as *const (),
         RuntimeSymbol::CharLoad => praxis_char_load as *const (),
         RuntimeSymbol::CharToInt => praxis_char_to_int as *const (),
+        RuntimeSymbol::CharToText => praxis_char_to_text as *const (),
         RuntimeSymbol::CheckFault => praxis_check_fault as *const (),
         RuntimeSymbol::ClosureCapture => praxis_closure_capture as *const (),
         RuntimeSymbol::ClosureFnPtr => praxis_closure_fn_ptr as *const (),
@@ -457,6 +458,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::GridHeight => praxis_grid_height as *const (),
         RuntimeSymbol::GridNeighbors4 => praxis_grid_neighbors4 as *const (),
         RuntimeSymbol::GridNeighbors8 => praxis_grid_neighbors8 as *const (),
+        RuntimeSymbol::GridFilled => praxis_grid_filled as *const (),
         RuntimeSymbol::GridNew => praxis_grid_new as *const (),
         RuntimeSymbol::GridPositions => praxis_grid_positions as *const (),
         RuntimeSymbol::GridRotateLeft => praxis_grid_rotate_left as *const (),
@@ -493,6 +495,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::IntSub => praxis_int_sub as *const (),
         RuntimeSymbol::IntToChar => praxis_int_to_char as *const (),
         RuntimeSymbol::IntToFloat => praxis_int_to_float as *const (),
+        RuntimeSymbol::IntToText => praxis_int_to_text as *const (),
         RuntimeSymbol::IntWrappingAdd => praxis_int_wrapping_add as *const (),
         RuntimeSymbol::IntWrappingMul => praxis_int_wrapping_mul as *const (),
         RuntimeSymbol::IntWrappingSub => praxis_int_wrapping_sub as *const (),
@@ -554,17 +557,22 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::TupleGet => praxis_tuple_get as *const (),
         RuntimeSymbol::TupleSet => praxis_tuple_set as *const (),
         RuntimeSymbol::ValueCmp => praxis_value_cmp as *const (),
+        RuntimeSymbol::ValueToText => praxis_value_to_text as *const (),
         RuntimeSymbol::VarCellGet => praxis_var_cell_get as *const (),
         RuntimeSymbol::VarCellSet => praxis_var_cell_set as *const (),
         RuntimeSymbol::VecFrequencies => praxis_vec_frequencies as *const (),
         RuntimeSymbol::VecGet => praxis_vec_get as *const (),
         RuntimeSymbol::VecSet => praxis_vec_set as *const (),
         RuntimeSymbol::VecIsEmpty => praxis_vec_is_empty as *const (),
+        RuntimeSymbol::VecJoin => praxis_vec_join as *const (),
         RuntimeSymbol::VecLen => praxis_vec_len as *const (),
+        RuntimeSymbol::VecFilled => praxis_vec_filled as *const (),
         RuntimeSymbol::VecNew => praxis_vec_new as *const (),
         RuntimeSymbol::VecPush => praxis_vec_push as *const (),
+        RuntimeSymbol::VecReversed => praxis_vec_reversed as *const (),
         RuntimeSymbol::VecSorted => praxis_vec_sorted as *const (),
         RuntimeSymbol::VecSortedByKey => praxis_vec_sorted_by_key as *const (),
+        RuntimeSymbol::VecToText => praxis_vec_to_text as *const (),
         RuntimeSymbol::VecUnique => praxis_vec_unique as *const (),
         RuntimeSymbol::WriteStdout => praxis_write_stdout as *const (),
     };
@@ -1661,6 +1669,80 @@ pub unsafe extern "C" fn praxis_float_to_text(ctx: *mut RuntimeContext, r: GcRef
     })
 }
 
+/// `Int.to_text()` — the same digits `out()` writes (ADR-143).
+///
+/// It goes through `scalars::write_int` rather than restating the rendering,
+/// because `to_text()` and `out()` disagreeing is a defect in itself: a program
+/// that prints a value and a program that builds a string from it must produce
+/// the same characters. That is the guarantee, and the shared writer is what
+/// makes it structural rather than a thing a test happens to check.
+///
+/// Never faults: every `i64` renders, `i64::MIN` included.
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Int` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_int_to_text(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    abi_guard!("praxis_int_to_text", ctx, {
+        let v = unsafe { int_payload(r) };
+        let mut s = String::new();
+        scalars::write_int(&mut s, v);
+        // SAFETY: `s` is valid UTF-8; ctx/heap valid.
+        unsafe {
+            gc_alloc_with(
+                ctx,
+                &crate::text::TEXT,
+                std::mem::size_of::<crate::text::TextPayload>(),
+                std::mem::align_of::<crate::text::TextPayload>(),
+                |payload| {
+                    (payload as *mut crate::text::TextPayload)
+                        .write(crate::text::TextPayload::owned(s.into_boxed_str()));
+                },
+            )
+        }
+    })
+}
+
+/// `Char.to_text()` — the one-character `Text` holding this scalar, which is the
+/// same character `out()` writes (ADR-143).
+///
+/// Shares `scalars::write_char` with the descriptor's `format` callback for
+/// [`praxis_int_to_text`]'s reason. Never faults: a `CharPayload` is a validated
+/// Unicode scalar value by construction (ADR-086).
+///
+/// Reads through [`read_scalar`] with the `Char` handle rather than
+/// `int_payload`, because a `Char` payload is **four** bytes and an `i64` read
+/// would take eight of them (REP-37) — the same care [`praxis_char_to_int`]
+/// takes.
+///
+/// # Safety
+/// `ctx` must be live and wired; `r` must be a valid `Char` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_char_to_text(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
+    abi_guard!("praxis_char_to_text", ctx, {
+        // SAFETY: caller guarantees `r` is a valid `GcRef`; `read_scalar` proves
+        // the descriptor is `CHAR` before reading its four bytes.
+        let code = unsafe { read_scalar(r, scalars::CHAR_PAYLOAD) }.unwrap_or_else(|| {
+            scalar_type_mismatch("praxis_char_to_text", "Char", r.descriptor().name)
+        });
+        let mut s = String::new();
+        scalars::write_char(&mut s, code);
+        // SAFETY: `s` is valid UTF-8; ctx/heap valid.
+        unsafe {
+            gc_alloc_with(
+                ctx,
+                &crate::text::TEXT,
+                std::mem::size_of::<crate::text::TextPayload>(),
+                std::mem::align_of::<crate::text::TextPayload>(),
+                |payload| {
+                    (payload as *mut crate::text::TextPayload)
+                        .write(crate::text::TextPayload::owned(s.into_boxed_str()));
+                },
+            )
+        }
+    })
+}
+
 /// `pi()` — the constant π as a `Float` (§4.12 prelude free function).
 ///
 /// # Safety
@@ -2450,6 +2532,82 @@ pub unsafe extern "C" fn praxis_vec_new(
     })
 }
 
+/// Allocate a `Vec[T]` of `count` slots, every one holding `fill` (ADR-146's
+/// `Vec(n, fill)`).
+///
+/// Faults `InvalidSize` if `count` is negative or exceeds
+/// [`VecExtent::MAX_ITEMS`](crate::collections::VecExtent::MAX_ITEMS): the count
+/// arrives from source and would otherwise become a `usize` cast, which is
+/// RT-07's defect one dimension down (ADR-041 decision 1).
+///
+/// Faults `TypeMismatch` if the caller declared an element type that the fill is
+/// not, through the same [`adopt_or_reject`] `push` uses — a `Vec[Int]` filled
+/// with a `Float` is a mislabelled element descriptor, and every later
+/// `equals`/`hash`/`format` would read the payloads as the wrong type (P0-11). A
+/// null static descriptor adopts the fill's, which is what "the caller has no
+/// static element type" already means here.
+///
+/// **`fill` is stored `count` times, not copied `count` times.** Every slot is
+/// the same `GcRef`, so `Vec(3, Vec())` is three names for one inner `Vec`.
+/// That is the language's existing reference semantics — `outer.push(a)` twice
+/// aliases too — stated at a new site rather than a new rule (ADR-146 decision
+/// 4).
+///
+/// `count` arrives boxed rather than as a `RawI64` like [`praxis_grid_new`]'s
+/// extents: MIR lowers an argument expression to a `Gc` local, and unboxing it
+/// there would cost an `ExtractScalar` and a second shape in the codegen's
+/// allocation arm. `praxis_grid_new`'s two are `iconst` immediates with no local
+/// to unbox, which is why the two wrappers differ.
+///
+/// # Safety
+/// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
+/// a `'static TypeDescriptor` (or null); `count` must be a valid `Int` `GcRef`;
+/// `fill` must be a valid `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_vec_filled(
+    ctx: *mut RuntimeContext,
+    element_descriptor: *const TypeDescriptor,
+    count: GcRef,
+    fill: GcRef,
+) -> GcRef {
+    abi_guard!("praxis_vec_filled", ctx, {
+        // SAFETY: caller guarantees `count` is a valid Int.
+        let n = unsafe { int_payload(count) };
+        let Some(extent) = crate::collections::VecExtent::new(n) else {
+            unsafe { set_fault(ctx, RaisedFault::INVALID_SIZE) };
+            return unsafe { unit_sentinel(ctx) };
+        };
+        let mut descriptor = element_descriptor;
+        if !unsafe { adopt_or_reject(ctx, &mut descriptor, fill) } {
+            return unsafe { unit_sentinel(ctx) };
+        }
+        // `fill` is a bare `GcRef` argument, and `gc_alloc_with` may collect.
+        // Rooting it in a native scope is what keeps it addressable across the
+        // allocation — the caller's shadow frame roots it up to the call, and
+        // this roots it through it.
+        let scope = unsafe { NativeScope::new(ctx) };
+        let fill = scope.root(fill).get();
+        // SAFETY: VecPayload matches VEC's size/align and is fully initialized.
+        unsafe {
+            gc_alloc_with(
+                ctx,
+                &crate::collections::VEC,
+                std::mem::size_of::<VecPayload>(),
+                std::mem::align_of::<VecPayload>(),
+                // Built inside the initializer, which runs *after* the block is
+                // reserved: no untraced `Vec<GcRef>` is ever live across a
+                // collection.
+                |payload| {
+                    (payload as *mut VecPayload).write(VecPayload {
+                        element_descriptor: descriptor,
+                        items: ReprCVec::from_vec(vec![fill; extent.len()]),
+                    });
+                },
+            )
+        }
+    })
+}
+
 /// Allocate a nominal record (M7, §4.5) with all fields initialized to Unit.
 /// The `schema_ptr` points at a `'static RecordSchema` (built and leaked by the
 /// codegen from the record def). Fields are filled in declaration order via
@@ -2844,10 +3002,17 @@ pub unsafe extern "C" fn praxis_struct_eq(ctx: *mut RuntimeContext, a: GcRef, b:
 /// by loading its first eight payload bytes compared *addresses* (P0-12).
 ///
 /// Raises `FaultKind::TypeMismatch` and answers `0` when the two operands are
-/// not the same runtime type, or when the type has no ordering. The type
+/// not the same runtime type, or when the type has no `compare`. The type
 /// checker rejects both in well-typed code (`Y006`), so reaching either is a
 /// compiler bug — reported as a fault rather than a callback dispatched on a
 /// foreign layout.
+///
+/// The second guard is weaker than it was. ADR-138 populated `compare` on every
+/// type a `Map` key can be, including tuples and records, so a *miscompile* that
+/// lowered `(1, 2) < (1, 3)` to this wrapper would now be answered instead of
+/// faulted. `capability::supports_ord` still refuses it at `praxis check`, so no
+/// well-typed program reaches here either way; what is lost is a backstop, and
+/// it is named so nobody has to rediscover it.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `a` and `b` must be valid `GcRef`s.
@@ -3235,10 +3400,15 @@ pub unsafe extern "C" fn praxis_vec_is_empty(ctx: *mut RuntimeContext, vec: GcRe
 /// answer is a function of the input alone.
 ///
 /// Raises `FaultKind::TypeMismatch` and answers Unit when the elements are not
-/// all one type, or when that type has no ordering. The catalog row's `Ord`
+/// all one type, or when that type has no `compare`. The catalog row's `Ord`
 /// bound (ADR-093, `Bound::Kind`) rejects both at `praxis check`, so reaching
 /// either is a compiler bug — reported as a fault rather than as a callback
-/// dispatched on a foreign layout.
+/// dispatched on a foreign layout. As [`praxis_value_cmp`], the second guard
+/// covers fewer types since ADR-138 populated `compare` on the composites.
+///
+/// This is the callback a `Set` and a `Map` now order their keys through too
+/// (ADR-138), which is what makes `out(s)` and `out(s.sorted())` print one
+/// sequence — before, one was numeric and the other lexicographic.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
@@ -3454,6 +3624,135 @@ pub unsafe extern "C" fn praxis_vec_unique(ctx: *mut RuntimeContext, vec: GcRef)
             }
         }
         unsafe { vec_of(ctx, p.element_descriptor, kept.into_iter()) }
+    })
+}
+
+/// `v.reversed()` — the elements of `vec` in the opposite order, as a **new**
+/// `Vec` (ADR-145). The receiver is not touched.
+///
+/// A barrier for `praxis_vec_sorted`'s reason and not a fused stage: reversal
+/// cannot answer its first element until it has seen the last one.
+///
+/// It reads **no descriptor callback** — not `compare`, not `equals`, not
+/// `hash` — so unlike `sorted` and `unique` there is no element it can be handed
+/// that it cannot reverse, and its catalog row carries no capability bound. That
+/// is why the manifest row is `Allocates` and there is no `TypeMismatch` path
+/// here to read.
+///
+/// The element label is copied through unchanged, the null a construction site
+/// that knew no element type leaves included (REP-41).
+///
+/// # Safety
+/// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_vec_reversed(ctx: *mut RuntimeContext, vec: GcRef) -> GcRef {
+    abi_guard!("praxis_vec_reversed", ctx, {
+        // SAFETY: caller guarantees `vec` is a valid Vec.
+        let p = unsafe { vec_payload(vec) };
+        let items: Vec<GcRef> = p.items.iter().rev().copied().collect();
+        unsafe { vec_of(ctx, p.element_descriptor, items.into_iter()) }
+    })
+}
+
+/// `seq.join(sep)` — these `Text` elements concatenated with `sep` between them
+/// (ADR-144). An empty sequence answers `""`; a one-element sequence answers
+/// that element's characters and no separator.
+///
+/// Raises `FaultKind::TypeMismatch` and answers Unit when an element is not a
+/// `Text`. The catalog row bounds the item to `Text`, so reaching that is a
+/// compiler bug — reported the way `praxis_vec_sorted` reports its own, rather
+/// than reading a foreign payload as a pointer-and-length pair.
+///
+/// This does **not** render: a `Vec[Int]` is refused at `praxis check` rather
+/// than stringified here, which is what keeps `join` from being a back door
+/// around ADR-143's decision about which types have a `to_text`.
+///
+/// # Safety
+/// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef` and `sep` a
+/// valid `Text` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_vec_join(
+    ctx: *mut RuntimeContext,
+    vec: GcRef,
+    sep: GcRef,
+) -> GcRef {
+    abi_guard!("praxis_vec_join", ctx, {
+        // SAFETY: caller guarantees `vec` is a valid Vec and `sep` a valid Text.
+        let p = unsafe { vec_payload(vec) };
+        if !p
+            .items
+            .iter()
+            .all(|item| std::ptr::eq(item.descriptor(), &crate::text::TEXT))
+        {
+            unsafe { set_fault(ctx, RaisedFault::TYPE_MISMATCH) };
+            return unsafe { unit_sentinel(ctx) };
+        }
+        let separator = unsafe { text_str(sep) };
+        let mut joined = String::new();
+        for (i, item) in p.items.iter().enumerate() {
+            if i > 0 {
+                joined.push_str(separator);
+            }
+            // SAFETY: the loop above proved every element's descriptor is TEXT.
+            joined.push_str(unsafe { text_str(*item) });
+        }
+        // SAFETY: `joined` is valid UTF-8; ctx/heap valid.
+        unsafe {
+            gc_alloc_with(
+                ctx,
+                &crate::text::TEXT,
+                std::mem::size_of::<crate::text::TextPayload>(),
+                std::mem::align_of::<crate::text::TextPayload>(),
+                |payload| {
+                    (payload as *mut crate::text::TextPayload)
+                        .write(crate::text::TextPayload::owned(joined.into_boxed_str()));
+                },
+            )
+        }
+    })
+}
+
+/// `chars.to_text()` — these `Char`s as one `Text`, with nothing between them
+/// (ADR-144). The inverse of walking a `Text`, and what renders a `Grid` row
+/// back as the line it was read from.
+///
+/// Each code point is read through [`read_scalar`] with the `Char` handle, never
+/// a bare payload read: the payload is **four** bytes and an `i64` read would
+/// take eight of them (REP-37). A foreign element is `TypeMismatch` and the Unit
+/// sentinel, for [`praxis_vec_join`]'s reason.
+///
+/// # Safety
+/// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_vec_to_text(ctx: *mut RuntimeContext, vec: GcRef) -> GcRef {
+    abi_guard!("praxis_vec_to_text", ctx, {
+        // SAFETY: caller guarantees `vec` is a valid Vec.
+        let p = unsafe { vec_payload(vec) };
+        let mut rendered = String::new();
+        for item in &p.items {
+            // SAFETY: `read_scalar` proves the descriptor is `CHAR` before
+            // reading its four bytes, and answers `None` otherwise.
+            let Some(code) = (unsafe { read_scalar(*item, scalars::CHAR_PAYLOAD) }) else {
+                unsafe { set_fault(ctx, RaisedFault::TYPE_MISMATCH) };
+                return unsafe { unit_sentinel(ctx) };
+            };
+            // The descriptor's own writer, so a line rebuilt from a `Grid` row
+            // holds the characters `out` would have written one at a time.
+            scalars::write_char(&mut rendered, code);
+        }
+        // SAFETY: `rendered` is valid UTF-8; ctx/heap valid.
+        unsafe {
+            gc_alloc_with(
+                ctx,
+                &crate::text::TEXT,
+                std::mem::size_of::<crate::text::TextPayload>(),
+                std::mem::align_of::<crate::text::TextPayload>(),
+                |payload| {
+                    (payload as *mut crate::text::TextPayload)
+                        .write(crate::text::TextPayload::owned(rendered.into_boxed_str()));
+                },
+            )
+        }
     })
 }
 
@@ -4324,7 +4623,7 @@ pub unsafe extern "C" fn praxis_counter_set(
 
 /// `c.keys()` — every key, as a `Vec[T]` (REP-18).
 ///
-/// Ordered by the key's rendered form, so it is the *same* order
+/// Ordered by the key's own `compare` (ADR-138), so it is the *same* order
 /// [`praxis_counter_values`] uses and the two are index-aligned. A `HashMap`'s own
 /// order is randomized per process, so returning it would make the same program
 /// answer differently on two runs (RT-16 in a place where the value depends on it,
@@ -5031,6 +5330,71 @@ pub unsafe extern "C" fn praxis_grid_new(
     })
 }
 
+/// Allocate a `Grid[T]` of `width` × `height` cells, every one holding `fill`
+/// (ADR-146's `Grid(w, h, fill)`) — the working grid an algorithm allocates for
+/// itself: an occupancy board, a visited mask, a distance table.
+///
+/// Faults `InvalidSize` on the extents [`praxis_grid_new`] refuses, through the
+/// same [`GridExtent::new`], since this is the very allocation ADR-041 was
+/// written about and a fill changes nothing about the arithmetic.
+///
+/// **It does not call [`default_cell`], and that is the whole difference.**
+/// `praxis_grid_new` has to invent a zero value for the cell type and has none
+/// for a composite, so it raises `TypeMismatch` for a `Grid[Vec[Int]]` rather
+/// than filling it with Unit sentinels under a `Vec` descriptor. An explicit
+/// fill removes the question — the caller supplied a value of the cell type —
+/// so a grid of collections is constructible here and not there. The descriptor
+/// is still reconciled through [`adopt_or_reject`], so a *declared* cell type
+/// the fill does not match is `TypeMismatch` rather than a silent retag (P0-11).
+///
+/// Every cell is the same `GcRef`, exactly as [`praxis_vec_filled`]'s are; see
+/// its comment for why that is the language's existing rule rather than a new
+/// one. The extents arrive boxed for the reason stated there too.
+///
+/// # Safety
+/// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
+/// a `'static TypeDescriptor` (or null); `width` and `height` must be valid
+/// `Int` `GcRef`s; `fill` must be a valid `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_grid_filled(
+    ctx: *mut RuntimeContext,
+    element_descriptor: *const TypeDescriptor,
+    width: GcRef,
+    height: GcRef,
+    fill: GcRef,
+) -> GcRef {
+    abi_guard!("praxis_grid_filled", ctx, {
+        // SAFETY: caller guarantees `width` and `height` are valid Ints.
+        let (w, h) = unsafe { (int_payload(width), int_payload(height)) };
+        let Some(extent) = GridExtent::new(w, h) else {
+            unsafe { set_fault(ctx, RaisedFault::INVALID_SIZE) };
+            return unsafe { unit_sentinel(ctx) };
+        };
+        let mut descriptor = element_descriptor;
+        if !unsafe { adopt_or_reject(ctx, &mut descriptor, fill) } {
+            return unsafe { unit_sentinel(ctx) };
+        }
+        let scope = unsafe { NativeScope::new(ctx) };
+        let fill = scope.root(fill).get();
+        // SAFETY: GridPayload matches GRID's size/align and is fully initialized.
+        unsafe {
+            gc_alloc_with(
+                ctx,
+                &crate::collections::GRID,
+                std::mem::size_of::<GridPayload>(),
+                std::mem::align_of::<GridPayload>(),
+                |payload| {
+                    (payload as *mut GridPayload).write(GridPayload {
+                        element_descriptor: descriptor,
+                        items: vec![fill; extent.cells()],
+                        width: extent.width(),
+                    });
+                },
+            )
+        }
+    })
+}
+
 /// The grid width (number of columns), as a boxed Int.
 ///
 /// # Safety
@@ -5688,6 +6052,50 @@ pub unsafe extern "C" fn praxis_text_concat(ctx: *mut RuntimeContext, a: GcRef, 
                     let owned: Box<str> = joined.clone().into_boxed_str();
                     (payload as *mut crate::text::TextPayload)
                         .write(crate::text::TextPayload::owned(owned));
+                },
+            )
+        }
+    })
+}
+
+/// Render `value` into a fresh `Text`, **exactly as `out` renders it** (§8.1,
+/// ADR-147).
+///
+/// This is the whole of an interpolation hole. `"{v}"` on a `Vec[Int]` is
+/// `[1, 2, 3]` because this function and [`praxis_write_stdout`] are the same
+/// two lines with a different destination: both call [`GcRef::format`], which
+/// dispatches through the value's type descriptor. There is no second renderer
+/// here and there must never be one — writing a `write!` inline instead of
+/// calling `format` is the mistake this wrapper exists to make unnecessary, and
+/// it is the mistake ADR-143 decision 2 records for the three scalar rows.
+///
+/// That is also why a hole may hold **any** type (ADR-147 decision 2). Every
+/// `GcRef` has a descriptor and every descriptor has a `format` callback, so
+/// there is no value this can be handed that it cannot render — which is what
+/// lets inference impose no requirement on a hole at all.
+///
+/// Declared `Allocates`, never `AllocatesAndFaults`: nothing above can fail, and
+/// a `String` built by `format` is valid UTF-8 by construction, so there is
+/// nothing for an `InvalidText` fault to check. That is `praxis_text_concat`'s
+/// row exactly.
+///
+/// # Safety
+/// `ctx` must be live and wired; `value` must be a valid `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_value_to_text(ctx: *mut RuntimeContext, value: GcRef) -> GcRef {
+    abi_guard!("praxis_value_to_text", ctx, {
+        let mut s = String::new();
+        value.format(&mut s);
+        // SAFETY: `s` is valid UTF-8; ctx/heap valid.
+        unsafe {
+            gc_alloc_with(
+                ctx,
+                &crate::text::TEXT,
+                std::mem::size_of::<crate::text::TextPayload>(),
+                std::mem::align_of::<crate::text::TextPayload>(),
+                |payload| {
+                    (payload as *mut crate::text::TextPayload)
+                        .write(crate::text::TextPayload::owned(s.clone().into_boxed_str()));
                 },
             )
         }
@@ -7059,6 +7467,261 @@ mod tests {
         unsafe { drop_ctx(ctx) };
     }
 
+    /// **ADR-143.** `Int.to_text()` answers exactly what `out` writes, and the
+    /// assertion is against `out`'s own path rather than a literal.
+    ///
+    /// Comparing to `"1660"` would pass while the two renderers disagreed about
+    /// everything else; comparing to `GcRef::format`'s output cannot, because
+    /// that is the function `praxis_write_stdout` calls. `i64::MIN` is in the
+    /// list because it is the one value whose negation does not fit, and
+    /// therefore the first thing a hand-rolled renderer gets wrong.
+    #[test]
+    fn int_to_text_renders_exactly_what_out_renders() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; every receiver is an Int.
+        unsafe {
+            for v in [0_i64, 1, -1, 1660, i64::MAX, i64::MIN, UNINTERNED] {
+                let receiver = praxis_alloc_int(ctx, v);
+                let answer = praxis_int_to_text(ctx, receiver);
+                assert!(!rt.has_pending_fault(), "{v} faulted");
+                let mut printed = String::new();
+                receiver.format(&mut printed);
+                assert_eq!(answer.as_text(), printed, "to_text and out disagree on {v}");
+            }
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **ADR-143.** The same claim for `Char.to_text()`, at an interned ASCII
+    /// character and an uninterned multi-byte one.
+    ///
+    /// The multi-byte case is the one that would catch reading the four-byte
+    /// payload as an `i64` (REP-37): `'é'` is `0xE9`, and eight bytes from a
+    /// four-byte payload picks up whatever follows it.
+    #[test]
+    fn char_to_text_renders_exactly_what_out_renders() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; every receiver is a Char.
+        unsafe {
+            for c in ['#', 'a', 'é', '☃', '\u{10FFFF}'] {
+                let receiver = praxis_alloc_char(ctx, i64::from(u32::from(c)));
+                let answer = praxis_char_to_text(ctx, receiver);
+                assert!(!rt.has_pending_fault(), "{c} faulted");
+                let mut printed = String::new();
+                receiver.format(&mut printed);
+                assert_eq!(answer.as_text(), printed, "to_text and out disagree on {c}");
+                assert_eq!(answer.as_text(), c.to_string());
+            }
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **ADR-147.** An interpolation hole renders exactly what `out` writes, for
+    /// **every** type — including the ones with no `to_text()` row.
+    ///
+    /// This is the wrapper-level half of ADR-147 decision 2, and it is asserted
+    /// against `GcRef::format` — `praxis_write_stdout`'s own call — rather than
+    /// against a literal, for `int_to_text_renders_exactly_what_out_renders`'s
+    /// reason: a literal comparison passes while the two agree by coincidence.
+    ///
+    /// The receivers deliberately span a scalar, a `Text` (whose rendering is
+    /// its own characters and not a quoted form), a collection and a tuple, so a
+    /// wrapper that reached for a scalar payload instead of the descriptor fails
+    /// on the last two rather than on none of them.
+    #[test]
+    fn value_to_text_renders_exactly_what_out_renders() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; every receiver below is freshly allocated here.
+        unsafe {
+            let empty = praxis_alloc_text(ctx, std::ptr::null(), 0);
+            let hello = "hello";
+            let text = praxis_alloc_text(ctx, hello.as_ptr(), hello.len());
+            let vec = praxis_vec_new(ctx, &scalars::INT as *const _);
+            for n in [1_i64, 2, 3] {
+                let _ = praxis_vec_push(ctx, vec, praxis_alloc_int(ctx, n));
+            }
+            let receivers = [
+                praxis_alloc_int(ctx, UNINTERNED),
+                praxis_alloc_int(ctx, 0),
+                praxis_alloc_bool(ctx, 1),
+                praxis_alloc_char(ctx, i64::from(u32::from('☃'))),
+                empty,
+                text,
+                vec,
+            ];
+            for receiver in receivers {
+                let answer = praxis_value_to_text(ctx, receiver);
+                assert!(!rt.has_pending_fault(), "value_to_text faulted");
+                let mut printed = String::new();
+                receiver.format(&mut printed);
+                assert_eq!(
+                    answer.as_text(),
+                    printed,
+                    "a hole and `out` must write the same characters"
+                );
+            }
+            // The `Text` rows pin the shape a caller is most likely to assume
+            // wrong: `out("hello")` writes `hello`, not `"hello"`, so `"{s}"`
+            // must not add quotes either.
+            assert_eq!(praxis_value_to_text(ctx, text).as_text(), "hello");
+            assert_eq!(praxis_value_to_text(ctx, empty).as_text(), "");
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **ADR-144.** `join` puts the separator *between* elements and nowhere
+    /// else, which is the whole of the specification and the whole of what an
+    /// off-by-one gets wrong.
+    #[test]
+    fn vec_join_puts_the_separator_between_and_nowhere_else() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; every element and separator is a Text.
+        unsafe {
+            let cases: [(&[&str], &str, &str); 5] = [
+                (&[], ", ", ""),
+                (&["only"], ", ", "only"),
+                (&["a", "b", "c"], ", ", "a, b, c"),
+                (&["a", "b", "c"], "", "abc"),
+                (&["é", "☃"], " — ", "é — ☃"),
+            ];
+            for (items, sep, want) in cases {
+                let members: Vec<GcRef> = items.iter().map(|s| rt.alloc_text(s)).collect();
+                let vec = rt.alloc_vec(&crate::text::TEXT, members);
+                let separator = rt.alloc_text(sep);
+                let answer = praxis_vec_join(ctx, vec, separator);
+                assert!(!rt.has_pending_fault(), "{items:?} faulted");
+                assert_eq!(answer.as_text(), want);
+            }
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **ADR-144.** A non-`Text` element is `TypeMismatch` and the Unit
+    /// sentinel, not a `Text` payload read out of an `Int`.
+    ///
+    /// The catalog row's `Text` bound means only a compiler bug gets here, and
+    /// this is what that bug looks like when it does: a fault the program can
+    /// see, rather than a pointer-and-length pair read from eight bytes of
+    /// integer.
+    #[test]
+    fn vec_join_refuses_a_non_text_element() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let mixed = rt.alloc_vec(&scalars::INT, vec![rt.alloc_text("a"), rt.alloc_int(1)]);
+            let sep = rt.alloc_text(",");
+            let answer = praxis_vec_join(ctx, mixed, sep);
+            assert!(rt.has_pending_fault());
+            assert!(std::ptr::eq(answer.descriptor(), &scalars::UNIT));
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **ADR-144.** `Vec[Char].to_text()` is the characters with nothing between
+    /// them, and it agrees with `out` on each of them for ADR-143's reason: it
+    /// goes through `scalars::write_char` too.
+    #[test]
+    fn vec_to_text_renders_every_char() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired; every element is a Char.
+        unsafe {
+            for want in ["", ".", "..|", "héllo", "☃☃"] {
+                let members: Vec<GcRef> = want
+                    .chars()
+                    .map(|c| praxis_alloc_char(ctx, i64::from(u32::from(c))))
+                    .collect();
+                let vec = rt.alloc_vec(&scalars::CHAR, members);
+                let answer = praxis_vec_to_text(ctx, vec);
+                assert!(!rt.has_pending_fault(), "{want:?} faulted");
+                assert_eq!(answer.as_text(), want);
+            }
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **ADR-144.** A non-`Char` element faults rather than being read as four
+    /// bytes of something else.
+    #[test]
+    fn vec_to_text_refuses_a_non_char_element() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let mixed = rt.alloc_vec(&scalars::CHAR, vec![rt.alloc_int(65)]);
+            let answer = praxis_vec_to_text(ctx, mixed);
+            assert!(rt.has_pending_fault());
+            assert!(std::ptr::eq(answer.descriptor(), &scalars::UNIT));
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **ADR-145.** `reversed` answers a **new** `Vec` and leaves the receiver
+    /// alone — the rule every barrier in this block states, and the one a
+    /// wrapper that reversed in place would break invisibly for a caller still
+    /// holding `v`.
+    ///
+    /// The empty case is here because `praxis_vec_sorted` needs a `len() > 1`
+    /// guard for the analogous one and this needs none: there is no callback to
+    /// avoid calling.
+    #[test]
+    fn vec_reversed_answers_a_new_vec_and_leaves_the_receiver_alone() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let source = rt.alloc_vec(
+                &scalars::INT,
+                vec![rt.alloc_int(3), rt.alloc_int(1), rt.alloc_int(2)],
+            );
+            let answer = praxis_vec_reversed(ctx, source);
+            assert!(!rt.has_pending_fault());
+            let got: Vec<i64> = answer.as_vec().iter().map(|r| r.as_int()).collect();
+            assert_eq!(got, vec![2, 1, 3]);
+            let still: Vec<i64> = source.as_vec().iter().map(|r| r.as_int()).collect();
+            assert_eq!(still, vec![3, 1, 2], "the receiver is not touched");
+            assert_ne!(answer.as_ptr(), source.as_ptr());
+
+            let empty = rt.alloc_vec(&scalars::INT, vec![]);
+            assert!(praxis_vec_reversed(ctx, empty).as_vec().is_empty());
+            assert!(!rt.has_pending_fault());
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **ADR-145.** Reversal reads no descriptor callback, so a `Vec` of a type
+    /// with no `compare` reverses where `sorted` faults.
+    ///
+    /// This is the runtime half of the catalog row carrying no capability bound.
+    /// A `Unit` has no `compare` — `praxis_vec_sorted` raises `TypeMismatch` on
+    /// one — and it reverses without a word.
+    #[test]
+    fn vec_reversed_needs_no_callback_where_sorted_needs_compare() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let closures = rt.alloc_vec(
+                &crate::closures::CLOSURE,
+                vec![
+                    praxis_alloc_closure(ctx, std::ptr::null(), 0),
+                    praxis_alloc_closure(ctx, std::ptr::null(), 0),
+                ],
+            );
+            assert_eq!(praxis_vec_reversed(ctx, closures).as_vec().len(), 2);
+            assert!(!rt.has_pending_fault(), "reversal asks for no callback");
+
+            praxis_vec_sorted(ctx, closures);
+            assert!(rt.has_pending_fault(), "ordering still asks for `compare`");
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
     /// **ADR-107's pacing half, and ADR-100 §3's analogue.** [`char_ref`] must
     /// give the collector its turn on the path where it allocates *nothing*.
     ///
@@ -7457,12 +8120,14 @@ mod tests {
     fn every_scalar_boxing_wrapper_paces_the_collector() {
         // (name, a closure that performs one allocating call)
         type Call = unsafe extern "C" fn(*mut RuntimeContext, GcRef) -> GcRef;
-        let cases: [(&str, Call); 5] = [
+        let cases: [(&str, Call); 7] = [
             ("praxis_text_len", praxis_text_len),
             ("praxis_vec_len", praxis_vec_len),
             ("praxis_grid_width", praxis_grid_width),
             ("praxis_grid_height", praxis_grid_height),
             ("praxis_float_to_text", praxis_float_to_text),
+            ("praxis_int_to_text", praxis_int_to_text),
+            ("praxis_char_to_text", praxis_char_to_text),
         ];
         // One past the interned range, in whatever unit the receiver measures.
         let big = UNINTERNED as usize;
@@ -7481,6 +8146,12 @@ mod tests {
                         rt.alloc_vec(&scalars::INT, vec![rt.alloc_int(0); big])
                     }
                     "praxis_float_to_text" => praxis_alloc_float(ctx, 1.5_f64.to_bits() as i64),
+                    // The two `to_text` rows answer a fresh owned `Text` every
+                    // call whatever the receiver is, so an interned receiver is
+                    // the honest case: the allocation is the *answer*, not the
+                    // argument.
+                    "praxis_int_to_text" => praxis_alloc_int(ctx, big as i64),
+                    "praxis_char_to_text" => praxis_alloc_char(ctx, i64::from(u32::from('e'))),
                     // `width` reads the first dimension and `height` the second,
                     // so each case makes *its own* answer uninterned and leaves
                     // the other dimension at one cell.
@@ -8661,6 +9332,185 @@ mod tests {
                 (got_cells, got_width),
                 (*cells, *width),
                 "Grid[Int]({w}, {h}) shape"
+            );
+        }
+    }
+
+    /// **ADR-146.** `Vec(n, fill)` builds `n` slots, all of them the fill, and
+    /// the empty case is a `Vec` and not a fault.
+    #[test]
+    fn vec_filled_builds_n_copies_of_one_value() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        let observed: Vec<(usize, bool)> = [0_i64, 1, 7]
+            .into_iter()
+            .map(|n| unsafe {
+                let count = praxis_alloc_int(ctx, n);
+                let fill = praxis_alloc_int(ctx, 42);
+                let v = praxis_vec_filled(ctx, &crate::scalars::INT as *const _, count, fill);
+                let p = vec_payload(v);
+                // Every slot is the *same* reference, which is the aliasing
+                // ADR-146 decision 4 states rather than n copies of a value.
+                let all_same = p.items.iter().all(|item| item.as_ptr() == fill.as_ptr());
+                (p.items.len(), all_same)
+            })
+            .collect();
+        unsafe { drop_ctx(ctx) };
+
+        assert_eq!(rt.fault(), FaultKind::None, "no in-range count faults");
+        assert_eq!(observed, vec![(0, true), (1, true), (7, true)]);
+    }
+
+    /// The other half of ADR-041 decision 1, for the newtype it added: a count
+    /// the runtime cannot serve is a fault and not an allocation, and the heap
+    /// is untouched — a half-built `Vec` is as bad as a crash.
+    #[test]
+    fn vec_filled_refuses_a_negative_or_absurd_count() {
+        let absurd = crate::collections::VecExtent::MAX_ITEMS as i64 + 1;
+        for n in [-1_i64, i64::MIN, absurd, i64::MAX] {
+            let mut rt = Runtime::new();
+            let ctx = wired_ctx(&mut rt);
+            let (result, live_before, live_after, unit) = unsafe {
+                let count = praxis_alloc_int(ctx, n);
+                let fill = praxis_alloc_int(ctx, 0);
+                let before = rt.heap().stats().live_count;
+                let r = praxis_vec_filled(ctx, &crate::scalars::INT as *const _, count, fill);
+                (
+                    r,
+                    before,
+                    rt.heap().stats().live_count,
+                    rt.immortals().unit(),
+                )
+            };
+            unsafe { drop_ctx(ctx) };
+
+            assert_eq!(rt.fault(), FaultKind::InvalidSize, "Vec({n}, 0) must fault");
+            assert_eq!(
+                result.as_ptr(),
+                unit.as_ptr(),
+                "a faulted Vec({n}, 0) returns the Unit sentinel"
+            );
+            assert_eq!(
+                live_after, live_before,
+                "a rejected Vec({n}, 0) allocates nothing"
+            );
+        }
+    }
+
+    /// A declared element type the fill is not is a `TypeMismatch`, through the
+    /// same `adopt_or_reject` a `push` goes through — not a silent retag of the
+    /// collection to the fill's type, which is the P0-11 defect one level down.
+    /// A *null* static descriptor adopts instead, which is what "the caller has
+    /// no static element type" already means for `praxis_vec_new`.
+    #[test]
+    fn vec_filled_reconciles_its_element_descriptor() {
+        let mut rejecting = Runtime::new();
+        let ctx = wired_ctx(&mut rejecting);
+        unsafe {
+            let count = praxis_alloc_int(ctx, 3);
+            let text = praxis_alloc_text(ctx, b"x".as_ptr(), 1);
+            praxis_vec_filled(ctx, &crate::scalars::INT as *const _, count, text);
+            drop_ctx(ctx);
+        }
+        assert_eq!(
+            rejecting.fault(),
+            FaultKind::TypeMismatch,
+            "a `Vec[Int]` filled with a `Text` is a mislabelled element descriptor"
+        );
+
+        let mut adopting = Runtime::new();
+        let ctx = wired_ctx(&mut adopting);
+        let adopted = unsafe {
+            let count = praxis_alloc_int(ctx, 3);
+            let text = praxis_alloc_text(ctx, b"x".as_ptr(), 1);
+            let v = praxis_vec_filled(ctx, std::ptr::null(), count, text);
+            let matches = std::ptr::eq(vec_payload(v).element_descriptor, text.descriptor());
+            drop_ctx(ctx);
+            matches
+        };
+        assert_eq!(adopting.fault(), FaultKind::None);
+        assert!(
+            adopted,
+            "a null static descriptor adopts the fill's, as `praxis_vec_new` already does"
+        );
+    }
+
+    /// **ADR-146 decision 6.** `Grid(w, h, fill)` accepts a fill
+    /// `praxis_grid_new` cannot invent: `default_cell` has no zero value for a
+    /// composite and answers `TypeMismatch`, and the explicit fill is exactly
+    /// what removes the question. The contrast is the assertion — both calls
+    /// are in one test so a later change that reintroduced `default_cell` here
+    /// fails rather than passes quietly.
+    #[test]
+    fn grid_filled_accepts_a_composite_fill_where_grid_new_cannot() {
+        let mut inventing = Runtime::new();
+        let ctx = wired_ctx(&mut inventing);
+        unsafe {
+            praxis_grid_new(ctx, &crate::collections::VEC as *const _, 2, 2);
+            drop_ctx(ctx);
+        }
+        assert_eq!(
+            inventing.fault(),
+            FaultKind::TypeMismatch,
+            "`praxis_grid_new` still has no zero value for a `Vec` cell"
+        );
+
+        let mut supplied = Runtime::new();
+        let ctx = wired_ctx(&mut supplied);
+        let (cells, all_same) = unsafe {
+            let inner = praxis_vec_new(ctx, &crate::scalars::INT as *const _);
+            let (w, h) = (praxis_alloc_int(ctx, 2), praxis_alloc_int(ctx, 2));
+            let g = praxis_grid_filled(ctx, &crate::collections::VEC as *const _, w, h, inner);
+            let p = grid_payload(g);
+            let same = p.items.iter().all(|c| c.as_ptr() == inner.as_ptr());
+            let len = p.items.len();
+            drop_ctx(ctx);
+            (len, same)
+        };
+        assert_eq!(supplied.fault(), FaultKind::None);
+        assert_eq!(cells, 4, "an explicit fill builds all four cells");
+        assert!(
+            all_same,
+            "the four cells are one `Vec`, not four (ADR-146 decision 4)"
+        );
+    }
+
+    /// `Grid(w, h, fill)` takes the extents `praxis_grid_new` refuses, through
+    /// the same `GridExtent::new` — a fill changes nothing about the arithmetic
+    /// RT-07 was about.
+    #[test]
+    fn grid_filled_refuses_the_extents_grid_new_refuses() {
+        let absurd = GridExtent::MAX_CELLS as i64 + 1;
+        for (width, height) in [(-1_i64, 4_i64), (4, -1), (i64::MAX, 2), (absurd, 1)] {
+            let mut rt = Runtime::new();
+            let ctx = wired_ctx(&mut rt);
+            let (result, live_before, live_after, unit) = unsafe {
+                let (w, h) = (praxis_alloc_int(ctx, width), praxis_alloc_int(ctx, height));
+                let fill = praxis_alloc_int(ctx, 0);
+                let before = rt.heap().stats().live_count;
+                let r = praxis_grid_filled(ctx, &crate::scalars::INT as *const _, w, h, fill);
+                (
+                    r,
+                    before,
+                    rt.heap().stats().live_count,
+                    rt.immortals().unit(),
+                )
+            };
+            unsafe { drop_ctx(ctx) };
+
+            assert_eq!(
+                rt.fault(),
+                FaultKind::InvalidSize,
+                "Grid({width}, {height}, 0) must fault"
+            );
+            assert_eq!(
+                result.as_ptr(),
+                unit.as_ptr(),
+                "a faulted Grid({width}, {height}, 0) returns the Unit sentinel"
+            );
+            assert_eq!(
+                live_after, live_before,
+                "a rejected Grid({width}, {height}, 0) allocates nothing"
             );
         }
     }

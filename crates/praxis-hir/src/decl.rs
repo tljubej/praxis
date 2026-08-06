@@ -724,20 +724,12 @@ pub(crate) fn tuple_or_degenerate(db: &mut TypeDb, mut els: Vec<Type>) -> Type {
 
 /// Resolve a collection ctor name (e.g. `"Deque"`) to its [`CollectionCtor`].
 /// `Seq` is compiler-internal (§6.3) and deliberately absent.
+///
+/// The mapping itself lives on `CollectionCtor`, beside the `name()` it
+/// inverts, because MIR resolves the same names when it lowers a construction
+/// and the two written separately would be two statements of one fact.
 pub(crate) fn collection_ctor_for(name: &str) -> Option<CollectionCtor> {
-    Some(match name {
-        "Vec" => CollectionCtor::Vec,
-        "Deque" => CollectionCtor::Deque,
-        "Map" => CollectionCtor::Map,
-        "Set" => CollectionCtor::Set,
-        "Counter" => CollectionCtor::Counter,
-        "MinHeap" => CollectionCtor::MinHeap,
-        "MaxHeap" => CollectionCtor::MaxHeap,
-        "BitSet" => CollectionCtor::BitSet,
-        "Grid" => CollectionCtor::Grid,
-        "Range" => CollectionCtor::Range,
-        _ => return None,
-    })
+    CollectionCtor::from_name(name)
 }
 
 /// Whether `name` is a compiler-owned type constructor — a §6.1 collection or

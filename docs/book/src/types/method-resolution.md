@@ -317,7 +317,44 @@ in the sentence, so the wording drops the receiver half rather than printing
 The two wordings divide by whether the receiver is known, not by whether the
 call is reached. A name the catalog *does* hold stays deferred — `fn total(values)
 { values.sum() }` with no call site is clean, because `sum` exists on `Vec[T]`
-at arity 0 and a later call site may still answer it.
+at arity 0 and a later call site may still answer it. The body of a function
+nothing calls compiles, at `check` and at `run` both; it is unreachable by
+construction, since any call — even one through a value, `var g = total` then
+`g([1, 2])` — is what pins the receiver.
+
+## A receiver derived from a parameter resolves like the parameter
+
+The receiver does not have to *be* the unannotated parameter. A subscript
+result, a method result and a `for` item are receivers in their own right, and
+each resolves one step after the thing it came from
+([ADR-137](../../../decisions/137-a-deferred-receiver-resolves-in-rounds-and-the-channel-runs-to-a-fixpoint.md)):
+`fn f(v) { v[0].len() }` is `(Vec[Vec[T]]) -> Int` once a call site says what
+the rows hold.
+
+Which means the report follows too. If the call site says the element is an
+`Int`, `len` is asked of an `Int`:
+
+```praxis
+fn width(rows) {
+    rows[0].len()
+}
+
+out(width([1, 2, 3]))
+```
+
+```console
+$ praxis check derived-receiver-no-row.px --color never
+error[Y110]: no method `len` on type `Int` taking 0 argument(s)
+
+  derived-receiver-no-row.px:2:13
+  2 |     rows[0].len()
+    |             ^^^ no method `len` on type `Int` taking 0 argument(s)
+
+praxis: 1 error(s)
+```
+
+The caret is on `len` and the type named is the *element*, because that is the
+receiver the program actually built — `rows` is a perfectly good `Vec[Int]`.
 
 A subscript is a catalog row too, dispatched under the name `[]`, but it has its
 own code and wording: `s[0]` on a `Set` is `Y020`, "values of type `Set[Int]`

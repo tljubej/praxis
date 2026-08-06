@@ -38,7 +38,13 @@ pub const PRELUDE: &[PreludeEntry] = &[
         "Euler's number as a Float. A nullary function: write `e()`.",
     ),
     // Collections
-    PreludeEntry::new("Vec", "Grow, iterate, and pipeline over an ordered list."),
+    // `Vec` and `Grid` are the two constructors with a sized form, so their doc
+    // strings say both — this string is what LSP hover puts in front of the one
+    // reader who has already asked (ADR-146).
+    PreludeEntry::new(
+        "Vec",
+        "Grow, iterate, and pipeline over an ordered list. `Vec()` is empty; `Vec(n, fill)` is n copies of fill.",
+    ),
     PreludeEntry::new("Deque", "Double-ended queue."),
     PreludeEntry::new("Map", "Hash map."),
     PreludeEntry::new("Set", "Hash set."),
@@ -51,7 +57,10 @@ pub const PRELUDE: &[PreludeEntry] = &[
         "MaxHeap",
         "Priority queue yielding the largest element first.",
     ),
-    PreludeEntry::new("Grid", "2D grid with rectangular indexing."),
+    PreludeEntry::new(
+        "Grid",
+        "2D grid with rectangular indexing. `Grid()` is 0x0; `Grid(w, h, fill)` is a w-by-h board of fill.",
+    ),
     PreludeEntry::new("BitSet", "Compact set of non-negative integers."),
     // Optionality (M9). Option[T] is a polymorphic enum: Some(T) carries a
     // value, None marks absence (§4.7 — "normal domain-level absence… not an
@@ -287,6 +296,67 @@ pub fn numeric_helper(name: &str) -> Option<NumericHelper> {
     NUMERIC_HELPERS.iter().copied().find(|h| h.name == name)
 }
 
+/// The collection constructors that also have a **sized** form, in which the
+/// argument count selects the shape: `Vec(n, fill)` and `Grid(w, h, fill)`
+/// beside the nullary `Vec()` and `Grid()` (ADR-146).
+///
+/// This is the whole of the carve-out ADR-146 makes to
+/// [ADR-089](../../../docs/decisions/089-a-name-has-one-signature.md) decision
+/// 1's "a name has exactly one signature", and it is a `const` table rather
+/// than a rule anywhere so that the narrowness is a fact a reader can count.
+/// The other seven constructors are absent on purpose: a sized `Set` is `n`
+/// copies of one element in a set, which is one element, and a sized `Map` has
+/// no answer for what its keys would be. `Vec` and `Grid` are the two whose
+/// contents are addressed by position, which is what makes "n of them" mean
+/// something.
+pub const SIZED_CTORS: &[SizedCtor] = &[
+    SizedCtor::new("Vec", RuntimeSymbol::VecFilled, 1),
+    SizedCtor::new("Grid", RuntimeSymbol::GridFilled, 2),
+];
+
+/// One sized collection constructor: the source name, the wrapper its sized
+/// form lowers to, and how many of its leading arguments are extents.
+///
+/// The fill is always the last argument and always exactly one, so `extents`
+/// determines the source arity — which is why nothing here states an arity
+/// twice.
+#[derive(Clone, Copy, Debug)]
+pub struct SizedCtor {
+    pub name: &'static str,
+    pub symbol: RuntimeSymbol,
+    /// The number of leading `Int` parameters: 1 for `Vec(n, fill)`, 2 for
+    /// `Grid(w, h, fill)`.
+    pub extents: usize,
+}
+
+impl SizedCtor {
+    const fn new(name: &'static str, symbol: RuntimeSymbol, extents: usize) -> SizedCtor {
+        SizedCtor {
+            name,
+            symbol,
+            extents,
+        }
+    }
+
+    /// The source-level arity: the extents plus the one fill.
+    #[inline]
+    #[must_use]
+    pub const fn arity(&self) -> usize {
+        self.extents + 1
+    }
+}
+
+/// The sized constructor `name` denotes, or `None` for any other name —
+/// including the seven collection constructors that have no sized form.
+///
+/// The one lookup from a source name to a sized constructor. Inference reads it
+/// to build the call site's type and MIR reads it to pick the wrapper, so
+/// neither carries its own list and neither can disagree with the other about
+/// which names are sized.
+pub fn sized_ctor(name: &str) -> Option<SizedCtor> {
+    SIZED_CTORS.iter().copied().find(|c| c.name == name)
+}
+
 /// One prelude symbol: its name and a one-line description.
 #[derive(Clone, Copy, Debug)]
 pub struct PreludeEntry {
@@ -415,6 +485,74 @@ mod tests {
         let mut seen = HashSet::new();
         for h in GRAPH_HELPERS {
             assert!(seen.insert(h.symbol), "{} reuses a wrapper", h.name);
+        }
+        let mut seen = HashSet::new();
+        for c in SIZED_CTORS {
+            assert!(seen.insert(c.symbol), "{} reuses a wrapper", c.name);
+        }
+    }
+
+    /// A sized constructor is a prelude name, for the reason the numeric and
+    /// graph helpers are: a row naming a name nothing declares is a wrapper no
+    /// program can reach.
+    #[test]
+    fn every_sized_ctor_is_a_prelude_name() {
+        let prelude: HashSet<_> = PRELUDE.iter().map(|e| e.name).collect();
+        for c in SIZED_CTORS {
+            assert!(prelude.contains(c.name), "{} is not in PRELUDE", c.name);
+        }
+    }
+
+    /// The row's `extents` count and its wrapper's arity are one number,
+    /// checked against each other. The wrapper takes a context, an element
+    /// descriptor, every extent, and the fill — so the source arity plus the
+    /// descriptor slot is the wrapper's arity, and a row that grew an extent
+    /// without growing its wrapper would otherwise pass garbage in an unfilled
+    /// slot rather than failing here.
+    #[test]
+    fn a_sized_ctors_arity_is_the_wrappers_arity() {
+        assert_eq!(sized_ctor("Vec").expect("Vec is sized").arity(), 2);
+        assert_eq!(sized_ctor("Grid").expect("Grid is sized").arity(), 3);
+        for c in SIZED_CTORS {
+            assert_eq!(
+                c.arity() + 1,
+                c.symbol.arity(),
+                "{}'s row and its wrapper disagree about how many operands it takes",
+                c.name
+            );
+            let sig = c.symbol.sig();
+            assert_eq!(sig.params[0], crate::abi::AbiKind::Ctx, "{}", c.name);
+            assert_eq!(
+                sig.params[1],
+                crate::abi::AbiKind::Ptr,
+                "{}'s second slot is the static element descriptor",
+                c.name
+            );
+            assert!(
+                sig.params[2..]
+                    .iter()
+                    .all(|k| *k == crate::abi::AbiKind::Gc),
+                "{}'s extents and fill are boxed (ADR-146 decision 7)",
+                c.name
+            );
+        }
+    }
+
+    /// **Only `Vec` and `Grid` are sized**, and this is the test that keeps
+    /// ADR-089 decision 1 intact everywhere else. ADR-146 is a carve-out of
+    /// exactly two names; a third row added without reopening that decision
+    /// fails here.
+    #[test]
+    fn only_vec_and_grid_have_a_sized_form() {
+        assert_eq!(SIZED_CTORS.len(), 2);
+        for absent in [
+            "Deque", "Map", "Set", "Counter", "MinHeap", "MaxHeap", "BitSet", "Range", "Option",
+            "out", "abs", "bfs",
+        ] {
+            assert!(
+                sized_ctor(absent).is_none(),
+                "{absent} has no sized form and ADR-146 says why"
+            );
         }
     }
 

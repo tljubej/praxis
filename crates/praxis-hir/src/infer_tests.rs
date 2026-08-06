@@ -2479,6 +2479,264 @@ fn a_deferred_method_still_carries_its_receivers_own_requirements() {
     assert!(!has_type_error_with_lower(ok));
 }
 
+// --- ADR-137: the constraint channel discharges to a fixpoint ---------------
+
+/// The catalog rows inference actually selected, by method name, sorted.
+///
+/// This is the map lowering reads and nothing else (F15/HIR-02), so it is the
+/// only place a *silently* unresolved method call is visible from inference.
+/// `has_type_error_with_lower` cannot see one: an unresolved call is not a
+/// diagnostic, it is an absence, and the absence is what MIR turns into an
+/// `internal compiler error`.
+fn resolved_method_rows(text: &str) -> Vec<String> {
+    let analysis = analyze(text);
+    let mut names: Vec<String> = analysis
+        .method_refs
+        .values()
+        .map(|m| m.entry.name.to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// **ADR-137.** A method on a value *derived* from an unannotated parameter
+/// resolves exactly as one on the parameter itself.
+///
+/// `HasMethod`, `Iterable` and `HasField` are discharged by *producing* a type,
+/// and that production is what resolves the receiver of the next link. Draining
+/// one batch of dischargeable constraints therefore answered `t[i]` and dropped
+/// `t[i][j]`: `praxis check` exit 0, `praxis run` an ICE at the pipeline
+/// recognizer. Every row below is a single call site at one concrete type, so
+/// none of them is asking for polymorphism.
+///
+/// RED before the fixpoint on the four `[]`/`len` chains — `resolved_method_rows`
+/// came back one row short, which is the compiler's own account of the crash.
+///
+/// Every program here calls at the **top level**, which is the handover's own
+/// spelling and the only faithful one. Wrapping the call in a later `fn` buys a
+/// second round for free, because `infer_fn` discharges once per body — that
+/// accident is how `fn f(v) { v[0].len() }` could be made to work at HEAD, and a
+/// test written that way is green before the fix.
+#[test]
+fn a_method_on_a_derived_receiver_resolves_like_one_on_the_parameter() {
+    // The handover's two lines, and the answer inference should reach.
+    let pick = "fn pick(t, i, j) { t[i][j] }\n\
+                out(pick([[7, 8]], 0, 0))";
+    assert_eq!(
+        scheme_of(pick, "pick").as_deref(),
+        Some("(Vec[Vec[Int]], Int, Int) -> Int")
+    );
+    assert_eq!(
+        resolved_method_rows(pick),
+        vec!["[]".to_string(), "[]".to_string()],
+        "both subscripts must carry a catalog row, not just the first"
+    );
+
+    // Every row of the handover's table, including the three that already
+    // worked, so a fix that trades one shape for another is caught here.
+    for (src, rows) in [
+        // Method on the parameter — worked before.
+        ("fn f(v) { v.len() }\nout(f([1, 2, 3]))", vec!["len"]),
+        // One subscript, result returned — worked before.
+        ("fn f(v) { v[0] }\nout(f([1, 2, 3]))", vec!["[]"]),
+        // Subscript of a subscript.
+        ("fn f(v) { v[0][1] }\nout(f([[1, 2, 3]]))", vec!["[]", "[]"]),
+        // Catalog method on a subscript result.
+        (
+            "fn f(v) { v[0].len() }\nout(f([[1, 2, 3]]))",
+            vec!["[]", "len"],
+        ),
+        // Catalog method on a method result.
+        (
+            "fn f(v) { v.get(0).len() }\nout(f([[1, 2, 3]]))",
+            vec!["get", "len"],
+        ),
+        // Catalog method on the `for` item — ADR-062's own claim, tested with a
+        // method instead of arithmetic.
+        (
+            "fn f(v) -> Unit { for row in v { out(row.len()) } }\n\
+             f([[1, 2, 3], [4, 5]])",
+            vec!["len"],
+        ),
+        // Binding the intermediate first is the same program.
+        (
+            "fn pick(t, i, j) { var row = t[i]\n row[j] }\n\
+             out(pick([[7, 8]], 0, 0))",
+            vec!["[]", "[]"],
+        ),
+    ] {
+        assert!(
+            !has_type_error_with_lower(src),
+            "a well-typed derived receiver must not be a diagnostic: {src:?}"
+        );
+        assert_eq!(
+            resolved_method_rows(src),
+            rows.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
+            "every call site must carry the row lowering reads: {src:?}"
+        );
+    }
+}
+
+/// **ADR-137.** The channel runs to a *fixpoint*, not for a second round.
+///
+/// Three links deep, with the call site inside a *later function* so the extra
+/// `infer_fn` discharge that HEAD's one-batch drain gets for free is already
+/// spent. That is what makes this the test a two-round patch cannot pass: two
+/// rounds resolve `v[0]` and `v[0][0]` and still drop the `len`, exactly as one
+/// round drops the second `[]` of `t[i][j]`.
+#[test]
+fn a_chain_of_deferred_receivers_resolves_to_a_fixpoint_not_one_link() {
+    let three = "fn f(v) { v[0][0].len() }\n\
+                 fn g() -> Int { f([[[1, 2, 3]]]) }\n\
+                 out(g())";
+    assert_eq!(
+        scheme_of(three, "f").as_deref(),
+        Some("(Vec[Vec[Vec[Int]]]) -> Int")
+    );
+    assert_eq!(
+        resolved_method_rows(three),
+        vec!["[]".to_string(), "[]".to_string(), "len".to_string()]
+    );
+
+    // And deeper still, so the test is about the fixpoint rather than about the
+    // number three.
+    let five = "fn f(v) { v[0][0][0][0].len() }\n\
+                out(f([[[[[1, 2, 3]]]]]))";
+    assert!(!has_type_error_with_lower(five));
+    assert_eq!(resolved_method_rows(five).len(), 5);
+}
+
+/// **ADR-137 × ADR-093/ADR-133.** A derived receiver that resolves to a type
+/// without the row is *reported*, at `check`.
+///
+/// This is the half of the fixpoint that is not "more programs compile". The
+/// element of a `Vec[Int]` is an `Int`, which has no `len`; before the fixpoint
+/// the `HasMethod` on the subscript's result was never re-examined, so `check`
+/// exited 0 and `run` reached MIR and ICEd — precisely the check/run asymmetry
+/// ADR-133 exists to close, in one more place.
+///
+/// The two assertions are the pair the ADR-093 test uses, for its reason: the
+/// second is RED against a half-fix that re-adds a lowering backstop, which
+/// reports twice.
+#[test]
+fn a_derived_receiver_that_resolves_to_a_type_without_the_row_is_reported() {
+    for src in [
+        // A subscript result.
+        "fn f(v) { v[0].len() }\nout(f([1, 2, 3]))",
+        // A method result.
+        "fn f(v) { v.get(0).len() }\nout(f([1, 2, 3]))",
+        // A `for` item.
+        "fn f(v) -> Unit { for row in v { out(row.len()) } }\nf([1, 2, 3])",
+    ] {
+        let from_inference: Vec<String> = analyze(src)
+            .diagnostics
+            .iter()
+            .map(|d| d.code().to_string())
+            .collect();
+        assert_eq!(
+            from_inference,
+            vec!["Y110".to_string()],
+            "`praxis check` must report it, got {from_inference:?} for {src:?}"
+        );
+        let with_lowering: Vec<String> = analyze_and_lower_diags(src)
+            .iter()
+            .map(|d| d.code().to_string())
+            .collect();
+        assert_eq!(
+            with_lowering,
+            vec!["Y110".to_string()],
+            "one emitter, not two: got {with_lowering:?} for {src:?}"
+        );
+    }
+
+    // And it names the type it resolved to, so the report is about the element
+    // rather than about the collection the program wrote.
+    let diags = analyze("fn f(v) { v[0].len() }\nout(f([1, 2, 3]))").diagnostics;
+    assert_eq!(
+        diags.iter().map(|d| d.message()).collect::<Vec<_>>(),
+        vec!["no method `len` on type `Int` taking 0 argument(s)"]
+    );
+}
+
+/// **ADR-137 decision 2, the negative gate.** The fixpoint changes *when* a
+/// constraint is examined and nothing about *which* variables are pinned.
+///
+/// ADR-057 decision 5 is untouched: there is one lowered body per source
+/// function, so a receiver a method was called on is pinned to the declaration
+/// group's level and `total` is the monotype `(Vec[Int]) -> Int`. Two element
+/// types at one call site is still the `Y001` the handover asked to keep, and it
+/// is produced by unifying the callee's monotype in `infer_call` — no number of
+/// discharge rounds can reach it.
+///
+/// The second half is the other side of the same fence: a parameter no method
+/// was called on still generalizes, so the fixpoint did not pin anything new
+/// either.
+#[test]
+fn a_derived_receiver_does_not_make_the_function_generic() {
+    let two = "fn total(values) { values.sum() }\n\
+               fn main() -> Int {\n\
+                 var a = Vec()\n\
+                 a.push(1)\n\
+                 var b = Vec()\n\
+                 b.push(1.0)\n\
+                 total(a)\n\
+                 total(b)\n\
+               }";
+    assert!(
+        has_type_error_with_lower(two),
+        "ADR-057 decision 5 stands: one method call site carries one receiver"
+    );
+    assert_eq!(
+        scheme_of(
+            "fn total(values) { values.sum() }\n\
+             fn main() -> Int { var v = Vec(); v.push(1); total(v) }",
+            "total"
+        )
+        .as_deref(),
+        Some("(Vec[Int]) -> Int"),
+        "a pinned receiver is still a monotype after the fixpoint"
+    );
+
+    // More discharge rounds at the `infer_fn` point could in principle lower a
+    // level and cost a quantifier. It does not: nothing a resolving discharge
+    // touches was quantifiable in the first place.
+    let generic = "fn id(x) { x }\n\
+                   fn main() -> Int { var t = id(\"s\"); id(1) }";
+    assert_eq!(
+        scheme_of(generic, "id").as_deref(),
+        Some("forall T. (T) -> T")
+    );
+    assert!(!has_type_error_with_lower(generic));
+}
+
+/// **ADR-137 decision 2.** The pin reaches the *derived* receiver too, and
+/// always did.
+///
+/// `require_method` pins the result variable alongside the receiver, so the
+/// subscript's result was pinned before the fixpoint existed — what was missing
+/// was the round that looked at it. The proof is that `pick` refuses two element
+/// types for exactly the reason `total` does, which is the shape a fix that
+/// quantified its way out of the ICE would have accepted.
+#[test]
+fn a_derived_receiver_is_pinned_too() {
+    let two = "fn pick(t, i, j) { t[i][j] }\n\
+               out(pick([[7, 8]], 0, 0))\n\
+               out(pick([[\"a\"]], 0, 0))";
+    assert!(
+        has_type_error_with_lower(two),
+        "a derived receiver is pinned, so one `pick` cannot serve two element types"
+    );
+
+    // The `for` item, ADR-062 decision 2's own variable, refuses the same way.
+    let items = "fn widths(rows) -> Unit { for row in rows { out(row.len()) } }\n\
+                 widths([[1, 2]])\n\
+                 widths([\"ab\", \"c\"])";
+    assert!(
+        has_type_error_with_lower(items),
+        "ADR-062 decision 2's item pin survives the fixpoint"
+    );
+}
+
 /// **ADR-093.** A method that cannot resolve is reported by **inference**, and
 /// only once.
 ///
@@ -4047,6 +4305,86 @@ fn a_capture_first_seen_as_an_assignment_target_keeps_its_type() {
     assert!(
         matches!(total.kind, crate::capture::CaptureKind::ByCell),
         "a captured `var` is shared through a cell"
+    );
+}
+
+/// Handover 31 item 1, at the level where the defect was manufactured: the
+/// **outer** closure of `|a| |b| b + base` must carry `base` as a capture, with
+/// the binding's type and the right storage.
+///
+/// The type assertion is the load-bearing one. A missing capture did not fail
+/// loudly — MIR filled the inner closure's env slot with `Unit` — so the
+/// observable symptom for a captured `Text` was a well-typed program answering
+/// `Unit` at run time. A capture whose `ty` renders as anything but the
+/// binding's type is that hole reopening.
+#[test]
+fn a_curried_closures_outer_literal_carries_the_transitive_capture() {
+    use praxis_ast::AstNode;
+
+    fn outer_closure(b: &crate::TypedBlock) -> &crate::TypedExpr {
+        fn find(e: &crate::TypedExpr) -> Option<&crate::TypedExpr> {
+            if matches!(e, crate::TypedExpr::Closure { .. }) {
+                return Some(e);
+            }
+            e.children()
+                .find_map(find)
+                .or_else(|| e.blocks().find_map(find_in_block))
+        }
+        fn find_in_block(b: &crate::TypedBlock) -> Option<&crate::TypedExpr> {
+            b.stmts
+                .iter()
+                .find_map(|s| crate::stmt_exprs(s).find_map(find))
+                .or_else(|| find(&b.tail))
+        }
+        find_in_block(b).expect("the outer closure")
+    }
+
+    fn captures_of(src: &str) -> Vec<(String, String, crate::capture::CaptureKind)> {
+        let map = SourceMap::new();
+        let id = map.intern("curried_capture_test.px", src);
+        let parsed = parse(id, src);
+        let mut analysis = analyze_root(id, &parsed.tree);
+        let module = crate::lower::lower(
+            id,
+            &praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap(),
+            &mut analysis,
+        );
+        let crate::TypedItem::Fn(main) = &module.items[0];
+        let crate::TypedExpr::Closure { captures, .. } = outer_closure(&main.body) else {
+            unreachable!("outer_closure returns a closure")
+        };
+        captures
+            .iter()
+            .map(|c| (c.name.clone(), analysis.db.render(c.ty), c.kind))
+            .collect()
+    }
+
+    let bare =
+        captures_of("fn main() -> Int { var base = 10\n  var mk = |a| |b| b + base\n  mk(5)(1) }");
+    assert_eq!(bare.len(), 1, "the outer closure captures `base`: {bare:?}");
+    assert_eq!(bare[0].0, "base");
+    assert_eq!(
+        bare[0].1, "Int",
+        "the capture carries the binding's type; a `Unit` here is the silent hole"
+    );
+    assert!(matches!(bare[0].2, crate::capture::CaptureKind::ByValue));
+
+    // One pair of braces cannot change the environment.
+    let braced = captures_of(
+        "fn main() -> Int { var base = 10\n  var mk = |a| { |b| b + base }\n  mk(5)(1) }",
+    );
+    assert_eq!(bare, braced, "the two spellings lower to the same captures");
+
+    // A reassigned binding is shared through a cell, transitively too — this is
+    // the shape that dereferenced a `Unit` as a `VarCell` and took a SIGSEGV.
+    let cell = captures_of(
+        "fn main() -> Int { var base = 10\n  base = 20\n  var mk = |a| |b| b + base\n  mk(5)(1) }",
+    );
+    assert_eq!(cell.len(), 1);
+    assert_eq!(cell[0].0, "base");
+    assert!(
+        matches!(cell[0].2, crate::capture::CaptureKind::ByCell),
+        "a transitively captured reassigned `var` is shared through a cell: {cell:?}"
     );
 }
 
@@ -6232,6 +6570,116 @@ fn a_fn_that_reads_a_binding_around_it_is_reported() {
         .any(|d| d.kind() == praxis_source::DiagCode::FunctionReadsOuterBinding));
 }
 
+/// **Handover 31 item 6.** `N007` offers two ways out — a parameter or a closure
+/// — and for a **recursive** `fn` the second is one the compiler itself refuses:
+/// a closure cannot name itself, because a `var`'s initializer is resolved in the
+/// preceding environment, so `var f = |n| … f(n - 1) …` is `N001`.
+///
+/// ```praxis
+/// var memo = 1
+/// fn fact(n: Int) -> Int { if n <= 1 { memo } else { n * fact(n - 1) } }
+/// ```
+///
+/// Recursion is exactly the case where threading state through the parameter
+/// list hurts — three AoC solves reached ten, seven and five parameters doing it
+/// — so it is the case where the unfollowable half of the advice was most likely
+/// to be taken. The recursive form drops it and says why; the far commoner
+/// non-recursive form is unchanged, which is what keeps the book's own examples
+/// byte-identical.
+#[test]
+fn a_recursive_fn_is_not_told_to_use_a_closure() {
+    let n007 = |src: &str| -> Vec<praxis_source::Diagnostic> {
+        analyze_and_lower_diags(src)
+            .into_iter()
+            .filter(|d| d.kind() == praxis_source::DiagCode::FunctionReadsOuterBinding)
+            .collect()
+    };
+    let only = |src: &str| -> praxis_source::Diagnostic {
+        let mut ds = n007(src);
+        assert_eq!(ds.len(), 1, "one report per use site: {ds:?}");
+        ds.remove(0)
+    };
+    let advice = |d: &praxis_source::Diagnostic| -> Vec<String> {
+        d.suggestions()
+            .iter()
+            .filter(|s| s.replacement.is_none())
+            .map(|s| s.label.clone())
+            .collect()
+    };
+
+    // Direct recursion: the closure clause is gone, and one advisory line says
+    // which rule took it away.
+    let d = only(
+        "var memo = 1\nfn fact(n: Int) -> Int { if n <= 1 { memo } else { n * fact(n - 1) } }\n",
+    );
+    assert_eq!(
+        d.message(),
+        "`fact` cannot use `memo`: a function does not capture the bindings around it \
+         (pass `memo` as a parameter)"
+    );
+    assert_eq!(
+        advice(&d),
+        vec![
+            "`fact` calls itself, so a closure is not the way out: a closure cannot name itself \
+             (`N001`)"
+        ]
+    );
+
+    // Mutual recursion is the same cycle one edge longer, so it gets the same
+    // form — and the help names the other member, the way `N006` names the other
+    // declarations in a type cycle.
+    let d = only(
+        "var k = 2\nfn ping(n: Int) -> Int { if n <= 0 { k } else { pong(n - 1) } }\n\
+         fn pong(n: Int) -> Int { ping(n - 1) }\n",
+    );
+    assert_eq!(
+        advice(&d),
+        vec![
+            "`ping` calls itself through `pong`, so a closure is not the way out: a closure \
+             cannot name itself (`N001`)"
+        ]
+    );
+
+    // The common case, untouched: a `fn` that is not recursive has both ways out
+    // and is told both. This is the assertion the book's `.err` files depend on.
+    let d = only("var limit = 10\nfn over_limit(n: Int) -> Bool { n > limit }\n");
+    assert_eq!(
+        d.message(),
+        "`over_limit` cannot use `limit`: a function does not capture the bindings around it \
+         (pass `limit` as a parameter, or use a closure)"
+    );
+    assert!(d.suggestions().is_empty(), "no advice to add: {d:?}");
+
+    // Calling a recursive function is not being one — one edge out is not a
+    // cycle, and `caller` can perfectly well be written as a closure.
+    let d = only(
+        "var limit = 10\nfn fact(n: Int) -> Int { if n <= 1 { 1 } else { n * fact(n - 1) } }\n\
+         fn caller(n: Int) -> Int { fact(n) + limit }\n",
+    );
+    assert!(d.message().contains("or use a closure"));
+    assert!(d.suggestions().is_empty());
+
+    // The boundary is the `fn`, not the closure inside it (ADR-068 decision 2),
+    // so a closure in a recursive `fn` reading an outer binding is the recursive
+    // form: the closure that would have to name itself is `f`, not this one.
+    let d = only(
+        "var k = 1\nfn f(n: Int) -> Int { if n <= 0 { [1].map(|x| x + k).sum() } \
+         else { f(n - 1) } }\n",
+    );
+    assert!(!d.message().contains("or use a closure"));
+    assert_eq!(advice(&d).len(), 1);
+
+    // Source order is preserved: the wording is settled at the end of
+    // resolution, but the report is still pushed at the use site, so the two
+    // reports stay where the reads are and nothing cascades.
+    let diags = analyze_and_lower_diags("var x = 1\nfn f() -> Int { x + x }\n");
+    assert_eq!(diags.len(), 2, "no cascade: {diags:?}");
+    assert!(
+        diags[0].primary().span.start() < diags[1].primary().span.start(),
+        "in source order: {diags:?}"
+    );
+}
+
 /// **REP-10.** A record pattern binds each field it names at *that field's*
 /// type, and a tuple pattern binds each element at that element's.
 ///
@@ -7536,8 +7984,14 @@ fn reduces_accumulator_is_the_element_type() {
 
     // The receiver is *pinned* now, which is the other half: an unknown method
     // on it can name the type it is not on. It used to say "no type has a
-    // method `to_text`", because there was no type in hand to name.
-    let diags = analyze("fn main() -> Unit { out([1, 2].reduce(|a, b| a.to_text())) }").diagnostics;
+    // method `sqrt`", because there was no type in hand to name.
+    //
+    // `sqrt` and not `to_text`: this read `to_text` until ADR-143 gave `Int` one,
+    // at which point the call resolved and the report became the (correct) `Y001`
+    // about the accumulator. The probe has to be a name the catalog holds at this
+    // arity and `Int` does not, or `has_name_at_arity` refuses it before a
+    // receiver is ever in hand — `sqrt` is `Float`'s alone.
+    let diags = analyze("fn main() -> Unit { out([1, 2].reduce(|a, b| a.sqrt())) }").diagnostics;
     let y110 = diags
         .iter()
         .find(|d| d.code().to_string() == "Y110")
@@ -7606,4 +8060,342 @@ fn the_retired_let_keyword_is_named_rather_than_guessed_at() {
     // An ordinary near miss is untouched — the budget rule is not what was
     // wrong.
     assert!(has_name_error("out(lets)\n"));
+}
+
+// --- the character literal (ADR-141) ---
+
+#[test]
+fn a_char_literal_is_a_char() {
+    assert_eq!(expr_type("'a'"), "Char");
+    assert_eq!(expr_type("'\\n'"), "Char");
+    // Above the interned table and outside the BMP — the *type* does not care
+    // where the value lives.
+    assert_eq!(expr_type("'é'"), "Char");
+    assert_eq!(expr_type("'😀'"), "Char");
+}
+
+/// The `Y001` the whole item is named after: `match c { "#" => … }` over a
+/// `Char` scrutinee was `expected Char, found Text`, and there was no third
+/// thing to write.
+#[test]
+fn a_char_literal_pattern_unifies_with_a_char_scrutinee() {
+    assert!(!has_type_error(
+        "fn f(c: Char) -> Int { match c { '#' => 1, '.' => 2, _ => 0 } }"
+    ));
+    assert!(!has_type_error(
+        "fn f(t: Text) -> Int { match t[0] { '#' => 1, _ => 0 } }"
+    ));
+}
+
+/// **The direct gate on `pattern.rs`'s literal type.** While that arm answered
+/// `scrutinee_ty`, a `Char` pattern agreed with whatever it was asked about, so
+/// this program type-checked and then compared an `Int` payload against a
+/// `Char`'s. It passed vacuously before the literal existed, which is exactly
+/// how a hole like this survives.
+#[test]
+fn a_char_pattern_against_an_int_scrutinee_is_y001() {
+    let errs = errors_of("fn f(n: Int) -> Int { match n { 'a' => 1, _ => 0 } }");
+    assert!(
+        errs.iter().any(|e| e.contains("Y001")),
+        "expected a type error, got {errs:?}"
+    );
+    // …and the other direction, so the arm is not merely refusing everything.
+    assert!(has_type_error(
+        "fn f(c: Char) -> Int { match c { 1 => 1, _ => 0 } }"
+    ));
+}
+
+/// `'#'` and `"#"[0]` are the same value written two ways (ADR-086, ADR-141) —
+/// the equivalence that makes migrating a program from one spelling to the other
+/// safe, and the reason the literal is a spelling change and not a new type.
+#[test]
+fn a_char_literal_and_a_text_subscript_are_the_same_type() {
+    assert!(!has_type_error(
+        "fn main() -> Unit { out('#' == \"#\"[0]) }"
+    ));
+    assert!(!has_type_error("fn main() -> Unit { out('a' < 'b') }"));
+    // A `Char` is not a `Text`, which is the rule that made the workaround
+    // necessary in the first place. It has not changed.
+    assert!(has_type_error("fn main() -> Unit { out('a' == \"a\") }"));
+}
+
+/// **The first `Lit::Char` in the tree's history built from source.** `Lit::Char`
+/// has existed since M6 for the input parser's `grid(char)` and was constructed
+/// nowhere — six mentions across `praxis-hir` and `praxis-mir`, every one a match
+/// arm waiting for a producer. This is the producer.
+#[test]
+fn a_char_literal_lowers_to_a_lit_char() {
+    use praxis_ast::AstNode;
+    let lowered = |text: &str| {
+        let map = SourceMap::new();
+        let id = map.intern("char_lower_test.px", text);
+        let parsed = parse(id, text);
+        let mut analysis = analyze_root(id, &parsed.tree);
+        let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+        let module = crate::lower::lower(id, &root, &mut analysis);
+        (analysis, module)
+    };
+
+    // `'a'` is U+0061, and the type on the node is the one inference decided.
+    let (analysis, module) = lowered("var c = 'a'\nout(c)\n");
+    let entry = module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::TypedItem::Fn(f) if f.name == crate::ENTRY_NAME => Some(f),
+            _ => None,
+        })
+        .expect("an entry item");
+    let init = match &entry.body.stmts[0] {
+        crate::TypedStmt::Var { init, .. } => init,
+        other => panic!("expected a var statement, got {other:?}"),
+    };
+    match init {
+        crate::TypedExpr::Lit {
+            value: crate::Lit::Char(code),
+            ty,
+            ..
+        } => {
+            assert_eq!(*code, 0x61);
+            assert_eq!(analysis.db.render(*ty), "Char");
+        }
+        other => panic!("expected Lit::Char, got {other:?}"),
+    }
+
+    // The escape and the multi-byte scalar decode to their code points and not
+    // to their first byte — the decoder is `praxis-syntax`'s, asked here for the
+    // second time after the lexer asked it for the length.
+    for (src, code) in [("'\\n'", 0x0A_u32), ("'é'", 0xE9), ("'😀'", 0x1_F600)] {
+        let (_, module) = lowered(&format!("var c = {src}\n"));
+        let entry = module
+            .items
+            .iter()
+            .find_map(|item| match item {
+                crate::TypedItem::Fn(f) if f.name == crate::ENTRY_NAME => Some(f),
+                _ => None,
+            })
+            .expect("an entry item");
+        let init = match &entry.body.stmts[0] {
+            crate::TypedStmt::Var { init, .. } => init,
+            other => panic!("expected a var statement, got {other:?}"),
+        };
+        assert!(
+            matches!(init, crate::TypedExpr::Lit { value: crate::Lit::Char(c), .. } if *c == code),
+            "{src} must lower to U+{code:04X}, got {init:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-146: a collection constructor's arity is its shape.
+// ---------------------------------------------------------------------------
+
+/// The fill decides the element type, with nothing written down. This is the
+/// property that makes the sized form worth having as an *arity* of `Vec`
+/// rather than as a second name: one fresh variable is shared between the fill
+/// parameter and the result, so unification carries it out.
+#[test]
+fn a_sized_constructor_takes_its_element_type_from_the_fill() {
+    assert_eq!(expr_type("Vec(3, false)"), "Vec[Bool]");
+    assert_eq!(expr_type("Vec(3, 0)"), "Vec[Int]");
+    assert_eq!(expr_type("Vec(3, \"a\")"), "Vec[Text]");
+    assert_eq!(expr_type("Vec(3, '#')"), "Vec[Char]");
+    assert_eq!(expr_type("Grid(2, 3, 0)"), "Grid[Int]");
+    assert_eq!(expr_type("Grid(2, 3, false)"), "Grid[Bool]");
+    assert_eq!(expr_type("Grid(2, 3, '.')"), "Grid[Char]");
+    // A composite fill too — the case `praxis_grid_new` has no zero value for.
+    assert_eq!(expr_type("Grid(2, 2, Vec[Int]())"), "Grid[Vec[Int]]");
+    // And the empty forms are untouched, which is the half that says the
+    // seeded scheme still generalizes.
+    assert_eq!(expr_type("Vec[Int]()"), "Vec[Int]");
+    assert_eq!(expr_type("Grid[Int]()"), "Grid[Int]");
+}
+
+/// ADR-065's bracket form composes with the sized one, because written type
+/// arguments are applied to the callee's *result*. Agreement is silent;
+/// disagreement is `Y001` on the fill, not on the whole function type.
+#[test]
+fn a_written_type_argument_constrains_a_sized_constructor() {
+    assert_eq!(expr_type("Vec[Bool](3, false)"), "Vec[Bool]");
+    assert_eq!(expr_type("Grid[Char](2, 2, '.')"), "Grid[Char]");
+    assert!(has_type_error("var v = Vec[Int](3, false)\n"));
+    assert!(has_type_error("var g = Grid[Bool](2, 2, 0)\n"));
+    // The extents are `Int`s and nothing else.
+    assert!(has_type_error("var v = Vec(\"a\", 0)\n"));
+    assert!(has_type_error("var g = Grid(2, false, 0)\n"));
+}
+
+/// The wrong count reports the arity **the count selected**, which is what
+/// makes `Y024` sharper rather than blunter: `Vec(3)` used to be measured
+/// against the empty form's zero.
+#[test]
+fn a_sized_constructor_with_the_wrong_count_names_its_own_arity() {
+    for (src, expected) in [
+        (
+            "var v = Vec(3)\n",
+            "Y024: this function takes 2 argument(s), but 1 were given",
+        ),
+        (
+            "var v = Vec(1, 2, 3)\n",
+            "Y024: this function takes 2 argument(s), but 3 were given",
+        ),
+        (
+            "var g = Grid(2, 3)\n",
+            "Y024: this function takes 3 argument(s), but 2 were given",
+        ),
+        (
+            "var g = Grid(1)\n",
+            "Y024: this function takes 3 argument(s), but 1 were given",
+        ),
+    ] {
+        assert!(
+            errors_of(src).iter().any(|e| e == expected),
+            "{src:?} must report {expected:?}, got {:?}",
+            errors_of(src)
+        );
+    }
+}
+
+/// **The negative gate that keeps ADR-089 decision 1 intact everywhere else.**
+/// ADR-146 carves out exactly two names; every other constructor still takes
+/// nothing, and the diagnostic still says zero.
+#[test]
+fn only_vec_and_grid_are_sized_and_the_rest_still_take_nothing() {
+    for src in [
+        "var s = Set(3, 0)\n",
+        "var m = Map(1, 2)\n",
+        "var d = Deque(3, 0)\n",
+        "var c = Counter(3, 0)\n",
+        "var h = MinHeap(3, 0)\n",
+        "var h = MaxHeap(3, 0)\n",
+        "var b = BitSet(3)\n",
+    ] {
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.starts_with("Y024: this function takes 0 argument(s)")),
+            "{src:?} must still be measured against the nullary form, got {errors:?}"
+        );
+    }
+    // And the nullary calls of all of them still typecheck.
+    for src in [
+        "var s = Set[Int]()\n",
+        "var m = Map[Int, Int]()\n",
+        "var d = Deque[Int]()\n",
+        "var b = BitSet()\n",
+        "var v = Vec[Int]()\n",
+        "var g = Grid[Int]()\n",
+    ] {
+        assert!(errors_of(src).is_empty(), "{src:?}: {:?}", errors_of(src));
+    }
+}
+
+/// A binding that shadows a constructor name is called, not constructed
+/// (HIR-03). The sized table is consulted only for a `SymbolKind::Builtin`
+/// resolution, so the closure's own signature is what the call is checked
+/// against — including its arity.
+#[test]
+fn a_shadowed_constructor_name_is_not_a_sized_constructor() {
+    let shadowed = "var Vec = |n: Int, f: Bool| n\nvar probe = Vec(3, false)\n";
+    assert_eq!(
+        scheme_of(shadowed, "probe").as_deref(),
+        Some("Int"),
+        "the shadow's own return type, not `Vec[Bool]`"
+    );
+    // And its arity is the closure's, so a two-argument shadow refuses three.
+    assert!(
+        errors_of("var Vec = |n: Int, f: Bool| n\nvar p = Vec(1, true, 2)\n")
+            .iter()
+            .any(|e| e.starts_with("Y024"))
+    );
+}
+
+/// **The fact ADR-146 decision 2 leans on.** A collection constructor has no
+/// function value, so the second of ADR-089's two grounds — that an overloaded
+/// name has no single closure value — cannot reach it. If this ever stops being
+/// `Y022`, the carve-out needs rearguing.
+#[test]
+fn a_constructor_still_has_no_function_value() {
+    for name in ["Vec", "Grid", "Set", "Map"] {
+        let errors = errors_of(&format!("var f = {name}\n"));
+        assert!(
+            errors.iter().any(|e| e.starts_with("Y022")),
+            "`{name}` in value position must still be Y022, got {errors:?}"
+        );
+    }
+}
+
+// --- string interpolation (§8.1, ADR-147) ---------------------------------
+
+/// **The gate for ADR-147 decision 3**, and the reason that decision needed
+/// writing at all.
+///
+/// ADR-085 decision 2 refused an implicit conversion to `Text` for `+`, and
+/// ADR-143 decision 4 recorded that a universal rendering was entangled with
+/// that refusal — "adding it as a rider would settle that by accident". ADR-147
+/// settles it on purpose, and the settlement is that the two are *complements*:
+/// a hole is a rendering site the program wrote, and `+` is not one.
+///
+/// Both halves are asserted from **one** source file, so an edit that "unifies"
+/// the two by relaxing `+` cannot pass this by only being run against the half
+/// it did not change.
+#[test]
+fn text_plus_an_int_is_still_y001_beside_a_hole_that_renders_it() {
+    let src = "fn main() {\n    var n = 3\n    out(\"n = {n}\")\n    out(\"n = \" + n)\n}\n";
+    let errors = errors_of(src);
+    assert_eq!(
+        errors.len(),
+        1,
+        "the hole is clean and the `+` is not: {errors:?}"
+    );
+    assert!(
+        errors[0].starts_with("Y001") && errors[0].contains("expected Text, found Int"),
+        "`+` must still refuse an Int operand (ADR-085 decision 2), got {errors:?}"
+    );
+}
+
+/// A hole imposes **no** requirement on what it holds (ADR-147 decision 2).
+/// Every one of these is a type that has no `to_text()` row and never will, so
+/// this also pins that the feature is not the desugar-through-`to_text()` route
+/// ADR-143 decision 5 proposed.
+#[test]
+fn a_hole_accepts_any_type() {
+    for src in [
+        "fn main() { var v = [1, 2, 3]\n    out(\"{v}\") }",
+        "fn main() { var t = (1, \"x\")\n    out(\"{t}\") }",
+        "fn main() { var b = true\n    out(\"{b}\") }",
+        "fn main() { var f = 1.5\n    out(\"{f}\") }",
+        "fn main() { var c = '#'\n    out(\"{c}\") }",
+        "fn main() { var s = Set[Int]()\n    out(\"{s}\") }",
+        "fn main() { var u = ()\n    out(\"{u}\") }",
+    ] {
+        assert!(errors_of(src).is_empty(), "{src}: {:?}", errors_of(src));
+    }
+}
+
+/// An interpolated literal is `Text`, so it composes with everything `Text`
+/// composes with — `+`, a `Text`-annotated binding, a `Text` parameter.
+#[test]
+fn an_interpolated_literal_is_text() {
+    assert_eq!(
+        scheme_of("var n = 1\nvar s = \"n = {n}\"\n", "s").as_deref(),
+        Some("Text")
+    );
+    assert!(errors_of("var n = 1\nvar s: Text = \"{n}\" + \"!\"\n").is_empty());
+}
+
+/// A hole is inferred **for its own sake**, so a mistake inside one is reported
+/// where it is written rather than swallowed by the universal rendering. This is
+/// the half "a hole accepts any type" could be mistaken for removing.
+#[test]
+fn a_mistake_inside_a_hole_is_still_reported() {
+    // An unknown name is `N001`, from the resolver walking into the hole.
+    assert!(has_name_error("fn main() { out(\"{nope}\") }"));
+    // And a type error inside the hole is the type error it would be anywhere.
+    let errors = errors_of("fn main() { var n = 1\n    out(\"{n + true}\") }");
+    assert!(
+        errors.iter().any(|e| e.starts_with("Y001")),
+        "expected the hole's own mismatch, got {errors:?}"
+    );
 }

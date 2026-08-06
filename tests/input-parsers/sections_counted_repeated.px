@@ -1,0 +1,33 @@
+// Input-parser fixture: a counted `repeated(P, N)` is bounded, so a fixed
+// field can follow it (§7.5).
+//
+// This is the shape of an AoC day-12 input in miniature: a known number of
+// identically-shaped blocks, then a section of something else entirely. Before
+// the counted form there was no spelling for it — an unbounded
+// `repeated(block(...))` takes every section that is left, so `regions:` after
+// it was `I028`, and the workaround was to name each block section separately
+// and re-collect the fields by hand afterwards.
+//
+// The two halves of the rule are both here: the counted group is *followed*,
+// which is the point, and the section after it is the one the count leaves
+// standing rather than the first one that happens to look different.
+fn main() {
+    var data = read sections(
+        shapes: repeated(block(`{i:int}:`, rows: grid(char)), 2),
+        regions: lines(`{w:int}x{h:int}: {counts:ws(int)}`),
+    )
+
+    out(data.shapes.len())
+    // Each shape kept its own header and its own grid: a group is a `Vec` of
+    // whatever the repeated parser produces, not a flattening of them.
+    for shape in data.shapes {
+        out(shape.i)
+        out(shape.rows.find_all("#"[0]).len())
+    }
+
+    // And the field after the group read the section the count left, which is
+    // the whole claim the unbounded tail cannot make.
+    out(data.regions.len())
+    out(data.regions.get(0).w * data.regions.get(0).h)
+    out(data.regions.get(1).counts)
+}

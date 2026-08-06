@@ -37,6 +37,7 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(vec_len())
         .entry(vec_get())
         .entry(vec_is_empty())
+        .entry(vec_to_text())
         .entry(deque_push_front())
         .entry(deque_push_back())
         .entry(deque_pop_front())
@@ -109,7 +110,9 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(seq_sorted())
         .entry(seq_sorted_by_key())
         .entry(seq_unique())
+        .entry(seq_reversed())
         .entry(seq_frequencies())
+        .entry(seq_join())
         // M8-WS11: the remaining non-barrier combinators. Each is an intrinsic
         // fused by the MIR pipeline recognizer.
         .entry(seq_take())
@@ -166,6 +169,10 @@ pub fn builtin_catalog() -> MethodCatalog {
         // reason §4.12 writes Float.to_int/Int.to_float as one.
         .entry(char_to_int())
         .entry(int_to_char())
+        // The other two thirds of the `to_text` family (ADR-143). `Float`'s row
+        // is above; all three share one renderer with `out`.
+        .entry(int_to_text())
+        .entry(char_to_text())
         .entry(int_wrapping_add())
         .entry(int_saturating_add())
         .entry(int_checked_add())
@@ -775,6 +782,47 @@ fn int_to_float() -> MethodEntry {
     }
 }
 
+// --- the `to_text` family (ADR-143) -----------------------------------------
+//
+// Three rows — `Int`, `Float`, `Char` — and the family is closed at three.
+//
+// **Each answers the characters `out` writes, by construction.** The wrapper
+// behind each row calls the same `scalars::write_*` function the type
+// descriptor's `format` callback calls, so there is one renderer per scalar with
+// two callers rather than two renderers that have to be kept in agreement. A
+// program that prints a value and a program that builds a `Text` from it
+// disagreeing is the defect this shape makes unrepresentable; §4.12's
+// shortest-round-trip rule for `Float` is the one that would have drifted first.
+//
+// **Deliberately absent, each for its own reason**, in the convention the Char
+// conversion block below uses:
+//
+// - **`Bool.to_text()`.** No design-doc surface asks for one, which is what
+//   REP-46 refused to invent rows past. `if b { "true" } else { "false" }` says
+//   it, and says which spelling the program wanted.
+// - **A universal `T.to_text()`.** That is §8.1 interpolation's question, not
+//   this one: a hole that stringifies *any* value needs a rendering conversion
+//   defined on every type, which is the implicit conversion to `Text` that
+//   ADR-085 decision 2 refused for `+`. It wants its own decision.
+//
+// §8.1's interpolation itself stays specified and unimplemented. These rows make
+// it cheaper rather than redundant — with `Int`, `Float`, `Char` and `Text` all
+// covered, `"a{n}b"` can desugar to `"a" + n.to_text() + "b"` and needs no new
+// runtime path.
+
+fn int_to_text() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Int),
+        name: "to_text",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Text),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntToText),
+        doc: "Format as Text — the same digits `out` writes (ADR-143).",
+        stability: Stability::Stable,
+    }
+}
+
 // --- Char conversions (ADR-086) ----------------------------------------------
 //
 // The `Char`/`Int` pair, written as a pair for the reason §4.12 writes
@@ -794,12 +842,6 @@ fn int_to_float() -> MethodEntry {
 // `_add` trio's comment below uses, so an omission is recorded where a reader
 // looks for it rather than only in a commit message:
 //
-// - **`Char.to_text()`.** §4.13 records a standing gap in the design doc's own
-//   words: `Int` has no `to_text()` either, and §8.1's interpolation is
-//   specified and unimplemented. The `to_text` family is one decision and wants
-//   taking whole. Adding it here would also give a second spelling for "is this
-//   character a `#`" (`t[i].to_text() == "#"` beside `t[i] == "#"[0]`), and two
-//   spellings for one question is what ADR-077 refused.
 // - **`is_digit`, `is_alpha`, `to_upper`, `to_lower`.** No design-doc surface
 //   asks for any of them and `to_int()` expresses every one. Four invented rows
 //   is exactly what REP-46 refused with `wrapping_sub`/`_mul`.
@@ -808,6 +850,16 @@ fn int_to_float() -> MethodEntry {
 //   `praxis_text_len`/`praxis_text_get` pair. A `chars()` row would be a second
 //   spelling for one question, which is what ADR-077 refused. This note used to
 //   record the `for` as a gap alongside it; that half is closed.
+//
+// **`Char.to_text()` used to be listed here and no longer is** (ADR-143). The
+// argument for its absence was that it gives a second spelling for "is this
+// character a `#`" — `t[i].to_text() == "#"` beside `t[i] == "#"[0]` — and that
+// ADR-077 refuses two spellings for one question. It does, but this is not one:
+// ADR-077 refused two *accessors*, and the comparison through `to_text` is not a
+// second way to ask the question so much as a worse one, allocating a `Text` to
+// answer what a scalar compare already answers. The question `to_text` is here
+// for is the other direction — producing output text — and that had no spelling
+// at all.
 
 fn char_to_int() -> MethodEntry {
     MethodEntry {
@@ -818,6 +870,20 @@ fn char_to_int() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CharToInt),
         doc: "The Unicode scalar value, as an `Int`. Never faults (ADR-086).",
+        stability: Stability::Stable,
+    }
+}
+
+fn char_to_text() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Scalar(ScalarType::Char),
+        name: "to_text",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Text),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CharToText),
+        doc: "The one-character Text holding this scalar — the same character \
+              `out` writes. Never faults (ADR-143).",
         stability: Stability::Stable,
     }
 }
@@ -1029,6 +1095,40 @@ fn vec_is_empty() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecIsEmpty),
         doc: "True iff the vector has no elements.",
+        stability: Stability::Stable,
+    }
+}
+
+/// `chars.to_text()` — a sequence of `Char`s as one `Text` (ADR-144), which is
+/// what renders `g.row(y)` back as the line it was read from.
+///
+/// **On `Vec[Char]` and not on the generic `Iterable` receiver**, which is the
+/// one thing about this row a reader cannot re-derive. `Text` is one of the ten
+/// pipeline receivers, so an `Iterable.to_text/0` row would sit at `(name,
+/// arity)` beside every scalar `to_text` the catalog has and beside any future
+/// `Text.to_text` — and `MethodCatalogBuilder::finish` answers
+/// `AmbiguousWithIterable` to exactly that. A concrete `Vec` receiver is safe
+/// against all of them, and a `Set[Char]` or a `Grid[Char]` row would be
+/// answering a different question anyway: a sequence of characters becomes a
+/// line because it has an *order*.
+///
+/// The element is a **bounded variable** rather than a literal `Char`, for
+/// `map_of_k_int_value`'s reason: the bound pins an unresolved element type
+/// instead of merely permitting it, so `var v = Vec()` followed by `v.to_text()`
+/// gives `v` a `Char` element type, and `[1, 2].to_text()` reports `expected
+/// Char, found Int` at the method name rather than "no method `to_text`".
+fn vec_to_text() -> MethodEntry {
+    MethodEntry {
+        receiver: TypePattern::Collection {
+            ctor: CollectionCtor::Vec,
+            args: vec![TypePattern::is_scalar("T", ScalarType::Char)],
+        },
+        name: "to_text",
+        params: vec![],
+        result: TypePattern::Scalar(ScalarType::Text),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecToText),
+        doc: "These Chars as one Text, with nothing between them (ADR-144).",
         stability: Stability::Stable,
     }
 }
@@ -2051,6 +2151,26 @@ fn seq_count_if() -> MethodEntry {
 // `set.map(f).sorted()` legal and `set.sorted()` a `Y110`, which is a rule
 // nobody can hold in their head.
 //
+// **`reversed` is a barrier for the definition's own reason** (ADR-145): it
+// cannot answer its first element until it has seen the last one. A
+// `classify_link` arm would be classified on name and arity alone and applied
+// wherever the name appears in a chain, and `v.filter(p).reversed()` does not
+// know the filtered length up front — so a fused reverse would be unsound
+// anywhere but immediately adjacent to the source. Walking `emit_iter_item` at
+// `len - 1 - idx` for that source-adjacent case is a real optimization and a
+// deliberate non-goal here: a row has exactly one `MethodLowering`, and the
+// general case has to keep working.
+//
+// **`join` is one row, on the generic receiver, with its item bounded to
+// `Text`** (ADR-144). The bound is on the item and not on a second row because
+// two `Iterable` rows differing only in their item bound are not duplicates —
+// `finish` accepts them, and dispatch would then resolve by insertion order,
+// which is the precedence rule ADR-127 decision 6 refuses. A concrete
+// `Vec[Char].join/1` beside the generic row is refused outright as
+// `AmbiguousWithIterable`. So the sequence-of-`Char` case is a differently-named
+// row — `Vec[Char].to_text()`, defined beside `vec_is_empty` — and a
+// sequence-of-`Int` joins by rendering first: `ns.map(|n| n.to_text()).join(",")`.
+//
 // **`chunks` and `windows` are still deferred, and here is the reason.** Both
 // answer `Vec[Vec[T]]`, so their wrapper has to label the *outer* Vec with
 // `collections::VEC` while the inner ones keep the element descriptor — a
@@ -2095,6 +2215,63 @@ fn seq_unique() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecUnique),
         doc: "A new Vec with duplicate elements removed, keeping first occurrences.",
+        stability: Stability::Stable,
+    }
+}
+
+/// `reversed` — a new `Vec` holding these elements back to front (ADR-145).
+///
+/// **No capability bound at all**, and that is the row's own claim rather than
+/// an omission: reversal reads no descriptor callback, so where `sorted` needs
+/// `Ord` and `unique` needs `HashStable`, a `Vec` of closures reverses. The
+/// wrapper cannot fail either, which is why its manifest row is `Allocates`.
+///
+/// It answers `Vec[T]` on every one of the ten receivers — including a `Range`,
+/// so `for y in (0..n).reversed()` is the countdown. That does *not* reopen
+/// ADR-059 decision 3: no descending `Range` value exists, `RangeVal::new` still
+/// clamps, and a pipeline's currency is `Vec` (ADR-127 decision 6).
+fn seq_reversed() -> MethodEntry {
+    MethodEntry {
+        receiver: iterable_of_t(),
+        name: "reversed",
+        params: vec![],
+        result: vec_of_t(),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecReversed),
+        doc: "A new Vec holding these elements in reverse order.",
+        stability: Stability::Stable,
+    }
+}
+
+/// An iterable of `Text`s, spelled as a bounded variable for
+/// [`iterable_of_int_elem`]'s reason: the row still *matches* a receiver whose
+/// item is a `Char` and rejects it with `expected Text, found Char` at the
+/// method name, rather than "no method `join` on this type".
+fn iterable_of_text_elem() -> TypePattern {
+    TypePattern::iterable(TypePattern::is_scalar("T", ScalarType::Text))
+}
+
+/// `join` — these `Text` elements concatenated with a separator between them
+/// (ADR-144).
+///
+/// The separator is a required argument and not an optional one, because the
+/// catalog has no optional arguments: a row is `(receiver, name, arity)`, and
+/// `join()` beside `join(Text)` would be two rows for one question. `join("")`
+/// is the no-separator spelling and says so where it is written.
+///
+/// **It renders nothing.** A `Vec[Int]` is a type error at the item, not a
+/// sequence quietly stringified — which is what keeps `join` from being a back
+/// door around ADR-143's decision about which types have a `to_text`. The
+/// spelling is `ns.map(|n| n.to_text()).join(", ")`, and it says that it renders.
+fn seq_join() -> MethodEntry {
+    MethodEntry {
+        receiver: iterable_of_text_elem(),
+        name: "join",
+        params: vec![TypePattern::Scalar(ScalarType::Text)],
+        result: TypePattern::Scalar(ScalarType::Text),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecJoin),
+        doc: "These Text items concatenated with `sep` between them.",
         stability: Stability::Stable,
     }
 }
@@ -2768,9 +2945,12 @@ mod tests {
     #[test]
     fn every_pipeline_combinator_is_one_row_on_the_generic_receiver() {
         let cat = builtin_catalog();
-        // The twenty-three fused stages and sinks, the four barriers, and the
+        // The twenty-three fused stages and sinks, the six barriers, and the
         // eight conversions. `count` is here once and checked at both arities
         // by `a_keyed_collection_enumerates_and_count_has_two_arities`.
+        //
+        // `to_text` is deliberately *not* in this list: it has no generic row,
+        // and the reason is written on `vec_to_text` (ADR-144).
         let combinators = [
             "map",
             "filter",
@@ -2797,7 +2977,9 @@ mod tests {
             "sorted",
             "sorted_by_key",
             "unique",
+            "reversed",
             "frequencies",
+            "join",
             "to_vec",
             "to_set",
             "to_map",
@@ -3433,6 +3615,115 @@ mod tests {
         assert!(
             !to_int.can_fault(),
             "every Unicode scalar value fits an Int, so the widening cannot"
+        );
+    }
+
+    /// **ADR-143.** The `to_text` family is `Int`, `Float` and `Char`, and it is
+    /// closed at three.
+    ///
+    /// The closure is the half worth asserting: two thirds of this family were
+    /// absent for two milestones on the argument that it "wants taking whole",
+    /// and the next reader to arrive with a `Bool.to_text()` or a universal one
+    /// should meet a failing test rather than an empty space. Adding either is a
+    /// decision, not a completion.
+    #[test]
+    fn the_to_text_family_is_int_float_and_char() {
+        let cat = builtin_catalog();
+        for scalar in [ScalarType::Int, ScalarType::Float, ScalarType::Char] {
+            let receiver = TypePattern::Scalar(scalar);
+            let row = cat
+                .by_receiver_and_name(&receiver, "to_text")
+                .next()
+                .unwrap_or_else(|| panic!("{scalar:?}.to_text exists"));
+            assert_eq!(row.result, TypePattern::Scalar(ScalarType::Text));
+            assert_eq!(row.purity, Purity::Pure);
+            assert!(row.allocates(), "{scalar:?}.to_text answers a fresh Text");
+            // Each renders a payload that was validated at construction, so
+            // there is nothing left to fault on — and a faulting row would put a
+            // `CheckFault` after every call site that can never fire.
+            assert!(!row.can_fault(), "{scalar:?}.to_text cannot fail");
+        }
+        for scalar in [ScalarType::Bool, ScalarType::Byte, ScalarType::Text] {
+            let receiver = TypePattern::Scalar(scalar);
+            assert_eq!(
+                cat.by_receiver_and_name(&receiver, "to_text").count(),
+                0,
+                "the `to_text` family is three scalars; {scalar:?} is not one of \
+                 them, and a universal `to_text` is §8.1 interpolation's question"
+            );
+        }
+    }
+
+    /// **ADR-144.** `join` is one row on the generic receiver bounded to `Text`
+    /// items; the sequence-of-`Char` case is `Vec[Char].to_text()` under a
+    /// different name.
+    ///
+    /// The two negatives are the point. A concrete `Vec[Char].join/1` beside the
+    /// generic row is refused by `finish` as `AmbiguousWithIterable`, and a
+    /// second `Iterable` row differing only in its item bound would resolve by
+    /// insertion order — so the surface had to be one `join` plus a different
+    /// name, and this says the shape was chosen rather than settled for.
+    #[test]
+    fn join_is_one_row_and_a_sequence_of_chars_has_its_own_name() {
+        let cat = builtin_catalog();
+
+        let join: Vec<_> = cat.entries().iter().filter(|e| e.name == "join").collect();
+        assert_eq!(join.len(), 1, "`join` is one row");
+        assert_eq!(join[0].receiver, iterable_of_text_elem());
+        assert_eq!(join[0].params, vec![TypePattern::Scalar(ScalarType::Text)]);
+        assert_eq!(join[0].result, TypePattern::Scalar(ScalarType::Text));
+
+        // No `to_text` row generalizes. It cannot: `Text` is one of the ten
+        // pipeline receivers, so an `Iterable.to_text/0` would shadow every
+        // scalar row of ADR-143's family at once.
+        assert!(
+            !cat.entries()
+                .iter()
+                .any(|e| e.name == "to_text" && matches!(e.receiver, TypePattern::Iterable { .. })),
+            "an `Iterable.to_text` would collide with the scalar `to_text` rows"
+        );
+        let vec_of_char = TypePattern::Collection {
+            ctor: CollectionCtor::Vec,
+            args: vec![TypePattern::is_scalar("T", ScalarType::Char)],
+        };
+        let chars = cat
+            .by_receiver_and_name(&vec_of_char, "to_text")
+            .next()
+            .expect("Vec[Char].to_text exists");
+        assert_eq!(chars.result, TypePattern::Scalar(ScalarType::Text));
+        assert!(chars.params.is_empty());
+    }
+
+    /// **ADR-145.** `reversed` carries no capability bound, and that is the
+    /// row's claim rather than an oversight.
+    ///
+    /// `sorted` needs `Ord` because it calls `compare`, `unique` needs
+    /// `HashStable` because it calls `hash` and `equals`. Reversal calls
+    /// nothing, so a `Vec` of closures reverses — and a later edit that "tidies
+    /// up" by giving it a bound to match its neighbours would take that away
+    /// with no wrapper behaviour to justify it.
+    #[test]
+    fn reversed_is_a_barrier_with_no_bound_on_its_element() {
+        let cat = builtin_catalog();
+        let receiver = iterable_of_t();
+        let row = cat
+            .by_receiver_and_name(&receiver, "reversed")
+            .next()
+            .expect("Iterable.reversed exists");
+        assert_eq!(row.result, vec_of_t());
+        assert_eq!(row.purity, Purity::Pure);
+        assert!(row.bounds().is_empty(), "reversal reads no callback");
+        assert!(
+            !row.can_fault(),
+            "there is no element `reversed` can be handed that it cannot reverse"
+        );
+        assert!(
+            matches!(
+                row.lowering,
+                MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecReversed)
+            ),
+            "a barrier is a runtime call, not a fused stage: reversal cannot \
+             answer its first element until it has seen the last"
         );
     }
 

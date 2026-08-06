@@ -1,10 +1,15 @@
-// The four combinators that need the whole sequence before they answer.
+// The six combinators that need the whole sequence before they answer.
 fn main() {
     var v = [3, 1, 4, 1, 5, 9, 2, 6, 5]
 
     out(v.sorted())
     out(v.unique())
+    out(v.reversed())
     out(v.frequencies())
+    out(["a", "b", "c"].join(", "))
+
+    // A countdown is a reversed range: `5..0` is empty, not descending.
+    out((0..5).reversed())
 
     // A chain ends at a barrier and begins again from its result.
     out(v.filter(|x| x > 2).sorted().take(3))

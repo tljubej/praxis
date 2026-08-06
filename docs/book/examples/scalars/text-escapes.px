@@ -1,9 +1,12 @@
-// The six escapes a text literal decodes.
+// The eight escapes a text literal decodes.
 out("a\tb")
 out("line\nbreak")
 out("quote: \" backslash: \\")
 out("a\rb".len())
 out("a\0b".len())
+
+// `\{` and `\}` are literal braces: a bare `{` opens an interpolation hole.
+out("a hole is \{expr\}")
 
 // A `\`` is accepted and left alone: two characters, not one.
 out("a\`b".len())

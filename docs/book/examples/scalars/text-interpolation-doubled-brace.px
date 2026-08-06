@@ -1,0 +1,6 @@
+// `{{` is the escape in some other languages. It is not one here, and it is
+// refused rather than left to mean something else: a `{` opens a hole, so `{{`
+// would open a hole holding a block, and `"a{{}}b"` would quietly print `aUnitb`.
+var n = 1
+out("a{{}}b")
+out("count: {{n}}")

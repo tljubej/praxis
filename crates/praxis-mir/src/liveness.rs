@@ -301,10 +301,15 @@ pub(crate) fn uses(inst: &Inst) -> Vec<LocalId> {
             alloc: crate::ir::AllocKind::Closure { captures, .. },
             ..
         } => captures.clone(),
+        // An empty collection reads nothing; a sized one (ADR-146) reads its
+        // extents and its fill. Naming them here is what roots the fill across
+        // the allocating call — `spill_roots` spills what liveness says is live
+        // — so an omission would be a use-after-free that shows up only when the
+        // fill is itself a fresh allocation and the pacer happens to collect.
         Inst::Alloc {
-            alloc: crate::ir::AllocKind::Collection { .. },
+            alloc: crate::ir::AllocKind::Collection { init, .. },
             ..
-        } => vec![],
+        } => init.operands(),
         Inst::ExtractScalar { src, .. } => vec![*src],
         Inst::StoreScalar { dst_gc, src, .. } => vec![*dst_gc, *src],
         Inst::StoreField { record, value, .. } => vec![*record, *value],

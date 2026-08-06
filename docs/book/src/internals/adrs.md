@@ -91,6 +91,7 @@ than the map below in one respect: it carries the reserved entries too.
 - [**062**](../../../decisions/062-an-iterated-parameter-is-generic-in-the-iterable-and-not-its-element.md) — a parameter you iterate is generic in the container and monomorphic in the element.
 - [**063**](../../../decisions/063-a-self-referring-type-declaration-is-reported.md) — a type that refers to itself is reported once, and declarations behind it are not.
 - [**093**](../../../decisions/093-a-method-that-cannot-resolve-is-reported-at-check.md) — an unresolvable method is a `check`-time error with exactly one emitter, and it is inference's.
+- [**137**](../../../decisions/137-a-deferred-receiver-resolves-in-rounds-and-the-channel-runs-to-a-fixpoint.md) — a deferred receiver resolves in rounds, so the constraint channel discharges to a fixpoint rather than once.
 - [**055**](../../../decisions/055-exhaustiveness-and-reachability-are-one-usefulness-question.md) — exhaustiveness and reachability are the same question asked at every sub-position.
 - [**130**](../../../decisions/130-a-matchs-coverage-is-analysis-answer-and-the-pattern-is-built-once.md) — coverage is computed during analysis, so a non-exhaustive `match` fails `praxis check`.
 
@@ -111,13 +112,21 @@ than the map below in one respect: it carries the reserved entries too.
 - [**027**](../../../decisions/027-closures.md) — the closure calling convention, capture analysis, and the cell a mutated capture lives in.
 - [**028**](../../../decisions/028-collections-and-sequence-pipelines.md) — the collection set, the dynamic map key, and the shape of a sequence pipeline.
 - [**037**](../../../decisions/037-float-implementation.md) — how `Float` rides a uniform `i64` channel that is not its own machine type.
-- [**045**](../../../decisions/045-ordering-semantics-and-the-compare-callback.md) — ordering is IEEE in the source language and total inside a container, and the two are reconciled by one callback.
+- [**045**](../../../decisions/045-ordering-semantics-and-the-compare-callback.md) — ordering is IEEE in the source language and total inside a container, and the two are reconciled by one callback (which ADR-138 then populated on every key type).
 - [**053**](../../../decisions/053-a-loop-is-the-value-its-breaks-carry.md) — `loop` is an expression whose value its `break`s carry; `while` and `for` are not.
-- [**059**](../../../decisions/059-a-range-is-a-value-and-a-descending-one-is-empty.md) — a range is a first-class value, `..` is half-open, and a descending range is empty rather than reversed.
+- [**059**](../../../decisions/059-a-range-is-a-value-and-a-descending-one-is-empty.md) — a range is a first-class value, `..` is half-open, and a descending range is empty rather than reversed (ADR-145 added the countdown's spelling without reopening that).
 - [**061**](../../../decisions/061-a-fn-name-in-value-position-is-a-closure.md) — naming a `fn` without calling it produces a closure over an adapter.
-- [**066**](../../../decisions/066-a-for-iterates-a-snapshot.md) — `for` iterates a snapshot, and the snapshot is where iteration order is decided.
+- [**066**](../../../decisions/066-a-for-iterates-a-snapshot.md) — `for` iterates a snapshot, and the snapshot is where iteration order is decided (ADR-138 changed what that order is).
+- [**138**](../../../decisions/138-a-container-orders-by-the-value-and-not-by-its-printing.md) — a `Map`, `Set` or `Counter` walks and prints its keys in the value's own order, not in the order they render.
+- [**139**](../../../decisions/139-a-pattern-name-is-a-name-in-the-frame.md) — a name a pattern introduces is a binding in the crash snapshot like any other, and a slot no pattern names is a temp.
+- [**141**](../../../decisions/141-a-character-is-one-token-and-a-literal-is-a-load.md) — `'#'` is one token, `''`/`'ab'` are lex errors, and an ASCII character literal is two loads.
+- [**143**](../../../decisions/143-the-to-text-family-is-int-float-and-char.md) — `Int`, `Float` and `Char` each render through the same writer `out` uses, so the two cannot disagree.
+- [**144**](../../../decisions/144-a-sequence-of-text-joins-and-a-sequence-of-char-becomes-one.md) — `join` is one generic row bounded to `Text` items, and a sequence of `Char` becomes a line under a different name.
+- [**145**](../../../decisions/145-a-reversal-needs-the-whole-sequence-so-it-is-a-barrier.md) — reversal cannot answer its first element until it has seen the last, so it is a barrier and not a fused stage.
+- [**146**](../../../decisions/146-a-collection-constructors-arity-is-its-shape.md) — a collection constructor's argument *count* selects its shape, so `Vec(n, fill)` and `Grid(w, h, fill)` sit beside the nullary forms; a closed two-row narrowing of ADR-089, and the only arity overload in the language.
+- [**147**](../../../decisions/147-a-hole-renders-anything-because-the-program-wrote-the-hole.md) — `"{v}"` renders any value through the printer `out` uses, and a hole's expression is a real subtree so a name in one is a closure capture; settles ADR-143 decision 4's open question without reopening ADR-085 decision 2, which still makes `"n = " + n` a `Y001`.
 - [**067**](../../../decisions/067-a-files-top-level-statements-are-its-program.md) — a file's top-level statements are its program; `fn main` is the fallback.
-- [**068**](../../../decisions/068-a-function-does-not-capture.md) — a named function captures nothing, and the diagnostic for assuming otherwise is `N007`.
+- [**068**](../../../decisions/068-a-function-does-not-capture.md) — a named function captures nothing, and the diagnostic for assuming otherwise is `N007` (which drops its closure suggestion when the function is recursive).
 - [**069**](../../../decisions/069-a-record-and-a-tuple-are-patterns-with-one-constructor.md) — records and tuples are patterns, each with one constructor form.
 - [**064**](../../../decisions/064-a-subscript-is-a-catalog-row.md) — `xs[i]` is a catalog row like any method, and reading is a different row from storing.
 - [**070**](../../../decisions/070-an-updating-store-is-a-row-with-a-contextual-operator.md) — `xs[i] += 1` is a catalog row, and which operator it means is decided by context.
@@ -141,6 +150,7 @@ than the map below in one respect: it carries the reserved entries too.
 - [**030**](../../../decisions/030-matrix-is-grid.md) — `matrix(P)` produces a `Grid[T]`, closing an open question in §21.
 - [**072**](../../../decisions/072-a-template-capture-body-is-a-parser-expression.md) — a `{name:body}` capture body is a full parser expression, parsed by the scanner and not handed back to the language parser.
 - [**073**](../../../decisions/073-a-constructor-call-is-a-shape-checked-before-it-is-built.md) — a constructor call's shape is validated before anything is constructed.
+- [**140**](../../../decisions/140-a-counted-repeated-is-bounded-so-something-can-follow-it.md) — `repeated(P, N)` takes exactly N sections, so it is bounded and something can follow it.
 - [**078**](../../../decisions/078-a-parser-position-is-absolute-and-a-region-only-narrows.md) — a parser position is absolute in the input, a region only narrows, and whether leftovers are an error is the parent's decision.
 - [**079**](../../../decisions/079-a-grid-cell-is-what-its-cell-parser-reads.md) — a grid cell is whatever its cell parser reads, a capture is non-greedy, and a collection's element type is its child's.
 - [**084**](../../../decisions/084-a-template-is-a-parser-expression-everywhere-or-nowhere.md) — a backtick template is a parser expression everywhere, so writing one in value position is a diagnostic rather than a string.
@@ -184,7 +194,7 @@ than the map below in one respect: it carries the reserved entries too.
 - [**080**](../../../decisions/080-totality-is-the-contract-and-catch-unwind-is-the-proof.md) — totality is the contract at the ABI boundary and `catch_unwind` is what proves it.
 - [**075**](../../../decisions/075-the-two-owed-fault-kinds-are-paid.md) — the last two missing fault kinds, and why the third debt was settled differently.
 - [**100**](../../../decisions/100-a-small-int-is-one-object-and-a-literal-is-a-load.md) — every `Int` from −256 to 1024 is one shared object, and a literal is a load.
-- [**107**](../../../decisions/107-a-small-char-is-one-object-and-there-is-no-char-literal.md) — every code point below 128 is one shared object, and there is no character literal syntax.
+- [**107**](../../../decisions/107-a-small-char-is-one-object-and-there-is-no-char-literal.md) — every code point below 128 is one shared object (its second clause, that there is no character literal syntax, is superseded by ADR-141).
 - [**101**](../../../decisions/101-the-shadow-stack-is-contiguous.md) — the shadow stack is one region and a frame is a run of slots in it, claimed inline with no call.
 - [**103**](../../../decisions/103-a-page-owns-the-storage-and-the-liveness.md) — storage is a size-class page, liveness is a bitmap on it, and the side registry is gone.
 - [**105**](../../../decisions/105-the-recursion-guard-spends-a-byte-budget.md) — the recursion guard charges each frame by its shape in bytes rather than counting calls.

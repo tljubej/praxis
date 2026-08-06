@@ -287,12 +287,68 @@ unsafe fn enum_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     }
 }
 
+unsafe fn enum_compare(a: *const u8, b: *const u8) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    // SAFETY: caller guarantees both pointers point at initialized EnumPayloads.
+    let pa = unsafe { &*(a as *const EnumPayload) };
+    let pb = unsafe { &*(b as *const EnumPayload) };
+    // A null schema is a producer bug rather than a user-reachable state, but it
+    // still needs a deterministic answer rather than a hash-order one (ADR-138).
+    match (pa.schema.is_null(), pb.schema.is_null()) {
+        (true, true) => return pa.tag.cmp(&pb.tag),
+        (true, false) => return Ordering::Less,
+        (false, true) => return Ordering::Greater,
+        (false, false) => {}
+    }
+    // SAFETY: both checked non-null above.
+    let (schema_a, schema_b) = unsafe { (&*pa.schema, &*pb.schema) };
+    match schema_a
+        .identity
+        .order_key()
+        .cmp(&schema_b.identity.order_key())
+    {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // The tag is the variant's **declaration** order — the order the type was
+    // written in, which is the order `enum_format` names the variants in and
+    // the order a `match`'s arms are read in. Sorting the variant *names*
+    // instead would impose an alphabet the declaration never mentioned, so a
+    // reader of the enum could not predict the order without sorting it
+    // themselves.
+    match pa.tag.cmp(&pb.tag) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    match pa.items.len().cmp(&pb.items.len()) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    let tag = pa.tag as usize;
+    // Payload slot-wise, through each side's own schema, falling back to the
+    // value's own descriptor for an unknown slot — the null-slot rule
+    // `descriptor_at` states, and the one `option_schema`'s unknown `Some` slot
+    // depends on.
+    for (i, (x, y)) in pa.items.iter().zip(pb.items.iter()).enumerate() {
+        let dx = schema_a.descriptor_at(tag, i, *x);
+        let dy = schema_b.descriptor_at(pb.tag as usize, i, *y);
+        // SAFETY: each payload matches the descriptor its schema slot names, or
+        // its own header's when that slot is null.
+        match unsafe { crate::ordering::slot_cmp(*x, *y, dx, dy) } {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    Ordering::Equal
+}
+
 /// Descriptor for the `Enum` value type (M7, §4.6). Structural equality and
 /// hashing (§5.5): two enum values are equal iff they are the same enum *type*,
 /// carry the same variant tag and have equal payloads; hashing mixes the type
 /// identity, the variant, then each payload. An enum is equatable/hashable iff
 /// every payload type is; functions never are. This lets enums serve as
-/// map/set keys (M8 containers).
+/// map/set keys (M8 containers) — and the container ordering (ADR-138) walks the
+/// same three levels, in declaration order at the tag.
 pub static ENUM: TypeDescriptor = TypeDescriptor::builtin::<EnumPayload>(
     BuiltinTypeId::Enum,
     "Enum",
@@ -301,8 +357,9 @@ pub static ENUM: TypeDescriptor = TypeDescriptor::builtin::<EnumPayload>(
     enum_format,
     Some(enum_equals),
     Some(enum_hash),
-    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
-    None,
+    // An enum can be a key, so a container orders one (ADR-138). `a < b` on two
+    // enum values is still Y006: that is `capability::supports_ord`'s question.
+    Some(enum_compare),
 )
 .with_owned_bytes(enum_owned_bytes);
 
@@ -598,5 +655,44 @@ mod alloc_tests {
 
         let none = unsafe { praxis_alloc_enum(&mut ctx, option_schema(), OPTION_NONE_TAG) };
         assert_eq!(rendered(none), "None");
+    }
+
+    /// The container order is the **variant's declaration order**, then the
+    /// payload (ADR-138). `Option` declares `Some` first (see
+    /// [`OPTION_SOME_TAG`]), so `Some(…)` precedes `None` — an alphabetical
+    /// order over the variant names would answer the opposite, and would be an
+    /// order the declaration never mentioned. Inside one variant the payload
+    /// decides, through its own type's order, so `Some(2)` precedes `Some(10)`
+    /// rather than trailing it as the rendered form would have said.
+    #[test]
+    fn enum_compare_is_declaration_order_then_payload() {
+        let mut rt = crate::Runtime::new();
+        let ten = rt.alloc_int(10);
+        let two = rt.alloc_int(2);
+        let zero = rt.alloc_int(0);
+        let mut ctx = rt.context();
+        let some = |ctx: &mut crate::RuntimeContext, payload| {
+            // SAFETY: a live context, and `Some`'s one slot takes an `Int`.
+            unsafe {
+                let e = praxis_alloc_enum(ctx, option_schema(), OPTION_SOME_TAG);
+                praxis_enum_set_payload(ctx, e, 0, payload);
+                e
+            }
+        };
+        let cmp = |a: GcRef, b: GcRef| unsafe {
+            enum_compare(
+                a.payload::<u8>() as *const u8,
+                b.payload::<u8>() as *const u8,
+            )
+        };
+        let none = unsafe { praxis_alloc_enum(&mut ctx, option_schema(), OPTION_NONE_TAG) };
+        let some_zero = some(&mut ctx, zero);
+        let some_two = some(&mut ctx, two);
+        let some_ten = some(&mut ctx, ten);
+
+        assert_eq!(cmp(some_zero, none), std::cmp::Ordering::Less);
+        assert_eq!(cmp(none, some_zero), std::cmp::Ordering::Greater);
+        assert_eq!(cmp(some_two, some_ten), std::cmp::Ordering::Less);
+        assert_eq!(cmp(some_ten, some_ten), std::cmp::Ordering::Equal);
     }
 }

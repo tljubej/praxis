@@ -1,6 +1,7 @@
-// `repeated(...)` is a marker on the final named argument of a `sections`
-// call, not a parser; `sep` needs a separator that advances; `grid`'s ragged
-// form is written with both `ragged` and `fill:`.
+// `repeated(...)` is a marker on a named argument of a `sections` call, not a
+// parser, and the uncounted form is greedy so it must be last; `sep` needs a
+// separator that advances; `grid`'s ragged form is written with both `ragged`
+// and `fill:`.
 var a = read sections(boards: repeated(matrix(int)), draws: csv(int))
 var b = read repeated(int)
 var c = read sep("", int)

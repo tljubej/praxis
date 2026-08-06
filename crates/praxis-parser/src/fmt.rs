@@ -263,6 +263,14 @@ fn needs_space(prev: SyntaxKind, next: SyntaxKind) -> bool {
     if is_comment(prev) || is_comment(next) {
         return true;
     }
+    // An interpolation fragment is glued to its hole (§8.1, ADR-147). The
+    // fragment tokens carry their own delimiters — `"a{`, `}b{`, `}c"` — so a
+    // space on either side of one lands *inside* the literal's braces, and
+    // `"total: {n}"` reformats to `"total: { n }"`. Legal, and not what anybody
+    // wrote.
+    if matches!(prev, InterpOpen | InterpMiddle) || matches!(next, InterpMiddle | InterpClose) {
+        return false;
+    }
     // No space right after an opening bracket or before a closing one.
     if matches!(prev, L_PAREN | L_BRACE | L_BRACK) {
         return false;
@@ -376,6 +384,37 @@ mod tests {
         assert!(once.contains("\"hello world\""), "literal changed: {once}");
         let twice = format(&once);
         assert_eq!(once, twice);
+    }
+
+    /// **ADR-147.** An interpolated literal reprints with its holes glued to
+    /// their fragments.
+    ///
+    /// The fragments carry their own delimiters, so the formatter's default —
+    /// "a space unless the pair is clearly meant to be tight" — would put one
+    /// *inside* the braces and turn `"total: {n}"` into `"total: { n }"`. That is
+    /// still a legal program with the same meaning, which is exactly why it needs
+    /// a test: nothing else would notice.
+    #[test]
+    fn format_keeps_a_hole_glued_to_its_fragments() {
+        // A subscript is deliberately absent from the list: `needs_space` puts a
+        // space between an `Ident` and a `[`, so `m["k"]` reprints as `m ["k"]`
+        // inside a hole and outside one alike. That is the formatter's own gap,
+        // not interpolation's, and asserting it here would tie this test to a
+        // defect it is not about.
+        for src in [
+            r#"out("total: {n}")"#,
+            r#"out("{a} and {b}")"#,
+            r#"out("{a + b}")"#,
+            r#"out("{xs.len()}")"#,
+        ] {
+            let once = format(src);
+            assert!(
+                once.contains(src.trim_start_matches("out(")),
+                "{src} → {once}"
+            );
+            let twice = format(&once);
+            assert_eq!(once, twice, "{src} is not idempotent");
+        }
     }
 
     #[test]

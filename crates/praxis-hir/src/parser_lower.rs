@@ -397,7 +397,8 @@ fn extract_call_args(
         .find(|c| c.kind() == praxis_syntax::SyntaxKind::PATH_EXPR)
         .map(|c| c.text().to_string())
         .unwrap_or_default();
-    let keyword_arg = Constructor::from_keyword(&name).and_then(Constructor::keyword_arg);
+    let ctor = Constructor::from_keyword(&name);
+    let keyword_arg = ctor.and_then(Constructor::keyword_arg);
     let mut args = Vec::new();
     let mut all_converted = true;
 
@@ -418,6 +419,35 @@ fn extract_call_args(
                     // silently produced the ragged parser.
                     if pe.text().as_deref() == Some("ragged") {
                         args.push(CallArg::Flag("ragged".to_string()));
+                        continue;
+                    }
+                    // **`repeated(P, n)` is a count that is not a literal, and
+                    // that is what the reader needs to be told.** A bare name
+                    // after `repeated`'s parser would otherwise be converted
+                    // first, and an unknown one reports `I010 unknown atomic
+                    // parser` — a true statement that carries none of the fix,
+                    // because there is no name that would have worked. The
+                    // plan is built when the program is compiled, so a count
+                    // can only ever be written out. A name that *is* a parser
+                    // (`repeated(P, word)`) still goes through the shape check
+                    // below, which is where a second parser's arity is decided.
+                    if ctor == Some(Constructor::Repeated)
+                        && !args.is_empty()
+                        && pe
+                            .text()
+                            .as_deref()
+                            .is_some_and(|t| !praxis_input_parser::parser_names().any(|n| n == t))
+                    {
+                        diagnostics.push(err_diag(
+                            file,
+                            rowan_span(&arg),
+                            DiagCode::InvalidConstructorArgument,
+                            "`repeated`'s count must be a whole-number literal — the parser plan \
+                             is built when the program is compiled, so the count cannot be a \
+                             parser or a variable (§7.5)"
+                                .to_string(),
+                        ));
+                        all_converted = false;
                         continue;
                     }
                     match convert_parser_expr(&pe, file, diagnostics) {
@@ -517,18 +547,29 @@ fn extract_call_args(
                 }
             }
             praxis_syntax::SyntaxKind::LITERAL => {
-                match unquote_parser_literal(&arg.text().to_string()) {
-                    Some(text) => args.push(CallArg::String(text)),
-                    None => {
-                        diagnostics.push(err_diag(
-                            file,
-                            rowan_span(&arg),
-                            DiagCode::InvalidConstructorArgument,
-                            "a parser constructor's literal argument must be a text \
-                                         literal"
-                                .to_string(),
-                        ));
-                        all_converted = false;
+                // Two positional literals exist: a text one (`sep`'s separator,
+                // `one_of`'s set) and a whole number (`repeated`'s count). The
+                // decode is by the token's own kind rather than by which
+                // constructor is being called, because which constructor takes
+                // which is `check_call`'s question and asking it twice is how
+                // two answers come to disagree.
+                let raw = arg.text().to_string();
+                if let Some(n) = parser_int_literal(&raw) {
+                    args.push(CallArg::Int(n));
+                } else {
+                    match unquote_parser_literal(&raw) {
+                        Some(text) => args.push(CallArg::String(text)),
+                        None => {
+                            diagnostics.push(err_diag(
+                                file,
+                                rowan_span(&arg),
+                                DiagCode::InvalidConstructorArgument,
+                                "a parser constructor's literal argument must be a text \
+                                 literal or a whole number"
+                                    .to_string(),
+                            ));
+                            all_converted = false;
+                        }
                     }
                 }
             }
@@ -537,6 +578,23 @@ fn extract_call_args(
     }
 
     (name, args, all_converted)
+}
+
+/// Decode a parser constructor's whole-number argument — `repeated(P, N)`'s
+/// count — or `None` if the token is not one.
+///
+/// The grammar puts an optional `-` and the digits in one `LITERAL` node, so
+/// the text arriving here is what the source wrote. Decoding goes through
+/// [`praxis_syntax::numeric::parse_int_literal`], the workspace's one integer
+/// decoder, so `1_000` means here what it means everywhere else and a value
+/// outside `Int` is `None` rather than a wrapped number.
+fn parser_int_literal(raw: &str) -> Option<i64> {
+    let trimmed = raw.trim();
+    let digits = trimmed.strip_prefix('-').unwrap_or(trimmed);
+    if digits.is_empty() || !digits.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    praxis_syntax::numeric::parse_int_literal(trimmed)
 }
 
 /// Decode a parser constructor's string-literal argument, or `None` if the

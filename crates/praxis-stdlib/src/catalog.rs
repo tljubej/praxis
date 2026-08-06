@@ -225,6 +225,19 @@ pub enum MethodCatalogError {
         name: &'static str,
         arity: usize,
     },
+    /// Two generic [`TypePattern::Iterable`] rows share a `(name, arity)`,
+    /// differing only in what they bound their item to (ADR-144).
+    ///
+    /// This is [`AmbiguousWithIterable`](Self::AmbiguousWithIterable)'s blind
+    /// spot, and it was found by trying to write `join` twice — once for a
+    /// sequence of `Text` and once for a sequence of `Char`. The pair is not a
+    /// `Duplicate`, because the receivers differ; it is not a shadowing, because
+    /// neither row is the concrete one. But `praxis_hir::catalog::lookup` matches
+    /// an `Iterable` receiver on *shape*, so both hit and inference takes the
+    /// first — which is a precedence rule by insertion order, exactly what
+    /// ADR-127 decision 6 refuses. A sequence of `Char` gets a differently-named
+    /// row instead.
+    AmbiguousIterablePair { name: &'static str, arity: usize },
     /// A row writes [`TypePattern::Iterable`] somewhere other than its receiver
     /// (ADR-127 decision 1).
     ///
@@ -271,6 +284,12 @@ impl fmt::Display for MethodCatalogError {
                 "catalog entry {receiver}.{name}/{arity} shadows the generic \
                  Iterable.{name}/{arity}: both match this receiver, and which \
                  one a call resolves to would be insertion order"
+            ),
+            MethodCatalogError::AmbiguousIterablePair { name, arity } => write!(
+                f,
+                "two generic Iterable.{name}/{arity} rows differ only in the \
+                 bound on their item: both match every receiver, and which one \
+                 a call resolves to would be insertion order"
             ),
             MethodCatalogError::IterableOutsideReceiver { method, arity } => write!(
                 f,
@@ -396,6 +415,16 @@ impl MethodCatalogBuilder {
                         receiver: concrete.receiver.clone(),
                         name: concrete.name,
                         arity: concrete.arity(),
+                    });
+                }
+                if a.name == b.name
+                    && a.arity() == b.arity()
+                    && matches!(a.receiver, TypePattern::Iterable { .. })
+                    && matches!(b.receiver, TypePattern::Iterable { .. })
+                {
+                    return Err(MethodCatalogError::AmbiguousIterablePair {
+                        name: a.name,
+                        arity: a.arity(),
                     });
                 }
             }
@@ -733,6 +762,57 @@ mod tests {
         assert!(MethodCatalog::build()
             .entry(generic)
             .entry(different_arity)
+            .finish()
+            .is_ok());
+    }
+
+    /// **ADR-144.** Two generic rows at one `(name, arity)` are refused, even
+    /// though their receivers are not equal.
+    ///
+    /// This is the shape `join` was first written as: one row for a sequence of
+    /// `Text` and one for a sequence of `Char`. Neither the `Duplicate` check
+    /// (the receivers differ) nor the shadowing check (neither row is concrete)
+    /// saw it, and `lookup` matches an `Iterable` on shape — so `cs.join("")`
+    /// would have resolved to whichever row was registered first and reported
+    /// `expected Text, found Char`. A precedence rule nobody wrote is worse than
+    /// a build failure, which is what this now is.
+    #[test]
+    fn finish_rejects_two_generic_rows_at_one_arity() {
+        let of_text = MethodEntry {
+            receiver: TypePattern::iterable(TypePattern::is_scalar("T", ScalarType::Text)),
+            name: "join",
+            params: vec![TypePattern::Scalar(ScalarType::Text)],
+            result: TypePattern::Scalar(ScalarType::Text),
+            purity: Purity::Pure,
+            lowering: MethodLowering::Intrinsic("seq_join"),
+            doc: "These Text items concatenated.",
+            stability: Stability::Stable,
+        };
+        let of_char = MethodEntry {
+            receiver: TypePattern::iterable(TypePattern::is_scalar("T", ScalarType::Char)),
+            ..of_text.clone()
+        };
+        let err = MethodCatalog::build()
+            .entry(of_text.clone())
+            .entry(of_char)
+            .finish()
+            .unwrap_err();
+        match err {
+            MethodCatalogError::AmbiguousIterablePair { name, arity } => {
+                assert_eq!((name, arity), ("join", 1));
+            }
+            other => panic!("expected an ambiguous generic pair, got {other}"),
+        }
+
+        // A different arity is a different question here too, which is what
+        // keeps `count()` and `count(pred)` — both generic — legal.
+        let nullary = MethodEntry {
+            params: vec![],
+            ..of_text.clone()
+        };
+        assert!(MethodCatalog::build()
+            .entry(of_text)
+            .entry(nullary)
             .finish()
             .is_ok());
     }

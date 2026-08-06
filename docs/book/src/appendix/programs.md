@@ -77,8 +77,11 @@ The other structural shape every puzzle set contains: groups separated by blank
 lines. `sections(lines(int))` nests two structural parsers, and the nesting *is*
 the type — `Vec[Vec[Int]]`, one inner vector per group.
 
-`sorted_by_key(|t| 0 - t)` is how a descending sort is written. There is no
-`reversed` method; negating the key is what the catalog leaves you.
+`sorted_by_key(|t| 0 - t)` is how this program writes a descending sort. Since
+[ADR-145](../../../decisions/145-a-reversal-needs-the-whole-sequence-so-it-is-a-barrier.md)
+there is a second spelling, `sorted().reversed()`, and the example keeps the
+first: negating the key is one pass over the group where sorting and then
+reversing is two.
 
 ```praxis
 // A sections day: blank-line-separated groups of integers.
@@ -132,12 +135,14 @@ A grid day. `read grid(char)` yields a `Grid[Char]`, indexed `map[x, y]` — a
 subscript taking two arguments, which is why a subscript's index list is an
 argument list rather than a single expression.
 
-Two details here are worth naming. `"#"[0]` is how a program writes a
-character: there is no character literal, and subscripting a one-character
-`Text` is the idiom. And `trees_on_slope` takes the grid as a *parameter*
+Two details here are worth naming. `'#'` is how a program writes a character it
+chose, and `"#"[0]` — subscripting a one-character `Text` — still names the same
+`Char`, which is what a program reaches for when the character came out of text
+it did not write down. And `trees_on_slope` takes the grid as a *parameter*
 even though `map` is in scope at the file level — a `fn` does not capture the
 bindings around it, and reading one from inside a function is `N007` with a
-message telling you to pass it in or use a closure.
+message telling you to pass it in (and, when the function is recursive, saying
+why a closure is not an option).
 
 ```praxis
 // A grid day: count the trees hit by descending a slope of (right 3, down 1).
@@ -377,7 +382,11 @@ value of type `Vec[Int]` can change after it is stored, so it cannot be used as
 a key"
 ([ADR-057](../../../decisions/057-a-capability-requirement-rides-on-the-scheme-that-quantified-it.md)).
 Hashable is not orderable: a tuple has no `<`
-([ADR-045](../../../decisions/045-ordering-semantics-and-the-compare-callback.md)).
+([ADR-045](../../../decisions/045-ordering-semantics-and-the-compare-callback.md))
+— though the collections above still walk and print their tuple keys
+element-wise, because a container needs a reproducible order whatever the source
+language permits
+([ADR-138](../../../decisions/138-a-container-orders-by-the-value-and-not-by-its-printing.md)).
 
 `bfs_distance` answers `Option[Int]`, so the third line of output is `Some(22)`
 and not `22`: a goal that cannot be reached has no distance.
@@ -646,7 +655,7 @@ suite rather than by this book:
 
 | directory | what is in it |
 |---|---|
-| `tests/aoc-corpus/` | 26 fixtures, one per input shape and per language feature, each with its `.out` and with an `.in` when it reads input |
+| `tests/aoc-corpus/` | 31 fixtures, one per input shape and per language feature, each with its `.out` and with an `.in` when it reads input |
 | `tests/input-parsers/` | 12 fixtures for the `read` DSL: one constructor, template or whitespace rule each |
 | `benchmarks/praxis/` | eight larger programs: `bfs`, `collatz`, `hashwork`, `mandelbrot`, `pipeline`, `primes`, `tree`, `vm` |
 | `crates/praxis-cli/tests/fixtures/` | programs whose *diagnostics* are the fixture, and `run/`, whose programs are driven end to end |

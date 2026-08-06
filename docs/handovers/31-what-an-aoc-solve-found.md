@@ -1,9 +1,16 @@
 # Three bugs and nine gaps three AoC solves found
 
 **Date:** 2026-08-06
-**Status:** all open. Nothing here is fixed.
+**Status:** **eleven of twelve are closed outright; only 6 is closed in part,
+and it says so where it stands.** Item 3 is now closed in full: its two missing
+`to_text` rows exist and §8.1's interpolation is implemented. Item 6's
+diagnostic is fixed and its ergonomics complaint is not. Every other entry is
+closed as written. Each keeps its reproduction and gains a **Fixed** line naming
+the change and the gate.
 **Build:** reproduced by hand against `target/release/praxis` and
-`target/debug/praxis` at `f049c64` (2026-08-06). Both behave identically.
+`target/debug/praxis` at `f049c64` (2026-08-06). Both behaved identically. The
+transcripts below are what the compiler *did*; run them against the current
+binary and you get the new answer, which is the point of leaving them in.
 
 This is what fell out of solving three real puzzles end to end — AoC 2025 day 7
 ("Laboratories"), day 11 ("Reactor") and day 12 ("Christmas Tree Farm") —
@@ -63,20 +70,43 @@ annotation off working programs. Neither is exotic — an unannotated helper tha
 indexes a nested collection is ordinary code — but neither is what a program
 written once and left alone happens to contain.
 
-| # | What it is | Severity |
-|---|---|---|
-| 1 | a closure whose body *is* a closure loses its transitive captures | **high** — silent wrong answer, panic, or SIGSEGV |
-| 2 | no reverse iteration: `(0..n).rev()` is `Y110` and `5..0` is silently empty | medium |
-| 3 | no `Int.to_text()`, no `Char.to_text()`, no interpolation | medium (known) |
-| 4 | no `join` on `Vec[Char]` — a grid row cannot be rendered back as a line | medium |
-| 5 | `Set[Int]` and `Map[Int, V]` order lexicographically on the rendered form | low, but silent |
-| 6 | recursion has no spelling that does not thread state — day 12's is 10 parameters | low |
-| 7 | `capture.rs`'s walker comments describe a guard the code does not have | low |
-| 8 | no collection can be built at a size: no sized `Grid`, no `Vec(n, fill)` | medium |
-| 9 | a `for` binding has no name **or type** in the crash snapshot — it prints `?` | low |
-| 10 | `sections` cannot express "a repeated group, then a fixed one" — `repeated` is tail-only | low |
-| 11 | a catalog method on a value *derived* from an unannotated parameter is an ICE | **high** — `check` clean, `run` panics |
-| 12 | no character literal: `"#"[0]` is the spelling, and `match` on a `Char` is unwritable | medium |
+| # | What it was | Severity | Where it went |
+|---|---|---|---|
+| 1 | a closure whose body *is* a closure loses its transitive captures | **high** — silent wrong answer, panic, or SIGSEGV | [ADR-027](../decisions/027-closures.md) amended |
+| 2 | no reverse iteration: `(0..n).rev()` is `Y110` and `5..0` is silently empty | medium | [ADR-145](../decisions/145-a-reversal-needs-the-whole-sequence-so-it-is-a-barrier.md) |
+| 3 | no `Int.to_text()`, no `Char.to_text()`, no interpolation | medium (known) | [ADR-143](../decisions/143-the-to-text-family-is-int-float-and-char.md) for the two rows, then [ADR-147](../decisions/147-a-hole-renders-anything-because-the-program-wrote-the-hole.md) for interpolation — **closed in full** |
+| 4 | no `join` on `Vec[Char]` — a grid row cannot be rendered back as a line | medium | [ADR-144](../decisions/144-a-sequence-of-text-joins-and-a-sequence-of-char-becomes-one.md) |
+| 5 | `Set[Int]` and `Map[Int, V]` order lexicographically on the rendered form | low, but silent | [ADR-138](../decisions/138-a-container-orders-by-the-value-and-not-by-its-printing.md) |
+| 6 | recursion has no spelling that does not thread state — day 12's is 10 parameters | low | [ADR-068](../decisions/068-a-function-does-not-capture.md) amended — the *diagnostic* half only |
+| 7 | `capture.rs`'s walker comments describe a guard the code does not have | low | with item 1 |
+| 8 | no collection can be built at a size: no sized `Grid`, no `Vec(n, fill)` | medium | ADR-146 |
+| 9 | a `for` binding has no name **or type** in the crash snapshot — it prints `?` | low | [ADR-139](../decisions/139-a-pattern-name-is-a-name-in-the-frame.md) |
+| 10 | `sections` cannot express "a repeated group, then a fixed one" — `repeated` is tail-only | low | [ADR-140](../decisions/140-a-counted-repeated-is-bounded-so-something-can-follow-it.md) |
+| 11 | a catalog method on a value *derived* from an unannotated parameter is an ICE | **high** — `check` clean, `run` panics | [ADR-137](../decisions/137-a-deferred-receiver-resolves-in-rounds-and-the-channel-runs-to-a-fixpoint.md) |
+| 12 | no character literal: `"#"[0]` is the spelling, and `match` on a `Char` is unwritable | medium | [ADR-141](../decisions/141-a-character-is-one-token-and-a-literal-is-a-load.md) |
+
+**One entry is closed only in part, and it is worth being plain about.**
+
+**Item 6 is the diagnostic only.** The handover attached no proposal for the language question — three
+individually defensible rules meeting at a corner — and none was invented. What
+landed is the cheap fix the entry itself named: `N007` no longer offers a
+closure to a *recursive* `fn`, because `N001` would refuse it. The ergonomics
+complaint — ten parameters of transport in day 12's `search` — stands
+unanswered, and §6 below says so.
+
+Two things the round found that the handover did not know:
+
+- **Item 12's downstream was not "already built".** ADR-107 said the work was
+  "a lexer, a parser arm, and `lower_lit`. Nothing else," and this document
+  repeated it. MIR's `Lit::Char` pattern arm was an unconditional jump to
+  success, so a `Char` pattern would have matched *every* value — a silent wrong
+  answer sitting directly on item 12's headline gate — and `pattern.rs` typed a
+  `Char` pattern as whatever the scrutinee was. Both were found because the fix
+  was written against a test that had to fail first.
+- **Item 11 had a second defect at the same panic.** An *uncalled* function whose
+  receiver nothing pins also reached MIR and ICEd, with no chaining involved
+  (`fn f(v) { v.len() }` beside `out(1)`). ADR-093 said `monomorphize` dropped
+  such bodies; it does not, because ADR-057's pin makes them monotypes.
 
 ## Reproducing
 
@@ -89,6 +119,34 @@ Each repro is a `.px` file and one command. None needs input on stdin.
 ---
 
 ## 1. A closure whose body *is* a closure loses its transitive captures
+
+**Fixed.** The four-line early return at `capture.rs:140` is gone, and the token
+scan's "declared outside `closure_range`" test — which was already the correct
+predicate — is now the only one. Nothing in lowering or codegen needed changing:
+once the outer closure captures `base`, `base` *is* a local of the synthetic
+outer function by the time the inner literal is allocated, and the prologue
+keys on the same `SymbolId`.
+
+Two shapes this entry did not list were broken the same way and are fixed by
+the same deletion: `|a| |b| { … }` (a body that is a closure whose own body is a
+block), and `[1, 2, 3].map(|x| |y| x + y + base)` — a curried closure inside a
+pipeline, which is the one most likely to bite.
+
+The `Unit` that made all three failure modes is now unrepresentable rather than
+merely unreached: MIR's closure-allocation arm used to fill a missing capture
+slot with `lower_lit_gc(&Lit::Unit)`, and it panics instead. It never fires
+across the workspace suite or the book.
+
+**Gate**, as proposed: `crates/praxis-cli/tests/run.rs::a_curried_closure_prints_the_same_thing_with_and_without_braces`
+asserts the two spellings produce byte-identical stdout, and that it is
+`<closure:1>\n11\n`. Comparing the two runs is the point — a fix that stopped
+the panic without restoring the capture would still print two different `N`.
+Also: eight capture-analysis unit tests, three lowering tests asserting the
+capture's *type* is `Int` and not `Unit`, and six JIT value tests including the
+silent-`Text` mode and a cell shared across three frames.
+[ADR-027](../decisions/027-closures.md) gains the transitive rule, and
+[functions.md](../book/src/language/functions.md) a section with a runnable
+example.
 
 **Severity: high.** `praxis check` is clean. It breaks at run time, three
 different ways depending on what was captured, and one of them is a silent wrong
@@ -252,6 +310,21 @@ restoring the capture would still fail it.
 
 ## 2. No reverse iteration
 
+**Fixed** as `reversed()`, a **barrier** on the generic `Iterable` receiver —
+one row covering `Range`, `Vec`, `Set`, `Text`, `Map` and the rest, so
+`(0..n).reversed()` and `xs.reversed()` are the same row. Reversal cannot answer
+its first element before it has seen its last, so a fused `classify_link` arm
+would be unsound off the source; the ADR says so and names the peephole as an
+explicit non-goal. It carries **no** capability bound, which is its own claim:
+`sorted` reads `compare` and `unique` reads `hash`, reversal reads nothing, so a
+`Vec` of closures reverses where `sorted()` is `Y006`.
+
+`5..0` stays silently empty, deliberately: no analysis pass has ever emitted a
+`Severity::Warning`, two book examples exist to demonstrate the rule and would
+earn the lint, and the real gap was the missing spelling.
+`jit::a_countdown_is_a_reversed_range` carries both halves.
+[ADR-145](../decisions/145-a-reversal-needs-the-whole-sequence-so-it-is-a-barrier.md).
+
 **Severity: medium.** `Range` has no `rev`, no sequence has a `reversed`, and a
 descending range is empty rather than an error:
 
@@ -292,6 +365,56 @@ available.
 
 ## 3. No `Int.to_text()`, no `Char.to_text()`, no interpolation
 
+**Fixed.** `Int.to_text()` and `Char.to_text()` exist, closing the family at
+Int/Float/Char. The load-bearing part is the refactor that came first:
+`scalars::write_int` and `scalars::write_char` were extracted from the existing
+`int_format`/`char_format` (mirroring the `write_float`/`float_format` pair that
+already existed), so each descriptor's `format` callback and its `to_text`
+wrapper call **one** function. `out(n)` and `n.to_text()` disagreeing is not
+representable rather than merely tested, and the runtime tests assert against
+`GcRef::format` — `out`'s own path — not against literals.
+
+**Interpolation landed too, so this entry is closed in full.** `out("n = {n}")`
+renders the value; the braces are no longer literal text.
+[ADR-147](../decisions/147-a-hole-renders-anything-because-the-program-wrote-the-hole.md)
+is the decision, and two things about it were settled by the user rather than
+derived, so they are recorded here as decisions and not as consequences:
+
+- **A hole may hold any type**, rendered exactly as `out` renders it. `"{v}"` on
+  a `Vec[Int]` is `[1, 2, 3]`. That is structural, not tested-and-found-to-agree:
+  a hole lowers to `praxis_value_to_text`, which calls `GcRef::format` — the same
+  function `praxis_write_stdout` calls — so there is one renderer and two
+  callers, which is exactly what ADR-143 decision 2 bought for the three scalar
+  rows.
+- **A hole may hold a full expression**, not only a bare name: `{a + b}`,
+  `{p.0}`, `{xs.len()}`, `{m["k"]}`.
+
+**The ADR-085 entanglement was settled on purpose rather than by accident**,
+which is what ADR-143 decision 4 asked for in so many words. ADR-085 decision 2
+refused an implicit conversion to `Text` for `+`, and it **still refuses**:
+`"n = " + n` is still `Y001`. The reconciliation is that a hole is a rendering
+site the program wrote, where `+` coercing would render values the program never
+asked to render — so the two are complements. Both halves are pinned from one
+source file by
+`infer_tests::text_plus_an_int_is_still_y001_beside_a_hole_that_renders_it`,
+so an edit that "unifies" them by relaxing `+` fails a test whose name says what
+it broke.
+
+The cost estimate in ADR-143 decision 5 was accurate about the parts and wrong
+about which part mattered. The one that *decided the design* was `capture.rs`:
+because capture analysis looks token **ranges** up in the resolver's map, a hole
+had to be a real subtree with real tokens, which rules out the cheap
+"lex the literal whole, re-parse holes later" implementation. That
+implementation compiles, passes every other test, and leaves
+`var f = |_| "{outer}"` capturing nothing — a silent wrong answer at run time.
+`capture::a_hole_in_a_closure_body_captures_the_name_it_holds` is the gate.
+
+The proposed desugar to `"a" + n.to_text() + "b"` was **not** taken, because it
+bounds a hole to the four types with a `to_text()` row. See ADR-147 decision 2.
+[ADR-143](../decisions/143-the-to-text-family-is-int-float-and-char.md),
+amending [ADR-086](../decisions/086-a-text-subscript-answers-a-char.md), and
+ADR-147 amending both ADR-143 and ADR-085.
+
 **Severity: medium.** Already known and written down in
 `crates/praxis-stdlib/src/builtins.rs:797` and
 [text.md](../book/src/language/text.md); this is a note that a real solve hit it
@@ -320,6 +443,22 @@ recording even though the decision to defer it is already made.
 
 ## 4. No `join`, so a grid row cannot be rendered back as a line
 
+**Fixed**, and the surface is not the one this entry proposed — which is the
+interesting part. `join` on both `Vec[Text]` and `Vec[Char]` is **not
+buildable**: a generic `Iterable.join/1` beside a concrete `Vec[Char].join/1` is
+`AmbiguousWithIterable`, a build-time panic, and two `Iterable` rows differing
+only in their item bound compiled and passed every existing test while producing
+a silent insertion-order precedence rule — exactly what ADR-127 decision 6
+refuses. That state is now a catalog build failure of its own
+(`MethodCatalogError::AmbiguousIterablePair`).
+
+So it is two rows under two names: `join(Text)` on `Iterable` with the item
+bounded to `Text`, and `to_text()` on a concrete `Vec[T]` with `T` bounded to
+`Char`. `out(grid.row(y).to_text())` renders the line; `[1, 2].join(",")` is
+`expected Text, found Int`, which is what keeps `join` from being a back door
+around ADR-143.
+[ADR-144](../decisions/144-a-sequence-of-text-joins-and-a-sequence-of-char-becomes-one.md).
+
 **Severity: medium**, and it compounds with 3.
 
 ```console
@@ -339,6 +478,27 @@ alone.
 ---
 
 ## 5. `Set[Int]` and `Map[Int, V]` order lexicographically on the rendered form
+
+**Fixed.** `{2, 9, 10, 100}`, and `s` now agrees with `s.sorted()`.
+
+The comments this entry quotes were stale in a way worth recording: `compare` was
+**not** `None` on every descriptor — it was already populated on `Int`, `Byte`,
+`Char`, `Float` and `Text`, and `None` only on composites. So the work was to use
+it at ADR-066's three named sites and to give the composites one. It is now
+carried by exactly the eleven descriptors a `Map` key or `Set` member can be —
+the scalars, `Text`, `Range`, `Record`, `Tuple` and `Enum`, the last three
+element-wise — and `None` on the nine collections, `Closure` and `VarCell`, none
+of which can ever be a key. That is deliberately a **wider** set than the source
+language's `<`: a tuple has a container order and still has no `<`, so
+`(1, 2) < (1, 3)` is still `Y006`.
+
+Determinism is unchanged and is still the property being bought: the order is
+total, NaN sorts last and ties with itself, and keys of different descriptors
+order by descriptor first.
+[ADR-138](../decisions/138-a-container-orders-by-the-value-and-not-by-its-printing.md),
+discharging the debt [ADR-045](../decisions/045-ordering-semantics-and-the-compare-callback.md)
+recorded and removing a leg from ADR-083's and ADR-086's arguments (both
+survive on the others).
 
 **Severity: low, but it is silent.**
 
@@ -387,6 +547,31 @@ book's own table.
 ---
 
 ## 6. Recursion has no spelling that does not thread state
+
+**Partly fixed, and only the part this entry proposed.** No language change was
+invented: the three rules still meet at the same corner, and day 12's `search`
+still has ten parameters of which five are transport. That complaint is open.
+
+What landed is the cheap fix named in the last paragraph above. `N007`'s advice
+is now conditional on recursion:
+
+```console
+$ praxis check countdown.px
+error[N007]: `countdown` cannot use `step`: a function does not capture the bindings around it (pass `step` as a parameter)
+
+help: `countdown` calls itself, so a closure is not the way out: a closure cannot name itself (`N001`)
+```
+
+A mutual cycle says "calls itself through `pong`", naming the other members the
+way `N006` already names the other declarations in a type cycle. A
+non-recursive `fn` is unchanged, byte for byte, and still names both ways out.
+No new diagnostic code was spent.
+
+Recursion is decided on a call graph the resolver builds as it walks, off the
+single `resolve_name_ref` funnel. The fact is not available at the instant
+`N007` is emitted, so the report is pushed at the use site — preserving source
+order — and only its *wording* is settled at the end of resolution.
+[ADR-068](../decisions/068-a-function-does-not-capture.md) is amended.
 
 **Severity: low.** Three individually well-argued rules meet at a corner:
 
@@ -448,6 +633,16 @@ independent of whatever the real answer is.
 
 ## 7. `capture.rs`'s walker comments describe a guard that is not there
 
+**Fixed with item 1**, and the entry was right that the comments were where the
+bug hid — they described the guard that would have made the *working* cases
+broken too.
+
+One correction to this entry: `walk` was never "the recursive walker". It never
+called itself; it was a single flat token scan over `descendants_with_tokens()`
+with one early return bolted on the front. The rewritten doc says "flat token
+scan", because a reader who believes it recurses will look for the bug in the
+wrong shape. `_inside_nested_closure` is deleted.
+
 **Severity: low on its own**, listed because it is the same file as item 1 and
 reads like the place the bug hid.
 
@@ -485,6 +680,35 @@ would make item 1 worse.
 ---
 
 ## 8. No collection can be built at a size
+
+**Fixed.** `Vec(n, fill)` and `Grid(w, h, fill)` exist, and day 12's occupancy
+board is now the real `Grid[T]` rather than a hand-rolled `Vec[Bool]` — the
+program answers byte-identically, which is the evidence that the feature is the
+one this entry asked for.
+
+The difficulty was never the runtime. It is that this is an **arity overload**,
+and [ADR-089](../decisions/089-a-name-has-one-signature.md) ("a name has one
+signature") forbids those in so many words. ADR-146 narrows rather than reverses
+it, on ADR-089's own two grounds: the shape is chosen on the argument *count* — a
+syntactic fact available before any argument is typed, so the inference
+circularity ADR-089 names cannot arise — and a collection constructor has no
+function value at all, so `var f = Vec` is still `Y022` and ADR-061 does not
+reopen. The exception is a **closed two-row table**, and a test asserts it is
+exactly two: the other seven constructors gain nothing and still report `Y024`
+naming zero arguments.
+
+A negative or oversized extent is a `size or extent out of range` fault, not a
+`check`-time refusal — a size is an ordinary `Int` whose value is not known until
+it runs. `AllocKind::Collection` carries a `CollectionInit` whose *variant is the
+arity*, so an operand list of the wrong length is unspellable rather than merely
+untested.
+
+One consequence worth naming: `praxis_grid_filled` deliberately does not call
+`default_cell`, which makes `Grid[Vec[Int]]` constructible from source for the
+first time. When the fill is itself a collection every cell is the *same*
+collection, because a binding names an object rather than owning it —
+`Grid(2, 2, Vec())` is four names for one `Vec`, and the book says so beside the
+constructor. ADR-146.
 
 **Severity: medium.** There is no sized `Grid`, no `Vec(n, fill)`, and no
 `repeat`. [grid-and-graphs.md](../book/src/language/grid-and-graphs.md) states
@@ -534,6 +758,27 @@ reimplementing it.
 ---
 
 ## 9. A `for` binding has no name or type in the crash snapshot
+
+**Fixed**, and it was two defects as this entry suspected. Every
+pattern-introduced binding now renders `name: Type = value`:
+
+```text
+  locals:
+    pairs: Vec[(Int, Int)] = [(1, 2), (3, 4)]
+    acc: Int = 87
+    a: Int = 3
+    b: Int = 4
+    opt: Option[Int] = Some(77)
+    payload: Int = 77
+```
+
+`payload` — absent before, and the harder half, since absent is not the same
+failure as unnamed — is there. And the destructuring `for`'s three anonymous
+rows are now two: `a` and `b` are named, and the *scrutinee* is gone rather than
+renamed. It is a compiler temp, not a user binding, so suppressing it is what
+ADR-125's model actually implies; naming it would have invented a binding the
+program never wrote.
+[ADR-139](../decisions/139-a-pattern-name-is-a-name-in-the-frame.md).
 
 **Severity: low**, but it is in the crash debugger, which is a headline feature
 (§9), and the value it hides is one of the most common things to want at a
@@ -627,6 +872,24 @@ the same failure as unnamed.
 
 ## 10. `sections` cannot express "a repeated group, then a fixed one"
 
+**Fixed** as the counted `repeated(P, N)` this entry proposed. Day 12's file is
+now writable as what it is:
+
+```praxis
+read sections(
+    shapes: repeated(block(`{i:int}:`, rows: grid(char)), 6),
+    regions: lines(`{w:int}x{h:int}: {counts:ws(int)}`),
+)
+```
+
+`I028` is unchanged in force and narrower in scope — it now fires only for the
+**unbounded** form, whose argument was always greed rather than position, and
+its message says so and names the counted form as the way out. `N` is a literal
+of at least 1, because the parser plan is built when the program is compiled;
+too few sections left is a parse fault, as too few for a fixed field already
+was. [ADR-140](../decisions/140-a-counted-repeated-is-bounded-so-something-can-follow-it.md),
+amending [ADR-073](../decisions/073-a-constructor-call-is-a-shape-checked-before-it-is-built.md).
+
 **Severity: low**, and the rule behind it is right. Recording it because it is
 the only place in three puzzles where the input-parser DSL could not say what
 the input was, and the workaround is copy-paste.
@@ -689,6 +952,35 @@ is worth writing down next to the one thing it genuinely could not do.
 ---
 
 ## 11. A method on a value *derived* from an unannotated parameter is an ICE
+
+**Fixed**, and the diagnosis in this entry is one level off in a way worth
+correcting: the derived receiver **was** pinned all along — `require_method`
+pins the result variable too — and the constraint **was** made. What was missing
+was that it was never looked at again.
+
+`discharge_constraints` drained one snapshot: `for c in self.db.take_dischargeable()`.
+But `HasMethod`, `Iterable` and `HasField` are discharged by *producing* a type,
+and that unification is the only thing that can make the **next** link of a
+chain dischargeable — and the next link is not in the batch already handed back,
+because when the batch was taken its receiver was still a variable. So `t[i]`
+resolved and `t[i][j]` was dropped on the floor. The channel now runs to a
+fixpoint, with the termination argument written into the doc comment rather than
+an iteration cap.
+
+All seven rows of the table above now compile and answer. Two consequences
+beyond the entry: a `Y110` that was being *swallowed* is now reported at `check`
+(`fn f(v) { v[0].len() }` on a `Vec[Int]`), which is ADR-133's rule reaching one
+more code; and a second, distinct defect at the same panic was found — an
+**uncalled** body whose receiver nothing pinned also ICEd, with no chaining
+involved. ADR-093 blamed `monomorphize` for dropping such bodies; it does not,
+because ADR-057's pin makes them monotypes. They lower to an unconditional
+`panic` now, which is sound because the body is unreachable by construction.
+
+**Negative gate held**: `fn total(values) { values.sum() }` at `Vec[Int]` and
+`Vec[Float]` is still `Y001`, byte-identical to generalization.md's transcript,
+and `fn id(x) { x }` still renders `forall T. (T) -> T`. The fix changes *when* a
+constraint is examined and nothing about *which* variables are pinned.
+[ADR-137](../decisions/137-a-deferred-receiver-resolves-in-rounds-and-the-channel-runs-to-a-fixpoint.md).
 
 **Severity: high.** `praxis check` exits 0. `praxis run` panics with an
 `internal compiler error` before the program produces anything. The program is
@@ -801,6 +1093,40 @@ still be `Y001` per ADR-057.
 ---
 
 ## 12. There is no character literal, and `"#"[0]` is not a substitute
+
+**Fixed.** `'#'` is a token, an expression and a pattern, with a text literal's
+escapes plus `\'`, and no `\x`/`\u{…}` in either. `''` and `'ab'` are lex
+errors (`T007`) where they are written — which is the `"##"[0]` row of the table
+above closed at the front end — and the too-long case offers a machine-applicable
+rewrite to a text literal.
+
+**This entry's claim that everything downstream was already built was wrong, and
+it inherited that from ADR-107.** Two of the three things it missed would have
+been silent:
+
+- MIR's `Lit::Char` pattern arm was `Terminator::Jump { target: on_success }`.
+  Landing the syntax alone would have made `match c { '#' => …, '.' => … }`
+  compile, coverage-check clean, and return the first arm **for every
+  character**. That is a silent wrong answer sitting on this item's headline
+  gate, and it is invisible to `check`.
+- `pattern.rs` typed a `Char` pattern as *whatever the scrutinee was*, so
+  `match n { 'a' => … }` over an `Int` would have type-checked.
+- There was no `GcConst::Char`. Without it `'#'` lowers to `praxis_alloc_char`
+  plus a `CheckFault` — **slower than the `"#"[0]` it replaces**, so the folding
+  half was required rather than polish.
+
+Exhaustiveness genuinely needed no code: `Char` already falls to
+`Signature::Open` like `Int`, and `LitKey::render` already printed a witness as
+`'x'` — the proposed syntax, written years ahead of it.
+
+**All three gates pass.** `match c { '#' => …, '.' => … , _ => … }` compiles and
+is coverage-checked (and a two-arm version is `Y120`, byte-identical to `Int`'s
+message); `'#'` is `Inst::ConstGc` — two loads via a new `SMALL_CHARS_OFFSET` —
+where `"#"[0]` emitted a `TextGet` call; and `''`/`'ab'` are lexical errors.
+`'é'` correctly still allocates. Both AoC solves now write `'^'`, `'S'` and
+`'#'`, with byte-identical output.
+[ADR-141](../decisions/141-a-character-is-one-token-and-a-literal-is-a-load.md),
+answering ADR-086's D19 and superseding ADR-107's decision 2.
 
 **Severity: medium.** Raised by the maintainer on reading the solutions. It is
 the most-written awkwardness in a language whose stated purpose includes reading

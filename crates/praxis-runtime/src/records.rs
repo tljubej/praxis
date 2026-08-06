@@ -52,6 +52,25 @@ pub enum SchemaIdentity {
     Nominal(&'static str),
 }
 
+impl SchemaIdentity {
+    /// A deterministic sort key over type identity, for the container ordering
+    /// (ADR-138). Anonymous shapes come first, then nominal ones by name.
+    ///
+    /// Derived `Ord` would do the same thing, but it would also make identity
+    /// *silently* orderable everywhere and would move whenever a variant is
+    /// added. This is the one place an order over it is wanted, so it is spelled
+    /// once, here, and the reason travels with it. The name is the key rather
+    /// than the address because a schema is interned per producer — the JIT
+    /// generation, the parser registry, the runtime — and two `Point` schemas
+    /// from different producers must order identically.
+    pub(crate) fn order_key(self) -> (u8, &'static str) {
+        match self {
+            SchemaIdentity::Anonymous => (0, ""),
+            SchemaIdentity::Nominal(name) => (1, name),
+        }
+    }
+}
+
 /// The static shape of a record: what type it is, plus an ordered list of named
 /// fields, each with its value descriptor. Allocated in the JIT generation that
 /// built it (or, for parser templates, in the runtime's schema registry).
@@ -65,6 +84,22 @@ impl RecordSchema {
     /// The number of fields in this record shape.
     pub fn arity(&self) -> usize {
         self.fields.len()
+    }
+
+    /// The descriptor to dispatch field `i` through for `value`: the static one
+    /// when the producer had it, and the value's own otherwise.
+    ///
+    /// The same rule [`TupleSchema::descriptor_at`](crate::tuples::TupleSchema)
+    /// states — an object always knows what it is — so a producer that had no
+    /// static type for a field leaves a null rather than guessing one.
+    fn descriptor_at(&self, i: usize, value: GcRef) -> &'static TypeDescriptor {
+        match self.fields.get(i).map(|f| f.descriptor) {
+            Some(d) if !d.is_null() => {
+                // SAFETY: a non-null slot is a `'static` descriptor pointer.
+                unsafe { &*d }
+            }
+            _ => value.descriptor(),
+        }
     }
 
     /// Whether two schemas describe the *same record type* — the same identity
@@ -205,11 +240,65 @@ unsafe fn record_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     }
 }
 
-/// Descriptor for the structural `Record` type (§4.5/§7.8). Structural equality
-/// and hashing (§5.5) recurse field-wise through the per-shape schema's field
-/// descriptors. A record is equatable/hashable iff every field is; functions
-/// never are, so a record containing a function field is neither. This lets
-/// records serve as map/set keys (M8 containers).
+unsafe fn record_compare(a: *const u8, b: *const u8) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    // SAFETY: caller guarantees both pointers point at initialized RecordPayloads.
+    let pa = unsafe { &*(a as *const RecordPayload) };
+    let pb = unsafe { &*(b as *const RecordPayload) };
+    // A null schema is a producer bug and not a user-reachable state, but it
+    // still needs a deterministic answer rather than a hash-order one (ADR-138).
+    match (pa.schema.is_null(), pb.schema.is_null()) {
+        (true, true) => return Ordering::Equal,
+        (true, false) => return Ordering::Less,
+        (false, true) => return Ordering::Greater,
+        (false, false) => {}
+    }
+    // SAFETY: both checked non-null above.
+    let (schema_a, schema_b) = unsafe { (&*pa.schema, &*pb.schema) };
+    // Type identity first, so two record *types* in one collection never
+    // interleave — and by name, never by schema address, for the reason
+    // `same_type` gives: there are three producers of a schema and their
+    // addresses differ.
+    match schema_a
+        .identity
+        .order_key()
+        .cmp(&schema_b.identity.order_key())
+    {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    match pa.items.len().cmp(&pb.items.len()) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // Field-wise in schema order, short-circuiting at the first difference. The
+    // field *name* participates because two anonymous shapes with one arity are
+    // different types, and `record_hash` already mixes the names for the same
+    // reason.
+    for (i, (x, y)) in pa.items.iter().zip(pb.items.iter()).enumerate() {
+        let (na, nb) = (schema_a.fields[i].name, schema_b.fields[i].name);
+        match na.cmp(nb) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+        let dx = schema_a.descriptor_at(i, *x);
+        let dy = schema_b.descriptor_at(i, *y);
+        // SAFETY: each field's payload matches the descriptor its schema slot
+        // names, or its own header's when that slot is null.
+        match unsafe { crate::ordering::slot_cmp(*x, *y, dx, dy) } {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    Ordering::Equal
+}
+
+/// Descriptor for the structural `Record` type (§4.5/§7.8). Structural equality,
+/// hashing (§5.5) and the container ordering (ADR-138) recurse field-wise
+/// through the per-shape schema's field descriptors. A record is
+/// equatable/hashable iff every field is; functions never are, so a record
+/// containing a function field is neither. This lets records serve as map/set
+/// keys (M8 containers) — which is why a container has to be able to order one.
 pub static RECORD: TypeDescriptor = TypeDescriptor::builtin::<RecordPayload>(
     BuiltinTypeId::Record,
     "Record",
@@ -218,8 +307,9 @@ pub static RECORD: TypeDescriptor = TypeDescriptor::builtin::<RecordPayload>(
     record_format,
     Some(record_equals),
     Some(record_hash),
-    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
-    None,
+    // A record can be a key, so a container orders one (ADR-138). `p < q` on
+    // two records is still Y006: that is `capability::supports_ord`'s question.
+    Some(record_compare),
 )
 .with_owned_bytes(record_owned_bytes);
 
@@ -330,6 +420,48 @@ mod tests {
         // Same shape, different values: still not equal.
         let c = record_of(&mut ctx, second, &[1, 3]);
         assert!(!equal(a, c));
+    }
+
+    /// The ordering analogue of the test above (ADR-138). A record's container
+    /// order is its type identity, then its fields — and identity is compared
+    /// by *name*, never by schema address, for the same reason equality is:
+    /// there are three producers of a schema and their allocations differ, so
+    /// an address order would have two `Point`s from two generations sort into
+    /// an order that changes between runs.
+    #[test]
+    fn record_compare_is_identity_then_fields() {
+        let mut rt = crate::Runtime::new();
+        let mut ctx = rt.context();
+        let cmp = |a: GcRef, b: GcRef| unsafe {
+            record_compare(
+                a.payload::<u8>() as *const u8,
+                b.payload::<u8>() as *const u8,
+            )
+        };
+
+        let first = leak_schema(SchemaIdentity::Anonymous, &["x", "y"]);
+        let second = leak_schema(SchemaIdentity::Anonymous, &["x", "y"]);
+        assert!(!std::ptr::eq(first, second));
+        let a = record_of(&mut ctx, first, &[1, 2]);
+        let same = record_of(&mut ctx, second, &[1, 2]);
+        assert_eq!(
+            cmp(a, same),
+            std::cmp::Ordering::Equal,
+            "one shape, one value"
+        );
+
+        // Fields decide, left to right, through each field's own order — so
+        // `2` precedes `10` rather than trailing it as `"10"` would.
+        let bigger = record_of(&mut ctx, second, &[1, 10]);
+        let smaller = record_of(&mut ctx, second, &[1, 2]);
+        assert_eq!(cmp(smaller, bigger), std::cmp::Ordering::Less);
+
+        // Identity comes first: an anonymous shape sorts before a nominal one,
+        // whatever its fields say.
+        let point = leak_schema(SchemaIdentity::Nominal("Point"), &["x", "y"]);
+        let p = record_of(&mut ctx, point, &[0, 0]);
+        assert_eq!(cmp(a, p), std::cmp::Ordering::Less);
+        assert_eq!(cmp(p, a), std::cmp::Ordering::Greater);
     }
 
     /// RT-12's other half: a *nominal* record is its declared type, so two

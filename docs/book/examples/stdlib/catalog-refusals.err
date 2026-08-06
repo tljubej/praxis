@@ -16,4 +16,16 @@ error[Y001]: expected (?T, ?U), found Int
   3 | out([1, 2].to_map())
     |            ^^^^^^ expected (?T, ?U), found Int
 
-praxis: 3 error(s)
+error[Y001]: expected Text, found Char
+
+  catalog-refusals.px:4:14
+  4 | out(["a"[0]].join(""))
+    |              ^^^^ expected Text, found Char
+
+error[Y001]: expected Char, found Int
+
+  catalog-refusals.px:5:12
+  5 | out([1, 2].to_text())
+    |            ^^^^^^^ expected Char, found Int
+
+praxis: 5 error(s)

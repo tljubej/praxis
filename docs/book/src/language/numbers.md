@@ -28,7 +28,10 @@ praxis: 1 error(s)
 
 The conversions are explicit and are a matched pair: `Int.to_float()` always
 succeeds, and `Float.to_int()` truncates toward zero and faults on anything it
-cannot represent. The rule that decides an operation's type is the operands':
+cannot represent. Both types also render: `Int.to_text()` and `Float.to_text()`
+each answer exactly the characters `out` writes, because the method and the
+printer share one renderer
+([ADR-143](../../../decisions/143-the-to-text-family-is-int-float-and-char.md)). The rule that decides an operation's type is the operands':
 one `Float` operand makes the operation `Float`, otherwise it is `Int`. (A
 `Text` operand makes it `Text` — see [Text and Char](text.md).)
 
@@ -196,7 +199,8 @@ outside the signed 64-bit range, with `float-to-int conversion out of range`.
 ### How a Float prints
 
 `out()` and `to_text()` render a finite `Float` in the shortest text that reads
-back as **the same `Float`**. Because `1` is an `Int` literal in this language
+back as **the same `Float`** — one function, called from both, so the pair
+cannot come apart. Because `1` is an `Int` literal in this language
 and the two types never mix, a whole-numbered float keeps a fractional part:
 
 ```praxis
@@ -233,8 +237,10 @@ takes a `.0` like any other whole number. The three non-finite values print as
 literals. The reasoning, and the defect where `out(1.0)` used to print `1`, is
 [ADR-083](../../../decisions/083-a-float-prints-as-a-float.md).
 
-The rendered form is load-bearing beyond printing: `Map`, `Set` and `Counter`
-order their entries by it, so it is a sort key as well as an answer.
+The rendered form is an answer and nothing more. `Map`, `Set` and `Counter` used
+to order their entries by it, which put `10.25` between `1.5` and `2.0`; they now
+order by the number, so a `Set[Float]` prints `{1.5, 2.0, 10.25}`
+([ADR-138](../../../decisions/138-a-container-orders-by-the-value-and-not-by-its-printing.md)).
 
 ### NaN
 

@@ -240,6 +240,12 @@ runtime_symbols! {
     BoolLoad = "praxis_bool_load": (Ctx, Gc) -> RawI64, Pure;
     CharLoad = "praxis_char_load": (Ctx, Gc) -> RawI64, Pure;
     CharToInt = "praxis_char_to_int": (Ctx, Gc) -> Gc, Allocates;
+    // The `to_text` family — this row, `FloatToText` and `IntToText` — is
+    // `Allocates` and never `AllocatesAndFaults` (ADR-143). Each answers a fresh
+    // `Text` built from a payload that was validated at construction, so there
+    // is nothing left to check; declaring one faulting would put a `CheckFault`
+    // after every call site that can never fire.
+    CharToText = "praxis_char_to_text": (Ctx, Gc) -> Gc, Allocates;
     CheckFault = "praxis_check_fault": (Ctx) -> RawI64, Pure;
     ClosureCapture = "praxis_closure_capture": (Ctx, Gc, RawI64) -> Gc, Pure;
     ClosureFnPtr = "praxis_closure_fn_ptr": (Ctx, Gc) -> Ptr, Pure;
@@ -287,6 +293,14 @@ runtime_symbols! {
     GridCells = "praxis_grid_cells": (Ctx, Gc) -> Gc, Allocates;
     GridColumn = "praxis_grid_column": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     GridContains = "praxis_grid_contains": (Ctx, Gc, Gc, Gc) -> Gc, Pure;
+    // `Grid(w, h, fill)` (ADR-146). The extents arrive boxed where `GridNew`'s
+    // arrive raw, because these two come from lowered argument expressions and
+    // a `RawI64` would cost an `ExtractScalar` apiece; `GridNew`'s are `iconst`
+    // immediates with no local to unbox. It faults for `GridNew`'s reason —
+    // `GridExtent::new` refuses a negative or oversized extent — and for that
+    // reason only, since an explicit fill is the one thing `default_cell`
+    // cannot invent.
+    GridFilled = "praxis_grid_filled": (Ctx, Ptr, Gc, Gc, Gc) -> Gc, AllocatesAndFaults;
     GridFind = "praxis_grid_find": (Ctx, Gc, Gc) -> Gc, Allocates;
     GridFindAll = "praxis_grid_find_all": (Ctx, Gc, Gc) -> Gc, Allocates;
     GridGet = "praxis_grid_get": (Ctx, Gc, Gc, Gc) -> Gc, Faults;
@@ -329,6 +343,8 @@ runtime_symbols! {
     IntSub = "praxis_int_sub": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     IntToChar = "praxis_int_to_char": (Ctx, Gc) -> Gc, AllocatesAndFaults;
     IntToFloat = "praxis_int_to_float": (Ctx, Gc) -> Gc, Allocates;
+    // `Allocates`, for the reason recorded on `CharToText`: every `i64` renders.
+    IntToText = "praxis_int_to_text": (Ctx, Gc) -> Gc, Allocates;
     IntWrappingAdd = "praxis_int_wrapping_add": (Ctx, Gc, Gc) -> Gc, Allocates;
     IntWrappingMul = "praxis_int_wrapping_mul": (Ctx, Gc, Gc) -> Gc, Allocates;
     IntWrappingSub = "praxis_int_wrapping_sub": (Ctx, Gc, Gc) -> Gc, Allocates;
@@ -388,14 +404,35 @@ runtime_symbols! {
     TupleGet = "praxis_tuple_get": (Ctx, Gc, RawI64) -> Gc, Pure;
     TupleSet = "praxis_tuple_set": (Ctx, Gc, RawI64, Gc) -> Gc, Pure;
     ValueCmp = "praxis_value_cmp": (Ctx, Gc, Gc) -> RawI64, Faults;
+    // The one wrapper an interpolation hole lowers to (ADR-147). `Allocates`
+    // and not `AllocatesAndFaults`: every `GcRef` has a descriptor with a
+    // `format` callback, so there is no value it can be handed that it cannot
+    // render, and a `String` built by `format` is UTF-8 by construction. That is
+    // `TextConcat`'s row, for the same two reasons.
+    ValueToText = "praxis_value_to_text": (Ctx, Gc) -> Gc, Allocates;
     VarCellGet = "praxis_var_cell_get": (Ctx, Gc) -> Gc, Pure;
     VarCellSet = "praxis_var_cell_set": (Ctx, Gc, Gc) -> Gc, Pure;
+    // `Vec(n, fill)` (ADR-146). `VecNew` beneath it only allocates; this one
+    // faults, because a count is a runtime `Int` and `VecExtent::new` refuses a
+    // negative or oversized one (ADR-041 decision 1).
+    VecFilled = "praxis_vec_filled": (Ctx, Ptr, Gc, Gc) -> Gc, AllocatesAndFaults;
     VecFrequencies = "praxis_vec_frequencies": (Ctx, Gc) -> Gc, Allocates;
     VecGet = "praxis_vec_get": (Ctx, Gc, Gc) -> Gc, Faults;
     VecIsEmpty = "praxis_vec_is_empty": (Ctx, Gc) -> Gc, Pure;
+    // `join` and `to_text` fault for `praxis_vec_sorted`'s reason and not for
+    // `sorted`'s cause: the catalog row bounds the item to `Text` (or to `Char`),
+    // so an element of another type is a compiler bug — and the honest way to
+    // report one is `TypeMismatch`, not reading a foreign payload as a `Text`
+    // (ADR-144).
+    VecJoin = "praxis_vec_join": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     VecLen = "praxis_vec_len": (Ctx, Gc) -> Gc, Allocates;
     VecNew = "praxis_vec_new": (Ctx, Ptr) -> Gc, Allocates;
     VecPush = "praxis_vec_push": (Ctx, Gc, Gc) -> GcUnit, AllocatesAndFaults;
+    // `reversed` reads no descriptor callback at all — not `compare`, not
+    // `equals`, not `hash` — so there is nothing it can be handed that it cannot
+    // reverse (ADR-145). That is why it is `Allocates` where `VecSorted` beneath
+    // it is not.
+    VecReversed = "praxis_vec_reversed": (Ctx, Gc) -> Gc, Allocates;
     VecSet = "praxis_vec_set": (Ctx, Gc, Gc, Gc) -> GcUnit, Faults;
     // `sorted` faults and `unique` does not, and the difference is derived from
     // the wrappers rather than guessed: `praxis_vec_sorted` raises
@@ -407,6 +444,7 @@ runtime_symbols! {
     // code, so this faults for two reasons where `praxis_vec_sorted` faults for
     // one: an unorderable key, and whatever the closure itself raised.
     VecSortedByKey = "praxis_vec_sorted_by_key": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
+    VecToText = "praxis_vec_to_text": (Ctx, Gc) -> Gc, AllocatesAndFaults;
     VecUnique = "praxis_vec_unique": (Ctx, Gc) -> Gc, Allocates;
     WriteStdout = "praxis_write_stdout": (Ctx, Gc) -> GcUnit, Pure;
 }
@@ -549,6 +587,115 @@ mod tests {
                 sym.name()
             );
         }
+    }
+
+    /// **ADR-143.** All three `to_text` wrappers allocate and none of them
+    /// faults.
+    ///
+    /// Green by construction the moment the rows exist, and pinned for
+    /// `no_overflow_alternative_declares_that_it_faults`'s reason: the wrong
+    /// answer here is silent. `MethodEntry::can_fault` reads the manifest, so a
+    /// row copied from `FloatToInt` instead of `FloatToText` would make every
+    /// `n.to_text()` emit a `CheckFault` that can never fire, and nothing about
+    /// the program's behaviour would say so.
+    #[test]
+    fn the_to_text_family_allocates_and_cannot_fault() {
+        for sym in [
+            RuntimeSymbol::IntToText,
+            RuntimeSymbol::FloatToText,
+            RuntimeSymbol::CharToText,
+        ] {
+            assert_eq!(
+                sym.sig().effect,
+                Effect::Allocates,
+                "`{}` renders a payload validated at construction and answers a \
+                 fresh Text; there is nothing for it to fault on",
+                sym.name()
+            );
+        }
+    }
+
+    /// **ADR-147.** An interpolation hole's wrapper allocates and cannot fault,
+    /// and it is `WriteStdout`'s renderer with `TextConcat`'s effect.
+    ///
+    /// The contrast is the assertion. `praxis_write_stdout` is `Pure` because it
+    /// allocates nothing at all; `praxis_value_to_text` does the same rendering
+    /// and then allocates a `Text`, so it is `Allocates` — and it is not
+    /// `AllocatesAndFaults`, because every `GcRef` has a descriptor with a
+    /// `format` callback and a `String` built by one is UTF-8 by construction.
+    /// Declaring it faulting would put a `CheckFault` after every hole in every
+    /// interpolated literal that can never fire, and nothing about the program's
+    /// behaviour would say so.
+    #[test]
+    fn a_holes_renderer_allocates_and_cannot_fault() {
+        assert_eq!(RuntimeSymbol::ValueToText.sig().effect, Effect::Allocates);
+        assert_eq!(RuntimeSymbol::TextConcat.sig().effect, Effect::Allocates);
+        // `out` renders through the same callback and allocates nothing, which
+        // is why the two rows differ at all.
+        assert_eq!(RuntimeSymbol::WriteStdout.sig().effect, Effect::Pure);
+    }
+
+    /// **ADR-145.** `reversed` reads no descriptor callback, so its row is
+    /// `Allocates` where its two neighbours are not.
+    ///
+    /// The contrast is the assertion. `sorted` faults because `compare` may be
+    /// absent; `reversed` has nothing to ask for, and marking it faulting to
+    /// match the barrier beside it would put a dead check after every call.
+    #[test]
+    fn reversal_cannot_fault_where_ordering_can() {
+        assert_eq!(RuntimeSymbol::VecReversed.sig().effect, Effect::Allocates);
+        assert_eq!(
+            RuntimeSymbol::VecSorted.sig().effect,
+            Effect::AllocatesAndFaults,
+            "the neighbour this is contrasted with still orders through `compare`"
+        );
+    }
+
+    /// **ADR-146.** A sized constructor declares that it faults, and its
+    /// nullary neighbour is the contrast.
+    ///
+    /// This row is what makes a negative size *observable*: MIR emits a
+    /// `CheckFault` after an allocation only when a wrapper it reaches declares
+    /// a fault, so a `Vec(n, fill)` marked `Allocates` would set `InvalidSize`
+    /// into a context nothing ever reads and hand the program a Unit sentinel
+    /// typed as a `Vec` (ADR-088).
+    ///
+    /// The arity is asserted too, because the descriptor slot and the fill are
+    /// what distinguish these from the nullary wrappers: a row that grew an
+    /// extent without growing its wrapper would pass garbage in an unfilled
+    /// slot.
+    #[test]
+    fn a_sized_constructor_declares_that_it_faults() {
+        for sym in [RuntimeSymbol::VecFilled, RuntimeSymbol::GridFilled] {
+            assert_eq!(
+                sym.sig().effect,
+                Effect::AllocatesAndFaults,
+                "`{}` refuses a negative or oversized extent, and only a \
+                 declared fault gets a `CheckFault` to observe it",
+                sym.name()
+            );
+        }
+        assert_eq!(
+            RuntimeSymbol::VecNew.sig().effect,
+            Effect::Allocates,
+            "the empty form has no size to refuse, and marking it faulting \
+             would put a dead check after every `Vec()`"
+        );
+        // (ctx, descriptor, count, fill) and (ctx, descriptor, w, h, fill).
+        assert_eq!(
+            RuntimeSymbol::VecFilled.sig().params,
+            &[AbiKind::Ctx, AbiKind::Ptr, AbiKind::Gc, AbiKind::Gc]
+        );
+        assert_eq!(
+            RuntimeSymbol::GridFilled.sig().params,
+            &[
+                AbiKind::Ctx,
+                AbiKind::Ptr,
+                AbiKind::Gc,
+                AbiKind::Gc,
+                AbiKind::Gc
+            ]
+        );
     }
 
     /// **ADR-111.** `praxis_alloc_text` trusts its bytes, and the row is where

@@ -270,17 +270,31 @@ pub enum ParserAst {
     /// `sections(P)` → `Vec[result(P)]` (homogeneous; named sections are M9).
     Sections { child: Box<ParserAst>, span: Span },
     /// Named heterogeneous `sections(name: P, ..., tail: repeated(P))` (M9,
-    /// §7.5). Each named field parses one fixed section in order; the optional
-    /// `repeated_tail` is a named field (`boards: repeated(matrix(int))`) whose
-    /// parser consumes all remaining sections as a `Vec[result(P)]`. Result is
-    /// an anonymous record `{ field1: result(P1), …, tail_name: Vec[…] }`.
+    /// §7.5). Result is an anonymous record with one field per named argument,
+    /// in source order.
+    ///
+    /// A named argument takes one of three forms, and the split between
+    /// `fields` and `repeated_tail` is what keeps the third one's rule
+    /// structural rather than remembered:
+    ///
+    /// - `name: P` — one section, one field of `result(P)`
+    ///   ([`SectionItem::One`]);
+    /// - `name: repeated(P, N)` — exactly `N` consecutive sections, one field
+    ///   of `Vec[result(P)]` ([`SectionItem::Counted`]). It is **bounded**, so
+    ///   it may sit anywhere among the named arguments and other fields may
+    ///   follow it;
+    /// - `name: repeated(P)` — every section that is left, one field of
+    ///   `Vec[result(P)]`. It is greedy, so nothing can follow it: there is at
+    ///   most one and it is last, which is `repeated_tail` being a single
+    ///   `Option` outside the list rather than a variant inside it.
     SectionsNamed {
-        /// `(field_name, parser)` pairs in source order. Each parses exactly
-        /// one section.
-        fields: Vec<(String, ParserAst)>,
-        /// The named `repeated(...)` tail, if present. The name (e.g.
-        /// `"boards"`) becomes the record field; the parser consumes every
-        /// remaining section into a `Vec[result(P)]`.
+        /// The named arguments other than the unbounded tail, in source order.
+        /// Each contributes exactly one record field and consumes
+        /// [`SectionItem::sections_wanted`] sections.
+        fields: Vec<SectionItem>,
+        /// The unbounded `repeated(P)` tail, if present. The name (e.g.
+        /// `"boards"`) becomes the record's last field; the parser consumes
+        /// every remaining section into a `Vec[result(P)]`.
         repeated_tail: Option<(String, Box<ParserAst>)>,
         span: Span,
     },
@@ -400,6 +414,130 @@ impl Separator {
 impl std::fmt::Display for Separator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// The `N` of a `repeated(P, N)` — **at least one section, by construction**.
+///
+/// A group of no sections parses nothing: `repeated(P, 0)` would produce an
+/// empty `Vec` while consuming no input, which is not a parser anybody means to
+/// write and reads as a typo for the unbounded form. A negative count names no
+/// sections at all. Both are the same kind of value [`Separator`] refuses one
+/// field over — a number the runtime would have to invent a meaning for — and
+/// they are refused the same way, by the one constructor, rather than by a
+/// `validate` arm the next construction site can forget.
+///
+/// The upper bound is the plan's: [`crate::plan::SectionItemNode`] stores the
+/// count as a `u32`, because the plan is a flat `&'static` repr the runtime
+/// reads without allocating. A count that does not fit is refused here, where
+/// the source span is still in hand, rather than truncated there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RepeatCount(std::num::NonZeroU32);
+
+/// The two ways [`RepeatCount::new`] fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvalidRepeatCount {
+    /// Zero or negative: a group of no sections parses nothing.
+    NotPositive,
+    /// Larger than a `u32`, which is what the plan node holds.
+    TooLarge,
+}
+
+impl std::fmt::Display for InvalidRepeatCount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            InvalidRepeatCount::NotPositive => {
+                "a `repeated` count must be at least 1: a group of no sections parses nothing"
+            }
+            InvalidRepeatCount::TooLarge => "a `repeated` count must fit in 32 bits",
+        })
+    }
+}
+
+impl std::error::Error for InvalidRepeatCount {}
+
+impl RepeatCount {
+    /// The **only** constructor. Refuses a count that names no sections.
+    ///
+    /// # Errors
+    /// [`InvalidRepeatCount`] for `n <= 0` or `n > u32::MAX`.
+    pub fn new(n: i64) -> Result<Self, InvalidRepeatCount> {
+        if n <= 0 {
+            return Err(InvalidRepeatCount::NotPositive);
+        }
+        let n = u32::try_from(n).map_err(|_| InvalidRepeatCount::TooLarge)?;
+        // Non-zero by the check above; `NonZeroU32::new` cannot fail here.
+        std::num::NonZeroU32::new(n)
+            .map(RepeatCount)
+            .ok_or(InvalidRepeatCount::NotPositive)
+    }
+
+    /// The count. Never zero.
+    #[must_use]
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+impl std::fmt::Display for RepeatCount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.get())
+    }
+}
+
+/// One named argument of a heterogeneous `sections(...)` other than its
+/// unbounded tail (§7.5).
+///
+/// Each variant contributes exactly one field to the generated record; they
+/// differ in how many sections they consume, which is what
+/// [`sections_wanted`](Self::sections_wanted) answers. The count lives *in the
+/// item* rather than in a parallel position map beside the field list, because
+/// a position recorded twice is a position that can disagree with itself —
+/// which is the drift ADR-073 was written about.
+#[derive(Clone, Debug)]
+pub enum SectionItem {
+    /// `name: P` — one section, one field of `result(P)`.
+    One { name: String, parser: ParserAst },
+    /// `name: repeated(P, N)` — exactly `N` consecutive sections, one field of
+    /// `Vec[result(P)]`.
+    Counted {
+        name: String,
+        count: RepeatCount,
+        parser: ParserAst,
+    },
+}
+
+impl SectionItem {
+    /// The record field this item contributes.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            SectionItem::One { name, .. } | SectionItem::Counted { name, .. } => name,
+        }
+    }
+
+    /// The parser applied to each of this item's sections.
+    #[must_use]
+    pub fn parser(&self) -> &ParserAst {
+        match self {
+            SectionItem::One { parser, .. } | SectionItem::Counted { parser, .. } => parser,
+        }
+    }
+
+    /// The parser, mutably — for [`ParserAst::shift_spans`].
+    pub fn parser_mut(&mut self) -> &mut ParserAst {
+        match self {
+            SectionItem::One { parser, .. } | SectionItem::Counted { parser, .. } => parser,
+        }
+    }
+
+    /// How many sections this item consumes.
+    #[must_use]
+    pub fn sections_wanted(&self) -> usize {
+        match self {
+            SectionItem::One { .. } => 1,
+            SectionItem::Counted { count, .. } => count.get() as usize,
+        }
     }
 }
 
@@ -546,8 +684,8 @@ impl ParserAst {
                 span,
             } => {
                 *span = span.shifted(delta);
-                for (_, p) in fields {
-                    p.shift_spans(delta);
+                for item in fields {
+                    item.parser_mut().shift_spans(delta);
                 }
                 if let Some((_, tail)) = repeated_tail {
                     tail.shift_spans(delta);
@@ -625,9 +763,10 @@ pub enum Constructor {
     Choice,
     Optional,
     Scan,
-    /// `repeated(P)` — legal **only** as the final named argument of a
-    /// `sections` call (§7.5). It is in the table so that the name is known and
-    /// its misuse is `MisplacedRepeatedTail` rather than "unknown constructor".
+    /// `repeated(P)` / `repeated(P, N)` — legal **only** as a named argument of
+    /// a `sections` call (§7.5). It is in the table so that the name is known
+    /// and its misuse is `MisplacedRepeatedTail` rather than "unknown
+    /// constructor".
     Repeated,
 }
 
@@ -647,6 +786,11 @@ pub enum ArgShape {
     OneString,
     /// `chars(P, skip: policy)` — one parser and an optional `skip:` keyword.
     ParserWithSkip,
+    /// `repeated(P)` or `repeated(P, N)` — one parser and an optional count
+    /// literal. The count must be a literal because the parser plan is built
+    /// when the program is compiled, so there is no runtime value in scope to
+    /// read one from.
+    ParserWithOptionalCount,
     /// `grid(P)` or `grid(P, ragged, fill: value)` — the ragged flag and the
     /// fill value come as a pair or not at all.
     GridMaybeRagged,
@@ -777,8 +921,9 @@ impl Constructor {
                  input that embeds its data in noise."
             }
             Constructor::Repeated => {
-                "The repeating tail of a heterogeneous `sections`. Legal only as \
-                 its final named argument."
+                "A repeating group of sections in a heterogeneous `sections`. \
+                 `repeated(P, N)` takes exactly N and may be followed; \
+                 `repeated(P)` takes every section left, so it must be last."
             }
         }
     }
@@ -812,8 +957,8 @@ impl Constructor {
             | Constructor::Ws
             | Constructor::Matrix
             | Constructor::Optional
-            | Constructor::Scan
-            | Constructor::Repeated => ArgShape::Positional(1),
+            | Constructor::Scan => ArgShape::Positional(1),
+            Constructor::Repeated => ArgShape::ParserWithOptionalCount,
             Constructor::Sections => ArgShape::OnePositionalOrNamed,
             Constructor::Sep => ArgShape::StringThenParser,
             Constructor::OneOf => ArgShape::OneString,
@@ -902,5 +1047,61 @@ mod tests {
             Constructor::Choice.arg_shape(),
             ArgShape::NamedOnly { at_least: 1 }
         );
+        assert_eq!(
+            Constructor::Repeated.arg_shape(),
+            ArgShape::ParserWithOptionalCount
+        );
+    }
+
+    /// **The count that names no sections is not constructible.**
+    ///
+    /// `repeated(P, 0)` would consume nothing and produce an empty `Vec`, which
+    /// is a parser nobody writes on purpose and reads as a typo for the
+    /// unbounded form; a negative count names no sections at all. A `validate`
+    /// arm would catch either only where somebody remembered to call it, so the
+    /// one constructor refuses them — the same argument `Separator` makes about
+    /// the separator that never advances.
+    #[test]
+    fn a_repeat_count_is_positive_by_construction() {
+        assert_eq!(RepeatCount::new(0), Err(InvalidRepeatCount::NotPositive));
+        assert_eq!(RepeatCount::new(-3), Err(InvalidRepeatCount::NotPositive));
+        assert_eq!(
+            RepeatCount::new(1 << 33),
+            Err(InvalidRepeatCount::TooLarge),
+            "the plan node holds a u32, so the refusal happens where the span is"
+        );
+
+        assert_eq!(RepeatCount::new(1).expect("one section").get(), 1);
+        assert_eq!(RepeatCount::new(6).expect("six sections").get(), 6);
+        assert_eq!(
+            RepeatCount::new(i64::from(u32::MAX))
+                .expect("the largest count the plan can hold")
+                .get(),
+            u32::MAX
+        );
+    }
+
+    /// A counted item wants its count's worth of sections and a plain one wants
+    /// exactly one — the number the runtime's cursor advances by, stated once
+    /// here so the walk and the shortfall diagnostic cannot disagree about it.
+    #[test]
+    fn a_section_items_appetite_is_its_count() {
+        let atom = || ParserAst::Atomic {
+            kind: AtomicKind::Int,
+            span: Span::at(0),
+        };
+        let one = SectionItem::One {
+            name: "regions".to_string(),
+            parser: atom(),
+        };
+        let counted = SectionItem::Counted {
+            name: "shapes".to_string(),
+            count: RepeatCount::new(6).expect("six sections"),
+            parser: atom(),
+        };
+        assert_eq!(one.sections_wanted(), 1);
+        assert_eq!(counted.sections_wanted(), 6);
+        assert_eq!(one.name(), "regions");
+        assert_eq!(counted.name(), "shapes");
     }
 }

@@ -1,0 +1,36 @@
+// Every binding form ADR-125 lists, live in one frame when it faults, so a
+// single `locals` dump is the whole gate for ADR-139: a `var`, a function
+// parameter, a plain `for` variable, a destructuring `for`'s two components, a
+// `match` arm payload bound by reference, and a *reassigned* `match` arm
+// payload — which takes the other lowering branch (its own slot rather than the
+// scrutinee's) and so is the row a fix that names four of the five would miss.
+//
+// The subscript at the end is past the end of `xs`, which faults with every
+// binding above it still holding its last value.
+
+fn walk(limit: Int) -> Int {
+    var total = limit
+    var ones = [1, 2, 3]
+    for item in ones {
+        total = total + item
+    }
+    var pairs = [(4, 5), (6, 7)]
+    for (a, b) in pairs {
+        total = total + a + b
+    }
+    match Some(8) {
+        Some(payload) => { total = total + payload }
+        None => {}
+    }
+    match Some(9) {
+        Some(bumped) => {
+            bumped = bumped + 1
+            total = total + bumped
+        }
+        None => {}
+    }
+    var xs = [total]
+    xs[9]
+}
+
+out(walk(100))

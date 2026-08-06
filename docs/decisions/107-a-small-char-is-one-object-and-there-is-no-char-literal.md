@@ -145,6 +145,21 @@ language rather than an omission. If character-literal syntax is ever added, a
 already the compile-time predicate it would ask — which is why that function is
 a `const fn` even though only the runtime calls it today.
 
+> **Superseded by [ADR-141](./141-a-character-is-one-token-and-a-literal-is-a-load.md)
+> (2026-08-06). The day it anticipated arrived, and the prediction was correct in
+> every particular.** `GcConst::Char` exists and is emitted for an in-range
+> literal; `small_char::index_of` is the compile-time predicate this paragraph
+> said it would be, asked through `GcConst::small_char` the way `small_int`'s is
+> asked through `GcConst::small_int`; and the `const fn` was worth keeping — it
+> needed no change to acquire its first compiler caller. What is superseded is
+> only the *fact* this decision recorded, that there is no character literal.
+> The reasoning above is left exactly as written, because an anticipation this
+> precise is more useful to the next reader than its own deletion would be.
+>
+> Decisions 1, 3 and 4 are untouched: the interning, `char_ref` and the v19 bump
+> are all unaffected, and ADR-141 owes no ABI bump of its own — `small_chars`
+> does not move and no `#[repr(C)]` layout changes.
+
 ### 3. Every door goes through `char_ref`, and it paces on both arms
 
 `char_ref` is `int_ref`'s shape. All four boxing sites reach it: three directly,
@@ -223,6 +238,15 @@ assumes the two are alike will look for a backend change that does not exist.
   crate and no backend reader, so it declares no `MIN` (the payload is unsigned
   and 0 is the floor, and a constant zero only invites an unchecked
   `code - MIN`), no `STRIDE`, and is not re-exported from the crate root.
+
+  > **Amended by [ADR-141](./141-a-character-is-one-token-and-a-literal-is-a-load.md)
+  > (2026-08-06).** "One consumer crate and no backend reader" is what the
+  > character literal falsifies: `Inst::ConstGc { GcConst::Char }` indexes this
+  > table from generated code at a compile-time byte offset, so
+  > `SMALL_CHAR_STRIDE` now exists, declared beside the array it measures for
+  > `index_of`'s reason. The rest of the bullet stands — there is still no `MIN`,
+  > and the module is still not re-exported from the crate root, since the
+  > backend names the table at the use site.
 
 - **No test in the suite was a false pass waiting to happen, and one new one
   was.** ADR-100 had to repair four tests *before* it could be measured, because

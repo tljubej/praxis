@@ -41,6 +41,17 @@
 //! Termination: the wildcard-complete case only fires when every constructor
 //! appears *literally* in the first column, so it can recurse no deeper than
 //! real constructor patterns nest in the source.
+//!
+//! # `Char` cost this pass nothing
+//!
+//! The character literal (ADR-141) arrived without a line of change here, which
+//! is the one thing worth recording about it: [`LitKey::Char`] already keyed a
+//! `Char` pattern, [`signature`] already falls it through to [`Signature::Open`]
+//! like every other scalar nobody can enumerate — so a `match` over a `Char` is
+//! never exhaustive without a `_` — and [`LitKey::render`] already printed a
+//! witness as `'x'`, which is now the spelling the reader can paste back into
+//! the program. `coverage_tests`' three `Char` tests exist to hold that, since
+//! there is no code here for a regression to break.
 
 use praxis_ast::AstNode;
 use praxis_source::{Diagnostic, FileId, FileSpan, Span};

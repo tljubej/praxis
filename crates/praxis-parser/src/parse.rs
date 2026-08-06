@@ -173,6 +173,10 @@ fn is_pattern_start(kind: SyntaxKind) -> bool {
         SyntaxKind::UNDERSCORE
             | SyntaxKind::IntLit
             | SyntaxKind::TextLit
+            // A character pattern (ADR-141). REP-10's regression class again:
+            // without it the arm list stops after `'#' => …` and every arm
+            // below it leaves the tree with no diagnostic at all.
+            | SyntaxKind::CharLit
             | SyntaxKind::KW_TRUE
             | SyntaxKind::KW_FALSE
             | SyntaxKind::Ident
@@ -599,7 +603,7 @@ impl<'t> Parser<'t> {
     ///
     /// This is the whole of the rule "a node never begins with trivia", and it
     /// belongs here rather than at 54 call sites. Before it, only the
-    /// `IntLit`/`FloatLit`/`TextLit`/`BacktickTemplate` arm of
+    /// `IntLit`/`FloatLit`/`TextLit`/`CharLit`/`BacktickTemplate` arm of
     /// [`parse_atom`](Self::parse_atom) ate trivia first — it had a comment
     /// saying why — and everything else opened the node and then let
     /// [`bump`](Self::bump)'s own sweep pull the whitespace *inside* it. So a
@@ -1262,6 +1266,7 @@ impl<'t> Parser<'t> {
             SyntaxKind::IntLit
             | SyntaxKind::FloatLit
             | SyntaxKind::TextLit
+            | SyntaxKind::CharLit
             | SyntaxKind::BacktickTemplate
             | SyntaxKind::UnterminatedBacktickTemplate
             | SyntaxKind::KW_TRUE
@@ -1270,6 +1275,7 @@ impl<'t> Parser<'t> {
                 self.bump();
                 self.finish_node();
             }
+            SyntaxKind::InterpOpen => self.parse_interp(),
             SyntaxKind::L_PAREN => self.parse_paren(),
             SyntaxKind::L_BRACK => self.parse_list(),
             SyntaxKind::L_BRACE => self.parse_block(),
@@ -1300,6 +1306,66 @@ impl<'t> Parser<'t> {
                 }
             }
         }
+    }
+
+    /// An interpolated text literal: `"a{x}b{y}"` (§8.1, ADR-147).
+    ///
+    /// The lexer has already decided the shape — it emits an `InterpOpen`, then
+    /// the hole's ordinary tokens, then an `InterpMiddle` for each further hole,
+    /// then exactly one `InterpClose` — so this is a straight walk of that run
+    /// rather than a scan of any kind. **Nothing here re-reads the source text**,
+    /// which is the point: the hole's expression is parsed by
+    /// [`parse_expr`](Self::parse_expr), so it is an ordinary subtree whose names
+    /// are tokens at their own ranges, and closure capture analysis sees them
+    /// (ADR-147 decision 1).
+    ///
+    /// The loop is bounded by the token stream, not by a count, and the
+    /// `InterpClose` is `expect`ed rather than assumed: a token stream missing
+    /// one cannot be produced by the lexer, but a parser that assumed it would
+    /// spin at EOF instead of reporting.
+    fn parse_interp(&mut self) {
+        self.start_node(SyntaxKind::INTERP_EXPR);
+        self.bump(); // `"…{`
+        loop {
+            self.refuse_doubled_brace();
+            self.parse_expr(); // the hole
+            if self.at(SyntaxKind::InterpMiddle) {
+                self.bump(); // `}…{`
+                continue;
+            }
+            break;
+        }
+        self.expect(SyntaxKind::InterpClose, "`}` to close the interpolation");
+        self.finish_node();
+    }
+
+    /// A hole whose expression *opens with a brace* is `{{`, and `{{` is not an
+    /// escape in this language — ADR-147 decision 4 chose `\{` instead, so that
+    /// `"…"` and `'…'` keep one shared escape table.
+    ///
+    /// Without this the doubling rule other languages use does not fail, it
+    /// **means something else**: `{` opens the hole, `{}` is an empty block, `}`
+    /// closes the hole, so `"a{{}}b"` is a well-typed program printing `aUnitb`,
+    /// and `"a{{x}}b"` reports `N001` about a name the author thought they had
+    /// escaped. A reader arriving from Rust, C# or Python writes `{{` first and
+    /// gets no sign they were wrong. That is the silent-wrong-answer class
+    /// handover 31 exists to close, so the mistaken escape is refused where it
+    /// is written and the message names the spelling that works.
+    ///
+    /// It costs a block as a hole's whole expression, which nothing wants: a
+    /// hole is a rendering site, and `"{ var t = f(); t }"` is a sentence no one
+    /// writes inside a string. A record literal is unaffected — that opens with
+    /// its type's name, not with a brace.
+    fn refuse_doubled_brace(&mut self) {
+        if !self.at(SyntaxKind::L_BRACE) {
+            return;
+        }
+        let span = self.current_span();
+        self.error(
+            span,
+            "`{{` is not an escape for a literal brace: write `\\{` for a `{`, \
+             or a value to render between single braces",
+        );
     }
 
     fn parse_paren(&mut self) {
@@ -1552,9 +1618,28 @@ impl<'t> Parser<'t> {
             }
             SyntaxKind::IntLit
             | SyntaxKind::TextLit
+            | SyntaxKind::CharLit
             | SyntaxKind::KW_TRUE
             | SyntaxKind::KW_FALSE => {
                 self.bump(); // literal
+            }
+            // An interpolated literal is not a constant, so it is not a pattern
+            // (§8.1, ADR-147). It is refused *here*, with the whole run consumed
+            // into a `PARSE_ERROR`, rather than falling through to the arm below:
+            // `match s { "{x}" => … }` would otherwise leave a `PATTERN` whose
+            // only direct `Ident` is the hole's `x`, and `Pattern::kind` would
+            // read that as a **variable bind** — an irrefutable arm that swallows
+            // every value, which is the silent-answer class ADR-091 and REP-66
+            // are both about.
+            SyntaxKind::InterpOpen => {
+                let span = self.current_span();
+                self.error(
+                    span,
+                    "an interpolated text literal is not a pattern; a pattern tests a constant",
+                );
+                self.start_node(SyntaxKind::PARSE_ERROR);
+                self.parse_interp();
+                self.finish_node();
             }
             SyntaxKind::Ident => {
                 self.bump(); // variant name, record name, or variable bind
@@ -1939,7 +2024,14 @@ impl<'t> Parser<'t> {
     /// `PARSER_EXPR > PARSER_CALL > PATH_EXPR + PARSER_ARG_LIST`. Each argument
     /// is one of:
     /// - a positional parser expression (`lines(int)` → child `int`);
-    /// - a string literal (the separator for `sep`);
+    /// - a positional literal, emitted as a `LITERAL` node: a string (the
+    ///   separator for `sep`, the set for `one_of`) or a whole number (the
+    ///   count of `repeated(P, N)`, §7.5). **Which constructors accept which
+    ///   literal is not the grammar's question** — it is
+    ///   `Constructor::arg_shape`'s, exactly as `Constructor::keyword_arg`
+    ///   owns the keyword question. A count written where no count belongs
+    ///   earns an argument diagnostic naming the constructor, which says more
+    ///   than "expected a parser expression" does;
     /// - a named argument `name: parser_expr` (M9, §7.5), emitted as a
     ///   `PARSER_NAMED_ARG` node — used by heterogeneous `sections`
     ///   (`rules: lines(...)`), `chars`/`grid` keyword args (`skip: whitespace`,
@@ -1957,10 +2049,21 @@ impl<'t> Parser<'t> {
         if !self.at(SyntaxKind::R_PAREN) {
             loop {
                 self.eat_trivia();
-                if self.at(SyntaxKind::TextLit) {
-                    // A string-literal separator for `sep`.
+                if self.at(SyntaxKind::TextLit) || self.at(SyntaxKind::IntLit) {
+                    // A positional literal: `sep`'s separator, or the count of
+                    // `repeated(P, N)`.
                     self.start_node(SyntaxKind::LITERAL);
                     self.bump();
+                    self.finish_node();
+                } else if self.at(SyntaxKind::MINUS) && self.nth_kind(1) == SyntaxKind::IntLit {
+                    // A negative count is still a *count*, and it belongs in one
+                    // `LITERAL` node so the shape check can say what is wrong
+                    // with it. Left to `parse_parser_expr`, `repeated(P, -1)`
+                    // would report "expected a parser expression" at the `-` —
+                    // a complaint about the wrong thing entirely.
+                    self.start_node(SyntaxKind::LITERAL);
+                    self.bump(); // `-`
+                    self.bump(); // the digits
                     self.finish_node();
                 } else if self.at(SyntaxKind::Ident) && self.nth_kind(1) == SyntaxKind::COLON {
                     // A named argument `name: parser_expr` (M9). The name is a
@@ -2210,6 +2313,162 @@ mod tests {
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert!(kinds.contains(&SyntaxKind::TextLit));
+    }
+
+    /// A `'#'` in expression position is a `LITERAL` holding one `CharLit`, and
+    /// the node spans exactly the literal — no leading trivia (REP-63).
+    #[test]
+    fn parses_char_literal() {
+        let src = "var c = '#'";
+        let out = parse_text(src);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let lit = out
+            .tree
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::LITERAL)
+            .expect("a LITERAL node");
+        assert_eq!(lit.text().to_string(), "'#'");
+        assert!(construct_names(&out.tree).contains(&SyntaxKind::CharLit));
+    }
+
+    // --- string interpolation (§8.1, ADR-147) -------------------------------
+
+    /// An interpolated literal is an `INTERP_EXPR`, and the hole's expression is
+    /// an ordinary subtree under it — a `PATH_EXPR` here, a `BIN_EXPR` below.
+    /// That is what everything else in the compiler reads it through.
+    #[test]
+    fn parses_an_interpolated_literal() {
+        let out = parse_text(r#"out("Part 2: {part2}")"#);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(kinds.contains(&SyntaxKind::INTERP_EXPR));
+        assert!(kinds.contains(&SyntaxKind::PATH_EXPR));
+        assert!(kinds.contains(&SyntaxKind::InterpOpen));
+        assert!(kinds.contains(&SyntaxKind::InterpClose));
+        // And it is *not* a LITERAL: a LITERAL is a leaf whose value comes off a
+        // token, which an interpolated literal's does not.
+        assert!(!kinds.contains(&SyntaxKind::TextLit));
+    }
+
+    /// A hole holds a full expression (ADR-147 decision 1), so the shapes below
+    /// each land as the node they would be anywhere else.
+    #[test]
+    fn a_hole_holds_a_full_expression() {
+        for (src, expected) in [
+            (r#"out("{a + b}")"#, SyntaxKind::BIN_EXPR),
+            (r#"out("{p.0}")"#, SyntaxKind::TUPLE_INDEX_EXPR),
+            (r#"out("{xs.len()}")"#, SyntaxKind::METHOD_CALL_EXPR),
+            (r#"out("{m["k"]}")"#, SyntaxKind::INDEX_EXPR),
+            (r#"out("{if c { 1 } else { 2 }}")"#, SyntaxKind::IF_EXPR),
+        ] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            assert!(construct_names(&out.tree).contains(&expected), "{src}");
+        }
+    }
+
+    /// Several holes are one node with one `InterpClose`, and the fragments
+    /// alternate with the holes.
+    #[test]
+    fn several_holes_are_one_node() {
+        let out = parse_text(r#"out("{a} and {b} and {c}")"#);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == SyntaxKind::INTERP_EXPR)
+                .count(),
+            1
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == SyntaxKind::InterpMiddle)
+                .count(),
+            2
+        );
+    }
+
+    /// Postfix operators apply to the whole literal, not to the last hole: an
+    /// `INTERP_EXPR` is an atom like any other.
+    #[test]
+    fn an_interpolated_literal_takes_postfix_operators() {
+        let out = parse_text(r#"var n = "{a}b".len()"#);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        assert!(construct_names(&out.tree).contains(&SyntaxKind::METHOD_CALL_EXPR));
+    }
+
+    /// **An interpolated literal is not a pattern**, and refusing it is not
+    /// pedantry: without the arm that reports it, `match s { "{x}" => … }`
+    /// leaves a `PATTERN` whose only direct `Ident` is the hole's `x`, which
+    /// `Pattern::kind` reads as a variable bind — an irrefutable arm that
+    /// swallows every value with no diagnostic at all. That is REP-66's class,
+    /// and it is why this asserts the diagnostic rather than the tree shape.
+    #[test]
+    fn an_interpolated_literal_is_not_a_pattern() {
+        let out = parse_text("var r = match s {\n    \"{x}\" => 1\n    _ => 2\n}");
+        assert!(
+            !out.diagnostics.is_empty(),
+            "an interpolated literal in pattern position must be reported"
+        );
+        assert!(
+            out.diagnostics
+                .iter()
+                .any(|d| d.message().contains("not a pattern")),
+            "{:?}",
+            out.diagnostics
+        );
+    }
+
+    /// `{{` is the escape in Rust, C# and Python, so it is the first thing a
+    /// reader tries — and here it *parses*: `{` opens the hole, `{}` is an empty
+    /// block, `}` closes it. `"a{{}}b"` printed `aUnitb` with no diagnostic
+    /// until this refusal existed, which is the silent-wrong-answer class
+    /// handover 31 was written about.
+    #[test]
+    fn a_doubled_brace_is_refused_rather_than_meaning_a_block() {
+        for src in [
+            "out(\"a{{}}b\")",
+            "out(\"a{{x}}b\")",
+            "out(\"{{}}\")",
+            "out(\"ok {n} then a{{}}b\")",
+        ] {
+            let out = parse_text(src);
+            assert!(
+                out.diagnostics
+                    .iter()
+                    .any(|d| d.message().contains("is not an escape for a literal brace")),
+                "`{src}` must be refused, got {:?}",
+                out.diagnostics
+            );
+        }
+        // The spelling that works, and an ordinary hole, are both untouched.
+        for src in ["out(\"a\\{\\}b\")", "out(\"a{n}b\")", "out(\"{a + b}\")"] {
+            let out = parse_text(src);
+            assert!(
+                out.diagnostics.is_empty(),
+                "`{src}` must parse cleanly, got {:?}",
+                out.diagnostics
+            );
+        }
+    }
+
+    /// **`is_pattern_start`'s half of ADR-141**, and the easiest thing in the
+    /// item to forget with the worst symptom. Leave `CharLit` out of it and the
+    /// arm list stops after `'#' => …`: the second and third arms leave the tree
+    /// with no diagnostic at all, and the literal still looks like it works.
+    /// REP-10 and ADR-091 are the same defect, one bracket apart.
+    #[test]
+    fn a_char_arm_does_not_truncate_the_arm_list() {
+        let src = "var r = match c {\n    '#' => 1\n    '.' => 2\n    _ => 3\n}";
+        let out = parse_text(src);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let arms = construct_names(&out.tree)
+            .into_iter()
+            .filter(|k| *k == SyntaxKind::MATCH_ARM)
+            .count();
+        assert_eq!(arms, 3);
     }
 
     // --- 2026-07 adversarial audit regressions -----------------------------
@@ -2996,6 +3255,43 @@ mod tests {
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert!(kinds.contains(&SyntaxKind::PARSER_NAMED_ARG));
+    }
+
+    /// **A count is a positional literal, and the grammar has to have a shape
+    /// for it.** `repeated(P, N)` died at `P001 expected a parser expression`
+    /// on the `2`, because the only positional argument shapes were a text
+    /// literal and a parser expression — an integer in positional position had
+    /// no shape at all, and the keyword-value path (`fill: 0`) that already
+    /// accepts one is reachable only after a `name:`.
+    #[test]
+    fn a_parser_call_takes_a_positional_count_literal() {
+        let out = parse_text("var v = read sections(a: repeated(lines(int), 2), b: lines(int))");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(
+            !kinds.contains(&SyntaxKind::PARSE_ERROR),
+            "a count argument must not be an error node"
+        );
+        assert!(
+            kinds.contains(&SyntaxKind::LITERAL),
+            "the count is a LITERAL child of the argument list"
+        );
+    }
+
+    /// A negative count is one `LITERAL`, not a `-` the parser complains about
+    /// separately: the diagnostic a reader needs is about the *count*, and only
+    /// a node that holds the whole thing can carry it there.
+    #[test]
+    fn a_negative_count_is_one_literal_not_a_parse_error() {
+        let out = parse_text("var v = read sections(a: repeated(int, -1))");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let kinds = construct_names(&out.tree);
+        assert!(!kinds.contains(&SyntaxKind::PARSE_ERROR));
+        assert_eq!(
+            kinds.iter().filter(|k| **k == SyntaxKind::LITERAL).count(),
+            1,
+            "`-1` is one literal node, not two"
+        );
     }
 
     #[test]

@@ -128,4 +128,25 @@ fn main() {
     names.insert("ccc")
     out(names.sorted_by_key(|t| t.len()))
 
+    // The two barriers added after this program was written, over the same
+    // spread of receivers. `reversed` reads no descriptor callback (ADR-145), so
+    // it is the barrier with no bound on its element; `join` bounds its item to
+    // `Text` and answers a scalar (ADR-144).
+    out(v.reversed())
+    out(s.reversed())
+    out((0..5).reversed())
+    out("abc".reversed())
+    out(names.join("-"))
+    out(["a", "b", "c"].join(", "))
+    out(tally.keys().join("|"))
+    out([1, 2, 3].map(|n| n.to_text()).join("+"))
+
+    // A countdown, which before `reversed` was a `while` and a decrement.
+    var down = 0
+    for y in (0..5).reversed() { down = down * 10 + y }
+    out(down)
+
+    // `Vec[Char]` is the one sequence that becomes a `Text` under a different
+    // name, because `join` could not carry a second item bound (ADR-144).
+    out("héllo".to_vec().to_text())
 }

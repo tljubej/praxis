@@ -135,9 +135,21 @@ unsafe fn range_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     hasher.write_bytes(&r.end.to_le_bytes());
 }
 
-/// Descriptor for `Range` (§4.11). Equatable and hashable over its two bounds;
-/// not orderable, because only the five scalars with a `compare` callback are
-/// (ADR-045).
+unsafe fn range_compare(a: *const u8, b: *const u8) -> std::cmp::Ordering {
+    // SAFETY: caller guarantees both pointers point at initialized RangeVals.
+    let ra = unsafe { &*(a as *const RangeVal) };
+    let rb = unsafe { &*(b as *const RangeVal) };
+    // Start then end, over the *normalized* payload — so `1..=4` and `1..5`
+    // compare `Equal` for the same reason `range_equals` calls them equal: they
+    // are one value, and an order that disagreed with equality would not be one.
+    (ra.start, ra.end).cmp(&(rb.start, rb.end))
+}
+
+/// Descriptor for `Range` (§4.11). Equatable and hashable over its two bounds,
+/// and orderable over them too — a `Range` can be a `Map` key (its bounds
+/// cannot change after it is stored), so a container has to be able to put one
+/// in a deterministic sequence (ADR-138). `a..b < c..d` in source is still
+/// Y006; that is `capability::supports_ord`'s question.
 pub static RANGE: TypeDescriptor = TypeDescriptor::builtin::<RangeVal>(
     BuiltinTypeId::Range,
     "Range",
@@ -146,7 +158,7 @@ pub static RANGE: TypeDescriptor = TypeDescriptor::builtin::<RangeVal>(
     range_format,
     Some(range_equals),
     Some(range_hash),
-    None,
+    Some(range_compare),
 );
 
 /// `Range`'s payload handle (REP-02): the two-`i64` value, not a scalar.
@@ -232,7 +244,29 @@ mod tests {
     fn range_descriptor_reports_its_capabilities() {
         assert!(RANGE.is_equatable() && RANGE.is_hashable());
         assert_eq!(RANGE.name, "Range");
-        // Not orderable: only the five scalars with a `compare` are (ADR-045).
-        assert!(!RANGE.is_orderable());
+        // Being a key is what makes the container order necessary (ADR-138).
+        assert!(RANGE.is_orderable());
+    }
+
+    /// The container order is start-then-end, and it agrees with equality —
+    /// including across the two spellings the constructor normalizes into one.
+    #[test]
+    fn range_compare_is_start_then_end_and_agrees_with_equality() {
+        let cmp = |a: &RangeVal, b: &RangeVal| unsafe {
+            range_compare((a as *const RangeVal).cast(), (b as *const RangeVal).cast())
+        };
+        let (a, b, c) = (
+            RangeVal::new(1, 4),
+            RangeVal::new(1, 5),
+            RangeVal::new(2, 3),
+        );
+        assert_eq!(cmp(&a, &b), std::cmp::Ordering::Less);
+        assert_eq!(cmp(&b, &c), std::cmp::Ordering::Less);
+        assert_eq!(cmp(&c, &a), std::cmp::Ordering::Greater);
+        // `1..=4` normalizes to `1..5` (ADR-059), so it is not a third value.
+        assert_eq!(
+            cmp(&RangeVal::new_inclusive(1, 4), &b),
+            std::cmp::Ordering::Equal
+        );
     }
 }

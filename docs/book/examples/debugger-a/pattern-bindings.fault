@@ -1,0 +1,20 @@
+error: program faulted: index out of bounds
+
+Backtrace:
+#0   <entry>
+
+  locals:
+    xs: Vec[Int] = [1, 2, 3]
+    total: Int = 64
+    item: Int = 3
+    pairs: Vec[(Int, Int)] = [(2, 3), (4, 5)]
+    a: Int = 4
+    b: Int = 5
+    sum: Int = 32
+  temps:
+    <tmp#1: Vec[Int]> @ "[1, 2, 3]" = [1, 2, 3]
+    <tmp#2: Int> @ "1" = 1
+    <tmp#3: Unit> = Unit
+    <tmp#4: Int> @ "2" = 2
+    <tmp#5: Unit> = Unit
+  …(38 more)

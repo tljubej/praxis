@@ -940,6 +940,91 @@ fn m11_temp_provenance_shows_materializing_expression() {
     );
 }
 
+/// **ADR-139's gate.** Every binding form ADR-125 lists, in one frame, printing
+/// `name: Type = value`.
+///
+/// The negative assertion is the load-bearing half and is not optional: the
+/// defect was six binding forms of which two printed their name, and a fix that
+/// named five of the six satisfies every positive assertion below. `? = ` is
+/// what an unnamed binding renders as, so its absence is the property.
+#[test]
+fn every_pattern_binding_prints_its_name_and_type() {
+    let (code, out) = run_repl_with_cmds("debug_pattern_bindings.px", "locals\nquit\n");
+    assert_eq!(code, 1, "the subscript faults and the REPL exits 1");
+    for expected in [
+        // A `var`, and a function parameter: the two that always worked.
+        "total: Int = ",
+        "limit: Int = 100",
+        // A plain `for` variable — the handover's `? = 3`.
+        "item: Int = 3",
+        // A destructuring `for`'s two components.
+        "a: Int = 6",
+        "b: Int = 7",
+        // A `match` arm payload bound by reference, which used to render in the
+        // `temps:` section as `<tmp#N> = 8`.
+        "payload: Int = 8",
+        // And one bound into its own slot, because it is reassigned — the other
+        // lowering branch entirely.
+        "bumped: Int = 10",
+    ] {
+        assert!(out.contains(expected), "missing `{expected}`: {out}");
+    }
+    assert!(
+        !out.contains("    ? = "),
+        "no binding reaches the frame without a name: {out}"
+    );
+}
+
+/// The deliberate half of ADR-139: a destructuring `for`'s item slot is a
+/// compiler temp, not a third binding beside `a` and `b`. The programmer named
+/// the components; nothing named the pair. It shows in `temps:` with the type
+/// it holds and the expression it was read out of, which explains itself where
+/// an anonymous `? = (6, 7)` in `locals:` did not.
+#[test]
+fn a_destructuring_fors_scrutinee_is_a_temp_not_a_binding() {
+    let (_code, out) = run_repl_with_cmds("debug_pattern_bindings.px", "locals\nquit\n");
+    // The REPL's own `locals` dump, which is uncapped — the crash banner above
+    // it elides after twelve rows and would hide the temp this is about.
+    let (_, dump) = out
+        .rsplit_once("  locals:")
+        .expect("the REPL printed a locals section");
+    let (bindings, temps) = dump
+        .split_once("  temps:")
+        .expect("and a temps section under it");
+    assert!(
+        temps.contains("(Int, Int)> @ \"pairs\" = (6, 7)"),
+        "the item slot is a temp that says what it holds and what it was read \
+         out of: {out}"
+    );
+    assert!(
+        !bindings.contains("= (6, 7)"),
+        "and the pair the loop walks is not listed as a binding: {out}"
+    );
+}
+
+/// The other half of the same defect, and the one with no coverage at all
+/// before: a local the frame cannot name is a local `p` cannot bind, so
+/// `p item` answered "`item` is not defined" about a name `locals` was
+/// printing. Naming the slot in MIR is the whole fix — `collect_bindings` was
+/// already written against the right contract.
+#[test]
+fn p_binds_a_pattern_introduced_binding() {
+    let (_code, out) = run_repl_with_cmds(
+        "debug_pattern_bindings.px",
+        "p item + payload\np a + b\nquit\n",
+    );
+    for absent in ["`item` is not defined", "`payload` is not defined"] {
+        assert!(
+            !out.contains(absent),
+            "{absent} — but `locals` prints it: {out}"
+        );
+    }
+    // `3 + 8` and `6 + 7`: sums rather than bare values, so a `p` that answered
+    // the wrong local would have to answer two wrong locals consistently.
+    assert!(out.contains("11"), "`p item + payload` answers 11: {out}");
+    assert!(out.contains("13"), "`p a + b` answers 13: {out}");
+}
+
 #[test]
 fn m10ws5_repl_frame_navigation() {
     // `frame 0` selects the (only) frame; `up` at the outermost reports the
@@ -1618,4 +1703,208 @@ fn the_destination_of_a_faulting_instruction_is_uninit() {
     ] {
         assert!(out.contains(expected), "missing `{expected}`: {out}");
     }
+}
+
+// --- Transitive closure captures (handover 31 item 1) ---------------------
+
+/// **The handover's stated gate.** `|a| |b| b + base` and `|a| { |b| b + base }`
+/// differ by one pair of braces, and must print the same `<closure:N>` and the
+/// same answer.
+///
+/// The comparison is the point, and it is why this asserts the equality of two
+/// runs rather than only a literal. `out` on a closure prints how many bindings
+/// it captured, so `N` is the defect made observable from outside the compiler:
+/// the broken spelling printed `<closure:0>` — the outer closure captured
+/// nothing — and then read a `Unit` out of the environment it never filled. A
+/// fix that only stopped the panic without restoring the capture would still
+/// print two different `N` here.
+#[test]
+fn a_curried_closure_prints_the_same_thing_with_and_without_braces() {
+    let dir = scratch_dir();
+    let bare = dir.join("curried-bare.px");
+    let braced = dir.join("curried-braced.px");
+    std::fs::write(
+        &bare,
+        "var base = 10\nvar mk = |a| |b| b + base\nout(mk)\nout(mk(5)(1))\n",
+    )
+    .expect("write the bare spelling");
+    std::fs::write(
+        &braced,
+        "var base = 10\nvar mk = |a| { |b| b + base }\nout(mk)\nout(mk(5)(1))\n",
+    )
+    .expect("write the braced spelling");
+
+    let run = |path: &PathBuf| {
+        let output = Command::new(bin_path())
+            .args(["run", "--debug=never"])
+            .arg(path)
+            .output()
+            .expect("failed to run praxis");
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (bare_code, bare_out, bare_err) = run(&bare);
+    let (braced_code, braced_out, braced_err) = run(&braced);
+    let _ = std::fs::remove_file(&bare);
+    let _ = std::fs::remove_file(&braced);
+
+    assert_eq!(bare_code, 0, "the bare spelling should exit 0: {bare_err}");
+    assert_eq!(
+        braced_code, 0,
+        "the braced spelling should exit 0: {braced_err}"
+    );
+    assert_eq!(
+        bare_out, braced_out,
+        "one pair of braces cannot change a closure's environment"
+    );
+    assert_eq!(bare_out, "<closure:1>\n11\n");
+}
+
+/// **Gate 1, end to end** (ADR-141): dispatching on a grid cell.
+///
+/// This is the program the character literal exists for, and the one that would
+/// have caught the item's real defect had it been implemented from the handover
+/// alone. `lower_pattern_test`'s `Lit::Char` arm was an unconditional
+/// `Terminator::Jump { target: on_success }` — so with the syntax landed and
+/// that arm untouched, this prints `wall` three times, exits 0, and checks
+/// clean. Nothing below the JIT can see it.
+#[test]
+fn a_char_match_dispatches_on_the_character() {
+    let dir = scratch_dir();
+    let src = dir.join("char-match.px");
+    std::fs::write(
+        &src,
+        "fn cell(c: Char) -> Text {\n\
+         \x20   match c {\n\
+         \x20       '#' => \"wall\"\n\
+         \x20       '.' => \"open\"\n\
+         \x20       _ => \"other\"\n\
+         \x20   }\n\
+         }\n\
+         for c in \"#.x\" {\n\
+         \x20   out(cell(c))\n\
+         }\n\
+         out('#' == \"#\"[0])\n\
+         out('#'.to_int())\n\
+         out('é'.to_int())\n",
+    )
+    .expect("write the source");
+
+    let output = Command::new(bin_path())
+        .args(["run", "--debug=never", "--input", "/dev/null"])
+        .arg(&src)
+        .output()
+        .expect("failed to run praxis");
+    let _ = std::fs::remove_file(&src);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        // Three distinct answers, which is the assertion. Then the equivalence
+        // with `"#"[0]` that makes the spelling a migration and not a new type,
+        // and a code point above the interned table taking the allocating path.
+        "wall\nopen\nother\ntrue\n35\n233\n",
+        "{stderr}"
+    );
+}
+
+/// **Gate 1, end to end** (§8.1, ADR-147): `out("Part 2: {part2}")` renders the
+/// value.
+///
+/// This is the line the design document has shown as the spec since it was
+/// written, and it printed `Part 2: {part2}` — braces and all — for twelve
+/// milestones. The rest of the program walks the decisions: a full expression in
+/// a hole, a type with no `to_text()` row, a nested literal inside a hole, the
+/// `\{` escape, and a closure that names an outer binding only inside a hole.
+///
+/// The last of those is the one with no compile-time symptom. An implementation
+/// that lexed the literal whole and re-parsed holes later prints an empty line
+/// or crashes there, and every other line of this program still passes.
+#[test]
+fn a_hole_renders_the_value_end_to_end() {
+    let dir = scratch_dir();
+    let src = dir.join("interp.px");
+    std::fs::write(
+        &src,
+        "fn main() {\n\
+         \x20   var part2 = 42\n\
+         \x20   out(\"Part 2: {part2}\")\n\
+         \x20   var a = 3\n\
+         \x20   var b = 4\n\
+         \x20   out(\"{a} + {b} = {a + b}\")\n\
+         \x20   var v = [1, 2, 3]\n\
+         \x20   out(\"v = {v}\")\n\
+         \x20   out(v)\n\
+         \x20   var m = Map[Text, Int]()\n\
+         \x20   m[\"k\"] = 9\n\
+         \x20   out(\"m = {m[\"k\"]}, len = {v.len()}\")\n\
+         \x20   out(\"literal braces: \\{ and \\}\")\n\
+         \x20   var f = |n: Int| \"a is {a}, n is {n}\"\n\
+         \x20   out(f(7))\n\
+         }\n",
+    )
+    .expect("write the source");
+
+    let output = Command::new(bin_path())
+        .args(["run", "--debug=never", "--input", "/dev/null"])
+        .arg(&src)
+        .output()
+        .expect("failed to run praxis");
+    let _ = std::fs::remove_file(&src);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Part 2: 42\n\
+         3 + 4 = 7\n\
+         v = [1, 2, 3]\n\
+         [1, 2, 3]\n\
+         m = 9, len = 3\n\
+         literal braces: { and }\n\
+         a is 3, n is 7\n",
+        "{stderr}"
+    );
+}
+
+/// **ADR-147 decision 3, from the command line.** A hole renders an `Int` and
+/// `"n = " + n` still does not.
+///
+/// The pair is run as one program so the two answers are read off one
+/// invocation: `check` reports the `Y001` ADR-085 decision 2 specifies, and the
+/// hole on the line above it contributes nothing.
+#[test]
+fn a_hole_renders_an_int_and_plus_still_refuses_one() {
+    let dir = scratch_dir();
+    let src = dir.join("interp-plus.px");
+    std::fs::write(
+        &src,
+        "fn main() {\n\
+         \x20   var n = 3\n\
+         \x20   out(\"n = {n}\")\n\
+         \x20   out(\"n = \" + n)\n\
+         }\n",
+    )
+    .expect("write the source");
+
+    let output = Command::new(bin_path())
+        .arg("check")
+        .arg(&src)
+        .output()
+        .expect("failed to run praxis");
+    let _ = std::fs::remove_file(&src);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    let rendered = format!("{}{}", String::from_utf8_lossy(&output.stdout), stderr);
+    assert!(
+        rendered.contains("Y001") && rendered.contains("expected Text, found Int"),
+        "`+` must still refuse an Int operand: {rendered}"
+    );
+    assert_eq!(
+        rendered.matches("error[").count(),
+        1,
+        "only the `+` is an error; the hole above it is not: {rendered}"
+    );
 }

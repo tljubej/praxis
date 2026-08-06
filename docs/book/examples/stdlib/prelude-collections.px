@@ -21,6 +21,9 @@ hi.push(5)
 
 var g = Grid()
 
+var sized = Vec(3, 0)
+var board = Grid(3, 2, '.')
+
 var b = BitSet()
 b.insert(3)
 
@@ -33,3 +36,6 @@ out(lo.peek())
 out(hi.peek())
 out(g.width())
 out(b)
+out(sized)
+out(board)
+out(board.width())

@@ -21,10 +21,20 @@ From the input parser, in practice. `grid(P)` reads one cell per character of
 each line; `matrix(P)` reads one cell per whitespace-separated token. Both are
 covered in [structural parsers](../input/structural.md).
 
-`Grid()` exists as a prelude name and builds a 0×0 grid, which is not useful for
-much: it takes no arguments, so there is no way to ask for a sized one, and
-there is no `to_vec`-style `to_grid` on any sequence. A grid is something you
-read, and then index, mutate and rotate.
+And from the program itself. `Grid()` is the empty 0×0 grid; `Grid(w, h, fill)`
+is the **working** grid an algorithm allocates for itself — an occupancy board, a
+visited mask, a distance table — with every cell starting as `fill`
+([ADR-146](../../../decisions/146-a-collection-constructors-arity-is-its-shape.md)).
+That is the difference between *using* `Grid[T]` and reimplementing it: a
+hand-rolled `Vec[Bool]` indexed `y * w + x` has no `contains`, no `neighbors4`,
+and no bounds behaviour at all. There is still no `to_vec`-style `to_grid` on any
+sequence, so a grid is either read or allocated.
+
+When `fill` is itself a collection, every cell is the *same* collection —
+`Grid(2, 2, Vec())` is four names for one `Vec` — because a binding names an
+object rather than owning it. And a negative extent, or one whose `w × h` is past
+2^28 cells, is a `size or extent out of range` fault rather than a `check`-time
+refusal: the extents are ordinary `Int`s computed at run time.
 
 ```praxis
 // `read grid(char)` makes every character of every line a cell.
@@ -60,6 +70,11 @@ map[0, 0] = rock
 map.set(0, 2, rock)
 out(map.row(0))
 out(map.row(2))
+
+// A row prints as a Vec; `to_text()` draws it back as the line it was read as.
+for y in 0..map.height() {
+    out(map.row(y).to_text())
+}
 ```
 
 On the input
@@ -85,6 +100,9 @@ false
 4
 [#, ., #, .]
 [#, #, ., #]
+#.#.
+#...
+##.#
 ```
 
 There is no `Char` literal, which is why the wall is written `"#"[0]` — a
@@ -301,7 +319,7 @@ That is all of it — eighteen rows, including the two subscript forms.
 | `grid.width()` | `Int` | columns |
 | `grid.height()` | `Int` | rows |
 | `grid.contains(x, y)` | `Bool` | never faults |
-| `grid.row(y)` | `Vec[T]` | faults off the grid |
+| `grid.row(y)` | `Vec[T]` | faults off the grid; `.to_text()` draws it back as a line |
 | `grid.column(x)` | `Vec[T]` | faults off the grid |
 | `grid.cells()` | `Vec[T]` | row-major |
 | `grid.positions()` | `Vec[(Int, Int)]` | row-major |
@@ -316,6 +334,19 @@ That is all of it — eighteen rows, including the two subscript forms.
 §6.4 of the design document also lists `grid.map(fn)`. It is not implemented:
 `grid.map(f)` is a `Y110`. Map over `grid.cells()` instead, and index back with
 `grid.positions()` if you need to know where each cell was.
+
+**Drawing the grid back** is how a grid puzzle is debugged, and `out(grid.row(y))`
+is not it — that prints `[., ., |]`. A `Vec[Char]` has a `to_text()`, so the
+line the grid was read from comes back one call later
+([ADR-144](../../../decisions/144-a-sequence-of-text-joins-and-a-sequence-of-char-becomes-one.md)):
+
+```praxis
+for y in 0..grid.height() { out(grid.row(y).to_text()) }
+```
+
+It is a `Vec[Char]` row and not a `Grid` one, so a whole grid still prints as
+its cells; a picture is a sequence of *lines*, and the loop is where the reader
+chooses that.
 
 ## The graph helpers
 

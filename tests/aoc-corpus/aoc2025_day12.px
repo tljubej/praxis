@@ -83,24 +83,28 @@ fn orientations(cells: Vec[(Int, Int)]) -> Vec[Vec[(Int, Int)]] {
     found
 }
 
-fn fits(w: Int, h: Int, occ: Vec[Bool], cells: Vec[(Int, Int)], x: Int, y: Int) -> Bool {
+// The occupancy board is a `Grid[Bool]` the search allocates for itself, which
+// is what `Grid(w, h, fill)` is for. It used to be a `Vec[Bool]` with `y * w + x`
+// written out at every use site — the language's own `Grid[T]` by hand, minus
+// the bounds check that `contains` is.
+fn fits(occ: Grid[Bool], cells: Vec[(Int, Int)], x: Int, y: Int) -> Bool {
     var i = 0
     while i < cells.len() {
         var c = cells[i]
         var nx = x + c.0
         var ny = y + c.1
-        if nx < 0 || nx >= w || ny < 0 || ny >= h { return false }
-        if occ[ny * w + nx] { return false }
+        if !occ.contains(nx, ny) { return false }
+        if occ[nx, ny] { return false }
         i = i + 1
     }
     true
 }
 
-fn mark(w: Int, occ: Vec[Bool], cells: Vec[(Int, Int)], x: Int, y: Int, v: Bool) -> Unit {
+fn mark(occ: Grid[Bool], cells: Vec[(Int, Int)], x: Int, y: Int, v: Bool) -> Unit {
     var i = 0
     while i < cells.len() {
         var c = cells[i]
-        occ[(y + c.1) * w + (x + c.0)] = v
+        occ[x + c.0, y + c.1] = v
         i = i + 1
     }
 }
@@ -110,7 +114,7 @@ fn mark(w: Int, occ: Vec[Bool], cells: Vec[(Int, Int)], x: Int, y: Int, v: Bool)
 fn search(
     w: Int,
     h: Int,
-    occ: Vec[Bool],
+    occ: Grid[Bool],
     orients: Vec[Vec[Vec[(Int, Int)]]],
     sizes: Vec[Int],
     counts: Vec[Int],
@@ -123,12 +127,12 @@ fn search(
     var total = w * h
     if pos >= total { return false }
     if cells_left > total - pos { return false }
-    if occ[pos] {
+    var x = pos % w
+    var y = pos / w
+    if occ[x, y] {
         return search(w, h, occ, orients, sizes, counts, remaining, cells_left, waste, pos + 1)
     }
 
-    var x = pos % w
-    var y = pos / w
     var s = 0
     while s < counts.len() {
         if counts[s] > 0 {
@@ -136,15 +140,15 @@ fn search(
             var o = 0
             while o < shape.len() {
                 var cells = shape[o]
-                if fits(w, h, occ, cells, x, y) {
-                    mark(w, occ, cells, x, y, true)
+                if fits(occ, cells, x, y) {
+                    mark(occ, cells, x, y, true)
                     counts[s] = counts[s] - 1
                     var ok = search(
                         w, h, occ, orients, sizes, counts,
                         remaining - 1, cells_left - sizes[s], waste, pos + 1,
                     )
                     counts[s] = counts[s] + 1
-                    mark(w, occ, cells, x, y, false)
+                    mark(occ, cells, x, y, false)
                     if ok { return true }
                 }
                 o = o + 1
@@ -168,7 +172,7 @@ diagrams.push(data.s3.rows)
 diagrams.push(data.s4.rows)
 diagrams.push(data.s5.rows)
 
-var hash = "#"[0]
+var hash = '#'
 var sizes = Vec()
 var orients = Vec()
 for d in diagrams {
@@ -198,12 +202,7 @@ for r in data.regions {
         fits_here = true
     } else {
         searched = searched + 1
-        var occ = Vec()
-        var k = 0
-        while k < w * h {
-            occ.push(false)
-            k = k + 1
-        }
+        var occ = Grid(w, h, false)
         var work = Vec()
         var j = 0
         while j < r.counts.len() {

@@ -228,15 +228,21 @@ pub type HashFn = unsafe fn(payload: *const u8, hasher: &mut dyn DynamicHasher);
 pub type OwnedBytesFn = unsafe fn(payload: *const u8) -> usize;
 
 /// `compare` callback shape: total ordering between two values of the same
-/// descriptor. `None` on the descriptor means the type is not orderable.
+/// descriptor. `None` on the descriptor means the type has no container order.
 ///
-/// This is the ordering a **container** imposes — a heap's `Ord`, a sort, a
-/// deterministic rendering — and it is total, including over `Float` NaN
-/// (which sorts last and equals itself). The source-level `<` on a `Float`
-/// keeps IEEE semantics and is a different operation; see ADR-045.
+/// This is the ordering a **container** imposes — a heap's `Ord`, a sort, the
+/// sequence a `Map` or `Set` prints and iterates in — and it is total, including
+/// over `Float` NaN (which sorts last and equals itself). The source-level `<`
+/// on a `Float` keeps IEEE semantics and is a different operation; see ADR-045.
 ///
-/// Populated on `Int`, `Byte`, `Char`, `Float` and `Text`; `None` on everything
-/// else, including every composite (ADR-045 decision 1).
+/// Populated on every type a `Map` key or `Set` member can be: `Int`, `Byte`,
+/// `Char`, `Float`, `Text`, `Bool`, `Unit`, `Range`, and tuples, records and
+/// enums recursing through their element types. `None` on the eleven that can
+/// never be one — the nine collections, `Closure` and `VarCell` (ADR-138
+/// decision 1). That is deliberately a *different* set from
+/// `praxis_hir::capability::supports_ord`, which is the source language's `<`
+/// and `sorted()`: a tuple has a container order and no `<`, and
+/// `(1, 2) < (1, 3)` is still `Y006` (ADR-138 decision 3).
 ///
 /// # Safety
 /// Both pointers must point at values of the descriptor's type.
@@ -407,7 +413,12 @@ impl TypeDescriptor {
         self.hash.is_some()
     }
 
-    /// True iff values of this type have a defined ordering (§5.5).
+    /// True iff values of this type have a **container** order — the sequence a
+    /// `Map`, `Set`, `Counter` or heap puts them in (ADR-138).
+    ///
+    /// Not the source language's `<`: that is
+    /// `praxis_hir::capability::supports_ord`, and it is a strictly smaller set
+    /// on purpose. A tuple answers `true` here and is still refused by `<`.
     #[inline]
     pub fn is_orderable(&self) -> bool {
         self.compare.is_some()

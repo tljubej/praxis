@@ -44,12 +44,14 @@ of its own, and the two used to share only a `format!("{f}")` by coincidence.
 ### Why this and not "print the type alongside"
 
 The alternative was to leave the digits alone and let the *context* say what the
-value is — a debugger-style `1 : Float`. It is rejected because §16.3 makes the
-rendered form load-bearing in two places where no context exists: `Map`, `Set`
-and `Counter` order their entries by the rendered form (ADR-066 decision 4,
-RT-16), and `for x in s` iterates that order, so the rendering is an *answer*
-and not only a printing. A rendering that needs external context to be
-unambiguous cannot be a sort key.
+value is — a debugger-style `1 : Float`. It is rejected because the rendered
+form has to be unambiguous on its own: it is what `Float.to_text()` answers, and
+it is what a reader compares against a written-down expected output. A rendering
+that needs external context to say which type it is cannot do either job.
+(This argument originally leaned on §16.3 making the rendered form a container's
+*sort key* as well. That leg is gone —
+[ADR-138](./138-a-container-orders-by-the-value-and-not-by-its-printing.md)
+orders a container by the value — and the decision does not need it.)
 
 ### Why not exponent notation for large values
 
@@ -69,7 +71,10 @@ change existing output for no correctness gain.
   `.` already and therefore passes under either rule. The new gate
   `a_whole_numbered_float_renders_as_a_float` is whole numbers, an exponent and
   the three non-finite values — the only places the two rules differ.
-- Sort keys move: a `Map[Float, _]` orders by the rendered form, so `1.0` now
-  sorts where `"1.0"` falls rather than where `"1"` did. That is the same
-  lexicographic-not-numeric limitation D3 already owns.
+- Sort keys moved: a `Map[Float, _]` ordered by the rendered form, so `1.0`
+  sorted where `"1.0"` falls rather than where `"1"` did — the same
+  lexicographic-not-numeric limitation D3 owned.
+  [ADR-138](./138-a-container-orders-by-the-value-and-not-by-its-printing.md)
+  removed it: a `Set[Float]` now prints `{1.5, 2.0, 10.25}`, and NaN sorts last
+  per decision 2 above rather than wherever the string `"NaN"` happened to fall.
 - §4.12's formatting sentence is rewritten to state the rule and its reason.

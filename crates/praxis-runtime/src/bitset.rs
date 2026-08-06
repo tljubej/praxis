@@ -252,7 +252,9 @@ pub static BITSET: TypeDescriptor = TypeDescriptor::builtin::<BitSetPayload>(
     bitset_format,
     Some(bitset_equals),
     Some(bitset_hash),
-    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
+    // No container order: a mutable collection can never be a `Map` key or a
+    // `Set` member (ADR-057 D4), so nothing ever has to put one in a
+    // deterministic sequence (ADR-138).
     None,
 )
 .with_owned_bytes(bitset_owned_bytes);

@@ -73,7 +73,8 @@ pub static CLOSURE: TypeDescriptor = TypeDescriptor::builtin::<ClosurePayload>(
     closure_format,
     None,
     None,
-    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
+    // No container order: a closure is not even equatable, so it can never be a
+    // `Map` key or a `Set` member and nothing ever has to order one (ADR-138).
     None,
 )
 .with_owned_bytes(closure_owned_bytes);

@@ -286,6 +286,16 @@ impl TypeDb {
     /// Inference calls this after unification and checks what comes back. A
     /// constraint whose variable is still unbound stays: it is not wrong yet,
     /// and answering it now is the optimism TY-29 is about.
+    ///
+    /// **One call answers one round, not the whole channel.** A capability that
+    /// discharges by *producing* a type — `HasMethod`, `Iterable`, `HasField` —
+    /// unifies something, and that unification can resolve the variable another
+    /// still-pending constraint is waiting on. Those constraints were left
+    /// behind by the call that is returning now, so the caller is required to
+    /// iterate until this returns empty; `Inferer::discharge_constraints` is
+    /// that loop, and ADR-137 records what one missing round cost. The fixpoint
+    /// lives there rather than here because resolution needs the catalog and the
+    /// diagnostic sink, neither of which this crate has.
     #[must_use]
     pub fn take_dischargeable(&mut self) -> Vec<Constraint> {
         let mut ready = Vec::new();

@@ -128,6 +128,40 @@ three cases are the three you would expect:
 - A closure inside a `fn`, using a binding declared outside that `fn`, is
   `N007`. The closure is inside `g`; the binding is not.
 
+### A recursive `fn` is offered only the parameter
+
+The message above names two ways out. A **recursive** function has one, because
+a closure cannot name itself: `var f = |n| … f(n - 1) …` resolves `f` in the
+environment *before* the declaration, so the call inside is `N001`. Rather than
+suggest something it would then refuse, the compiler drops that half and says
+which rule took it away:
+
+```praxis
+var step = 2
+
+fn countdown(n: Int) -> Int {
+    if n <= 0 { 0 } else { 1 + countdown(n - step) }
+}
+
+out(countdown(10))
+```
+
+```text
+error[N007]: `countdown` cannot use `step`: a function does not capture the bindings around it (pass `step` as a parameter)
+
+  fn-recursive-cannot-capture.px:4:46
+  4 |     if n <= 0 { 0 } else { 1 + countdown(n - step) }
+    |                                              ^^^^ `countdown` cannot use `step`: a function does not capture the bindings around it (pass `step` as a parameter)
+
+help: `countdown` calls itself, so a closure is not the way out: a closure cannot name itself (`N001`)
+
+praxis: 1 error(s)
+```
+
+Mutual recursion counts too, and there the `help:` names the other function in
+the cycle. A `fn` that merely *calls* a recursive one is not itself recursive
+and keeps both ways out.
+
 A binding declared *after* the function is `N001` rather than `N007`: only `fn`,
 `struct` and `enum` are pre-registered for forward reference, so the name is
 genuinely not in scope and nothing has crossed a boundary.
@@ -246,6 +280,49 @@ for f in fs { out(f()) }
 102
 103
 ```
+
+### A closure that returns a closure captures for it
+
+A closure whose body *is* another closure captures whatever the returned one
+names from outside them both — not just what its own body mentions directly.
+It has to: the returned closure's environment is filled from the returning
+closure's frame at the moment its literal is evaluated, so the returning closure
+must be holding the value in order to hand it over.
+
+```praxis
+var base = 10
+var mk = |a| |b| a * 100 + b * 10 + base
+out(mk)
+out(mk(1)(2))
+
+var deep = |a| |b| |c| a + b + c + base
+out(deep(1)(2)(3))
+
+var n = 0
+var bump = |a| |b| { n = n + a + b; n }
+out(bump(1)(2))
+out(bump(10)(20))
+out(n)
+```
+
+```text
+<closure:1>
+130
+16
+3
+33
+33
+```
+
+`mk` prints `<closure:1>`: it captures one binding, `base`, even though nothing
+in `|a| …` names `base` except the closure it returns. Nesting is not a limit —
+`deep` threads the same capture down three levels — and a reassigned binding is
+still a single shared cell however many environments it passes through, which is
+why `bump` accumulates into one `n` that the outer scope reads back.
+
+What is *not* captured is anything either closure declares. `|a| |b| b + a`
+captures nothing: `a` is the outer closure's own parameter, and `b` is the
+inner's. Only a name declared outside both becomes an environment slot.
 
 ## A `fn` name in value position is a closure
 

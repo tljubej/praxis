@@ -115,8 +115,8 @@
 use std::collections::BTreeSet;
 
 use crate::ir::{
-    AllocKind, BlockId, Function, Inst, IntBinOp, LocalId, LocalKind, Overflow, ScalarKind,
-    Terminator,
+    AllocKind, BlockId, Function, Inst, IntBinOp, LocalDebugKind, LocalId, LocalKind, Overflow,
+    ScalarKind, Terminator,
 };
 use crate::provable::{DescriptorClass, ProvableDescriptors};
 
@@ -256,6 +256,19 @@ pub enum VerifyError {
         proved: DescriptorClass,
         scalar: ScalarKind,
     },
+    /// A `Gc` local classified [`LocalDebugKind::User`] with no debug name.
+    ///
+    /// That is precisely the state that renders `? = value` in a crash
+    /// snapshot: the local claims to be a binding the programmer wrote and
+    /// cannot say which one, so `locals` prints an anonymous row and `p` will
+    /// not bind it. Every binding form ADR-125 lists has a name at the point
+    /// lowering allocates its slot, and four pattern sites used to throw theirs
+    /// away — so this is the rule that keeps the fifth from doing it silently
+    /// (ADR-139).
+    ///
+    /// It is *not* an error for a slot to be nameless. It is an error for a
+    /// nameless slot to claim to be a binding; a compiler temp is `Temp`.
+    UserLocalHasNoName { func: String, local: LocalId },
 }
 
 /// Which slot set a [`VerifyError::RootIsNotGc`] came from.
@@ -387,6 +400,11 @@ impl std::fmt::Display for VerifyError {
                  {proved}",
                 block.0
             ),
+            VerifyError::UserLocalHasNoName { func, local } => write!(
+                f,
+                "{func}: {local:?} is classified as a user binding but carries \
+                 no debug name, so a crash snapshot would print it as `?`"
+            ),
         }
     }
 }
@@ -406,6 +424,19 @@ pub fn verify(f: &Function) -> Result<(), Vec<VerifyError>> {
     // One linear pass plus a short fixpoint, computed once for the function
     // rather than per `ExtractScalar` (ADR-122).
     let provable = ProvableDescriptors::of(f);
+
+    // The debugger metadata's one invariant: a slot that says it is a binding
+    // the programmer wrote can say which one. It is a property of the local
+    // table rather than of any instruction, so it is checked once here and not
+    // in the block loop.
+    for local in f.locals.iter().filter(|l| l.kind == LocalKind::Gc) {
+        if f.debug_kind(local.id) == LocalDebugKind::User && f.debug_name(local.id).is_none() {
+            errs.push(VerifyError::UserLocalHasNoName {
+                func: f.name.clone(),
+                local: local.id,
+            });
+        }
+    }
 
     for (blk_idx, block) in f.blocks.iter().enumerate() {
         let bid = BlockId(blk_idx as u32);
@@ -794,7 +825,10 @@ fn operands(inst: &Inst) -> Vec<LocalId> {
                 AllocKind::Tuple { elements, .. } => v.extend(elements.iter().copied()),
                 AllocKind::Enum { args, .. } => v.extend(args.iter().copied()),
                 AllocKind::Closure { captures, .. } => v.extend(captures.iter().copied()),
-                AllocKind::Unit | AllocKind::Text { .. } | AllocKind::Collection { .. } => {}
+                // A sized collection's extents and fill are locals like any
+                // other operand, so the range check covers them (ADR-146).
+                AllocKind::Collection { init, .. } => v.extend(init.operands()),
+                AllocKind::Unit | AllocKind::Text { .. } => {}
             }
         }
         Inst::ExtractScalar { dst, src, .. }
@@ -1185,6 +1219,35 @@ mod tests {
         assert_eq!(verify(&f), Ok(()));
     }
 
+    /// **REP-49's defect, one type over** (ADR-141). A `Char`'s payload is four
+    /// bytes; reading it at an `Int`'s eight is the same read past the end of a
+    /// descriptor that made `true` and `false` compare equal. The character
+    /// literal gives `GcConst` a fourth variant and `match c { '#' => … }` a
+    /// second operand to extract, so the pair is worth pinning at the width the
+    /// lowering actually emits *and* at the one next door.
+    #[test]
+    fn extracting_a_char_from_a_proved_char_verifies() {
+        let f = extract_from_const_gc(crate::ir::GcConst::Char('#' as u32), ScalarKind::Char);
+        assert_eq!(verify(&f), Ok(()));
+    }
+
+    #[test]
+    fn extracting_an_int_from_a_proved_char_is_rejected() {
+        let f = extract_from_const_gc(crate::ir::GcConst::Char('#' as u32), ScalarKind::Int);
+        let errs = verify(&f).expect_err("Char is not Int");
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                VerifyError::ProvedDescriptorMismatch {
+                    proved: DescriptorClass::Char,
+                    scalar: ScalarKind::Int,
+                    ..
+                }
+            )),
+            "{errs:?}"
+        );
+    }
+
     /// **The false positive the rule must not have**, and the reason it refuses
     /// a proved contradiction rather than requiring a proof.
     ///
@@ -1311,5 +1374,60 @@ mod tests {
             )),
             "{errs:?}"
         );
+    }
+
+    /// ADR-139's gate. A `Gc` slot classified as a binding with no name is what
+    /// renders `? = value` in a crash snapshot, which is how a `for` variable
+    /// and a destructuring `for`'s elements shipped for four releases.
+    #[test]
+    fn a_binding_slot_with_no_name_is_rejected() {
+        let (mut f, _, _) = alloc_and_return();
+        let anon = f.new_local(
+            LocalKind::Gc,
+            MirType::Opaque,
+            None,
+            LocalDebugKind::User,
+            None,
+        );
+        crate::annotate(&mut f);
+
+        let errs = verify(&f).expect_err("a nameless user binding must be rejected");
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                VerifyError::UserLocalHasNoName { local, .. } if *local == anon
+            )),
+            "{errs:?}"
+        );
+    }
+
+    /// The same slot with the name it should have carried all along. The pair
+    /// is what says the rule is about the *name*, not about classifying a slot
+    /// as a binding at all.
+    #[test]
+    fn a_named_binding_slot_verifies() {
+        let (mut f, _, _) = alloc_and_return();
+        f.new_local(
+            LocalKind::Gc,
+            MirType::Opaque,
+            Some("item".into()),
+            LocalDebugKind::User,
+            Some((4, 8)),
+        );
+        crate::annotate(&mut f);
+
+        assert_eq!(verify(&f), Ok(()));
+    }
+
+    /// A nameless slot is fine — it is a nameless slot *claiming to be a
+    /// binding* that is not. Temps are the majority of every function and none
+    /// of them has a name.
+    #[test]
+    fn a_nameless_temp_verifies() {
+        let (mut f, _, _) = alloc_and_return();
+        gc_local(&mut f);
+        crate::annotate(&mut f);
+
+        assert_eq!(verify(&f), Ok(()));
     }
 }

@@ -23,8 +23,9 @@ fn main() {
     out("héllo"[1])
     out("héllo"[1].to_int())
 
-    // What this unlocks. There is no char literal (D19), so `"#"[0]` is how a
-    // program names a particular character — and it is the reason a `Grid[Char]`
-    // cell can finally be compared to one.
+    // What this unlocks. `"#"[0]` names a particular character out of a text —
+    // and it is the reason a `Grid[Char]` cell can be compared to one at all.
+    // (A character the program *chooses* is now a literal, `'#'`, per ADR-141;
+    // this file is about the subscript, so it keeps the subscript.)
     out("#"[0])
 }

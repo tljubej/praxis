@@ -3694,10 +3694,79 @@ fn closure_returned_and_called() {
 fn closure_curried() {
     // A closure returning a closure: |x| |y| x + y. The inner closure captures
     // the outer's param `x`.
+    //
+    // This test passed throughout the transitive-capture bug below, and is kept
+    // beside it as the record of what was actually covered: `x` is the *outer's
+    // param*, so the outer closure captures nothing and there is no environment
+    // to hand down. The bug needed a name declared outside **both**.
     let (rt, result) =
         run_main("fn main() -> Int { var add = |x| |y| x + y; var inc = add(1); inc(41) }");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
+}
+
+// --- Transitive captures (handover 31 item 1) -----------------------------
+//
+// A closure whose body *is* a closure must capture whatever the returned one
+// names from outside them both: the returned closure's environment is filled
+// from the returning closure's frame, so the returning closure has to be
+// holding the value. `capture.rs`'s walker used to return early when the body it
+// was handed was itself a closure, recording nothing — and the inner env slot
+// was then filled from an empty environment with `Unit`. Three failure modes
+// fell out of that one slot, and each gets a test here because they fail
+// differently: a panic, a SIGSEGV, and a silently wrong answer.
+
+#[test]
+fn closure_curried_captures_transitively() {
+    // `base` is declared outside both closures. Before the fix: `<closure:0>`
+    // and a panic out of `praxis_int_load` reading a `Unit` as an `Int`.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var base = 10\n  var mk = |a| |b| b + base\n  mk(5)(1)\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 11);
+}
+
+#[test]
+fn closure_curried_three_levels_captures_transitively() {
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var base = 10\n  var mk = |a| |b| |c| c + base\n  mk(1)(2)(3)\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 13);
+}
+
+#[test]
+fn a_transitively_captured_text_is_the_text_and_not_unit() {
+    // The silent mode, and the reason this needs a value assertion rather than a
+    // `has_pending_fault` check: a captured `Text` read back as `Unit` neither
+    // panics nor faults. `got` was `Text` at check time and `Unit` at run time,
+    // and `got.len()` answered 0 with nothing in the output to say so.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var base = \"hello\"\n  var mk = |a| |b| base\n  mk(0)(0).len()\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 5);
+}
+
+#[test]
+fn a_bare_and_a_braced_curried_body_agree() {
+    // The two spellings differ by one pair of braces; the braced one was always
+    // on the working side, which is what made the bug survive.
+    let (rt_bare, bare) = run_main(
+        "fn main() -> Int {\n  var base = 10\n  var mk = |a| |b| b + base\n  mk(5)(1)\n}\n",
+    );
+    assert!(!rt_bare.has_pending_fault(), "fault: {:?}", rt_bare.fault());
+    let (rt_braced, braced) = run_main(
+        "fn main() -> Int {\n  var base = 10\n  var mk = |a| { |b| b + base }\n  mk(5)(1)\n}\n",
+    );
+    assert!(
+        !rt_braced.has_pending_fault(),
+        "fault: {:?}",
+        rt_braced.fault()
+    );
+    assert_eq!(bare.as_int(), braced.as_int());
+    assert_eq!(bare.as_int(), 11);
 }
 
 // --- M7-WS7b: mutable captures via VarCell (§4.10) ------------------------
@@ -3746,6 +3815,30 @@ fn mutable_capture_survives_returned_closure() {
     );
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 7);
+}
+
+#[test]
+fn transitive_mutable_capture_shares_one_cell_across_frames() {
+    // The SIGSEGV mode: a reassigned `var` is a `ByCell` capture, so the empty
+    // environment handed the inner closure a `Unit` where a `VarCell` pointer
+    // was expected, and the write dereferenced it. What must hold now is
+    // stronger than "no crash": the *same* cell is threaded through every
+    // environment, so a write two levels down is visible at the top.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var n = 0\n  var mk = |a| |b| { n = n + a + b; n }\n  mk(1)(2)\n  n = n + 50\n  mk(3)(4)\n  n\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    // 0 + 1 + 2 = 3, then +50 = 53, then +3+4 = 60.
+    assert_eq!(result.as_int(), 60);
+}
+
+#[test]
+fn transitive_mutable_capture_shares_one_cell_across_three_frames() {
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var n = 0\n  var mk = |a| |b| |c| { n = n + a + b + c; n }\n  mk(1)(2)(3)\n  n = n + 50\n  mk(1)(2)(3)\n  n\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 62);
 }
 
 // --- M7-WS8: monomorphization (§13.6) -------------------------------------
@@ -3995,6 +4088,19 @@ fn adv_pipeline_nested_closure_allocation_in_fused_map() {
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
+}
+
+#[test]
+fn adv_pipeline_curried_closure_captures_transitively() {
+    // The shape above allocates a nested closure per iteration but captures
+    // nothing from outside the pipeline, so it never exercised the transitive
+    // path. `base` is declared outside both closures *and* outside the fused
+    // loop — this is `[1,2,3].map(|x| |y| x + y + base)`, which was broken.
+    let src = "fn main() -> Int {\n  var base = 100\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var fs = v.map(|x| |y| x + y + base)\n  fs[0](1) + fs[2](1)\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    // (1 + 1 + 100) + (3 + 1 + 100) = 102 + 104 = 206.
+    assert_eq!(result.as_int(), 206);
 }
 
 #[test]
@@ -7099,8 +7205,9 @@ fn a_keyed_collection_enumerates_in_a_deterministic_order() {
         "every index pairs a key with its own value"
     );
 
-    // The order itself, twice in one process and asserted against the rendered-key
-    // order the formatter already uses.
+    // The order itself, twice in one process and asserted against the key order
+    // the formatter already uses — the key's own `compare`, not its rendering
+    // (ADR-138).
     let (rt, result) = run_main(
         "fn main() -> Int {\n  var m = Map[Text, Int]()\n  m[\"c\"] = 3\n  m[\"a\"] = 1\n  \
          m[\"b\"] = 2\n  var vs = m.values()\n  vs[0] * 100 + vs[1] * 10 + vs[2]\n}\n",
@@ -7396,7 +7503,7 @@ fn a_for_reaches_every_member_of_every_iterable() {
             "fn main() -> Int {\n  var s = Set()\n  s.insert(3)\n  s.insert(1)\n  \
              var t = 0\n  for x in s { t = t * 10 + x }\n  t\n}\n",
             13,
-            "Set, ascending by rendered member",
+            "Set, ascending by member",
         ),
         // A `BitSet`'s members are bit positions, not objects: each is boxed by
         // the snapshot rather than copied out of the payload.
@@ -7579,6 +7686,70 @@ fn an_iterables_order_is_the_one_its_own_accessors_promise() {
     assert!(!rt.has_pending_fault() && !rt2.has_pending_fault());
     assert_eq!(forward.as_int(), backward.as_int());
     assert_eq!(forward.as_int(), 123);
+}
+
+/// **The AoC defect, end to end.** A hashed collection walks its `Int` keys in
+/// numeric order, not in the order they print.
+///
+/// The order used to be the *rendered* member's, so a `Set` holding 9, 10, 100
+/// and 2 was walked `10, 100, 2, 9`. Nothing faulted and nothing printed
+/// suspiciously — a solve that folded its members simply computed a different
+/// number, which is the worst shape a defect comes in. The single-digit gates
+/// above cannot see it, because for one digit the two orders agree; these keys
+/// are chosen so they do not.
+#[test]
+fn a_hashed_collection_orders_its_int_keys_numerically() {
+    for inserts in [
+        "s.insert(9)\n  s.insert(10)\n  s.insert(100)\n  s.insert(2)",
+        "s.insert(2)\n  s.insert(100)\n  s.insert(10)\n  s.insert(9)",
+    ] {
+        let (rt, result) = run_main(&format!(
+            "fn main() -> Int {{\n  var s = Set()\n  {inserts}\n  \
+             var t = 0\n  for x in s {{ t = t * 1000 + x }}\n  t\n}}\n"
+        ));
+        assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+        assert_eq!(
+            result.as_int(),
+            2_009_010_100,
+            "2, 9, 10, 100 — not the lexicographic 10, 100, 2, 9"
+        );
+    }
+
+    // A `Map`'s keys are the same rule through the same helper, and a `Counter`
+    // is the third caller of it.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var m = Map()\n  m.insert(9, 1)\n  m.insert(10, 2)\n  \
+         m.insert(2, 3)\n  var ks = m.keys()\n  \
+         ks[0] * 10000 + ks[1] * 100 + ks[2]\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 20910, "2, 9, 10");
+}
+
+/// The handover's own assertable property: a `Set` and the `Vec` its members
+/// sort into are **one** sequence.
+///
+/// `sorted()` always went through the element descriptor's `compare` and the
+/// container always went through the rendered form, so the two disagreed for
+/// any `Set[Int]` with keys of different digit counts — and a reader comparing
+/// `out(s)` with `out(s.sorted())` was the only thing that could catch it. A fix
+/// that reordered only the *printing* would still fail this, because both sides
+/// here are folded by a `for`.
+#[test]
+fn a_set_and_its_sorted_vec_agree() {
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var s = Set()\n  s.insert(9)\n  s.insert(10)\n  \
+         s.insert(100)\n  s.insert(2)\n  \
+         var a = 0\n  for x in s { a = a * 1000 + x }\n  \
+         var b = 0\n  for x in s.to_vec().sorted() { b = b * 1000 + x }\n  \
+         if a == b { a } else { 0 }\n}\n",
+    );
+    assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        2_009_010_100,
+        "walking the set and walking its sorted members answer the same sequence"
+    );
 }
 
 /// ADR-062's asymmetry, extended to the seven iterables that had no lowering:
@@ -9609,4 +9780,480 @@ fn text_float_parses_a_number_or_answers_none() {
         );
         assert_eq!(result.as_text(), "none", "`{text}` spells no Float");
     }
+}
+
+/// **ADR-143.** `Int.to_text()` is the digits `out` prints, through the real
+/// JIT and the real wrapper.
+///
+/// Observed red before the row existed: `error[Y110]: no method `to_text` on
+/// type `Int` taking 0 argument(s)`.
+///
+/// `i64::MIN` is spelled `-9223372036854775807 - 1` because `-9223372036854775808`
+/// is a negation of a literal one past `i64::MAX`. It is in the list because a
+/// renderer that negates before formatting overflows on exactly that value.
+#[test]
+fn int_to_text_is_the_digits_out_prints() {
+    for (expr, want) in [
+        ("(1660)", "1660"),
+        ("(0)", "0"),
+        ("(-7)", "-7"),
+        ("(9223372036854775807)", "9223372036854775807"),
+        ("(-9223372036854775807 - 1)", "-9223372036854775808"),
+    ] {
+        let src = format!("fn main() -> Text {{\n  {expr}.to_text()\n}}\n");
+        let (rt, result) = run_main(&src);
+        assert!(!rt.has_pending_fault(), "{expr} faulted: {:?}", rt.fault());
+        assert_eq!(result.as_text(), want, "{expr}");
+    }
+}
+
+/// **ADR-143, and the handover's own complaint.** A labelled debug line is one
+/// call.
+///
+/// Three AoC solves wrote `out("splits:")` and `out(splits)` on two lines
+/// because there was no third thing to write. The row composing with ADR-085's
+/// `+` is what closes that, and composing is a separate claim from existing —
+/// `+` refuses to stringify, so the conversion has to be explicit and has to
+/// land on a `Text`.
+#[test]
+fn a_labelled_line_is_one_call() {
+    let src = "fn main() -> Text {\n  \"splits: \" + (1660).to_text()\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_text(), "splits: 1660");
+
+    // And the whole family concatenates, which is the point of closing it: a
+    // line built from a number, a character and a float needs no third spelling.
+    let src = "fn main() -> Text {\n  (3).to_text() + \"#\"[0].to_text() + (1.5).to_text()\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_text(), "3#1.5");
+}
+
+/// **ADR-143.** `Char.to_text()` is the character `out` prints, including one
+/// that does not fit a byte.
+///
+/// The multi-byte case is the four-byte payload read (REP-37) observed from a
+/// program: `"héllo"[1]` is `é`, and a wrapper that took eight bytes for it
+/// would answer something else entirely.
+#[test]
+fn char_to_text_is_the_character_out_prints() {
+    for (expr, want) in [
+        ("\"#\"[0]", "#"),
+        ("\"héllo\"[1]", "é"),
+        ("(233).to_char()", "é"),
+        ("(9731).to_char()", "☃"),
+    ] {
+        let src = format!("fn main() -> Text {{\n  {expr}.to_text()\n}}\n");
+        let (rt, result) = run_main(&src);
+        assert!(!rt.has_pending_fault(), "{expr} faulted: {:?}", rt.fault());
+        assert_eq!(result.as_text(), want, "{expr}");
+    }
+}
+
+/// **ADR-144.** `join` puts the separator between the elements and nowhere
+/// else, over a `Vec` and over a receiver that is not one.
+///
+/// Observed red before the row existed: `error[Y110]: no method `join` on type
+/// `Vec[Text]` taking 1 argument(s)`.
+///
+/// The `Set` case is the generic receiver earning its keep: `join` is one row on
+/// `Iterable`, so the materializing walk in front of the wrapper is what makes a
+/// non-`Vec` source work at all (ADR-127 decision 3).
+#[test]
+fn join_puts_the_separator_between_the_items() {
+    let src = "fn main() -> Text {\n  var v = Vec[Text]()\n  v.push(\"a\")\n  v.push(\"b\")\n  \
+               v.push(\"c\")\n  v.join(\", \")\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_text(), "a, b, c");
+
+    // An empty separator is the no-separator spelling, and it is written rather
+    // than defaulted — the catalog has no optional arguments.
+    let src = "fn main() -> Text {\n  [\"a\", \"b\", \"c\"].join(\"\")\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_text(), "abc");
+
+    // An empty sequence answers the empty Text, not a stray separator.
+    let src = "fn main() -> Int {\n  var v = Vec[Text]()\n  v.join(\"-\").len()\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+
+    // A `Set` receiver, materialized in front of the wrapper. One member, so the
+    // answer does not depend on the snapshot's order.
+    let src = "fn main() -> Text {\n  var s = Set()\n  s.insert(\"only\")\n  s.join(\",\")\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_text(), "only");
+
+    // A sequence of numbers joins by rendering first, which is the composition
+    // ADR-143 and ADR-144 were decided together to make available. `join` itself
+    // still refuses to render.
+    let src = "fn main() -> Text {\n  [1, 2, 3].map(|n| n.to_text()).join(\"-\")\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_text(), "1-2-3");
+}
+
+/// **ADR-144, and the handover's grid-drawing case.** A `Grid` row renders back
+/// as the line it was read from.
+///
+/// `out(g.row(y))` prints `[., ., |]`; drawing the grid is how a grid puzzle is
+/// debugged, and `..|` had no spelling at all. The round trip is the assertion:
+/// the text goes in through `read grid(char)` and comes back out unchanged.
+#[test]
+fn a_grid_row_renders_back_as_a_line() {
+    let src = "fn main() -> Text {\n  var g = read grid(char)\n  g.row(1).to_text()\n}";
+    let (rt, result) = run_main_with_input(src, "..|\n#.#\n");
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_text(), "#.#");
+
+    // The empty sequence, and a character that does not fit a byte.
+    let src = "fn main() -> Int {\n  var v = Vec[Char]()\n  v.to_text().len()\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+
+    let src = "fn main() -> Text {\n  var v = Vec[Char]()\n  v.push(\"é\"[0])\n  \
+               v.push(\"☃\"[0])\n  v.to_text()\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_text(), "é☃");
+}
+
+/// **ADR-145, and the handover's own gate.** A countdown is a reversed range.
+///
+/// `43210` is the shape day 7's manual `while y >= sy { … ; y = y - 1 }` loop
+/// existed to work around — the one place in that program where the mechanism
+/// was visible instead of the puzzle.
+///
+/// Observed red before the row existed: `error[Y110]: no method `rev` on type
+/// `Range` taking 0 argument(s)`.
+#[test]
+fn a_countdown_is_a_reversed_range() {
+    let src =
+        "fn main() -> Int {\n  var t = 0\n  for y in (0..5).reversed() { t = t * 10 + y }\n  t\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 43210);
+
+    // **The negative gate beside it (ADR-059 decision 3).** `5..0` is still an
+    // empty range and still says nothing: the countdown got a spelling, the
+    // descending literal did not become an error.
+    let src = "fn main() -> Int {\n  var t = 0\n  for y in 5..0 { t = t + 1 }\n  t\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        0,
+        "a descending range is empty, not reversed"
+    );
+
+    let src = "fn main() -> Int {\n  (0..0).reversed().len()\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+/// **ADR-145.** `reversed` answers a new `Vec`, leaves the receiver alone, and
+/// carries no capability bound — which is what separates it from the barrier it
+/// sits beside.
+///
+/// `32` is `v.get(0)` still 3 and `r.get(0)` already 2. The closure case is the
+/// two-sided half: the same receiver earns `Y006` from `sorted()`, because
+/// ordering asks for `compare` and reversal asks for nothing.
+#[test]
+fn a_reversed_vec_is_new_and_needs_nothing_of_its_elements() {
+    let src = "fn main() -> Int {\n  var v = [3, 1, 2]\n  var r = v.reversed()\n  \
+               v.get(0) * 10 + r.get(0)\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 32, "the source Vec is not mutated");
+
+    // Every receiver, through its own accessor rather than through
+    // `praxis_vec_get` on a foreign payload (ADR-127 decision 2).
+    let src = "fn main() -> Char {\n  \"abc\".reversed().get(0)\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_char(), 'c');
+
+    let src = "fn main() -> Int {\n  var d = Deque()\n  d.push_back(1)\n  d.push_back(2)\n  \
+               d.reversed().get(0)\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+
+    // A `Vec` of closures has no `compare` and no `hash`, so `sorted()` and
+    // `unique()` refuse it at check time. `reversed()` does not ask.
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(|x| x + 1)\n  \
+               v.push(|x| x + 2)\n  v.reversed().len()\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+// --- ADR-146: sized collection constructors ---------------------------------
+
+/// `Vec(n, fill)` end to end: `n` slots, every one the fill, and zero is a
+/// `Vec` rather than a refusal.
+#[test]
+fn a_sized_vec_runs() {
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var v = Vec(3, 7)\n  var t = 0\n  for x in v { t = t + x }\n  t * 10 + v.count()\n}",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 213, "three sevens, then the count");
+
+    let (rt, result) = run_main("fn main() -> Int { Vec(0, 1).count() }");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(
+        result.as_int(),
+        0,
+        "an empty sized Vec is empty, not a fault"
+    );
+
+    // The element type comes from the fill with nothing written down, and the
+    // slots are writable afterwards like any other `Vec`.
+    let (rt, result) = run_main(
+        "fn main() -> Bool {\n  var v = Vec(3, false)\n  v[1] = true\n  !v[0] && v[1] && !v[2]\n}",
+    );
+    assert!(!rt.has_pending_fault());
+    assert!(result.as_bool());
+}
+
+/// `Grid(w, h, fill)` end to end — the working board handover 31 item 8 asked
+/// for. Its extents, its cells, its bounds check and a store that touches one
+/// cell and not its neighbour.
+#[test]
+fn a_sized_grid_runs() {
+    let (rt, result) =
+        run_main("fn main() -> Int {\n  var g = Grid(3, 2, 0)\n  g.width() * 10 + g.height()\n}");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 32);
+
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var g = Grid(3, 2, 0)\n  g[1, 1] = 9\n  g[0, 0] * 10 + g[1, 1]\n}",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 9, "one cell moved and the rest did not");
+
+    // The bounds behaviour a hand-rolled `y * w + x` board does not have.
+    let (rt, result) = run_main(
+        "fn main() -> Bool {\n  var g = Grid(3, 2, '.')\n  g.contains(2, 1) && !g.contains(3, 1) && !g.contains(0 - 1, 0)\n}",
+    );
+    assert!(!rt.has_pending_fault());
+    assert!(result.as_bool());
+
+    // `Grid(0, 0, fill)` is `Grid()`: the empty grid is still reachable both
+    // ways, which is ADR-146 decision 1's "the arity chooses the shape" seen
+    // from the degenerate end.
+    let (rt, result) = run_main("fn main() -> Int { Grid(0, 0, 1).cells().count() }");
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+/// **ADR-146 decision 5.** A size the runtime cannot serve is a fault the
+/// program can see, not an abort — ADR-041's answer, now reachable from source
+/// for the first time since `Grid()` went nullary.
+#[test]
+fn a_negative_or_absurd_size_is_an_invalid_size_fault() {
+    for src in [
+        "fn main() -> Int { Vec(0 - 1, 0).count() }",
+        "fn main() -> Int { Grid(0 - 1, 2, 0).width() }",
+        "fn main() -> Int { Grid(2, 0 - 1, 0).width() }",
+        // Multiplies cleanly and is still an allocation no host can serve.
+        "fn main() -> Int { Grid(100000, 100000, 0).width() }",
+        "fn main() -> Int { Vec(1000000000, 0).count() }",
+    ] {
+        let (rt, _r) = run_main(src);
+        assert!(rt.has_pending_fault(), "{src} must fault");
+        assert_eq!(rt.fault(), praxis_runtime::FaultKind::InvalidSize, "{src}");
+    }
+}
+
+/// **ADR-146 decision 4**, pinned so that a later change to deep-copy the fill
+/// is a failing test rather than a silent change of meaning. Every cell is the
+/// *same* object, which is the aliasing `var b = a` and a double `push` of one
+/// value already have.
+#[test]
+fn a_collection_fill_is_one_object_shared() {
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var g = Grid(2, 2, Vec())\n  g[0, 0].push(1)\n  g[1, 1].count()\n}",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(
+        result.as_int(),
+        1,
+        "the four cells are one `Vec` (ADR-146 decision 4)"
+    );
+
+    // …and the same for `Vec(n, fill)`. This is also the case
+    // `praxis_grid_new` refuses outright: `default_cell` has no zero value for
+    // a composite, so an explicit fill is what makes a collection of
+    // collections constructible at all.
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n  var v = Vec(3, Vec())\n  v[0].push(1)\n  v[0].push(2)\n  v[2].count()\n}",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+/// The fill is an arbitrary expression, and an expression that **allocates** is
+/// the one the rooting has to survive: liveness names the fill as an operand of
+/// the allocation, so `spill_roots` spills it before the wrapper that may
+/// collect. Without that this is a use-after-free the pacer hides until the
+/// heap is busy, which is what the loop is for.
+#[test]
+fn a_fill_that_allocates_survives_the_allocation_that_uses_it() {
+    let (rt, result) = run_main(
+        "fn main() -> Int {\n\
+         \x20 var total = 0\n\
+         \x20 var i = 0\n\
+         \x20 while i < 5000 {\n\
+         \x20   var v = Vec(20, \"a\" + \"b\")\n\
+         \x20   total = total + v[19].len()\n\
+         \x20   i = i + 1\n\
+         \x20 }\n\
+         \x20 total\n\
+         }",
+    );
+    assert!(!rt.has_pending_fault());
+    assert_eq!(result.as_int(), 10000, "5000 iterations of a 2-char fill");
+}
+
+// --- string interpolation (§8.1, ADR-147) ---------------------------------
+
+/// **The gate for ADR-147 decision 2**, and the reason `praxis_value_to_text`
+/// calls `GcRef::format` rather than rendering anything itself.
+///
+/// Each row is asserted against what `out` writes — obtained by *calling*
+/// `GcRef::format`, the function `praxis_write_stdout` calls — and never against
+/// a literal string. A test written against literals passes while the two
+/// renderers agree by coincidence and keeps passing when one of them changes;
+/// this one cannot pass while they disagree, which is the property ADR-143
+/// decision 2 bought for the three scalar rows and ADR-147 extends to every
+/// type.
+///
+/// The types here deliberately include several with **no** `to_text()` row and
+/// no prospect of one, so this also pins that interpolation is not the
+/// desugar-through-`to_text()` route ADR-143 decision 5 proposed.
+///
+/// `()` is absent from the list only because `fn main() { () }` currently
+/// compiles clean and then has no entry point to run — a pre-existing gap
+/// between `check` and `run` that has nothing to do with interpolation. The
+/// `Unit` hole itself is covered by
+/// `praxis_hir::infer_tests::a_hole_accepts_any_type`.
+#[test]
+fn a_hole_renders_what_out_renders() {
+    for expr in [
+        "[1, 2, 3]",
+        "[\"a\", \"b\"]",
+        "(1, \"x\")",
+        "1.5",
+        "'#'",
+        "42",
+        "true",
+        "\"plain\"",
+        "0..3",
+        "Set[Int]()",
+        "Map[Text, Int]()",
+    ] {
+        let hole_src = format!("fn main() -> Text {{\n  \"{{{expr}}}\"\n}}\n");
+        let (rt, hole) = run_main(&hole_src);
+        assert!(!rt.has_pending_fault(), "{expr} faulted: {:?}", rt.fault());
+
+        // `out`'s own path: build the value and render it through `GcRef::format`.
+        // Bound to a `var` first so every row takes one shape — a bare `()` as a
+        // function body is a degenerate case with its own history, and this test
+        // is not about it.
+        let value_src = format!("fn main() {{\n  var probe = {expr}\n  probe\n}}\n");
+        let (rt2, value) = run_main(&value_src);
+        assert!(
+            !rt2.has_pending_fault(),
+            "{expr} faulted: {:?}",
+            rt2.fault()
+        );
+        let mut want = String::new();
+        value.format(&mut want);
+
+        assert_eq!(
+            hole.as_text(),
+            want,
+            "`\"{{{expr}}}\"` must render exactly what `out({expr})` writes"
+        );
+    }
+}
+
+/// The literal text around the holes survives, in order, with the escapes it
+/// was written with — and an adjacent pair of holes has nothing between them.
+#[test]
+fn the_text_around_the_holes_is_kept_in_order() {
+    for (src, want) in [
+        ("\"Part 2: {40 + 2}\"", "Part 2: 42"),
+        ("\"{1}{2}{3}\"", "123"),
+        ("\"{1} and {2}\"", "1 and 2"),
+        ("\"a{1}\"", "a1"),
+        ("\"{1}b\"", "1b"),
+        ("\"\\{{1}\\}\"", "{1}"),
+        ("\"tab\\there: {1}\"", "tab\there: 1"),
+    ] {
+        let program = format!("fn main() -> Text {{\n  {src}\n}}\n");
+        let (rt, result) = run_main(&program);
+        assert!(!rt.has_pending_fault(), "{src} faulted: {:?}", rt.fault());
+        assert_eq!(result.as_text(), want, "{src}");
+    }
+}
+
+/// A hole holds a full expression, and it is evaluated where it is written —
+/// left to right, so a hole with an effect runs in source order.
+#[test]
+fn a_hole_evaluates_a_full_expression_in_source_order() {
+    let src = "\
+fn bump(v: Vec[Int], n: Int) -> Int {
+  v.push(n)
+  n
+}
+fn main() -> Text {
+  var seen = Vec[Int]()
+  var line = \"{bump(seen, 1)}-{bump(seen, 2)}-{bump(seen, 3)}\"
+  \"{line} {seen}\"
+}
+";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_text(), "1-2-3 [1, 2, 3]");
+}
+
+/// **The end-to-end half of ADR-147 decision 1.** A closure body that names an
+/// outer binding *only inside a hole* still captures it.
+///
+/// The failure this guards is not a diagnostic: an implementation that re-lexed
+/// holes later would allocate the closure with an empty environment and read a
+/// slot nothing filled, so the program runs and answers something else. That is
+/// why the assertion is on the value and not on a compile result.
+#[test]
+fn a_closure_captures_the_name_in_its_hole() {
+    let src = "\
+fn main() -> Text {
+  var outer = 41
+  var f = |n: Int| \"outer + n = {outer + n}\"
+  f(1)
+}
+";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_text(), "outer + n = 42");
+}
+
+/// **ADR-147's consequence, measured.** The handover's `out(label); out(value)`
+/// pair is one call for *every* type, not just the four with a `to_text()` row —
+/// which is the difference between this and `a_labelled_line_is_one_call`.
+#[test]
+fn a_labelled_line_is_one_call_for_any_type() {
+    let src = "fn main() -> Text {\n  var splits = [1, 2, 3]\n  \"splits: {splits}\"\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_text(), "splits: [1, 2, 3]");
 }

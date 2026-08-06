@@ -54,7 +54,12 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
             span,
         } => {
             // At least one named field is required (§7.5: a named sections call
-            // with zero fields is malformed).
+            // with zero fields is malformed). The test is `fields`, not "no
+            // named argument at all": `sections(boards: repeated(P))` is a
+            // greedy tail and nothing else, which is spelled `sections(P)` and
+            // is still refused here. A *counted* group is an ordinary field —
+            // it is in `fields` — so `sections(shapes: repeated(P, 6))` alone
+            // is legal, which is the point of it being bounded.
             if fields.is_empty() {
                 errs.push(ValidationError {
                     span: *span,
@@ -64,16 +69,17 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
             }
             // Field names must be unique.
             let mut seen = Vec::new();
-            for (name, child) in fields {
-                if seen.contains(name) {
+            for item in fields {
+                let name = item.name();
+                if seen.iter().any(|s: &String| s == name) {
                     errs.push(ValidationError {
                         span: *span,
                         code: DiagCode::DuplicateSectionField,
                         message: format!("duplicate section field `{name}`"),
                     });
                 }
-                seen.push(name.clone());
-                validate_node(child, errs);
+                seen.push(name.to_string());
+                validate_node(item.parser(), errs);
             }
             // The tail is a field of the generated record too (IP-09). It used
             // to be validated for its *parser* and never for its *name*, so
@@ -245,6 +251,8 @@ pub enum ArgKind {
     Parser,
     /// A positional string literal.
     String,
+    /// A positional whole-number literal — the count of `repeated(P, N)`.
+    Int,
     /// A bare keyword flag, e.g. the `ragged` of `grid(P, ragged, fill: 0)`.
     Flag(String),
     /// A named argument `name: parser` — the value is a parser expression.
@@ -267,6 +275,7 @@ impl ArgKind {
         match self {
             ArgKind::Parser => "a parser".to_string(),
             ArgKind::String => "a string literal".to_string(),
+            ArgKind::Int => "a whole-number literal".to_string(),
             ArgKind::Flag(f) => format!("the flag `{f}`"),
             ArgKind::Named(n) => format!("the named argument `{n}:`"),
             ArgKind::Keyword(n) => format!("the keyword argument `{n}:`"),
@@ -366,6 +375,38 @@ pub fn check_call(ctor: Constructor, args: &[ArgKind], span: Span) -> Vec<Valida
             }
             if args.len() > 2 {
                 arity(&mut errs, "1 or 2 arguments", args.len());
+            }
+        }
+        ArgShape::ParserWithOptionalCount => {
+            // The count comes **first**, unlike the arms above, because one
+            // caller reads only the first error: the capture-body scanner turns
+            // a shape failure into a single `ScanError::CallShape`. A wrong
+            // number of arguments is the more useful of the two things a
+            // three-argument `repeated` is wrong about, and it is the one the
+            // rowan front end has always reported for it.
+            if args.is_empty() || args.len() > 2 {
+                arity(&mut errs, "1 or 2 arguments", args.len());
+            }
+            match args.first() {
+                // An empty list is the arity error above and nothing else.
+                None | Some(ArgKind::Parser) => {}
+                Some(other) => {
+                    bad_arg(&mut errs, 0, other, "the repeated parser must be a parser");
+                }
+            }
+            match args.get(1) {
+                None | Some(ArgKind::Int) => {}
+                // The reason is in the message because there is no other
+                // spelling that would have worked: the parser plan is built
+                // when the program is compiled, so a count read from a value
+                // cannot exist.
+                Some(other) => bad_arg(
+                    &mut errs,
+                    1,
+                    other,
+                    "the count must be a whole-number literal — the parser plan is built when \
+                     the program is compiled, so the count cannot be a parser or a variable",
+                ),
             }
         }
         ArgShape::GridMaybeRagged => {
@@ -476,7 +517,9 @@ pub fn check_call(ctor: Constructor, args: &[ArgKind], span: Span) -> Vec<Valida
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{AtomicKind, CaptureName, EmptySeparator, Separator};
+    use crate::ast::{
+        AtomicKind, CaptureName, EmptySeparator, RepeatCount, SectionItem, Separator,
+    };
     use praxis_source::{DiagCode, Span};
 
     fn atom() -> ParserAst {
@@ -705,7 +748,10 @@ mod tests {
     #[test]
     fn repeated_section_tail_cannot_reuse_a_fixed_field_name() {
         let ast = ParserAst::SectionsNamed {
-            fields: vec![("items".to_string(), atom())],
+            fields: vec![SectionItem::One {
+                name: "items".to_string(),
+                parser: atom(),
+            }],
             repeated_tail: Some(("items".to_string(), Box::new(atom()))),
             span: Span::at(0),
         };
@@ -717,5 +763,88 @@ mod tests {
                 .any(|error| error.code == DiagCode::DuplicateSectionField),
             "the generated record cannot contain two fields named `items`"
         );
+    }
+
+    /// A counted group is a record field like any other, so it collides with
+    /// the tail's name the same way a fixed field does. The duplicate check
+    /// reads `SectionItem::name`, which is one answer for both variants — a
+    /// check that only knew about `One` would let `Counted` past.
+    #[test]
+    fn a_counted_group_and_the_tail_cannot_share_a_name() {
+        let ast = ParserAst::SectionsNamed {
+            fields: vec![SectionItem::Counted {
+                name: "shapes".to_string(),
+                count: RepeatCount::new(2).expect("two sections"),
+                parser: atom(),
+            }],
+            repeated_tail: Some(("shapes".to_string(), Box::new(atom()))),
+            span: Span::at(0),
+        };
+
+        let errors = validate(&ast);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.code == DiagCode::DuplicateSectionField),
+            "a counted group's name is a field name too"
+        );
+    }
+
+    /// **A counted group alone is a `sections` call; an unbounded tail alone is
+    /// not.** `sections(boards: repeated(P))` is `sections(P)` written the long
+    /// way round — every section, one parser — and I025 has always said so. A
+    /// counted group consumes a *known* prefix and leaves the rest unread, so
+    /// it is a heterogeneous call with one field, and the same check must let
+    /// it through. That is why the emptiness test is `fields`, which holds the
+    /// counted item and not the tail.
+    #[test]
+    fn a_counted_group_alone_is_a_field_but_an_unbounded_tail_alone_is_not() {
+        let counted_only = ParserAst::SectionsNamed {
+            fields: vec![SectionItem::Counted {
+                name: "shapes".to_string(),
+                count: RepeatCount::new(2).expect("two sections"),
+                parser: atom(),
+            }],
+            repeated_tail: None,
+            span: Span::at(0),
+        };
+        assert!(validate(&counted_only).is_empty());
+
+        let tail_only = ParserAst::SectionsNamed {
+            fields: Vec::new(),
+            repeated_tail: Some(("boards".to_string(), Box::new(atom()))),
+            span: Span::at(0),
+        };
+        assert!(
+            validate(&tail_only)
+                .iter()
+                .any(|e| e.code == DiagCode::EmptyFieldList),
+            "a greedy tail and nothing else is `sections(P)`"
+        );
+    }
+
+    /// The shape table now owns `repeated`'s arity, which it did not: the
+    /// marker's builder hand-rolled `args.len() != 1`, the one call site
+    /// ADR-073's "check the shape before building" never covered. Adding the
+    /// count meant closing that exemption, and this is the table answering.
+    #[test]
+    fn repeated_takes_a_parser_and_an_optional_count() {
+        let ok = |args: &[ArgKind]| check_call(Constructor::Repeated, args, Span::at(0));
+        assert!(ok(&[ArgKind::Parser]).is_empty());
+        assert!(ok(&[ArgKind::Parser, ArgKind::Int]).is_empty());
+
+        // No parser at all, and a count where the parser belongs.
+        assert!(ok(&[]).iter().any(|e| e.code == DiagCode::ConstructorArity));
+        assert!(ok(&[ArgKind::Int])
+            .iter()
+            .any(|e| e.code == DiagCode::InvalidConstructorArgument));
+        // A second parser is not a count — this is the diagnostic a
+        // non-literal `repeated(P, n)` earns.
+        assert!(ok(&[ArgKind::Parser, ArgKind::Parser])
+            .iter()
+            .any(|e| e.code == DiagCode::InvalidConstructorArgument));
+        assert!(ok(&[ArgKind::Parser, ArgKind::Int, ArgKind::Int])
+            .iter()
+            .any(|e| e.code == DiagCode::ConstructorArity));
     }
 }

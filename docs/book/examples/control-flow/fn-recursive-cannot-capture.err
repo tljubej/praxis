@@ -1,0 +1,9 @@
+error[N007]: `countdown` cannot use `step`: a function does not capture the bindings around it (pass `step` as a parameter)
+
+  fn-recursive-cannot-capture.px:4:46
+  4 |     if n <= 0 { 0 } else { 1 + countdown(n - step) }
+    |                                              ^^^^ `countdown` cannot use `step`: a function does not capture the bindings around it (pass `step` as a parameter)
+
+help: `countdown` calls itself, so a closure is not the way out: a closure cannot name itself (`N001`)
+
+praxis: 1 error(s)

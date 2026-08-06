@@ -3,9 +3,11 @@
 // building a label out of parsed fields, accumulating into a `var`, and using a
 // built `Text` as a map key.
 //
-// No `Int` is concatenated anywhere, because there is nothing to concatenate it
-// with: `Int.to_text()` does not exist (ADR-085 records that as its own gap) and
-// `+` does not coerce. Every operand below is a `Text` already.
+// `+` does not coerce, and it never will: ADR-085 decision 2 refuses an implicit
+// conversion to `Text`. What has changed since this was written is that the
+// conversion now exists *explicitly* — `Int.to_text()` and `Char.to_text()`
+// landed with ADR-143 — so the last two lines concatenate a number and a
+// character by saying so, which is exactly what that decision asked for.
 var rows = read lines(`{first:word} {second:word}`)
 
 var report = ""
@@ -22,3 +24,7 @@ out(index["beta/two"])
 out(("" + "").is_empty())
 out(("a" + "b" + "c" + "d").len())
 out("héllo" + " wörld")
+
+// The explicit conversion, at the two shapes a labelled line takes.
+out("rows=" + rows.count().to_text())
+out("first=" + rows[0].first[0].to_text())

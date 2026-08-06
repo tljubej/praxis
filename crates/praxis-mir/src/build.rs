@@ -25,8 +25,8 @@ use praxis_types::{Type, TypeDb};
 
 use crate::annot::{DebugSlots, RootSlots};
 use crate::ir::{
-    AllocKind, BlockId, CallTarget, CmpOp, FloatBinOp, Function, GcConst, Inst, IntBinOp,
-    LocalDebugKind, LocalId, LocalKind, MirType, Overflow, ScalarKind, Terminator,
+    AllocKind, BlockId, CallTarget, CmpOp, CollectionInit, FloatBinOp, Function, GcConst, Inst,
+    IntBinOp, LocalDebugKind, LocalId, LocalKind, MirType, Overflow, ScalarKind, Terminator,
 };
 
 /// Lower a typed module to MIR: one [`Function`] per source `fn` item, plus one
@@ -333,11 +333,14 @@ fn lower_fn(f: &TypedFn, db: &mut TypeDb, bindings: Bindings<'_>) -> Function {
 
     // Parameters: one `Gc` slot each. User locals: classified + span-less (a
     // param has no single materializing expression; its span is the fn's span).
+    // A destructuring parameter has no name of its own, and its slot is a temp
+    // holding the whole argument — the names the programmer wrote are the
+    // components, bound out of it in the body.
     for p in &f.params {
         let id = b.alloc_gc(
             MirType::Known(p.ty),
-            Some(p.name.clone()),
-            LocalDebugKind::User,
+            p.name.clone(),
+            param_debug_kind(p),
             Some(f.span),
         );
         b.locals.insert(p.symbol, id);
@@ -346,7 +349,7 @@ fn lower_fn(f: &TypedFn, db: &mut TypeDb, bindings: Bindings<'_>) -> Function {
         // the incoming value's slot and not the cell's.
         b.func.params.push(id);
         if b.bindings.escaping.contains(&p.symbol) {
-            bind_cell(&mut b, p.symbol, id, Some(&p.name), Some(f.span));
+            bind_cell(&mut b, p.symbol, id, Some(f.span));
         }
     }
 
@@ -443,8 +446,8 @@ fn lower_closure_fn(closure: &LiftedClosure, db: &mut TypeDb, bindings: Bindings
     for p in &closure.params {
         let id = b.alloc_gc(
             MirType::Known(p.ty),
-            Some(p.name.clone()),
-            LocalDebugKind::User,
+            p.name.clone(),
+            param_debug_kind(p),
             None,
         );
         b.locals.insert(p.symbol, id);
@@ -452,7 +455,7 @@ fn lower_closure_fn(closure: &LiftedClosure, db: &mut TypeDb, bindings: Bindings
         // A closure parameter is a binding like any other: writable, and
         // capturable by a *nested* closure, which together is what needs a cell.
         if b.bindings.escaping.contains(&p.symbol) {
-            bind_cell(&mut b, p.symbol, id, Some(&p.name), None);
+            bind_cell(&mut b, p.symbol, id, None);
         }
     }
 
@@ -784,19 +787,36 @@ fn lower_block_body(b: &mut Builder<'_>, block: &praxis_hir::TypedBlock) -> Loca
 /// binding each iteration, so a closure made on step *i* must keep step *i*'s
 /// cell. Overwriting the slot with a new cell each time leaves the previous cell
 /// alive in whatever captured it, which is exactly that rule.
+///
+/// The cell is a **compiler temp**, and `span` is the binding's so the crash
+/// snapshot can say which binding it belongs to. It is not the binding: it holds
+/// a `VarCell` object, not the bound value, so classifying it `User` made the
+/// snapshot print a row named `__cell_n` whose value read `<var-cell>` — an
+/// internal name, no type, and the wrong value. Naming it plainly `n` would be
+/// worse still, because `p n` would then bind the cell instead of what is in it.
+/// Showing a captured-and-written binding *by value* needs the renderer to
+/// dereference the cell, which is a separate change (ADR-139).
+/// How the debugger should classify a parameter's slot: a binding the
+/// programmer named is a `User` local, and a destructuring parameter's
+/// whole-argument slot is a temp (`TypedParam::name` is `None` for it).
+///
+/// One function rather than the same `if` at the `fn` and closure sites, since
+/// the two disagreeing is how a slot ends up `User` with no name — the state
+/// [`crate::verify`] now rejects.
+fn param_debug_kind(p: &TypedParam) -> LocalDebugKind {
+    match p.name {
+        Some(_) => LocalDebugKind::User,
+        None => LocalDebugKind::Temp,
+    }
+}
+
 fn bind_cell(
     b: &mut Builder<'_>,
     symbol: praxis_hir::SymbolId,
     value: LocalId,
-    name: Option<&str>,
     span: Option<(u32, u32)>,
 ) -> LocalId {
-    let cell = b.alloc_gc(
-        MirType::Opaque,
-        name.map(|n| format!("__cell_{n}")),
-        LocalDebugKind::User,
-        span,
-    );
+    let cell = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, span);
     b.call_runtime(cell, RuntimeSymbol::AllocVarCell, vec![value]);
     b.locals.insert(symbol, cell);
     cell
@@ -818,7 +838,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                 // reads/writes route through
                 // `praxis_var_cell_get`/`praxis_var_cell_set` so a closure
                 // sharing the cell sees mutations.
-                bind_cell(b, *symbol, v, Some(name), Some(*span));
+                bind_cell(b, *symbol, v, Some(*span));
             } else {
                 let slot = b.alloc_gc(
                     MirType::Known(expr_static_type(init)),
@@ -994,6 +1014,12 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
     let espan = Some(praxis_hir::expr_span(e));
     match e {
         TypedExpr::Lit { value, .. } => lower_lit_gc(b, value, espan),
+        TypedExpr::Interp {
+            parts,
+            trailing,
+            ty,
+            ..
+        } => lower_interp(b, parts, trailing, *ty, espan),
         TypedExpr::Path { symbol, ty, .. } => {
             match b.locals.get(symbol).copied() {
                 Some(slot) => {
@@ -1287,12 +1313,27 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // so the codegen resolves the real element descriptor (closing the M7
             // null-descriptor carryover). `out`/`panic` and other builtins fall
             // through to the generic call path below.
-            if let Some(alloc) = collection_alloc_kind(b, callee_name, *ty) {
-                let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, None);
-                // Only `Grid()` faults here: `praxis_grid_new` validates its
-                // dimensions. The other eight `praxis_*_new` wrappers are
-                // `Effect::Allocates`, and `alloc` reads that rather than
-                // checking after all nine.
+            if let Some(ctor) = praxis_types::CollectionCtor::from_name(callee_name) {
+                // The sized forms' operands are lowered **first** (ADR-146), so
+                // an argument that allocates runs before the destination local
+                // exists — the order `lower_list_lit` already keeps.
+                let init = lower_collection_init(b, ctor, args);
+                let sized = init != CollectionInit::Empty;
+                let alloc = collection_alloc_kind(b, ctor, *ty, init);
+                // A sized construction carries its span; a nullary one does
+                // not, as it never has. The asymmetry is the fault: `Vec(-1, x)`
+                // stops the program, and the crash snapshot names the
+                // expression that asked for the impossible size only if the
+                // destination local knows where it came from. `Vec()` cannot be
+                // refused for anything it was given, so a span on it would only
+                // add a row to a snapshot that is never about it — and the
+                // snapshot has a window, so an added row costs a real one.
+                let span = if sized { espan } else { None };
+                let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, span);
+                // Which of these faults is `alloc.constructor()`'s answer, not a
+                // rule written here: `praxis_grid_new` validates its dimensions
+                // and the two filled wrappers validate theirs, while the other
+                // eight `praxis_*_new` wrappers are `Effect::Allocates`.
                 b.alloc(dst, alloc);
                 return dst;
             }
@@ -1422,18 +1463,40 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 if let Some(plan) = recognize_pipeline(b.db, &call) {
                     return lower_pipeline(b, plan);
                 }
-                // Two ways to get here, and both are compiler bugs rather than
-                // user errors — which is why this is an ICE and not a
-                // diagnostic (ADR-093 deleted lowering's `Y110`; a wrong answer
-                // or a type error at this point would misattribute a compiler
-                // fault to the program).
+                // A receiver that is **still a type variable** is not a compiler
+                // bug. It is the body of a function nothing ever calls —
+                // ADR-093 §3's first bullet — and that bullet's explanation was
+                // wrong: `monomorphize` does not drop such a body, because
+                // ADR-057 decision 5 pins the receiver, which makes the function
+                // a monotype rather than a generic. Dropping it would be wrong
+                // anyway: `var g = f` on an uncalled `f` still needs the symbol.
                 //
-                // Either the catalog lowers `{name}` as an intrinsic and no
+                // The body is unreachable by construction — every call unifies
+                // the argument and pins the receiver, including a call through a
+                // value (`var g = f` then `g([1, 2])` prints `2`) — so it lowers
+                // to an unconditional `panic` stating that invariant. Not to the
+                // Unit singleton, which REP-40 refuses, and not to a diagnostic,
+                // which ADR-093 promised it would not be (ADR-137 decision 3).
+                if b.db
+                    .var_id_of(b.db.follow(praxis_hir::expr_ty(receiver)))
+                    .is_some()
+                {
+                    let message = Lit::Text(format!(
+                        "internal: `{name}` on a receiver no call site pinned"
+                    ));
+                    let arg_local = lower_lit_gc(b, &message, espan);
+                    let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
+                    b.call_runtime(dst, RuntimeSymbol::Panic, vec![arg_local]);
+                    return dst;
+                }
+                // What is left is a compiler bug rather than a user error, which
+                // is why this is an ICE and not a diagnostic (ADR-093 deleted
+                // lowering's `Y110`; a wrong answer or a type error at this point
+                // would misattribute a compiler fault to the program): either the
+                // catalog lowers `{name}` as an intrinsic and no
                 // `classify_link`/`classify_sink` arm claims it, or inference
-                // never resolved the call at all — in which case it reported
-                // `Y110` and the front end should have stopped, or the receiver
-                // was one no call site pinned and `monomorphize` should have
-                // dropped the uncalled polymorphic original before MIR.
+                // never resolved a call whose receiver *is* concrete — in which
+                // case it reported `Y110` and the front end should have stopped.
                 panic!(
                     "internal compiler error: the pipeline recognizer declined \
                      `{name}`, and it carries no runtime symbol. Every intrinsic \
@@ -1565,13 +1628,31 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             ty,
             ..
         } => {
+            // A capture with no local in this frame is not representable: the
+            // symbol capture analysis recorded is the symbol `lower_closure_fn`'s
+            // prologue binds, so by the time a nested literal is allocated inside
+            // a synthetic function, every name that function captured is one of
+            // its locals.
+            //
+            // This used to fall back to the `Unit` singleton, and that fallback
+            // is where handover 31 item 1 turned an under-recorded capture list
+            // into three different runtime failures: an env slot holding `Unit`
+            // read back as an `Int` panicked out of `praxis_int_load`, the same
+            // slot dereferenced as a `VarCell` was a SIGSEGV, and read back as a
+            // `Text` it was a well-typed program answering `Unit` with nothing in
+            // the output to say so. A silent wrong answer is the worst of the
+            // three, so the disagreement is loud now.
             let cap_locals: Vec<LocalId> = captures
                 .iter()
                 .map(|cap| {
-                    b.locals
-                        .get(&cap.symbol)
-                        .copied()
-                        .unwrap_or_else(|| lower_lit_gc(b, &Lit::Unit, espan))
+                    b.locals.get(&cap.symbol).copied().unwrap_or_else(|| {
+                        panic!(
+                            "internal compiler error: the closure capture `{}` has no local in \
+                             this frame — capture analysis and lowering disagree about what this \
+                             closure captures",
+                            cap.name
+                        )
+                    })
                 })
                 .collect();
             // The closure value temp materializes `e` (the whole closure expr),
@@ -1644,6 +1725,67 @@ fn run_parser_plan(
     let dst = b.alloc_gc(MirType::Known(result_ty), None, LocalDebugKind::Temp, None);
     b.call_runtime(dst, RuntimeSymbol::RunParser, vec![idx_gc, input]);
     dst
+}
+
+/// Lower an interpolated text literal (§8.1, ADR-147): render each hole, then
+/// fold the pieces left with `praxis_text_concat`.
+///
+/// **Each hole goes through `RuntimeSymbol::ValueToText`, and that is the whole
+/// of "a hole renders anything".** The wrapper calls `GcRef::format`, which is
+/// the function `praxis_write_stdout` calls, so a hole and an `out` of the same
+/// value produce the same characters *by construction* — there is no per-type
+/// dispatch here to get wrong, and no list of renderable types to fall out of
+/// date. The value is materialized with [`lower_expr_gc`] like `out`'s argument,
+/// so an unboxed scalar is boxed on exactly the same path.
+///
+/// The fold is left-to-right, which is also evaluation order: a hole may call a
+/// function with an effect, and `"{f()}{g()}"` must run `f` before `g`.
+///
+/// Empty literal fragments are skipped rather than concatenated. That is not an
+/// optimization for its own sake — `"{a}{b}"` has an empty fragment between the
+/// holes and a leading empty one before the first — and skipping them is what
+/// keeps the common `"{x}"` a single `ValueToText` call with no concatenation at
+/// all.
+fn lower_interp(
+    b: &mut Builder<'_>,
+    parts: &[(String, TypedExpr)],
+    trailing: &str,
+    ty: praxis_types::Type,
+    span: Option<(u32, u32)>,
+) -> LocalId {
+    // `acc` is `None` until the first piece exists, so nothing has to invent an
+    // empty `Text` to start from — and a literal with one hole and no text
+    // around it allocates exactly one object.
+    let mut acc: Option<LocalId> = None;
+    let join = |b: &mut Builder<'_>, acc: &mut Option<LocalId>, piece: LocalId| match acc {
+        None => *acc = Some(piece),
+        Some(cur) => {
+            let dst = b.alloc_gc(MirType::Known(ty), None, LocalDebugKind::Temp, span);
+            // `Allocates`, not `AllocatesAndFaults` — no fault check follows,
+            // for the reason `+` on `Text` has none (ADR-085).
+            b.call_runtime(dst, RuntimeSymbol::TextConcat, vec![*cur, piece]);
+            *acc = Some(dst);
+        }
+    };
+    for (text, hole) in parts {
+        if !text.is_empty() {
+            let lit = lower_lit_gc(b, &Lit::Text(text.clone()), span);
+            join(b, &mut acc, lit);
+        }
+        let value = lower_expr_gc(b, hole);
+        let rendered = b.alloc_gc(MirType::Known(ty), None, LocalDebugKind::Temp, span);
+        b.call_runtime(rendered, RuntimeSymbol::ValueToText, vec![value]);
+        join(b, &mut acc, rendered);
+    }
+    if !trailing.is_empty() {
+        let lit = lower_lit_gc(b, &Lit::Text(trailing.to_string()), span);
+        join(b, &mut acc, lit);
+    }
+    // `None` means no holes and no text, which the lexer cannot produce: an
+    // interpolated literal has at least one hole, so `parts` is non-empty and
+    // the loop above always joins something. The empty `Text` is the answer that
+    // keeps a malformed tree buildable rather than panicking in the backend.
+    acc.unwrap_or_else(|| lower_lit_gc(b, &Lit::Text(String::new()), span))
 }
 
 /// Lower a literal to a `GcRef` local (allocating the object). `span` is the
@@ -1736,28 +1878,38 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
             dst
         }
         Lit::Char(c) => {
-            // Char's payload is a u32 Unicode scalar; ConstInt carries it as i64.
-            let scalar = b.alloc_scalar(ScalarKind::Char);
-            b.push(Inst::ConstInt {
-                dst: scalar,
-                value: *c as i64,
-            });
             let dst = b.alloc_gc(MirType::Known(b.char_ty), None, LocalDebugKind::Temp, span);
-            // `praxis_alloc_char` validates the Unicode scalar and raises
-            // `INVALID_CHAR`, so its row is `AllocatesAndFaults` and `b.alloc`
-            // pushes the check — and for the same reason the allocation is not
-            // hoisted out of a loop (`box_invariant_literal`'s first
-            // precondition). Unlike `AllocKind::Text`, whose validation ADR-111
-            // moved to its one untrusted caller, this one has nowhere to go: an
-            // `i64` that is not a Unicode scalar arrives from `Int.to_char()`
-            // at run time (ADR-086), not from a literal. There is no
-            // char-literal syntax today (ADR-107), and nothing in the tree
-            // constructs a `Lit::Char` either — every mention of it is a match
-            // arm — so this arm is currently unreachable from any source
-            // program. It is kept because `Lit` is the shape lowering answers
-            // for, and an arm that panics instead would be a panic waiting for
-            // the first char literal.
-            b.alloc(dst, AllocKind::Char { value: scalar });
+            // `Lit::Int`'s question, asked of the other interned table
+            // (ADR-141). `GcConst::small_char` asks `small_char::index_of`,
+            // which is what `praxis_alloc_char` consults, so `Some` is a
+            // guarantee that `ctx.small_chars` holds this code point and the
+            // backend may read the slot. Two loads for `'#'`, where `"#"[0]`
+            // was a `praxis_text_get` per evaluation.
+            if let Some(konst) = GcConst::small_char(*c) {
+                // Not a safepoint, and `b.push` rather than `b.emit` says so:
+                // this reads a table, allocates nothing and cannot fault.
+                b.push(Inst::ConstGc { dst, konst });
+            } else {
+                // Above U+007F: a real allocation, and a safepoint.
+                //
+                // Char's payload is a u32 Unicode scalar; ConstInt carries it
+                // as i64. `praxis_alloc_char` validates that scalar and raises
+                // `INVALID_CHAR`, so its row is `AllocatesAndFaults` and
+                // `b.alloc` pushes the check — and for the same reason the
+                // allocation is not hoisted out of a loop
+                // (`box_invariant_literal`'s first precondition). The check
+                // cannot fire for a literal, since the lexer decoded a real
+                // `char` to get here; it is still required, because this arm is
+                // also reached from `Int.to_char()`, where the `i64` arrives at
+                // run time from a program (ADR-086). Splitting the two would be
+                // ADR-111's manifest split, and it buys nothing at this size.
+                let scalar = b.alloc_scalar(ScalarKind::Char);
+                b.push(Inst::ConstInt {
+                    dst: scalar,
+                    value: *c as i64,
+                });
+                b.alloc(dst, AllocKind::Char { value: scalar });
+            }
             dst
         }
         Lit::Float(f) => {
@@ -2480,19 +2632,45 @@ fn lower_for(
     // The loop variable's slot: allocate one if the `for` binding has no slot
     // yet (it is introduced by the loop, not a `var` statement). Reads of the
     // binding inside the body resolve to this slot via `b.locals`.
+    // A `for x in xs` names its slot: ADR-125 makes the loop variable a binding
+    // in exactly the sense a `var` is, so it carries the same name/kind/span the
+    // `TypedStmt::Var` site passes and the crash snapshot prints it the same way
+    // (it used to print `? = 3`). A `for (a, b) in ps` or a `for _ in r` names
+    // nothing here: the slot holds the whole item, the names are the
+    // components', and calling the container a binding would put a row in
+    // `locals:` that the source never wrote — so it is a temp, tagged with the
+    // iterated expression's span so it reads `<tmp#N: (Int, Int)> @ "ps"`.
     let named = match binding {
-        praxis_hir::TypedPattern::Bind { symbol, .. } => Some(*symbol),
+        praxis_hir::TypedPattern::Bind {
+            symbol, name, span, ..
+        } => Some((*symbol, name.clone(), *span)),
         _ => None,
     };
     // A loop variable that escapes is boxed *below*, per iteration, so its slot
     // is never the cell and the reuse lookup must not find one.
-    let escapes = named.is_some_and(|s| b.bindings.escaping.contains(&s));
+    let escapes = named
+        .as_ref()
+        .is_some_and(|(s, ..)| b.bindings.escaping.contains(s));
     let slot = named
+        .as_ref()
         .filter(|_| !escapes)
-        .and_then(|s| b.locals.get(&s).copied())
-        .unwrap_or_else(|| b.alloc_gc(MirType::Known(item_ty), None, LocalDebugKind::User, None));
-    if let Some(symbol) = named.filter(|_| !escapes) {
-        b.locals.insert(symbol, slot);
+        .and_then(|(s, ..)| b.locals.get(s).copied())
+        .unwrap_or_else(|| match &named {
+            Some((_, name, span)) => b.alloc_gc(
+                MirType::Known(item_ty),
+                Some(name.clone()),
+                LocalDebugKind::User,
+                Some(*span),
+            ),
+            None => b.alloc_gc(
+                MirType::Known(item_ty),
+                None,
+                LocalDebugKind::Temp,
+                Some(praxis_hir::expr_span(iter)),
+            ),
+        });
+    if let Some((symbol, ..)) = named.as_ref().filter(|_| !escapes) {
+        b.locals.insert(*symbol, slot);
     }
     b.push(Inst::MoveGc {
         dst: slot,
@@ -2503,8 +2681,8 @@ fn lower_for(
     // allocated here, inside the body, rather than once before the header: the
     // next step overwrites the slot with a new cell and leaves the old one alive
     // in whatever captured it.
-    if let Some(symbol) = named.filter(|_| escapes) {
-        bind_cell(b, symbol, slot, None, None);
+    if let Some((symbol, _, span)) = named.as_ref().filter(|_| escapes) {
+        bind_cell(b, *symbol, slot, Some(*span));
     }
     // A destructuring binding reads its components out of that same slot
     // (REP-25). The pattern is irrefutable — HIR reported one that can fail — so
@@ -4467,6 +4645,7 @@ fn alloc_empty_vec(b: &mut Builder<'_>, result_ty: MirType) -> LocalId {
         AllocKind::Collection {
             ctor: praxis_types::CollectionCtor::Vec,
             args: vec![MirType::Opaque],
+            init: CollectionInit::Empty,
         },
     );
     result
@@ -4496,7 +4675,14 @@ fn alloc_collect_target(
         _ => vec![MirType::Opaque; ctor.arity()],
     };
     let result = b.alloc_gc(MirType::Known(result_ty), None, LocalDebugKind::Temp, None);
-    b.alloc(result, AllocKind::Collection { ctor, args });
+    b.alloc(
+        result,
+        AllocKind::Collection {
+            ctor,
+            args,
+            init: CollectionInit::Empty,
+        },
+    );
     result
 }
 
@@ -4866,6 +5052,7 @@ fn binop_to_cmp(op: BinOp) -> CmpOp {
 fn expr_static_type(e: &TypedExpr) -> Type {
     match e {
         TypedExpr::Lit { ty, .. }
+        | TypedExpr::Interp { ty, .. }
         | TypedExpr::Path { ty, .. }
         | TypedExpr::FnValue { ty, .. }
         | TypedExpr::Bin { ty, .. }
@@ -4951,6 +5138,7 @@ fn lower_list_lit(b: &mut Builder<'_>, elements: &[TypedExpr], ty: Type, e: &Typ
         AllocKind::Collection {
             ctor: CollectionCtor::Vec,
             args,
+            init: CollectionInit::Empty,
         },
     );
     for el in elements {
@@ -4968,25 +5156,19 @@ fn lower_list_lit(b: &mut Builder<'_>, elements: &[TypedExpr], ty: Type, e: &Typ
 /// (`result_ty`), which inference has already pinned to e.g. `Vec[Int]` or
 /// `Map[Text, Int]`.
 ///
+/// `init` says whether the call is the empty form or ADR-146's sized one; it is
+/// built by [`lower_collection_init`], which lowers the argument expressions,
+/// so it must be passed in already lowered rather than derived here.
+///
 /// `Seq` is intentionally rejected — it is compiler-internal and never
 /// constructed from source (§6.3, M8 WS8).
-fn collection_alloc_kind(b: &Builder<'_>, callee_name: &str, result_ty: Type) -> Option<AllocKind> {
+fn collection_alloc_kind(
+    b: &Builder<'_>,
+    ctor: praxis_types::CollectionCtor,
+    result_ty: Type,
+    init: CollectionInit,
+) -> AllocKind {
     use praxis_types::data::TypeData;
-    use praxis_types::CollectionCtor;
-    let ctor = match callee_name {
-        "Vec" => CollectionCtor::Vec,
-        "Deque" => CollectionCtor::Deque,
-        "Map" => CollectionCtor::Map,
-        "Set" => CollectionCtor::Set,
-        "Counter" => CollectionCtor::Counter,
-        "MinHeap" => CollectionCtor::MinHeap,
-        "MaxHeap" => CollectionCtor::MaxHeap,
-        "BitSet" => CollectionCtor::BitSet,
-        "Grid" => CollectionCtor::Grid,
-        "Range" => CollectionCtor::Range,
-        // Not a collection constructor; fall through to the generic call path.
-        _ => return None,
-    };
     // Extract the type arguments from the result type. For a nullary collection
     // (BitSet/Range) there are none; for Vec/Deque/Set/Heap/Grid/Counter there is
     // one; for Map there are two. If the result type does not match the ctor's
@@ -5000,7 +5182,39 @@ fn collection_alloc_kind(b: &Builder<'_>, callee_name: &str, result_ty: Type) ->
         } if *c == ctor => a.iter().copied().map(MirType::Known).collect(),
         _ => Vec::new(),
     };
-    Some(AllocKind::Collection { ctor, args })
+    AllocKind::Collection { ctor, args, init }
+}
+
+/// Lower a constructor call's arguments into a [`CollectionInit`].
+///
+/// A **match, not a check.** Inference has already refused every count this does
+/// not name — `Vec(3)` and `Grid(2, 3)` are `Y024` against the sized arity, and
+/// `Set(3, 0)` is `Y024` against the nullary one — so an unrecognized shape here
+/// is not a program a user can write, and lowering it as `Empty` (which drops
+/// the arguments, exactly as every constructor call did before ADR-146) is the
+/// degradation rather than a panic.
+///
+/// The operands are lowered here, before the caller emits the `Alloc`, because
+/// an argument expression may itself allocate and the `Alloc`'s destination
+/// local must not be live across it.
+fn lower_collection_init(
+    b: &mut Builder<'_>,
+    ctor: praxis_types::CollectionCtor,
+    args: &[TypedExpr],
+) -> CollectionInit {
+    use praxis_types::CollectionCtor;
+    match (ctor, args) {
+        (CollectionCtor::Vec, [count, fill]) => CollectionInit::Filled {
+            count: lower_expr_gc(b, count),
+            fill: lower_expr_gc(b, fill),
+        },
+        (CollectionCtor::Grid, [width, height, fill]) => CollectionInit::FilledGrid {
+            width: lower_expr_gc(b, width),
+            height: lower_expr_gc(b, height),
+            fill: lower_expr_gc(b, fill),
+        },
+        _ => CollectionInit::Empty,
+    }
 }
 
 /// Lower a record literal `Name { field: expr, … }` (M7, §4.5). Lowers each
@@ -5129,30 +5343,49 @@ fn emit_pattern_test(
             b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
             b.cur = on_fail;
         }
-        TypedPattern::Bind { symbol, ty } => {
+        TypedPattern::Bind {
+            symbol,
+            name,
+            ty,
+            span,
+        } => {
             // Always matches. A name that is only ever *read* can alias the
             // scrutinee's local outright — no slot, no copy. One that is written
             // cannot: since ADR-125 every binding is assignable, and for a plain
             // `match v { n => … }` the scrutinee's local is `v`'s own, so a write
             // through `n` would land in `v`.
             if b.bindings.escaping.contains(symbol) {
-                bind_cell(b, *symbol, scrut, None, None);
+                bind_cell(b, *symbol, scrut, Some(*span));
             } else if b.bindings.reassigned.contains(symbol) {
-                let slot = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::User, None);
+                let slot = b.alloc_gc(
+                    MirType::Known(*ty),
+                    Some(name.clone()),
+                    LocalDebugKind::User,
+                    Some(*span),
+                );
                 b.push(Inst::MoveGc {
                     dst: slot,
                     src: scrut,
                 });
                 b.locals.insert(*symbol, slot);
             } else {
+                // The aliasing branch, and the one that hid a `match` arm's
+                // payload: `Some(p)` extracted the payload into a nameless temp
+                // and bound `p` to it, so the snapshot listed it under `temps:`
+                // as `<tmp#7> = 77` rather than as the binding it is. Retitling
+                // the slot is what names it — and `Function::adopt_binding_name`
+                // is what keeps `match v { n => … }` from renaming `v`'s slot,
+                // since there the scrutinee already belongs to a binding.
+                b.func
+                    .adopt_binding_name(scrut, name, MirType::Known(*ty), *span);
                 b.locals.insert(*symbol, scrut);
             }
             b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
             b.cur = on_fail;
         }
         TypedPattern::Lit { value, .. } => {
-            // Compare the scrutinee against the literal value. Int/Bool use a
-            // native scalar compare; Text uses structural equality.
+            // Compare the scrutinee against the literal value. Int/Bool/Char use
+            // a native scalar compare; Text uses structural equality.
             let lit_gc = lower_lit_gc(b, value, None);
             match value {
                 // Both operands are read at the payload's *own* width. `Bool`
@@ -5164,11 +5397,21 @@ fn emit_pattern_test(
                 // and compared equal whenever two immortals happened to have
                 // matching padding (REP-49; REP-37 is the same defect in the
                 // graph oracle). `praxis_bool_load` reads the byte.
-                Lit::Int(_) | Lit::Bool(_) => {
-                    let kind = if matches!(value, Lit::Bool(_)) {
-                        ScalarKind::Bool
-                    } else {
-                        ScalarKind::Int
+                //
+                // `Char` had a worse arm than either: an unconditional
+                // `Terminator::Jump { target: on_success }`, commented
+                // "defensive". It was unreachable while there was no character
+                // literal, and the day one landed every `Char` pattern would
+                // have matched every scrutinee — a wrong answer `check`,
+                // coverage and `verify` all call clean. It belongs here, where
+                // it is the same extract-then-compare `c == '#'` already
+                // lowered to via `compare_kind`'s `CompareVia::Scalar(Char)`,
+                // so the two spellings emit the same instructions (ADR-141).
+                Lit::Int(_) | Lit::Bool(_) | Lit::Char(_) => {
+                    let kind = match value {
+                        Lit::Bool(_) => ScalarKind::Bool,
+                        Lit::Char(_) => ScalarKind::Char,
+                        _ => ScalarKind::Int,
                     };
                     let si = lower_extract_scalar(b, scrut, kind);
                     let li = lower_extract_scalar(b, lit_gc, kind);
@@ -5199,11 +5442,6 @@ fn emit_pattern_test(
                         then_block: on_success,
                         else_block: on_fail,
                     };
-                }
-                Lit::Char(_) => {
-                    // Char patterns aren't produced by the parser today; treat
-                    // as a match (defensive).
-                    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
                 }
                 Lit::Float(_) => {
                     // Compare two Float scalars for equality with IEEE-754
@@ -5364,23 +5602,42 @@ fn bind_components(b: &mut Builder<'_>, src: LocalId, pat: &praxis_hir::TypedPat
             continue;
         }
         let idx = idx as u32;
-        let component_local = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+        // The component the pattern reads out of the item. A temp, but a
+        // self-describing one: it carries the sub-pattern's type and span, so
+        // the crash snapshot tags it `<tmp#N: Int> @ "a"` instead of leaving a
+        // bare, typeless `<tmp#N>` beside the binding it feeds.
+        let (sub_ty, sub_span) = match sub {
+            TypedPattern::Bind { ty, span, .. } => (MirType::Known(*ty), Some(*span)),
+            TypedPattern::Lit { ty, .. }
+            | TypedPattern::EnumVariant { ty, .. }
+            | TypedPattern::Tuple { ty, .. }
+            | TypedPattern::Record { ty, .. } => (MirType::Known(*ty), None),
+            TypedPattern::Wildcard => (MirType::Opaque, None),
+        };
+        let component_local = b.alloc_gc(sub_ty, None, LocalDebugKind::Temp, sub_span);
         let inst = component.load(component_local, src, idx);
         b.push(inst);
         match sub {
             // A name the loop body reads: its own slot, so the debugger shows it
             // as the user local it is.
-            TypedPattern::Bind { symbol, .. } => {
+            TypedPattern::Bind {
+                symbol, name, span, ..
+            } => {
                 // Already its own slot, so a write through the name is fine as
                 // it stands; only a captured-and-written one needs the cell, and
                 // it is allocated here for the same per-binding-event reason the
                 // loop variable's is.
                 if b.bindings.escaping.contains(symbol) {
-                    bind_cell(b, *symbol, component_local, None, None);
+                    bind_cell(b, *symbol, component_local, Some(*span));
                     continue;
                 }
                 let slot = b.locals.get(symbol).copied().unwrap_or_else(|| {
-                    b.alloc_gc(MirType::Opaque, None, LocalDebugKind::User, None)
+                    b.alloc_gc(
+                        sub_ty,
+                        Some(name.clone()),
+                        LocalDebugKind::User,
+                        Some(*span),
+                    )
                 });
                 b.locals.insert(*symbol, slot);
                 b.push(Inst::MoveGc {
@@ -5422,8 +5679,18 @@ fn emit_subpattern_tests(
             );
             return;
         }
-        // Extract this component into a local.
-        let payload = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
+        // Extract this component into a local. A `Bind` sub-pattern adopts this
+        // slot rather than allocating its own (see `emit_pattern_test`), so the
+        // type goes on here or the binding renders without a type column.
+        let payload_ty = match sub {
+            praxis_hir::TypedPattern::Bind { ty, .. }
+            | praxis_hir::TypedPattern::Lit { ty, .. }
+            | praxis_hir::TypedPattern::EnumVariant { ty, .. }
+            | praxis_hir::TypedPattern::Tuple { ty, .. }
+            | praxis_hir::TypedPattern::Record { ty, .. } => MirType::Known(*ty),
+            praxis_hir::TypedPattern::Wildcard => MirType::Opaque,
+        };
+        let payload = b.alloc_gc(payload_ty, None, LocalDebugKind::Temp, None);
         let inst = component.load(payload, scrut, slot_idx);
         b.push(inst);
         // Test `sub` against `payload`. If it matches, continue to the next
@@ -5488,6 +5755,178 @@ mod tests {
             ints >= 2,
             "the item temp and the binding slot both: {named:?}"
         );
+    }
+
+    /// Every `Gc` slot a function classifies as a binding, as `(name, kind)`
+    /// pairs — the shape the crash snapshot renders from, read at the IR so a
+    /// property is pinned where it is decided and not only through the text.
+    fn binding_slots(f: &Function) -> Vec<String> {
+        f.locals
+            .iter()
+            .filter(|l| l.kind == LocalKind::Gc)
+            .filter(|l| f.debug_kind(l.id) == LocalDebugKind::User)
+            .map(|l| f.debug_name(l.id).unwrap_or("<anonymous>").to_string())
+            .collect()
+    }
+
+    /// **ADR-139.** A `for` variable is a binding in exactly the sense a `var`
+    /// is (ADR-125), so its slot carries the name the programmer wrote. It used
+    /// to carry `None`, and the crash snapshot printed the row as `? = 3`.
+    #[test]
+    fn a_for_bindings_slot_carries_its_written_name() {
+        let (funcs, _) = lower_src_to_mir(
+            "fn f(v: Vec[Int]) -> Int {\n  var s = 0\n  for item in v { s = s + item }\n  s\n}",
+        );
+        let f = &funcs[0];
+        assert!(
+            binding_slots(f).iter().any(|n| n == "item"),
+            "the loop variable is a named binding: {:?}",
+            binding_slots(f)
+        );
+        let slot = f
+            .locals
+            .iter()
+            .find(|l| f.debug_name(l.id) == Some("item"))
+            .expect("`item` has a slot");
+        assert_eq!(f.debug_kind(slot.id), LocalDebugKind::User);
+        assert!(
+            f.debug_span(slot.id).is_some(),
+            "and a span, so `source` can point at where it was bound"
+        );
+    }
+
+    /// **ADR-139.** A `match` arm's payload aliases the slot the payload was
+    /// extracted into, so naming it means retitling that slot. It used to stay
+    /// a nameless temp, which put `payload` in the snapshot's `temps:` section
+    /// as `<tmp#7> = 77` — present, but unnameable and untyped.
+    #[test]
+    fn a_match_arm_payload_is_a_named_user_local() {
+        let (funcs, _) = lower_src_to_mir(
+            "fn f(o: Option[Int]) -> Int {\n  match o { Some(payload) => payload, None => 0 }\n}",
+        );
+        let f = &funcs[0];
+        let named = binding_slots(f);
+        assert_eq!(
+            named.iter().filter(|n| *n == "payload").count(),
+            1,
+            "exactly one slot is `payload`: {named:?}"
+        );
+    }
+
+    /// The other half of the aliasing rule: `match v { n => … }` binds `n` to
+    /// `v`'s own slot, so adopting the name there would relabel `v` and lose a
+    /// binding the programmer did write. `adopt_binding_name` is a no-op on a
+    /// slot that already belongs to a binding, and this is the test that keeps
+    /// that branch from being read as dead.
+    #[test]
+    fn a_bind_over_a_named_binding_does_not_steal_its_name() {
+        let (funcs, _) = lower_src_to_mir("fn f() -> Int {\n  var v = 7\n  match v { n => n }\n}");
+        let f = &funcs[0];
+        let named = binding_slots(f);
+        assert!(named.iter().any(|n| n == "v"), "`v` survives: {named:?}");
+        assert!(
+            !named.iter().any(|n| n == "n"),
+            "`n` is `v`'s slot, not a second one: {named:?}"
+        );
+    }
+
+    /// **ADR-139.** A destructuring `for` names its components and *not* its
+    /// container: the programmer wrote `a` and `b`, and the slot holding the
+    /// whole `(a, b)` is a compiler temp. All three used to be anonymous
+    /// bindings, so one loop put three `? = …` rows in the snapshot.
+    #[test]
+    fn a_destructuring_for_names_each_component_and_not_the_item() {
+        let (funcs, analysis) = lower_src_to_mir(
+            "fn f(ps: Vec[(Int, Int)]) -> Int {\n  var s = 0\n  \
+             for (a, b) in ps { s = s + a + b }\n  s\n}",
+        );
+        let f = &funcs[0];
+        let named = binding_slots(f);
+        assert!(named.iter().any(|n| n == "a"), "{named:?}");
+        assert!(named.iter().any(|n| n == "b"), "{named:?}");
+        assert!(
+            !named.iter().any(|n| n == "(a, b)" || n == "<anonymous>"),
+            "the container is not a binding: {named:?}"
+        );
+        // And the components carry their element type, so the snapshot has a
+        // type column to print.
+        for want in ["a", "b"] {
+            let slot = f
+                .locals
+                .iter()
+                .find(|l| f.debug_name(l.id) == Some(want))
+                .expect("component slot");
+            let rendered = slot.ty.known().map(|t| analysis.db.render(t));
+            assert_eq!(rendered.as_deref(), Some("Int"), "`{want}`'s type");
+        }
+        // The item slot is a temp that says what it holds and where it came
+        // from, rather than an anonymous row the source never wrote.
+        assert!(
+            f.locals
+                .iter()
+                .filter(|l| l.kind == LocalKind::Gc)
+                .filter(|l| f.debug_kind(l.id) == LocalDebugKind::Temp)
+                .any(|l| l.ty.known().map(|t| analysis.db.render(t)).as_deref()
+                    == Some("(Int, Int)")
+                    && f.debug_span(l.id).is_some()),
+            "the item slot is a typed, span-carrying temp"
+        );
+    }
+
+    /// **ADR-139.** A destructuring closure parameter's slot holds the whole
+    /// argument, and the programmer named the components. It used to be a
+    /// binding whose name was the *pattern's source text*, so a frame listed
+    /// `(a, b): (Int, Int) = (1, 2)` beside the `a` and `b` it decomposes into.
+    #[test]
+    fn a_destructuring_closure_parameter_is_not_a_binding() {
+        let (funcs, _) = lower_src_to_mir(
+            "fn f(ps: Vec[(Int, Int)]) -> Vec[Int] {\n  ps.map(|(a, b)| a + b)\n}",
+        );
+        for f in &funcs {
+            let named = binding_slots(f);
+            assert!(
+                !named.iter().any(|n| n.starts_with('(')),
+                "no slot is named by a pattern's text in `{}`: {named:?}",
+                f.name
+            );
+        }
+        let closure = funcs
+            .iter()
+            .find(|f| f.name != "f")
+            .expect("the closure is lowered as its own function");
+        let named = binding_slots(closure);
+        assert!(named.iter().any(|n| n == "a"), "{named:?}");
+        assert!(named.iter().any(|n| n == "b"), "{named:?}");
+    }
+
+    /// The whole rule in one assertion, over every function every one of these
+    /// programs lowers to: a slot that claims to be a binding can say which
+    /// one. `verify` enforces it, and this is the lowering-side canary that
+    /// says which construct broke it.
+    #[test]
+    fn no_lowering_produces_a_nameless_binding_slot() {
+        for src in [
+            "fn f(v: Vec[Int]) -> Int {\n  var s = 0\n  for x in v { s = s + x }\n  s\n}",
+            "fn f(v: Vec[Int]) -> Int {\n  var s = 0\n  for _ in v { s = s + 1 }\n  s\n}",
+            "fn f(ps: Vec[(Int, Int)]) -> Int {\n  var s = 0\n  \
+             for (a, b) in ps { s = s + a + b }\n  s\n}",
+            "fn f(o: Option[Int]) -> Int {\n  match o { Some(p) => p, None => 0 }\n}",
+            "fn f(o: Option[Int]) -> Int {\n  \
+             match o { Some(p) => { p = p + 1\n p }, None => 0 }\n}",
+            "struct P { x: Int, y: Int }\n\
+             fn f(p: P) -> Int {\n  match p { P { x, y } => x + y }\n}",
+            "fn f(ps: Vec[(Int, Int)]) -> Vec[Int] {\n  ps.map(|(a, b)| a + b)\n}",
+            "fn f() -> Int {\n  var n = 0\n  var g = || { n = n + 1\n n }\n  g()\n}",
+        ] {
+            let (funcs, _) = lower_src_to_mir(src);
+            for f in &funcs {
+                assert!(
+                    !binding_slots(f).iter().any(|n| n == "<anonymous>"),
+                    "`{}` in `{src}` has a nameless binding slot",
+                    f.name
+                );
+            }
+        }
     }
 
     /// **P0-02.** A closure value's local is its `Func` type, and an indirect
@@ -7420,6 +7859,144 @@ mod tests {
         );
     }
 
+    // ---- The character literal (ADR-141) -----------------------------------
+
+    /// **The bug the syntax would otherwise have shipped on top of.**
+    ///
+    /// `lower_pattern_test`'s `Lit::Char` arm was an unconditional
+    /// `Terminator::Jump { target: on_success }` with a comment calling itself
+    /// "defensive": every `Char` pattern matched every scrutinee. It was
+    /// unreachable while no char literal could be written, and invisible to
+    /// `check`, to coverage and to `verify` the moment one could — so
+    /// `match c { '#' => 1, '.' => 2, _ => 3 }` would have compiled, checked
+    /// clean and answered `1` for every character.
+    ///
+    /// The structural assertion, which fails without a JIT: the block that ends
+    /// a `Char` pattern test branches on a comparison. A defensive arm that
+    /// jumps to success is not defensive.
+    #[test]
+    fn a_char_pattern_emits_a_comparison_and_not_a_jump() {
+        let (funcs, _) = lower_src_to_mir(
+            "fn f(c: Char) -> Int {\n  match c {\n    '#' => 1\n    '.' => 2\n    _ => 3\n  }\n}",
+        );
+        let f = funcs.iter().find(|f| f.name == "f").expect("f");
+
+        // One `IntCmp { Eq }` per literal arm — the stub emitted none.
+        let cmps = f
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .filter(|i| matches!(i, Inst::IntCmp { op: CmpOp::Eq, .. }))
+            .count();
+        assert_eq!(cmps, 2, "one comparison per Char arm");
+
+        // Each comparison reads the scrutinee's payload at `Char`'s own width —
+        // REP-49 is this shape read at the wrong one. The *literal* side is one
+        // read per arm too, and `forward` has already folded both to immediates
+        // by this point, which is why there are two of these and not four.
+        let char_extracts = f
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .filter(|i| {
+                matches!(
+                    i,
+                    Inst::ExtractScalar {
+                        scalar: ScalarKind::Char,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(char_extracts, 2, "the scrutinee, once per Char arm");
+
+        // And the block each comparison ends branches — the assertion that
+        // fails against the stub, which terminated with a `Jump`.
+        let branch_terms = f
+            .blocks
+            .iter()
+            .filter(|b| matches!(b.term, Terminator::Branch { .. }))
+            .count();
+        assert!(
+            branch_terms >= 2,
+            "each Char arm decides; got {branch_terms} branching blocks"
+        );
+    }
+
+    /// **Gate 2, at the compiler boundary.** An ASCII `'#'` is an
+    /// `Inst::ConstGc` — the table base and one element, two loads — and not a
+    /// `praxis_alloc_char` call with the `CheckFault` ADR-088 puts after it.
+    /// Without this half the literal is *slower* than the `"#"[0]` it replaces,
+    /// which was one call and no guard.
+    #[test]
+    fn an_ascii_char_literal_is_a_const_gc() {
+        let const_gcs = |src: &str| -> Vec<GcConst> {
+            lower_src_to_mir(src).0[0]
+                .blocks
+                .iter()
+                .flat_map(|b| b.insts.iter())
+                .filter_map(|i| match i {
+                    Inst::ConstGc { konst, .. } => Some(*konst),
+                    _ => None,
+                })
+                .collect()
+        };
+        let (funcs, _) = lower_src_to_mir("fn main() -> Int { '#'.to_int() }");
+        let main = &funcs[0];
+        assert!(
+            const_gcs("fn main() -> Int { '#'.to_int() }")
+                .iter()
+                .any(|k| matches!(k, GcConst::Char(35))),
+            "'#' is U+0023 and the table holds it"
+        );
+        assert!(
+            !main.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(
+                i,
+                Inst::Alloc {
+                    alloc: AllocKind::Char { .. },
+                    ..
+                }
+            ))),
+            "and it does not also allocate"
+        );
+        // The spelling it replaces, for contrast: one `praxis_text_get` per
+        // evaluation, folded by nothing.
+        let (funcs, _) = lower_src_to_mir("fn main() -> Int { \"#\"[0].to_int() }");
+        let subscript = funcs.iter().find(|f| f.name == "main").expect("main");
+        assert_eq!(runtime_calls(subscript, RuntimeSymbol::TextGet), 1);
+        assert_eq!(runtime_calls(main, RuntimeSymbol::TextGet), 0);
+    }
+
+    /// The ASCII ceiling, pinned at the compiler boundary the way
+    /// `GcConst::small_int` pins the `Int` one. `'é'` is U+00E9, one past
+    /// `SMALL_CHAR_MAX`, so it takes the allocating path — and that path's
+    /// `CheckFault` stays, because `praxis_alloc_char` validates its scalar.
+    #[test]
+    fn a_char_literal_above_the_table_still_allocates() {
+        let (funcs, _) = lower_src_to_mir("fn main() -> Int { 'é'.to_int() }");
+        let main = &funcs[0];
+        assert!(
+            !main.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(
+                i,
+                Inst::ConstGc {
+                    konst: GcConst::Char(_),
+                    ..
+                }
+            ))),
+            "U+00E9 is outside the interned range, so there is no slot to load"
+        );
+        assert!(
+            main.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(
+                i,
+                Inst::Alloc {
+                    alloc: AllocKind::Char { .. },
+                    ..
+                }
+            ))),
+            "it allocates instead"
+        );
+    }
+
     // ---- The build-time preheader hoist (ADR-108) --------------------------
 
     /// Find the block every loop is entered through: the one whose `Jump`
@@ -7850,6 +8427,120 @@ fn f(n: Int, x0: Float) -> Float {
                 float_literal_may_be_shared(ordinary),
                 "{ordinary} is reflexive under `float_equals` and may be shared"
             );
+        }
+    }
+
+    /// **ADR-146.** A sized construction is one allocation carrying its
+    /// operands, followed by the fault check its wrapper earns.
+    ///
+    /// Three facts in one test because they only hold together: the `init`
+    /// variant is what says the operands exist, `constructor()` is what turns
+    /// that into `praxis_vec_filled`, and `Effect::AllocatesAndFaults` on that
+    /// row is what makes the verifier require the `CheckFault`. Break any one
+    /// and a negative count is unobservable.
+    #[test]
+    fn a_sized_vec_lowers_to_one_filled_allocation_followed_by_a_fault_check() {
+        let (funcs, _) = lower_src_to_mir("fn main() {\n  var v = Vec(3, false)\n  out(v)\n}\n");
+        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let insts: Vec<&Inst> = main.blocks.iter().flat_map(|b| &b.insts).collect();
+
+        let at = insts
+            .iter()
+            .position(|i| {
+                matches!(
+                    i,
+                    Inst::Alloc {
+                        alloc: AllocKind::Collection {
+                            init: CollectionInit::Filled { .. },
+                            ..
+                        },
+                        ..
+                    }
+                )
+            })
+            .expect("`Vec(3, false)` is a filled collection allocation");
+        let Inst::Alloc { alloc, .. } = insts[at] else {
+            unreachable!("selected by the pattern above")
+        };
+        assert_eq!(
+            alloc.constructor(),
+            Some(RuntimeSymbol::VecFilled),
+            "a filled `Vec` calls the filled wrapper, not `praxis_vec_new`"
+        );
+        assert!(
+            matches!(insts[at + 1], Inst::CheckFault { .. }),
+            "the allocation that can refuse a size is observed by the next \
+             instruction (ADR-088): got {:?}",
+            insts[at + 1]
+        );
+
+        // Liveness names both operands, which is what roots the fill across the
+        // allocating call. Without this the fill is a dangling reference the
+        // collector never sees.
+        let uses = crate::liveness::uses(insts[at]);
+        let CollectionInit::Filled { count, fill } = (match alloc {
+            AllocKind::Collection { init, .. } => init.clone(),
+            _ => unreachable!(),
+        }) else {
+            unreachable!("matched as Filled above")
+        };
+        assert!(
+            uses.contains(&count) && uses.contains(&fill),
+            "the count and the fill are operands of the allocation: {uses:?}"
+        );
+    }
+
+    /// `Grid(w, h, fill)` is the three-operand variant and names its own
+    /// wrapper. The empty form beside it is unchanged, which is the half that
+    /// says the new field did not move the old path.
+    #[test]
+    fn a_sized_grid_lowers_to_the_grid_wrapper_and_an_empty_one_still_does_not() {
+        let (funcs, _) = lower_src_to_mir(
+            "fn main() {\n  var g = Grid(2, 3, 0)\n  var e = Grid()\n  var v = Vec()\n  out(g)\n  out(e)\n  out(v)\n}\n",
+        );
+        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let mut seen: Vec<(Option<RuntimeSymbol>, usize)> = Vec::new();
+        for inst in main.blocks.iter().flat_map(|b| &b.insts) {
+            if let Inst::Alloc {
+                alloc: alloc @ AllocKind::Collection { init, .. },
+                ..
+            } = inst
+            {
+                seen.push((alloc.constructor(), init.operands().len()));
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![
+                (Some(RuntimeSymbol::GridFilled), 3),
+                (Some(RuntimeSymbol::GridNew), 0),
+                (Some(RuntimeSymbol::VecNew), 0),
+            ],
+            "the arity picks the wrapper, and the nullary forms are untouched"
+        );
+    }
+
+    /// A list literal and a pipeline's collect target are constructions too, and
+    /// ADR-146 gave them a field they must not accidentally use. `[1, 2]`
+    /// allocates an *empty* `Vec` and pushes — a `Filled` there would drop the
+    /// pushes on the floor.
+    #[test]
+    fn a_list_literal_is_still_an_empty_allocation() {
+        let (funcs, _) =
+            lower_src_to_mir("fn main() {\n  var v = [1, 2]\n  out(v.to_set().count())\n}\n");
+        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        for inst in main.blocks.iter().flat_map(|b| &b.insts) {
+            if let Inst::Alloc {
+                alloc: AllocKind::Collection { ctor, init, .. },
+                ..
+            } = inst
+            {
+                assert_eq!(
+                    *init,
+                    CollectionInit::Empty,
+                    "a {ctor:?} built by a literal or a collect target is empty"
+                );
+            }
         }
     }
 }

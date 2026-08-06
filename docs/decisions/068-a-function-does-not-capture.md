@@ -63,6 +63,8 @@ error[N007]: `f` cannot use `x`: a function does not capture the bindings around
 it (pass `x` as a parameter, or use a closure)
 ```
 
+…unless `f` is recursive, in which case it names one — see the amendment below.
+
 ## Decision 2: the boundary is a `fn` body, not a closure body
 
 A closure body opens no boundary of its own, so the question is always about the
@@ -98,6 +100,47 @@ The resolved reference is still recorded, so inference types the body as written
 and adds nothing. That is `N004`'s no-cascade rule and REP-14's: one report per
 use site is the whole answer, and a second report from inference about a type it
 could not derive would name a consequence rather than the mistake.
+
+## Amendment (handover 31 item 6): the closure half of the advice is conditional
+
+Three AoC solves reached ten, seven and five parameters threading state a
+recursive function could not capture, and the message told each of them to use a
+closure. A closure cannot name itself — a `var`'s initializer is resolved in the
+*preceding* environment, so `var f = |n| … f(n - 1) …` is `N001` — so for a
+recursive `fn`, which is exactly where the threading hurts, "or use a closure" is
+advice the compiler itself refuses. Decision 1 is otherwise unchanged: the
+message still names every way out that exists.
+
+Two forms, one code:
+
+```
+error[N007]: `f` cannot use `x`: a function does not capture the bindings around
+it (pass `x` as a parameter, or use a closure)
+
+error[N007]: `f` cannot use `x`: a function does not capture the bindings around
+it (pass `x` as a parameter)
+help: `f` calls itself, so a closure is not the way out: a closure cannot name
+itself (`N001`)
+```
+
+A mutual cycle says "calls itself through `g`", naming the other members the way
+`N006` names the other declarations in a type cycle. It is the same mistake with
+one fewer way out, so it keeps the same code and ADR-051's `N007` row is
+untouched.
+
+Recursion is decided on a call graph the resolver builds as it walks — one edge
+per reference to a `fn` symbol, recorded off the single `resolve_name_ref` funnel
+— and "is `f` recursive" is "does `f` reach itself", which is
+`decl.rs::self_referring`'s search at the value level. The fact is not available
+at the instant `N007` is emitted (the rest of the body is unwalked, and a mutual
+partner may be entirely unwalked), so the *report* is pushed at the use site, in
+source order, and only its wording is settled at the end of resolution by
+rewriting the placeholder in place. Deferring the push instead would move every
+`N007` to the end of `NameResolution::diagnostics`.
+
+This decides nothing about the larger question handover 31 raises — whether
+recursion should have a spelling that does not thread invariant state through
+every call. It makes the diagnostic honest; it does not make the ergonomics good.
 
 ## Consequences
 

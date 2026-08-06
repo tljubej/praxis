@@ -1,0 +1,5 @@
+// A size is an ordinary `Int` computed at run time, so a negative one is not
+// something `praxis check` can refuse. It is a fault.
+var n = 0 - 1
+var v = Vec(n, 0)
+out(v)

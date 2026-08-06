@@ -275,7 +275,13 @@ Wherever the parser grammar takes a name, the name becomes a field or a variant.
 
 - A named `sections(...)` is a record with one field per named section, in
   source order.
-- A `repeated(P)` tail is one more field, holding a `Vec[result(P)]`.
+- A `repeated(P)` tail is one more field, holding a `Vec[result(P)]`. A counted
+  `repeated(P, N)` holds the same `Vec[result(P)]`, but in the position it was
+  written rather than at the end — the record's field order is the source order
+  of the named arguments, so
+  `sections(shapes: repeated(lines(int), 2), regions: lines(int))` is
+  `{ shapes: Vec[Vec[Int]], regions: Vec[Int] }`. The count changes how many
+  sections the field reads, not what it holds.
 - A `block(...)` is one record: a named item contributes its own field, and a
   positional *template* contributes each of its named captures directly —
   flattened into the same record rather than nested inside one.

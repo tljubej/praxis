@@ -1,0 +1,13 @@
+var base = 10
+var mk = |a| |b| a * 100 + b * 10 + base
+out(mk)
+out(mk(1)(2))
+
+var deep = |a| |b| |c| a + b + c + base
+out(deep(1)(2)(3))
+
+var n = 0
+var bump = |a| |b| { n = n + a + b; n }
+out(bump(1)(2))
+out(bump(10)(20))
+out(n)

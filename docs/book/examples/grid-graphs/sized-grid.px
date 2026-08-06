@@ -1,0 +1,30 @@
+// `Grid(w, h, fill)` is the working grid — the one an algorithm allocates for
+// itself rather than reads. Here it is a visited mask over a maze, filled with
+// `false` and marked as the walk goes.
+var maze = read grid(char)
+
+var seen = Grid(maze.width(), maze.height(), false)
+var frontier = Vec()
+frontier.push((0, 0))
+seen[0, 0] = true
+
+var reached = 0
+var at = 0
+while at < frontier.len() {
+    var cur = frontier[at]
+    at = at + 1
+    reached = reached + 1
+    for n in maze.neighbors4(cur) {
+        if maze[n.0, n.1] != '#' && !seen[n.0, n.1] {
+            seen[n.0, n.1] = true
+            frontier.push(n)
+        }
+    }
+}
+
+out(seen.width())
+out(seen.height())
+out(reached)
+out(seen[0, 0])
+out(seen.contains(0, 0))
+out(seen.contains(seen.width(), 0))

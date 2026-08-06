@@ -228,7 +228,9 @@ pub static VEC: TypeDescriptor = TypeDescriptor::builtin::<VecPayload>(
     vec_format,
     Some(vec_equals),
     Some(vec_hash),
-    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
+    // No container order: a mutable collection can never be a `Map` key or a
+    // `Set` member (ADR-057 D4), so nothing ever has to put one in a
+    // deterministic sequence (ADR-138).
     None,
 )
 .with_owned_bytes(vec_owned_bytes);
@@ -358,7 +360,9 @@ pub static DEQUE: TypeDescriptor = TypeDescriptor::builtin::<DequePayload>(
     deque_format,
     Some(deque_equals),
     Some(deque_hash),
-    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
+    // No container order: a mutable collection can never be a `Map` key or a
+    // `Set` member (ADR-057 D4), so nothing ever has to put one in a
+    // deterministic sequence (ADR-138).
     None,
 )
 .with_owned_bytes(deque_owned_bytes);
@@ -373,6 +377,64 @@ unsafe fn deque_owned_bytes(payload: *const u8) -> usize {
     // SAFETY: caller guarantees `payload` points at an initialized DequePayload.
     let p = unsafe { &*(payload as *const DequePayload) };
     p.items.capacity() * std::mem::size_of::<GcRef>()
+}
+
+/// A validated `Vec` length: a non-negative item count the runtime can actually
+/// allocate.
+///
+/// The third of ADR-041 decision 1's validated newtypes, beside [`GridExtent`]
+/// and `BitIndex`, and it exists for the same reason they do: `Vec(n, fill)`
+/// (ADR-146) takes a user-supplied `Int` to a `vec![fill; n]`, so `n = -1` would
+/// cast to `usize::MAX` and ask the host for 147 exabytes — an OOM abort raised
+/// inside an `extern "C"` function, which the program that caused it never gets
+/// to see. `praxis_vec_filled` cannot reach the allocation without one of these,
+/// so the guard is not something a caller can forget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VecExtent {
+    len: usize,
+}
+
+impl VecExtent {
+    /// The longest `Vec` the runtime will construct at a stroke: 2^28 items,
+    /// which is [`GridExtent::MAX_CELLS`] and is 2 GiB of `GcRef` storage before
+    /// a single element object exists.
+    ///
+    /// The same number as a grid's for the same reason ADR-041 decision 2 gave:
+    /// a cell of one and an item of the other are the same eight bytes, and a
+    /// count that merely fits in a `usize` is still an allocation no host can
+    /// serve. `push` is not bounded by this and does not need to be — it grows
+    /// one item at a time, so there is no single multiplication to overflow.
+    pub const MAX_ITEMS: usize = GridExtent::MAX_CELLS;
+
+    /// The extent `len` names, or `None` if it is negative or exceeds
+    /// [`MAX_ITEMS`](Self::MAX_ITEMS). Zero is legal and names the empty `Vec`.
+    #[must_use]
+    pub const fn new(len: i64) -> Option<VecExtent> {
+        if len < 0 {
+            return None;
+        }
+        // Now non-negative, so the cast is exact on a 64-bit host.
+        let len = len as usize;
+        if len > Self::MAX_ITEMS {
+            return None;
+        }
+        Some(VecExtent { len })
+    }
+
+    /// The item count, proven allocatable.
+    #[inline]
+    #[must_use]
+    pub const fn len(self) -> usize {
+        self.len
+    }
+
+    /// Whether the extent names the empty `Vec`. Present because clippy asks
+    /// any type with a `len` for it, and it is the honest answer.
+    #[inline]
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
 }
 
 // ===========================================================================
@@ -560,7 +622,9 @@ pub static GRID: TypeDescriptor = TypeDescriptor::builtin::<GridPayload>(
     grid_format,
     Some(grid_equals),
     Some(grid_hash),
-    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
+    // No container order: a mutable collection can never be a `Map` key or a
+    // `Set` member (ADR-057 D4), so nothing ever has to put one in a
+    // deterministic sequence (ADR-138).
     None,
 )
 .with_owned_bytes(grid_owned_bytes);
@@ -583,6 +647,37 @@ mod tests {
     // (allocation, tracing, collection of nested references). Here we only
     // sanity-check the descriptor is well-formed.
     use super::*;
+
+    /// ADR-041 decision 1's guarantee, for the third newtype: the only route
+    /// from a source `Int` to a `Vec` allocation size refuses the two inputs
+    /// that used to end the process. Zero is not one of them — the empty `Vec`
+    /// is a `Vec`.
+    #[test]
+    fn a_vec_extent_refuses_a_negative_or_absurd_length() {
+        assert!(VecExtent::new(-1).is_none());
+        assert!(VecExtent::new(i64::MIN).is_none());
+        assert!(VecExtent::new(VecExtent::MAX_ITEMS as i64 + 1).is_none());
+        assert!(VecExtent::new(i64::MAX).is_none());
+
+        assert_eq!(VecExtent::new(0).expect("zero is a length").len(), 0);
+        assert!(VecExtent::new(0).expect("zero is a length").is_empty());
+        assert_eq!(VecExtent::new(7).expect("seven is a length").len(), 7);
+        assert_eq!(
+            VecExtent::new(VecExtent::MAX_ITEMS as i64)
+                .expect("the cap itself is allowed")
+                .len(),
+            VecExtent::MAX_ITEMS
+        );
+    }
+
+    /// The two caps are one number, stated once. ADR-041 decision 2 says a
+    /// `Vec` item and a `Grid` cell are the same eight bytes, so a change to one
+    /// bound that left the other behind would be a judgement made twice and
+    /// agreed with once.
+    #[test]
+    fn a_vecs_cap_is_a_grids_cap() {
+        assert_eq!(VecExtent::MAX_ITEMS, GridExtent::MAX_CELLS);
+    }
 
     #[test]
     fn vec_descriptor_reports_capabilities() {

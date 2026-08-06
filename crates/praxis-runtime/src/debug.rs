@@ -90,7 +90,11 @@ use crate::MAX_RECURSION_DEPTH;
 
 /// How a local appears in the crash debugger (§9.4 `locals`). Mirrors
 /// [`praxis_mir::ir::LocalDebugKind`], flattened to a `u8` for the FFI
-/// boundary: `0` = a user-written binding, `1` = a compiler temp. Stored on
+/// boundary: `0` = a binding, `1` = a compiler temp. "Binding" is ADR-125's
+/// sense — a `var`, a parameter, a `for` variable and a name a pattern
+/// introduces — so that the FFI constant and the compiler agree about what the
+/// byte means; the compiler reading it more narrowly than this is what left a
+/// `match` arm's payload sitting among the temps (ADR-139). Stored on
 /// each [`DebugLocalMeta`] so the debugger can separate the two in its display
 /// and name temps with their materializing expression instead of the old
 /// `"<tmp>"` placeholder.

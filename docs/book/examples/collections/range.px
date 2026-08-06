@@ -8,8 +8,9 @@ for i in 1..4 {
 out((1..4).count())
 out((1..4).sum())
 
-// A descending range is empty, not a countdown.
+// A descending range is empty, not a countdown. The countdown is a barrier.
 out((5..0).count())
+out((0..5).reversed())
 
 // A Range has no mutator, so it is usable as a Map key.
 var spans = Map()

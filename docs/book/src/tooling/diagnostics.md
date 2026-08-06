@@ -107,14 +107,16 @@ an old message and a new one come to answer to the same name.
 | `T001` | ``unterminated block comment`` | A `/*` with no matching `*/` before end of file. |
 | `T002` | ``unterminated backtick template`` | A backtick template with no closing backtick. Nested templates count, so a `` ` `` inside a capture body does not close the outer one. |
 | `T003` | ``unexpected character in source`` | A byte the lexer cannot classify. It becomes an `ERROR` token and lexing continues. |
-| `T004` | ``unterminated text literal`` | A `"` string with no closing quote. |
-| `T005` | ``invalid escape in text literal`` | A `\` followed by a character that is not a recognized escape. |
+| `T004` | ``unterminated text literal`` | A `"` string with no closing quote on its line. Also what an interpolated literal earns when a hole never closes — string interpolation added **no** lex code, because the lexer splits a literal into fragments only after proving it closes, so a malformed one reports exactly what it always did (ADR-147). |
+| `T005` | ``invalid escape in text literal`` / ``invalid escape in character literal`` | A `\` followed by a character that is not a recognized escape. One code, two messages: `"…"` and `'…'` share an escape table (ADR-141), which since ADR-147 holds `\{` and `\}` as well. Every fragment of an interpolated literal is validated on the same terms as a whole one; a `\` inside a *hole* is not an escape at all, because a hole holds expression tokens. |
+| `T006` | ``unterminated character literal`` | A `'` with no closing quote before the end of its line. |
+| `T007` | ``a character literal holds exactly one character`` / ``empty character literal: `''` names no character`` | A `'…'` whose body is not exactly one Unicode scalar. Two messages under one code; the too-long form offers a machine-applicable rewrite to a text literal. |
 
 ## Parse — `P0xx`
 
 | Code | Message | What it means |
 |---|---|---|
-| `P001` | ``expected an expression``, ``expected a pattern``, ``expected a type``, ``expected a parser expression``, `` expected `{` to begin function body ``, ``unexpected token, skipping to recover``, … | The general "this token cannot appear here". The message names what the grammar wanted; the parser then recovers and keeps going, so one `P001` does not stop the rest of the file being checked. |
+| `P001` | ``expected an expression``, ``expected a pattern``, ``expected a type``, ``expected a parser expression``, `` expected `{` to begin function body ``, ``an interpolated text literal is not a pattern; a pattern tests a constant``, ``unexpected token, skipping to recover``, … | The general "this token cannot appear here". The message names what the grammar wanted; the parser then recovers and keeps going, so one `P001` does not stop the rest of the file being checked. |
 | `P002` | `` expected `;` or a line break between statements ``, `` expected `,` or a line break between match arms ``, `` expected `,` or a line break between … `` | Two things run together with no separator. Statements are separated by a newline or a `;`; list elements and match arms by a newline or a `,`. |
 
 ## Name — `N0xx`
@@ -128,7 +130,7 @@ an old message and a new one come to answer to the same name.
 | `N004` | `` `{name}` is already declared in this scope `` | One name declared twice in one scope. |
 | `N005` | `` `{name}` cannot be declared inside another function ``, `` `{name}` cannot be declared inside a function `` | A `fn`, `struct` or `enum` declared inside a function body. Only a source file's own statements are a declaration position. The wording differs by whether the nested thing is a function or a type. |
 | `N006` | `` `{name}` refers to itself, and a self-referring type is not supported ``, `` `{name}` refers to itself through `{other}`, and … `` | A `struct` or `enum` declaration in a reference cycle, directly or through other declarations. `Vec[Node]` inside `Node` is the same cycle: what is missing is the language feature, not the values. |
-| `N007` | `` `{fn}` cannot use `{name}`: a function does not capture the bindings around it (pass `{name}` as a parameter, or use a closure) `` | A `fn` body naming a binding declared outside it. A closure captures; a function does not. |
+| `N007` | `` `{fn}` cannot use `{name}`: a function does not capture the bindings around it (pass `{name}` as a parameter, or use a closure) ``, `` … (pass `{name}` as a parameter) `` | A `fn` body naming a binding declared outside it. A closure captures; a function does not. When the `fn` is recursive — directly or mutually — the closure half is dropped and a `help:` line says why: a closure cannot name itself, which is `N001`. |
 | `N008` | `` `{name}` is {kind}, so `{name} { … }` does not build a record `` | A record literal whose head names something that is not a `struct` — an `enum`, a value, a builtin. |
 | `N009` | `` `{name}` is not a keyword; a binding is written with `{replacement}` `` | A keyword the language retired, written where a statement starts. `let` is the whole table. It is not a misspelling of anything, so it gets an exact fix rather than the near-miss search that answers `N001`. `let` is still a legal identifier, which is why the position matters. |
 

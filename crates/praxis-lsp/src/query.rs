@@ -366,6 +366,10 @@ fn rank(kind: SyntaxKind) -> u8 {
         | SyntaxKind::IntLit
         | SyntaxKind::FloatLit
         | SyntaxKind::TextLit
+        | SyntaxKind::CharLit
+        | SyntaxKind::InterpOpen
+        | SyntaxKind::InterpMiddle
+        | SyntaxKind::InterpClose
         | SyntaxKind::BacktickTemplate
         | SyntaxKind::UnterminatedBacktickTemplate => 2,
         _ => 1,

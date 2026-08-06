@@ -1,3 +1,5 @@
 out("a,b".split(","))
 out([1.5, 2.5].sum())
 out([1, 2].to_map())
+out(["a"[0]].join(""))
+out([1, 2].to_text())

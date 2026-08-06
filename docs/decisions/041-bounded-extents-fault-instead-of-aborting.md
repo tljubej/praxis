@@ -5,6 +5,10 @@
 **Milestone:** Repair (stage S7 — RT-07, RT-09)
 **Amends:** ADR-017's fault list (`FaultKind` gains `InvalidSize`); ADR-028's
 `DynamicKey` contract (equality now requires descriptor identity)
+**Amended by:**
+[ADR-146](./146-a-collection-constructors-arity-is-its-shape.md) — `VecExtent`
+joins decision 1's validated newtypes, and decision 2's cap gains
+`VecExtent::MAX_ITEMS`
 
 ## Context
 
@@ -46,10 +50,28 @@ An unbounded resize is therefore not something a caller forgot to guard — it i
 something a caller cannot spell. `GridExtent` additionally carries the product
 it proved (`cells()`), so the multiplication happens once, where it is checked.
 
+**A third constructor, `VecExtent::new(len: i64) -> Option<VecExtent>`
+([ADR-146](./146-a-collection-constructors-arity-is-its-shape.md)).** `Vec(n,
+fill)` takes a user `Int` to a `vec![fill; n]`, which is this ADR's opening
+example with one dimension instead of two, so it takes this ADR's answer: the
+newtype is the only route, and `praxis_vec_filled` cannot reach the allocation
+without one.
+
+**The Context above describes a path that is live again.** `Grid[T](width,
+height)` was unreachable from source for as long as `Grid()` was nullary — the
+codegen passed two `iconst 0`s — and ADR-146's `Grid(w, h, fill)` reopens it
+with a user-supplied extent. Nothing about that is a repeat of RT-07, and the
+reason is this decision: `praxis_grid_filled` calls the same `GridExtent::new`,
+so the negative width and the overflowing product are refused before an
+allocation size exists.
+
 ## Decision 2: the bound is a cap, not merely "fits in a `usize`"
 
 `GridExtent::MAX_CELLS = 2^28` (2 GiB of `GcRef` before a single cell object
 exists). `BitIndex::MAX = 2^32 - 1` (a 512 MiB word vector).
+`VecExtent::MAX_ITEMS = GridExtent::MAX_CELLS` (ADR-146) — the same number for
+the same reason, because a `Vec` cell and a `Grid` cell are the same eight bytes
+and a program that wants more of one plausibly wants more of the other.
 
 A `checked_mul` alone is not enough: `Grid[Int](2^40, 2)` multiplies cleanly and
 then aborts the process anyway. The numbers are a judgement about what a Praxis

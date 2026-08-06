@@ -3,6 +3,9 @@
 **Date:** 2026-08-01
 **Status:** accepted
 **Milestone:** Repair (answers open decision **D16**, S25)
+**Amended by:**
+[ADR-146](./146-a-collection-constructors-arity-is-its-shape.md) — a collection
+constructor's arity is its shape (decision 1 gains one narrow carve-out, below)
 
 ## Context
 
@@ -50,6 +53,22 @@ arguments outside the parser-expression sublanguage.
   text `sort_by(|value| …)`. That answer is established and costs nothing.
 - **§2.2's non-goals are the same instinct**: no user-defined operator
   overloads, no traits, no macros.
+
+**Amended by [ADR-146](./146-a-collection-constructors-arity-is-its-shape.md):
+the collection constructors `Vec` and `Grid` select their shape on their
+argument count.** `Vec()` beside `Vec(n, fill)`, and `Grid()` beside `Grid(w, h,
+fill)`, from a closed two-row table the compiler owns. The rule above is
+otherwise unchanged, and it is unchanged *because neither ground it rests on
+reaches those two names*: the choice is made on the argument count — a syntactic
+fact available before any argument is typed — so the circularity the first
+bullet names does not arise; and a collection constructor has no function value
+for the second bullet's `map(f)` rule to be ambiguous about, because `var f =
+Vec` is `Y022`. This is the same shape of exception as §7.5's parser
+constructors, carved out in the Context above for the same reason: a closed
+hand-written table with per-constructor type synthesis, which no user program
+can declare. Nothing else in the language gains an overload, an optional
+parameter or a default argument, and a third row in that table is a request to
+reopen ADR-146.
 
 ### 2. `assert` keeps one argument, and the name that carries words is `panic`
 

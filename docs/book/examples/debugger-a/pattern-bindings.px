@@ -1,0 +1,18 @@
+var xs = [1, 2, 3]
+var total = 0
+
+for item in xs {
+    total = total + item
+}
+
+var pairs = [(2, 3), (4, 5)]
+for (a, b) in pairs {
+    total = total + a * b
+}
+
+match Some(total) {
+    Some(sum) => { total = sum * 2 }
+    None => {}
+}
+
+out(xs[9])

@@ -10,6 +10,7 @@
     { "include": "#keywords" },
     { "include": "#update-operator" },
     { "include": "#strings" },
+    { "include": "#chars" },
     { "include": "#numbers" },
     { "include": "#declarations" },
     { "include": "#types" },
@@ -56,9 +57,34 @@
       "end": "\"|(?=\\n)",
       "patterns": [
         {
+          "comment": "Exactly `is_valid_escape` in crates/praxis-parser/src/lex.rs, which since ADR-147 asks `praxis_syntax::literal::decode_escape` and adds the backtick. `\\{` and `\\}` are ADR-147's two: a literal brace needs a spelling now that `{` opens a hole. It used to paint `\\x41` and `\\u{41}` as valid escapes; the lexer has never accepted either (T005), so a program that took the colouring at its word did not compile (ADR-141 Decision 1: one language, one escape table).",
           "name": "constant.character.escape.praxis",
-          "match": "\\\\(x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f]+\\}|[nrt0\\\\\"'`])"
+          "match": "\\\\[nrt0\\\\\"`{}]"
         },
+        {
+          "comment": "An interpolation hole (§8.1, ADR-147): a `{` in a text literal opens a full expression, so its contents are painted as code and not as string — which is what the server does too, because there really is an expression subtree there. This rule ends at the first `}`, so a hole holding a block (`\"{if c { 1 } else { 2 }}\"`) is under-coloured by the fallback. That is deliberate: tracking brace depth here would be a second implementation of the lexer's rule, which is the drift `praxis_syntax::interp` exists to prevent.",
+          "name": "meta.embedded.line.praxis",
+          "begin": "\\{",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.interpolation.begin.praxis" }
+          },
+          "end": "\\}",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.interpolation.end.praxis" }
+          },
+          "patterns": [{ "include": "$self" }]
+        },
+        { "name": "invalid.illegal.escape.praxis", "match": "\\\\." }
+      ]
+    },
+
+    "chars": {
+      "comment": "A character literal ends at its line for the text literal's reason (T006), so the rule does too. Its escapes are `is_valid_char_escape`: the text set plus `\\'`. Painted as a string rather than as its own scope so it matches the LSP semantic token, which classifies a CharLit as `string` — a file must not change colour when the server attaches.",
+      "name": "string.quoted.single.praxis",
+      "begin": "'",
+      "end": "'|(?=\\n)",
+      "patterns": [
+        { "name": "constant.character.escape.praxis", "match": "\\\\[nrt0\\\\\"'`{}]" },
         { "name": "invalid.illegal.escape.praxis", "match": "\\\\." }
       ]
     },

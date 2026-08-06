@@ -772,42 +772,81 @@ impl Inferer {
     }
 
     /// Check every constraint whose variable has resolved since it was made,
-    /// and report the ones that fail.
+    /// and report the ones that fail — **to a fixpoint**, because discharging
+    /// one constraint is what makes the next one dischargeable (ADR-137).
     ///
     /// Called where a variable's fate is settled: after a function body (before
     /// its scheme is generalized, so the requirements the scheme *owns* are
     /// still pending and get claimed rather than reported) and once more when
     /// the declaration group closes.
+    ///
+    /// **One batch is one round, and a derived receiver is one round deeper
+    /// than the parameter.** Three of the four capabilities below — `HasMethod`,
+    /// `Iterable`, `HasField` — are discharged by *producing* a type: they unify
+    /// the row's result, the iterator's item, or the field's type with the
+    /// variable the call site is holding. That unification is the only thing
+    /// that can resolve the receiver of the *next* link, and the next link is
+    /// not in the batch [`praxis_types::TypeDb::take_dischargeable`] already
+    /// handed back. Draining one batch therefore resolved `t[i]` and dropped
+    /// `t[i][j]` on the floor: `check` said nothing and MIR met a method call
+    /// with no catalog entry (`internal compiler error: the pipeline recognizer
+    /// declined `[]``). The loop is the fix; nothing about *which* variables are
+    /// pinned changes, only when a constraint is looked at.
+    ///
+    /// **Why this terminates.** A compiler that hangs is worse than one that
+    /// ICEs, so the invariant is written down rather than papered over with an
+    /// iteration cap. Every round strictly removes constraints from the pending
+    /// set — `take_dischargeable` removes what it returns — so the loop can only
+    /// run forever if a round can *mint* a constraint that a later round
+    /// discharges into another one. It cannot: the only channel writes any
+    /// discharge path makes are `Capability::Kind` requirements, from
+    /// [`Self::apply_bounds`]'s [`praxis_stdlib::Bound::Kind`] arm and from
+    /// [`Self::require_collection_invariants`], both through
+    /// [`Self::require_cap`]. A `Kind` constraint falls to the last arm here and
+    /// is answered by [`crate::capability::check`], which emits nothing at all.
+    /// So no round can produce a *resolving* constraint, and the fixpoint is
+    /// reached in at most one round per link of the longest derived-receiver
+    /// chain. `apply_bounds`'s exhaustive `match` is where a future `Bound` arm
+    /// that routed to `require_method` would have to be written, which is why
+    /// the argument is anchored to it.
     fn discharge_constraints(&mut self) {
-        for c in self.db.take_dischargeable() {
-            // `HasMethod` is the one requirement that *produces* something when
-            // it holds — the catalog entry the deferred call site could not
-            // select — so it is discharged by resolving it rather than by
-            // checking it. See [`Inferer::resolve_deferred_method`], including
-            // why a failure is reported there and not left to lowering.
-            if matches!(c.cap, Capability::HasMethod { .. }) {
-                self.resolve_deferred_method(&c);
-                continue;
+        loop {
+            let ready = self.db.take_dischargeable();
+            if ready.is_empty() {
+                return;
             }
-            // `Iterable` is the second: it *produces* the item type, so it is
-            // discharged by unifying that item rather than by asking whether the
-            // receiver iterates at all (REP-04).
-            if let Capability::Iterable { item } = c.cap {
-                self.resolve_deferred_iterable(&c, item);
-                continue;
-            }
-            // `HasField` is the third, and it produces the field's type: the
-            // deferred read handed back a bare variable and nothing else ever
-            // says what it holds (REP-28).
-            if let Capability::HasField { ref name, ty } = c.cap {
-                let name = name.clone();
-                self.resolve_deferred_field(&c, &name, ty);
-                continue;
-            }
-            let ty = c.var_type();
-            if let Err(offender) = crate::capability::check(&mut self.db, self.catalog, ty, &c.cap)
-            {
-                self.report_cap_failure(&c.cap, offender, c.report_at(), c.origin_note());
+            for c in ready {
+                // `HasMethod` is the one requirement that *produces* something
+                // when it holds — the catalog entry the deferred call site could
+                // not select — so it is discharged by resolving it rather than
+                // by checking it. See [`Inferer::resolve_deferred_method`],
+                // including why a failure is reported there and not left to
+                // lowering.
+                if matches!(c.cap, Capability::HasMethod { .. }) {
+                    self.resolve_deferred_method(&c);
+                    continue;
+                }
+                // `Iterable` is the second: it *produces* the item type, so it
+                // is discharged by unifying that item rather than by asking
+                // whether the receiver iterates at all (REP-04).
+                if let Capability::Iterable { item } = c.cap {
+                    self.resolve_deferred_iterable(&c, item);
+                    continue;
+                }
+                // `HasField` is the third, and it produces the field's type: the
+                // deferred read handed back a bare variable and nothing else
+                // ever says what it holds (REP-28).
+                if let Capability::HasField { ref name, ty } = c.cap {
+                    let name = name.clone();
+                    self.resolve_deferred_field(&c, &name, ty);
+                    continue;
+                }
+                let ty = c.var_type();
+                if let Err(offender) =
+                    crate::capability::check(&mut self.db, self.catalog, ty, &c.cap)
+                {
+                    self.report_cap_failure(&c.cap, offender, c.report_at(), c.origin_note());
+                }
             }
         }
     }
@@ -1023,6 +1062,12 @@ impl Inferer {
                 // Collection constructors (§6.1). Each yields an empty
                 // collection of its ctor type; the element type is a
                 // quantified variable pinned by usage (push/insert/etc.).
+                //
+                // This is the **empty** form, and it is the only scheme a
+                // constructor symbol carries. `Vec(n, fill)` and `Grid(w, h,
+                // fill)` are built at the call site by `sized_ctor_type`
+                // instead (ADR-146), so nothing downstream of a symbol's scheme
+                // ever sees two of them.
                 "Vec" | "Deque" | "Set" | "Counter" | "MinHeap" | "MaxHeap" | "Grid" => {
                     let v = db.fresh_var();
                     let ctor = crate::decl::collection_ctor_for(&name).expect("ctor name");
@@ -1306,15 +1351,23 @@ impl Inferer {
         }
         // Whatever the per-function sweeps left: a requirement made at the top
         // level, and any a later declaration resolved. What is still pending
-        // after this belongs to a variable nothing pinned — and that is now safe
-        // to drop, which it was not before ADR-093. A `HasMethod` requirement is
-        // only ever *made* when the catalog holds that name at that arity
-        // (`infer_catalog_call` reports the ones it does not, on the spot), so a
-        // pending one means the program never said which of those receivers it
-        // meant — §5.2's uncalled `fn total(values) { values.sum() }` — and
-        // monomorphization drops the uncalled polymorphic original rather than
-        // lowering it. Before, the pending set silently swallowed `x.nope()` and
-        // lowering met it at `run`.
+        // after this fixpoint belongs to a variable *no call site ever pinned* —
+        // and that is safe to drop, which it was not before ADR-093. A
+        // `HasMethod` requirement is only ever *made* when the catalog holds
+        // that name at that arity (`infer_catalog_call` reports the ones it does
+        // not, on the spot), so a pending one means the program never said which
+        // of those receivers it meant — §5.2's uncalled
+        // `fn total(values) { values.sum() }`. Before, the pending set silently
+        // swallowed `x.nope()` and lowering met it at `run`.
+        //
+        // What such a body is *not* is dropped by monomorphization, which is
+        // what this comment used to claim. ADR-057 decision 5 pins the receiver
+        // to this level, so the function generalizes to a monotype,
+        // `Scheme::is_polymorphic` is false and `mono` keeps it — the body
+        // reaches MIR with a method call carrying no catalog entry. It is
+        // unreachable by construction (any call unifies the argument and pins
+        // the receiver, so a body that got here is one nothing calls), and MIR
+        // is where that is answered; see ADR-137 decision 3.
         self.discharge_constraints();
         self.db.exit_level(group);
     }
@@ -1602,6 +1655,7 @@ impl Inferer {
     fn infer_expr_uncached(&mut self, expr: &Expr) -> Type {
         match expr {
             Expr::Literal(l) => self.infer_literal(l),
+            Expr::Interp(i) => self.infer_interp(i),
             Expr::Path(p) => self.infer_path(p),
             Expr::Bin(b) => self.infer_bin(b),
             Expr::Range(r) => self.infer_range(r),
@@ -2239,6 +2293,7 @@ impl Inferer {
                     let lit_ty = match tok.kind() {
                         SyntaxKind::IntLit => self.db.int(),
                         SyntaxKind::TextLit => self.db.text(),
+                        SyntaxKind::CharLit => self.db.char(),
                         SyntaxKind::KW_TRUE | SyntaxKind::KW_FALSE => self.db.bool(),
                         _ => self.db.fresh_var(),
                     };
@@ -2611,6 +2666,12 @@ impl Inferer {
             }
             SyntaxKind::FloatLit => self.db.float(),
             SyntaxKind::TextLit => self.db.text(),
+            // The lexer decided the one-character rule and reported `''`/`'ab'`
+            // there (ADR-141), so nothing is left to check here: unlike an
+            // `IntLit`, whose range question the token's text still holds, a
+            // `CharLit` that reached inference names exactly one scalar or has
+            // already been reported.
+            SyntaxKind::CharLit => self.db.char(),
             SyntaxKind::KW_TRUE | SyntaxKind::KW_FALSE => self.db.bool(),
             // A backtick template reaching *here* is one written in value
             // position: the `read`/`parse` path lowers its template through
@@ -2631,6 +2692,31 @@ impl Inferer {
             }
             _ => self.db.fresh_var(),
         }
+    }
+
+    /// An interpolated literal is `Text`, and **a hole imposes no requirement on
+    /// what it holds** (§8.1, ADR-147 decision 2).
+    ///
+    /// Each hole is inferred for its own sake — so `"{x + 1}"` still types `x` as
+    /// `Int` and `"{undefined}"` still reports — and then nothing is unified
+    /// against it. That absence is the decision: rendering goes through the value
+    /// descriptor's `format` callback at run time, which every type has, so there
+    /// is no type a hole can be handed that it cannot render. A `Vec[Int]` in a
+    /// hole is `[1, 2, 3]` because that is what `out` writes.
+    ///
+    /// This is emphatically not a coercion added to `+`. ADR-085 decision 2
+    /// refused that and still does: `"n = " + n` is `Y001`. The difference is
+    /// that a hole is a rendering site *the program wrote*, where `+` renders
+    /// values nobody asked to render — see ADR-147 decision 3, and
+    /// `text_plus_an_int_is_still_y001_beside_a_hole_that_renders_it`, which
+    /// pins both halves from one source file.
+    fn infer_interp(&mut self, i: &praxis_ast::InterpExpr) -> Type {
+        for part in i.parts() {
+            if let praxis_ast::InterpPart::Hole(hole) = part {
+                self.infer_expr(&hole);
+            }
+        }
+        self.db.text()
     }
 
     fn infer_path(&mut self, p: &PathExpr) -> Type {
@@ -3405,7 +3491,17 @@ impl Inferer {
                         // very same expression is correct for every other
                         // instantiation.
                         let site = self.file_span(c.syntax().text_range());
-                        let callee_ty = self.db.instantiate_at(&scheme, site);
+                        // A collection constructor's argument *count* selects
+                        // its shape (ADR-146): `Vec(n, fill)` and `Grid(w, h,
+                        // fill)` are built here rather than instantiated,
+                        // because the seeded scheme is the empty form and stays
+                        // that way. Every other callee, and every nullary
+                        // construction, takes the instantiation below.
+                        let callee_ty = match self.sized_ctor_type(resolved.symbol, arg_types.len())
+                        {
+                            Some(ty) => ty,
+                            None => self.db.instantiate_at(&scheme, site),
+                        };
                         // The callee name is a `PATH_EXPR` that nothing
                         // evaluates, and this instantiation is its type. It is
                         // deliberately *not* also written to `ref_types`: hover
@@ -3788,6 +3884,55 @@ impl Inferer {
         self.names
             .get(id)
             .is_some_and(|s| s.kind == SymbolKind::Builtin && s.name == name)
+    }
+
+    /// The callee type of a **sized** collection construction — `Vec(n, fill)`
+    /// or `Grid(w, h, fill)` — or `None` when this call is not one, which is
+    /// every call with no arguments and every callee not in
+    /// [`praxis_stdlib::SIZED_CTORS`].
+    ///
+    /// This is ADR-146's carve-out to ADR-089 decision 1, and it is the whole of
+    /// it. The shape is selected on `argc` alone — a syntactic fact, known
+    /// before a single argument has been typed — so none of the circularity
+    /// ADR-089 gives as its first ground arises: nothing here inspects an
+    /// argument type to choose.
+    ///
+    /// The type is built **at the call site's level**, not seeded as a second
+    /// scheme. `seed_builtin_schemes` still stores exactly one scheme per
+    /// symbol — the empty form — so the generalized `forall T. () -> Vec[T]`
+    /// every `Vec()` instantiates is untouched, and a symbol still carries one
+    /// scheme as §5.1's model requires.
+    ///
+    /// The one fresh variable is shared between the fill parameter and the
+    /// result, which is what makes `Vec(3, false)` a `Vec[Bool]` with no
+    /// annotation: unification pins it from the fill and the result carries it
+    /// out.
+    ///
+    /// A `SymbolKind::Builtin` resolution is required, so a `var Vec = …`
+    /// binding in scope makes `Vec(3, 0)` an ordinary call of that binding
+    /// (HIR-03's shadowing rule) rather than a construction.
+    fn sized_ctor_type(&mut self, symbol: SymbolId, argc: usize) -> Option<Type> {
+        if argc == 0 {
+            return None;
+        }
+        let name = self
+            .names
+            .get(symbol)
+            .filter(|s| s.kind == SymbolKind::Builtin)
+            .map(|s| s.name.clone())?;
+        let row = praxis_stdlib::sized_ctor(&name)?;
+        let ctor = crate::decl::collection_ctor_for(&name)?;
+        let elem = self.db.fresh_var();
+        let int = self.db.int();
+        // The extents first, then the one fill: the row states how many of the
+        // former there are, so the arity is not written down a second time here.
+        // A call with the *wrong* count still builds this type and still reaches
+        // `unify`, which is what makes `Vec(3)` report `Y024` against 2 rather
+        // than against the empty form's 0.
+        let mut params = vec![int; row.extents];
+        params.push(elem);
+        let result = self.db.unary_collection(ctor, elem);
+        Some(self.db.func(params, result))
     }
 
     // --- type resolution ---------------------------------------------------

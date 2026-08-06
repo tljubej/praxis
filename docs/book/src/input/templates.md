@@ -290,9 +290,11 @@ This used to type-check and print `n = {int}` — a program that asked to parse 
 integer printing the word `{int}`. The message names the fix, because the fix is
 always the same word.
 
-A backtick is never a way to build text. `"..."` is the text literal, and it has
-no interpolation: `"n = {n}"` prints the braces. §8.1 specifies interpolation and
-it is not implemented.
+A backtick is never a way to build text. `"..."` is the text literal, and the
+braces in it are §8.1's [interpolation](../language/text.md#interpolation--renders-a-value)
+— `"n = {n}"` renders `n`. The two mechanisms share nothing but the character:
+a template's `{name:parser}` names a capture in the input-parser DSL, while a
+literal's `{expr}` is an ordinary Praxis expression rendered into text.
 
 ## Escapes
 

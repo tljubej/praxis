@@ -1,0 +1,7 @@
+var step = 2
+
+fn countdown(n: Int) -> Int {
+    if n <= 0 { 0 } else { 1 + countdown(n - step) }
+}
+
+out(countdown(10))

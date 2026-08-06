@@ -7,6 +7,8 @@
 orderable)
 **Amends:** ADR-026's "scalars and ordering ops stay [native]" sentence;
 ADR-037's Float comparison note; §5.4 `SupportsOrd`
+**Amended by:** [ADR-138](./138-a-container-orders-by-the-value-and-not-by-its-printing.md)
+— `compare` is now populated on every type a key can be, and the containers use it
 
 ## Context
 
@@ -103,14 +105,20 @@ the heap degrades to a bag rather than corrupting itself.
 
 - `TypeDescriptor::compare` is populated on five descriptors and stays `None` on
   the other sixteen. `is_orderable()` is now a real question with a real answer.
+  (Superseded by [ADR-138](./138-a-container-orders-by-the-value-and-not-by-its-printing.md):
+  it is now populated on every type a `Map` key can be — eleven descriptors — and
+  `is_orderable()` reports the *container* order, which is deliberately a wider
+  set than `capability::supports_ord`.)
 - Ordering a `Text` is a runtime call (`praxis_value_cmp`), not an inline
   compare. Ordering an `Int`, `Char` or `Float` is still a scalar instruction —
   `Char` now through `ScalarKind::Char` (`praxis_char_load`), which is what
   removes the misaligned eight-byte read.
 - `Map`/`Set`/`Counter` formatting can now sort by key rather than by rendered
-  string. It deliberately does **not** yet: RT-16 shipped the determinism and
-  `maps::write_sorted` is one function, but changing what `{10: a, 9: b}` prints
-  is a user-visible output change that belongs with the sort/`Ordered` work, not
-  with a bug-fix stage. The debt is recorded here rather than in a comment.
+  string. It deliberately did **not** yet, because changing what `{10: a, 9: b}`
+  prints is a user-visible output change that belonged with the sort work rather
+  than with a bug-fix stage. **The debt is discharged by
+  [ADR-138](./138-a-container-orders-by-the-value-and-not-by-its-printing.md)**,
+  after an Advent-of-Code solve walked a `Set[Int]` and got a silently wrong
+  answer out of the lexicographic order.
 - `numeric_scalars_are_orderable` (capability.rs) keeps its meaning; the two
   tuple assertions beside it invert, and say why in place.

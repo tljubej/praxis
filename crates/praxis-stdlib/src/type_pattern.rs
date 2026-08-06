@@ -352,6 +352,30 @@ impl CollectionCtor {
         }
     }
 
+    /// The constructor a source name denotes, or `None` for any other name.
+    ///
+    /// The inverse of [`name`](Self::name), and the one authority for the
+    /// mapping: HIR resolves a constructor call through it and MIR picks the
+    /// allocation's ctor through it, so the two cannot come to disagree about
+    /// which names construct a collection. `Seq` is deliberately absent — it is
+    /// compiler-internal and no source name reaches it (§6.3).
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<CollectionCtor> {
+        Some(match name {
+            "Vec" => CollectionCtor::Vec,
+            "Deque" => CollectionCtor::Deque,
+            "Map" => CollectionCtor::Map,
+            "Set" => CollectionCtor::Set,
+            "Counter" => CollectionCtor::Counter,
+            "MinHeap" => CollectionCtor::MinHeap,
+            "MaxHeap" => CollectionCtor::MaxHeap,
+            "BitSet" => CollectionCtor::BitSet,
+            "Grid" => CollectionCtor::Grid,
+            "Range" => CollectionCtor::Range,
+            _ => return None,
+        })
+    }
+
     /// The user-facing name of this collection constructor, e.g. `Vec`. `Seq`
     /// is internal and has no user-facing name; `name()` returns `"Seq"` only
     /// for diagnostics/debugging.

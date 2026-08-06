@@ -131,7 +131,10 @@ Print the selected frame's slots, in two labeled sections.
     <tmp#{id}: {Type}> @ "{expression}" = {value}
 ```
 
-`locals:` is the bindings you wrote. `temps:` is the compiler's intermediates,
+`locals:` is the bindings you wrote — a `var`, a parameter, a `for` variable and
+a name a pattern introduces, all of which are bindings in the same sense
+([ADR-125](../../../decisions/125-a-binding-is-a-binding-and-the-compiler-decides-its-storage.md)).
+`temps:` is the compiler's intermediates,
 each tagged with its per-frame id, its static type, and — this is the useful
 part — the source expression it materialized. A value is rendered through the
 same descriptor `out` uses. A slot nothing was written into is `<uninit>`.
@@ -170,11 +173,9 @@ Frame 1's temps read as a small trace of the call that faulted: `values[i]` was
 20, `values[i + 1]` was 20, and the call whose result they were arguments to
 never returned a value.
 
-Two known rough edges in this output. The first: a `for` loop's binding reaches
-the frame without a name, so it prints as `? = 1` and `p` will not bind it.
-
-The second is shadowing. Two bindings that shadow each other print as two lines
-with the same name, in declaration order, and nothing distinguishes them:
+One known rough edge in this output: shadowing. Two bindings that shadow each
+other print as two lines with the same name, in declaration order, and nothing
+distinguishes them:
 
 ```praxis
 var count = 1

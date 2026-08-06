@@ -111,16 +111,52 @@ pub(crate) fn nested_declaration(at: FileSpan, name: &str) -> Diagnostic {
 /// closures, and only the second says "capture". So the message names the
 /// distinction and the two ways out, because both are ordinary: pass it as a
 /// parameter, or write a closure.
-pub(crate) fn function_reads_outer_binding(at: FileSpan, name: &str, func: &str) -> Diagnostic {
-    Diagnostic::new(
+///
+/// The closure half is conditional (handover 31 item 6). A closure cannot name
+/// itself — a `var`'s initializer is resolved in the *preceding* environment, so
+/// `var f = |n| … f(n - 1) …` is `N001` — which means that for a **recursive**
+/// `fn`, exactly the case where threading state through the parameter list
+/// hurts, "or use a closure" is advice the compiler itself refuses. So
+/// `recursive_through` drops that clause and attaches a `help:` line saying why,
+/// naming the other members of the call cycle the way `N006` names the other
+/// members of a type cycle. `None` — the common, non-recursive case — is the
+/// message unchanged, byte for byte.
+pub(crate) fn function_reads_outer_binding(
+    at: FileSpan,
+    name: &str,
+    func: &str,
+    recursive_through: Option<&[String]>,
+) -> Diagnostic {
+    let Some(through) = recursive_through else {
+        return Diagnostic::new(
+            Severity::Error,
+            DiagCode::FunctionReadsOuterBinding,
+            format!(
+                "`{func}` cannot use `{name}`: a function does not capture the bindings around it \
+                 (pass `{name}` as a parameter, or use a closure)"
+            ),
+            at,
+        );
+    };
+    let how = if through.is_empty() {
+        format!("`{func}` calls itself")
+    } else {
+        format!("`{func}` calls itself through {}", list_names(through))
+    };
+    Diagnostic::build(
         Severity::Error,
         DiagCode::FunctionReadsOuterBinding,
         format!(
             "`{func}` cannot use `{name}`: a function does not capture the bindings around it \
-             (pass `{name}` as a parameter, or use a closure)"
+             (pass `{name}` as a parameter)"
         ),
         at,
     )
+    .help(
+        at,
+        format!("{how}, so a closure is not the way out: a closure cannot name itself (`N001`)"),
+    )
+    .finish()
 }
 
 /// `N006` — a `struct`/`enum` declaration that refers to itself (REP-14,

@@ -7,3 +7,6 @@ out(ran)
 
 for i in 0..0 { ran = ran + 1 }
 out(ran)
+
+// Counting down is a reversed range, which is a Vec and not a Range.
+for i in (0..3).reversed() { out(i) }

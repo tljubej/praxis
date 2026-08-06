@@ -24,11 +24,14 @@
 //! - `T002` — unterminated backtick template.
 //! - `T003` — unexpected character in source.
 //! - `T004` — unterminated text literal.
-//! - `T005` — invalid escape in text literal.
+//! - `T005` — invalid escape in a text or character literal.
+//! - `T006` — unterminated character literal.
+//! - `T007` — a character literal that is not exactly one character.
 
 use praxis_source::{DiagCode, Diagnostic, FileId, Severity, Span};
 use praxis_syntax::{SyntaxKind, Token};
 
+use praxis_syntax::interp::{FragmentEnd, TextEnd};
 use praxis_syntax::template::TemplateEnd;
 
 /// The result of lexing one source file: the token stream and any diagnostics.
@@ -70,6 +73,21 @@ struct Lexer<'a> {
     /// break. Consumed (and cleared) by the next meaningful token, which is
     /// where the parser reads it from (F8/D8, ADR-049).
     pending_newline: bool,
+    /// The open interpolation holes, innermost last, each holding the brace
+    /// depth **within** it (§8.1, ADR-147).
+    ///
+    /// This is the lexer's only mode stack, and the one question it answers is
+    /// what a `}` is: at depth 0 of the innermost hole it closes the hole and
+    /// literal text resumes, and anywhere else it is the ordinary `R_BRACE` that
+    /// closes a block, a record literal or a set. `"{if x { 1 } else { 2 }}"`
+    /// needs exactly that and nothing more.
+    ///
+    /// A frame is pushed only by a fragment token, and a fragment token is only
+    /// emitted for a literal [`praxis_syntax::interp::text_end`] has already
+    /// proved closes on its line. That is what keeps the stack from being a new
+    /// failure mode: there is no newline, no EOF and no malformed literal that
+    /// can leave a frame on it (ADR-147 decision 5).
+    holes: Vec<u32>,
 }
 
 impl<'a> Lexer<'a> {
@@ -81,6 +99,7 @@ impl<'a> Lexer<'a> {
             tokens: Vec::new(),
             diagnostics: Vec::new(),
             pending_newline: false,
+            holes: Vec::new(),
         }
     }
 
@@ -95,7 +114,8 @@ impl<'a> Lexer<'a> {
                 CharClass::IdentStart => self.eat_ident(start, len),
                 CharClass::Digit => self.eat_number(start),
                 CharClass::Quote => self.eat_text(start),
-                CharClass::Punct => self.eat_punct(start),
+                CharClass::SingleQuote => self.eat_char(start),
+                CharClass::Punct => self.eat_punct_tracking_holes(start),
                 CharClass::Backtick => self.eat_template(start),
                 CharClass::Unknown => self.diagnose_unknown(start, len),
             }
@@ -126,6 +146,11 @@ impl<'a> Lexer<'a> {
                 b'_' | b'a'..=b'z' | b'A'..=b'Z' => CharClass::IdentStart,
                 b'0'..=b'9' => CharClass::Digit,
                 b'"' => CharClass::Quote,
+                // A `'` opens a character literal and nothing else — it is not
+                // a lifetime sigil, not a digit separator and not part of an
+                // identifier (ADR-141). Before it was claimed, every one of
+                // these was `T003` plus a parse cascade.
+                b'\'' => CharClass::SingleQuote,
                 b'`' => CharClass::Backtick,
                 // Any leading punctuation byte of an operator we recognize. The
                 // precise multi-char split happens in `eat_punct`; the class just
@@ -352,51 +377,289 @@ impl<'a> Lexer<'a> {
         matches!(self.bytes().get(i), Some(d) if d.is_ascii_digit())
     }
 
+    /// A `"…"` literal, which since §8.1's interpolation landed (ADR-147) is one
+    /// of three token shapes rather than always one.
+    ///
+    /// The extent is decided **before** anything is emitted, by
+    /// [`praxis_syntax::interp::text_end`], and that ordering is the whole of
+    /// ADR-147 decision 5. The lexer enters interpolation mode — the
+    /// [`holes`](Self::holes) brace-depth stack that decides whether a later `}`
+    /// closes a hole or a block — only for a literal already proved to close on
+    /// its line with balanced holes. So no newline and no EOF can reach that
+    /// stack, and a literal that does *not* close is one `TextLit` plus `T004`,
+    /// byte for byte what it was before interpolation existed.
+    ///
+    /// Escapes are still validated here (a stray `\q` is `T005`), and still only
+    /// over the *literal text*: the escape rule does not apply inside a hole,
+    /// which holds ordinary expression tokens.
     fn eat_text(&mut self, start: usize) {
-        // Double-quoted text literal with `\` escapes (§4). The body is scanned
-        // here only to find the closing quote; its semantic value is decoded
-        // later. We do validate escapes so a stray trailing backslash is caught.
-        self.pos += 1; // opening `"`
+        match praxis_syntax::interp::text_end(self.src, start) {
+            TextEnd::Closed {
+                end,
+                first_hole: None,
+            } => {
+                self.validate_escapes(start + 1, end - 1);
+                self.pos = end;
+                self.push(SyntaxKind::TextLit, start);
+            }
+            TextEnd::Closed {
+                end: _,
+                first_hole: Some(brace),
+            } => {
+                // The opening fragment: `"` … `{`. The hole's own tokens are
+                // lexed by the main loop, which is what gives every name in it a
+                // real range in the lossless tree (ADR-147 decision 1).
+                self.validate_escapes(start + 1, brace);
+                self.pos = brace + 1;
+                self.push(SyntaxKind::InterpOpen, start);
+                self.holes.push(0);
+            }
+            TextEnd::Unterminated { stopped } => {
+                self.pos = stopped;
+                self.diagnostic(
+                    Span::new(start as u32, self.pos as u32),
+                    DiagCode::UnterminatedTextLiteral,
+                    "unterminated text literal",
+                );
+                self.push(SyntaxKind::TextLit, start);
+            }
+        }
+    }
+
+    /// Resume literal text after the `}` at `start` closed a hole, emitting the
+    /// [`InterpMiddle`] or [`InterpClose`] fragment that follows it.
+    ///
+    /// [`InterpMiddle`]: SyntaxKind::InterpMiddle
+    /// [`InterpClose`]: SyntaxKind::InterpClose
+    ///
+    /// This reads the *same* rule the pre-scan in [`eat_text`] read, through the
+    /// same function — [`praxis_syntax::interp::fragment_end`] — entered in the
+    /// middle. Two scanners with a copy each of one rule is the mistake
+    /// [`praxis_syntax::template`] exists to have stopped repeating.
+    ///
+    /// [`eat_text`]: Self::eat_text
+    ///
+    /// The `None` arm cannot be reached: this runs only while the `holes` stack
+    /// is non-empty, and the stack is only pushed for a literal the pre-scan
+    /// proved closes. It is written as the unterminated path anyway rather than
+    /// as a panic, because the cost of being wrong about "cannot happen" in a
+    /// lexer is a crash on a user's file.
+    fn eat_interp_resume(&mut self, start: usize) {
+        match praxis_syntax::interp::fragment_end(self.src, start) {
+            Some(FragmentEnd::Hole(brace)) => {
+                self.validate_escapes(start + 1, brace);
+                self.pos = brace + 1;
+                self.push(SyntaxKind::InterpMiddle, start);
+                self.holes.push(0);
+            }
+            Some(FragmentEnd::Close(end)) => {
+                self.validate_escapes(start + 1, end - 1);
+                self.pos = end;
+                self.push(SyntaxKind::InterpClose, start);
+            }
+            None => {
+                self.pos = self.src.len();
+                self.diagnostic(
+                    Span::new(start as u32, self.pos as u32),
+                    DiagCode::UnterminatedTextLiteral,
+                    "unterminated text literal",
+                );
+                self.push(SyntaxKind::TextLit, start);
+            }
+        }
+    }
+
+    /// Report `T005` for every unrecognized escape in the literal text spanning
+    /// `from..to`.
+    ///
+    /// Split out of [`eat_text`](Self::eat_text) when the scan of *where* a
+    /// literal ends moved to `praxis_syntax::interp`: validation is the half
+    /// that stayed, because it is about the characters and not about the extent,
+    /// and every fragment of an interpolated literal needs it on the same terms
+    /// as a whole one.
+    fn validate_escapes(&mut self, from: usize, to: usize) {
+        let mut pos = from;
+        while pos < to {
+            if self.bytes()[pos] != b'\\' {
+                pos += 1;
+                continue;
+            }
+            if pos + 1 >= to {
+                break;
+            }
+            // The escaped **scalar**, not the escaped byte. `"\¡"` is an invalid
+            // escape either way, but a span ending inside `¡` is a span the
+            // diagnostic renderer slices the source at — which is the panic
+            // `eat_char` records having been bitten by and `lex_never_panics`
+            // exists to catch.
+            let (esc, esc_len) = self.scalar_at(pos + 1).expect("pos is a char boundary");
+            let end = pos + 1 + esc_len;
+            if !esc.is_ascii() || !is_valid_escape(esc as u8) {
+                self.diagnostic(
+                    Span::new(pos as u32, end as u32),
+                    DiagCode::InvalidEscape,
+                    "invalid escape in text literal",
+                );
+            }
+            pos = end;
+        }
+    }
+
+    /// Punctuation, with the one extra question an open interpolation hole asks
+    /// (§8.1, ADR-147): is this `}` the end of the hole, or an ordinary brace
+    /// inside it?
+    ///
+    /// The brace depth is kept per hole rather than globally, because holes
+    /// nest: `"{f("{y}")}"` opens a second hole while the first is still open,
+    /// and the inner `}` must close the inner one. Only the innermost frame is
+    /// ever consulted, which is what makes that fall out rather than be arranged.
+    ///
+    /// Every other punctuation byte routes straight through, so a file with no
+    /// interpolation in it takes exactly the path it took before.
+    fn eat_punct_tracking_holes(&mut self, start: usize) {
+        let byte = self.bytes()[start];
+        if let Some(depth) = self.holes.last_mut() {
+            match byte {
+                b'}' if *depth == 0 => {
+                    self.holes.pop();
+                    self.eat_interp_resume(start);
+                    return;
+                }
+                b'}' => *depth -= 1,
+                b'{' => *depth += 1,
+                _ => {}
+            }
+        }
+        self.eat_punct(start);
+    }
+
+    /// A `'…'` character literal (§4.3, ADR-141): [`eat_text`]'s shape, with the
+    /// one-character rule decided here rather than downstream.
+    ///
+    /// [`eat_text`]: Self::eat_text
+    ///
+    /// Three differences from a text literal, each of which is a defect if it is
+    /// dropped:
+    ///
+    /// - the body advances by whole **scalars**, so `'é'` is one character and
+    ///   not the two bytes it is written in;
+    /// - `\'` is an escape here and `\"` is there — the shared table
+    ///   ([`praxis_syntax::literal::decode_escape`]) supplies the rest, so the
+    ///   two spellings of `\n` cannot drift;
+    /// - a *closed* literal is decoded immediately and its length checked. That
+    ///   is the whole of gate 3: `'ab'` is `T007` where `"ab"[0]` was a
+    ///   well-typed program that quietly meant `a`, and `''` is `T007` where
+    ///   `""[0]` was an index fault at run time.
+    ///
+    /// The token is pushed on every path, including the unterminated one, so the
+    /// tokens still tile the source (ADR-003) and the parser still sees a
+    /// literal to build a node from rather than a hole.
+    fn eat_char(&mut self, start: usize) {
+        self.pos += 1; // opening `'`
         while self.pos < self.src.len() {
             match self.bytes()[self.pos] {
-                b'"' => {
+                b'\'' => {
                     self.pos += 1; // closing quote
-                    self.push(SyntaxKind::TextLit, start);
+                    self.finish_char(start);
                     return;
                 }
                 b'\\' => {
-                    // Need at least one more byte for the escape.
-                    if self.pos + 1 >= self.src.len() {
+                    // Need at least one more scalar for the escape.
+                    let esc_at = self.pos + 1;
+                    if esc_at >= self.src.len() {
                         break;
                     }
-                    let esc = self.bytes()[self.pos + 1];
-                    if !is_valid_escape(esc) {
-                        let bad_at = self.pos;
-                        self.pos += 2;
+                    // The escaped **scalar**, not the escaped byte. `'\¡'` is
+                    // an invalid escape either way, but stepping two bytes past
+                    // it leaves the cursor inside `¡` — and every later read,
+                    // including the slice `finish_char` decodes, then panics on
+                    // a char boundary. Found by `lex_never_panics`, which is
+                    // what that fuzz target is for.
+                    let (esc, esc_len) = self.scalar_at(esc_at).expect("pos is a char boundary");
+                    let bad_at = self.pos;
+                    self.pos = esc_at + esc_len;
+                    if !is_valid_char_escape(esc) {
                         self.diagnostic(
                             Span::new(bad_at as u32, self.pos as u32),
                             DiagCode::InvalidEscape,
-                            "invalid escape in text literal",
+                            "invalid escape in character literal",
                         );
-                    } else {
-                        self.pos += 2;
                     }
                 }
                 b'\n' | b'\r' => {
-                    // A raw newline inside a text literal is not allowed; report
-                    // it and let the unterminated path close the token at EOF.
+                    // A character literal ends at its line, for the text
+                    // literal's reason: a missing `'` should report where it was
+                    // wanted, not swallow the rest of the file.
                     break;
                 }
-                _ => self.pos += 1,
+                // A whole scalar, never a byte. `pos += 1` here would put the
+                // cursor inside `é`, and the length check below would then count
+                // two characters in a literal that names one.
+                _ => {
+                    let (_, len) = self.scalar_at(self.pos).expect("pos is a char boundary");
+                    self.pos += len;
+                }
             }
         }
-        // Reached EOF (or a newline) without a closing quote.
         self.diagnostic(
             Span::new(start as u32, self.pos as u32),
-            DiagCode::UnterminatedTextLiteral,
-            "unterminated text literal",
+            DiagCode::UnterminatedCharLiteral,
+            "unterminated character literal",
         );
-        self.push(SyntaxKind::TextLit, start);
+        self.push(SyntaxKind::CharLit, start);
+    }
+
+    /// Push a closed `'…'` token, reporting a body that does not name exactly
+    /// one character.
+    ///
+    /// The decode is `praxis-syntax`'s, not a second count written here: the
+    /// lexer's question ("how many characters is this") and the lowerer's
+    /// ("which character is this") have to be the same walk, or `'\n'` is one
+    /// character to one of them and two to the other.
+    fn finish_char(&mut self, start: usize) {
+        use praxis_syntax::literal::CharLitError;
+
+        let raw = &self.src[start..self.pos];
+        match praxis_syntax::literal::decode_char_literal(raw).err() {
+            None => {}
+            Some(CharLitError::Empty) => self.diagnostic(
+                Span::new(start as u32, self.pos as u32),
+                DiagCode::CharLiteralIsNotOneCharacter,
+                "empty character literal: `''` names no character",
+            ),
+            Some(CharLitError::TooLong) => {
+                // The fix is mechanical and it is the one the author probably
+                // meant, so it rides as a replacement rather than a `help:`
+                // (ADR-132): `'ab'` was almost certainly a `"ab"`.
+                let span = Span::new(start as u32, self.pos as u32);
+                let body = &raw[1..raw.len() - 1];
+                let diag = Diagnostic::new(
+                    Severity::Error,
+                    DiagCode::CharLiteralIsNotOneCharacter,
+                    "a character literal holds exactly one character",
+                    praxis_source::FileSpan::new(self.file, span),
+                )
+                .with_suggestion(
+                    praxis_source::FileSpan::new(self.file, span),
+                    format!("\"{body}\""),
+                    "write it as a text literal",
+                );
+                self.diagnostics.push(diag);
+            }
+            // Not reachable from here — this function is only called on a
+            // quote the scan itself matched, and the one body that decodes as
+            // unterminated (a lone trailing `\`) is exactly the one whose
+            // escape ate that quote, so the scan ran to EOF instead. The arm
+            // exists because `CharLitError` is the decoder's answer and not
+            // this call site's, and a decoder that grows a fourth reason should
+            // report it rather than fall into `Empty`'s message.
+            Some(CharLitError::Unterminated) => self.diagnostic(
+                Span::new(start as u32, self.pos as u32),
+                DiagCode::UnterminatedCharLiteral,
+                "unterminated character literal",
+            ),
+        }
+        self.push(SyntaxKind::CharLit, start);
     }
 
     fn eat_punct(&mut self, start: usize) {
@@ -588,8 +851,32 @@ fn single_punct(b: u8) -> Option<SyntaxKind> {
 }
 
 /// Whether `esc` is a recognized escape character inside a text literal.
+///
+/// Asked of [`praxis_syntax::literal::decode_escape`] rather than listed again,
+/// because a lexer that *accepts* an escape the decoder does not *decode* is two
+/// answers to one question — and this function had already drifted from that
+/// table by one row before ADR-147 added two more to it (`\{` and `\}`, so a
+/// literal brace has a spelling now that `{` opens a hole).
+///
+/// The one row that is still only here is `` \` ``, which the decoder leaves
+/// alone: the lexer accepts it so a backtick inside a text literal does not earn
+/// `T005`, and preserving it verbatim is what `unquote_text` does with any
+/// escape it does not recognize. That carve-out predates this change and is
+/// deliberately not widened by it.
 fn is_valid_escape(esc: u8) -> bool {
-    matches!(esc, b'"' | b'\\' | b'n' | b'r' | b't' | b'0' | b'`')
+    esc.is_ascii() && (praxis_syntax::literal::decode_escape(esc as char).is_some() || esc == b'`')
+}
+
+/// Whether `esc` is a recognized escape character inside a character literal.
+///
+/// The text literal's set **plus** `\'`, and defined in terms of it rather than
+/// listed again: a language with two escape tables has two answers to what `\n`
+/// is, which is the drift `praxis_syntax::literal` exists to prevent (ADR-141).
+/// There is no `\x` or `\u{…}` here because there is none there.
+/// Takes a `char` and not a byte, because a character literal's body is scanned
+/// by scalar: `'\¡'` must be refused *and* stepped over whole.
+fn is_valid_char_escape(esc: char) -> bool {
+    esc.is_ascii() && (is_valid_escape(esc as u8) || esc == '\'')
 }
 
 #[derive(Clone, Copy)]
@@ -600,6 +887,7 @@ enum CharClass {
     IdentStart,
     Digit,
     Quote,
+    SingleQuote,
     Punct,
     Backtick,
     Unknown,
@@ -651,7 +939,11 @@ mod tests {
     /// including bytes the lexer cannot classify.
     #[test]
     fn tokens_tile_the_source_even_across_unknown_characters() {
-        let src = "var x = 1 @ \u{2192} 2";
+        // A character literal and a multi-byte scalar inside one are in here for
+        // `eat_char`'s sake: it is the second scan in the lexer that advances by
+        // whole scalars, and a `pos += 1` in it would leave the next token
+        // starting mid-scalar.
+        let src = "var x = 1 @ \u{2192} 2 'é' ''";
         let out = lex(FileId::SYNTHETIC, src);
         let mut at = 0usize;
         for token in &out.tokens {
@@ -1102,6 +1394,306 @@ error[T003]: unexpected character in source
         let (_, diags) = lex_text("\"bad \\q escape\"");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].kind(), DiagCode::InvalidEscape);
+    }
+
+    // --- string interpolation (§8.1, ADR-147) -------------------------------
+
+    /// Lex `text` and return `(kind, source text)` for every meaningful token,
+    /// which is how the fragment shape is asserted: the fragments carry their
+    /// own delimiters, so the token texts are the whole story.
+    fn lex_pieces(text: &str) -> Vec<(SyntaxKind, String)> {
+        let map = SourceMap::new();
+        let id = map.intern("test.px", text);
+        lex(id, text)
+            .tokens
+            .into_iter()
+            .filter(|t| !t.kind.is_trivia() && t.kind != SyntaxKind::EOF)
+            .map(|t| {
+                (
+                    t.kind,
+                    text[t.span.start().to_u32() as usize..t.span.end().to_u32() as usize]
+                        .to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// A literal with no brace in it takes exactly the path it took before
+    /// ADR-147: one token, one kind, no fragments.
+    #[test]
+    fn a_literal_with_no_hole_is_still_one_text_lit() {
+        assert_eq!(
+            lex_pieces(r#""hello""#),
+            vec![(SyntaxKind::TextLit, r#""hello""#.to_string())]
+        );
+        // A `}` in text closes nothing, so this is not a fragment either.
+        assert_eq!(
+            lex_pieces(r#""a } b""#),
+            vec![(SyntaxKind::TextLit, r#""a } b""#.to_string())]
+        );
+    }
+
+    /// **The gate for ADR-147 decision 1.** A name inside a hole is an ordinary
+    /// `Ident` token *at its own range*, not a substring of one opaque literal.
+    ///
+    /// That is the whole representation decision. `praxis-hir`'s capture
+    /// analysis finds free variables by looking token ranges up in the
+    /// resolver's map, so an implementation that kept the literal whole and
+    /// re-lexed holes later would leave `|_| "{outer}"` capturing nothing — a
+    /// silent wrong answer, not a compile error. This asserts the range, not
+    /// merely the kind, because the kind alone would pass for a token the lexer
+    /// synthesized at the wrong offset.
+    #[test]
+    fn a_name_in_a_hole_is_a_token_at_its_own_range() {
+        let src = r#""Part 2: {part2}""#;
+        let map = SourceMap::new();
+        let id = map.intern("test.px", src);
+        let ident = lex(id, src)
+            .tokens
+            .into_iter()
+            .find(|t| t.kind == SyntaxKind::Ident)
+            .expect("the hole's name is an Ident token");
+        let start = ident.span.start().to_u32() as usize;
+        let end = ident.span.end().to_u32() as usize;
+        assert_eq!(&src[start..end], "part2");
+        assert_eq!(start, src.find("part2").unwrap());
+    }
+
+    /// The three fragment kinds, each carrying one delimiter at each end.
+    #[test]
+    fn an_interpolated_literal_is_fragments_around_ordinary_tokens() {
+        assert_eq!(
+            lex_pieces(r#""a{x}b{y}c""#),
+            vec![
+                (SyntaxKind::InterpOpen, r#""a{"#.to_string()),
+                (SyntaxKind::Ident, "x".to_string()),
+                (SyntaxKind::InterpMiddle, "}b{".to_string()),
+                (SyntaxKind::Ident, "y".to_string()),
+                (SyntaxKind::InterpClose, r#"}c""#.to_string()),
+            ]
+        );
+    }
+
+    /// A hole holds a full expression, so its tokens are the tokens that
+    /// expression has anywhere else — operators, calls, subscripts and all.
+    #[test]
+    fn a_hole_holds_ordinary_expression_tokens() {
+        let kinds: Vec<SyntaxKind> = lex_pieces(r#""{a + b}""#)
+            .into_iter()
+            .map(|p| p.0)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                SyntaxKind::InterpOpen,
+                SyntaxKind::Ident,
+                SyntaxKind::PLUS,
+                SyntaxKind::Ident,
+                SyntaxKind::InterpClose,
+            ]
+        );
+    }
+
+    /// A `{` inside a hole is an ordinary brace and the `}` matching it does not
+    /// close the hole — which is what the per-hole depth counter is for. Without
+    /// it `"{if c { 1 } else { 2 }}"` would end at the first `}` and the rest of
+    /// the line would be lexed as source nobody wrote.
+    #[test]
+    fn a_brace_inside_a_hole_nests_rather_than_closing_it() {
+        let pieces = lex_pieces(r#""{if c { 1 } else { 2 }}""#);
+        assert_eq!(pieces.first().unwrap().0, SyntaxKind::InterpOpen);
+        assert_eq!(
+            pieces.last().unwrap(),
+            &(SyntaxKind::InterpClose, r#"}""#.to_string())
+        );
+        assert_eq!(
+            pieces
+                .iter()
+                .filter(|p| p.0 == SyntaxKind::L_BRACE || p.0 == SyntaxKind::R_BRACE)
+                .count(),
+            4,
+            "the two blocks' braces are ordinary braces"
+        );
+    }
+
+    /// A `"` inside a hole opens a literal of its own, and a hole inside *that*
+    /// pushes a second frame. Only the innermost frame is ever consulted, so
+    /// nesting falls out of the stack rather than being arranged.
+    #[test]
+    fn a_literal_nested_in_a_hole_is_its_own_run() {
+        let kinds: Vec<SyntaxKind> = lex_pieces(r#""{m["k"]}""#)
+            .into_iter()
+            .map(|p| p.0)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                SyntaxKind::InterpOpen,
+                SyntaxKind::Ident,
+                SyntaxKind::L_BRACK,
+                SyntaxKind::TextLit,
+                SyntaxKind::R_BRACK,
+                SyntaxKind::InterpClose,
+            ]
+        );
+        // …and the nested literal may itself interpolate.
+        let nested = lex_pieces(r#""{f("{y}")}""#);
+        assert_eq!(
+            nested
+                .iter()
+                .filter(|p| p.0 == SyntaxKind::InterpOpen)
+                .count(),
+            2
+        );
+    }
+
+    /// **The gate for ADR-147 decision 5.** An unterminated interpolated literal
+    /// is the *fallback*: one `TextLit` and one `T004`, exactly what an
+    /// unterminated plain literal has always been. No fragment is emitted, so
+    /// nothing is left on the lexer's hole stack and the rest of the file lexes
+    /// as it did.
+    ///
+    /// This is the half a later edit would quietly lose — an implementation that
+    /// emitted the opening fragment first and discovered the problem afterwards
+    /// passes every other test here and produces a cascade on this one.
+    #[test]
+    fn an_unterminated_interpolated_literal_is_one_text_lit_and_t004() {
+        for src in ["\"a {b\ncd\n", "\"{a\n", "\"{a // b}\"\n"] {
+            let (kinds, diags) = lex_text(src);
+            assert_eq!(diags.len(), 1, "{src:?}");
+            assert_eq!(
+                diags[0].kind(),
+                DiagCode::UnterminatedTextLiteral,
+                "{src:?}"
+            );
+            assert!(kinds.contains(&SyntaxKind::TextLit), "{src:?}");
+            assert!(
+                !kinds.contains(&SyntaxKind::InterpOpen),
+                "no fragment is emitted for a literal that never closes: {src:?}"
+            );
+        }
+    }
+
+    /// `\{` is a literal brace, so it opens no hole and earns no `T005`
+    /// (ADR-147 decision 4). `\}` is accepted for symmetry.
+    #[test]
+    fn an_escaped_brace_is_literal_text() {
+        let (kinds, diags) = lex_text(r#""\{ and \}""#);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(kinds.first(), Some(&SyntaxKind::TextLit));
+    }
+
+    /// Escapes are still validated in every fragment, not just in a whole
+    /// literal — and only in the *literal text*, since a hole holds expression
+    /// tokens where a backslash is not an escape at all.
+    #[test]
+    fn an_escape_is_validated_in_every_fragment() {
+        let (_, diags) = lex_text(r#""\q{x}\z""#);
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        assert!(diags.iter().all(|d| d.kind() == DiagCode::InvalidEscape));
+    }
+
+    // --- the character literal (ADR-141) ---
+
+    /// The token exists and is one token. Before ADR-141 a `'` was `T003` and
+    /// `'a'` was three of them plus a parse cascade.
+    #[test]
+    fn a_char_literal_is_one_token() {
+        let map = SourceMap::new();
+        let src = "var c = '#'";
+        let id = map.intern("test.px", src);
+        let out = lex(id, src);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let lit = out
+            .tokens
+            .iter()
+            .find(|t| t.kind == SyntaxKind::CharLit)
+            .expect("a CharLit token");
+        assert_eq!(
+            &src[lit.span.start().to_usize()..lit.span.end().to_usize()],
+            "'#'"
+        );
+    }
+
+    /// The escape set is the text literal's plus `\'`, and **no more**: a `\u`
+    /// is `T005` here exactly as it is inside `"…"`. Pinning both halves is what
+    /// keeps the two tables from drifting into two languages.
+    #[test]
+    fn the_char_escapes_are_the_text_escapes_plus_the_quote() {
+        for src in [
+            r"var c = '\n'",
+            r"var c = '\r'",
+            r"var c = '\t'",
+            r"var c = '\0'",
+            r"var c = '\\'",
+            r"var c = '\''",
+            r#"var c = '\"'"#,
+        ] {
+            let (kinds, diags) = lex_text(src);
+            assert!(diags.is_empty(), "{src}: {diags:?}");
+            assert!(kinds.contains(&SyntaxKind::CharLit), "{src}");
+        }
+        for src in [r"var c = '\q'", r"var c = '\u{41}'", r"var c = '\x41'"] {
+            let (_, diags) = lex_text(src);
+            assert!(
+                diags.iter().any(|d| d.kind() == DiagCode::InvalidEscape),
+                "{src}: {diags:?}"
+            );
+        }
+    }
+
+    /// **Gate 3.** `"##"[0]` is a well-typed program that quietly means `#`;
+    /// `'##'` is a lexical error carrying the rewrite the author meant.
+    #[test]
+    fn a_two_character_char_literal_is_a_lex_error() {
+        let (kinds, diags) = lex_text("var c = 'ab'");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].kind(), DiagCode::CharLiteralIsNotOneCharacter);
+        assert_eq!(
+            diags[0].message(),
+            "a character literal holds exactly one character"
+        );
+        let fix = diags[0].suggestions().first().expect("a fix-it");
+        assert_eq!(fix.replacement.as_deref(), Some("\"ab\""));
+        // Lossless even when refused (ADR-003).
+        assert!(kinds.contains(&SyntaxKind::CharLit));
+    }
+
+    /// **Gate 3, the other half.** `""[0]` was an index fault at run time.
+    #[test]
+    fn an_empty_char_literal_is_a_lex_error() {
+        let (kinds, diags) = lex_text("var c = ''");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].kind(), DiagCode::CharLiteralIsNotOneCharacter);
+        assert_eq!(
+            diags[0].message(),
+            "empty character literal: `''` names no character"
+        );
+        assert!(kinds.contains(&SyntaxKind::CharLit));
+    }
+
+    #[test]
+    fn an_unterminated_char_literal_ends_at_its_line() {
+        let (kinds, diags) = lex_text("var c = 'a\nvar d = 1\n");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].kind(), DiagCode::UnterminatedCharLiteral);
+        assert!(kinds.contains(&SyntaxKind::CharLit));
+        // The rest of the file is still lexed: the `var d` line is intact.
+        assert_eq!(
+            kinds.iter().filter(|k| **k == SyntaxKind::KW_VAR).count(),
+            2
+        );
+    }
+
+    /// A scan that advanced by byte would count `'é'` as two characters and
+    /// report a literal that names one.
+    #[test]
+    fn a_multibyte_scalar_is_one_character() {
+        for src in ["var c = 'é'", "var c = '😀'", "var c = '字'"] {
+            let (kinds, diags) = lex_text(src);
+            assert!(diags.is_empty(), "{src}: {diags:?}");
+            assert!(kinds.contains(&SyntaxKind::CharLit), "{src}");
+        }
     }
 
     #[test]

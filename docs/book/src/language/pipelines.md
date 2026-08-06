@@ -230,7 +230,25 @@ result.
 | `sorted()` | — | `Vec[T]` — `T` must be orderable |
 | `sorted_by_key(f)` | `(T) -> K` | `Vec[T]` — `K` must be orderable |
 | `unique()` | — | `Vec[T]`, in first-occurrence order |
+| `reversed()` | — | `Vec[T]`, back to front — no requirement on `T` |
 | `frequencies()` | — | `Counter[T]` |
+| `join(sep)` | `Text` | `Text` — the items must be `Text` |
+
+`reversed` is the barrier with an empty requirement column, and that is its own
+claim rather than an omission: `sorted` reads the element's `compare` callback
+and `unique` reads its `hash` and `equals`, while reversal reads nothing at all
+— so a `Vec` of closures reverses where it cannot be sorted
+([ADR-145](../../../decisions/145-a-reversal-needs-the-whole-sequence-so-it-is-a-barrier.md)).
+It is also what a countdown is written with: `for i in (0..n).reversed()`, since
+`n..0` is an empty range rather than a descending one.
+
+`join` is the one barrier that answers a scalar rather than a sequence. Its
+separator is a required argument, because the catalog has no optional ones —
+`join("")` is the no-separator spelling and says so where it is written — and it
+renders nothing: `[1, 2].join(",")` is `expected Text, found Int`, and the
+spelling is `[1, 2].map(|n| n.to_text()).join(",")`. A sequence of `Char` uses
+`to_text()` instead, which is a `Vec[Char]` row rather than a pipeline one
+([ADR-144](../../../decisions/144-a-sequence-of-text-joins-and-a-sequence-of-char-becomes-one.md)).
 
 `chunks` and `windows` are not implemented. Both answer `Vec[Vec[T]]`, and what
 descriptor the outer vector carries is an open question.
@@ -534,13 +552,18 @@ carry one.
 ## Barriers
 
 ```praxis
-// The four combinators that need the whole sequence before they answer.
+// The six combinators that need the whole sequence before they answer.
 fn main() {
     var v = [3, 1, 4, 1, 5, 9, 2, 6, 5]
 
     out(v.sorted())
     out(v.unique())
+    out(v.reversed())
     out(v.frequencies())
+    out(["a", "b", "c"].join(", "))
+
+    // A countdown is a reversed range: `5..0` is empty, not descending.
+    out((0..5).reversed())
 
     // A chain ends at a barrier and begins again from its result.
     out(v.filter(|x| x > 2).sorted().take(3))
@@ -562,7 +585,10 @@ fn main() {
 ```text
 [1, 1, 2, 3, 4, 5, 5, 6, 9]
 [3, 1, 4, 5, 9, 2, 6]
+[5, 6, 2, 9, 5, 1, 4, 1, 3]
 {1: 2, 2: 1, 3: 1, 4: 1, 5: 2, 6: 1, 9: 1}
+a, b, c
+[4, 3, 2, 1, 0]
 [3, 4, 5]
 [(the, 3), (cat, 2), (dog, 1)]
 [a, bb, ccc]
@@ -595,8 +621,10 @@ praxis: 1 error(s)
 ```
 
 The closure extracts an orderable key from an item that is not one, so the
-ordering requirement moves off the element and onto the key. `0 - p.1` is how
-you sort descending; there is no reverse flag.
+ordering requirement moves off the element and onto the key. There is still no
+reverse flag on `sorted`, but there are now two ways to write a descending sort:
+`0 - p.1` as the key, or `sorted().reversed()`. The first is one pass and the
+second is two, which is the whole difference.
 
 `unique()` and `to_set()` answer different questions: `unique` keeps
 first-occurrence order in a `Vec`, and a `Set` has no order to preserve.

@@ -98,11 +98,19 @@ fn synth_inner(
             repeated_tail,
             ..
         } => {
-            // Anonymous record: one field per named section, plus a final
-            // `Vec[result(P)]` field for the `repeated` tail (if any).
+            // Anonymous record: one field per named argument, in source order,
+            // plus a final `Vec[result(P)]` field for the unbounded `repeated`
+            // tail (if any). A counted group is a `Vec[result(P)]` too — the
+            // same field the tail contributes, in the position it was written,
+            // which is what lets a fixed field follow one.
             let mut rec_fields: Vec<(String, Type)> = Vec::with_capacity(fields.len());
-            for (name, p) in fields {
-                rec_fields.push((name.clone(), synth(p, db, out)?));
+            for item in fields {
+                let elem = synth(item.parser(), db, out)?;
+                let ty = match item {
+                    crate::ast::SectionItem::One { .. } => elem,
+                    crate::ast::SectionItem::Counted { .. } => db.vec(elem),
+                };
+                rec_fields.push((item.name().to_string(), ty));
             }
             if let Some((name, tail)) = repeated_tail {
                 let elem = synth(tail, db, out)?;
@@ -547,5 +555,41 @@ mod tests {
             other => panic!("expected Vec[Record], got {other:?}"),
         }
         assert_eq!(db.render(t), "Vec[{ x: Int, y: Int }]");
+    }
+
+    /// **A counted group is a `Vec` field where it was written.** The unbounded
+    /// tail contributes the same `Vec[result(P)]`, but only ever at the end;
+    /// the record's field order is the source order of the named arguments, so
+    /// a fixed field after a counted group lands after it in the record too.
+    /// This is the whole type story of the counted form — `read`'s inference
+    /// takes whatever type comes back and needed no arm of its own.
+    #[test]
+    fn a_counted_group_is_a_vec_field_in_the_position_it_was_written() {
+        use crate::ast::{RepeatCount, SectionItem};
+
+        let mut db = TypeDb::new();
+        let ast = ParserAst::SectionsNamed {
+            fields: vec![
+                SectionItem::Counted {
+                    name: "shapes".to_string(),
+                    count: RepeatCount::new(6).expect("six sections"),
+                    parser: ParserAst::Lines {
+                        child: Box::new(atom(AtomicKind::Int)),
+                        span: Span::at(0),
+                    },
+                },
+                SectionItem::One {
+                    name: "regions".to_string(),
+                    parser: ParserAst::Lines {
+                        child: Box::new(atom(AtomicKind::Int)),
+                        span: Span::at(0),
+                    },
+                },
+            ],
+            repeated_tail: None,
+            span: Span::at(0),
+        };
+        let t = synthesize(&ast, &mut db).expect("a valid AST synthesizes");
+        assert_eq!(db.render(t), "{ shapes: Vec[Vec[Int]], regions: Vec[Int] }");
     }
 }

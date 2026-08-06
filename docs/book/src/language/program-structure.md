@@ -109,8 +109,10 @@ error[N007]: `over_limit` cannot use `limit`: a function does not capture the bi
 praxis: 1 error(s)
 ```
 
-The message names both fixes. A closure written at the top level does capture;
-see [functions and closures](functions.md).
+The message names both fixes, when both exist — a *recursive* function is told to
+pass a parameter and nothing else, because a closure cannot name itself. A
+closure written at the top level does capture; see
+[functions and closures](functions.md).
 
 A `fn` cannot be declared inside another `fn` either — that is `N005`, and a
 `struct` or `enum` in a function body gets the same code. Declarations live at

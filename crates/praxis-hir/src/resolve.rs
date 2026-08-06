@@ -21,7 +21,7 @@
 //! but the closed `KNOWN_TYPE_NAMES` table is replaced with scope-based lookup
 //! so WS3 can register user types the same way.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use praxis_ast::{
     ArgList, AssignStmt, AstNode, BinExpr, BlockExpr, BreakExpr, CallExpr, ContinueExpr,
@@ -119,14 +119,46 @@ pub fn resolve(file: FileId, root: &SourceFile) -> NameResolution {
     for stmt in root.stmts() {
         r.resolve_top_stmt(root_scope, &stmt);
     }
+    // Pass 2 answered *whether* each `N007` is a mistake; the call graph it just
+    // finished building answers *what to advise*, so the wording is settled here.
+    r.finish_captures();
     r.out
+}
+
+/// The `fn` whose body resolution is currently inside (REP-22).
+#[derive(Clone, Debug)]
+struct FnBoundary {
+    /// The body scope. A read of a binding declared outside it is `N007`.
+    scope: ScopeId,
+    /// The function's name, as the message spells it. Empty for a `fn` with no
+    /// name token, which the parser has already reported.
+    name: String,
+    /// The function's own symbol, when pass 1 registered one. `None` for a `fn`
+    /// with no name token and for one `N004` left unregistered — both keep the
+    /// unconditional wording, because a second confident claim about a
+    /// declaration that is already wrong would be noise.
+    symbol: Option<SymbolId>,
+}
+
+/// An `N007` whose *advice* is not decidable yet.
+///
+/// The report itself is pushed at the use site, in source order; only the
+/// wording waits. See [`Resolver::reject_outer_binding`] for why.
+struct PendingCapture {
+    /// Where in `out.diagnostics` the placeholder sits. Nothing ever removes
+    /// from that vector, so the index stays valid to the end of resolution.
+    index: usize,
+    at: FileSpan,
+    name: String,
+    func: String,
+    symbol: Option<SymbolId>,
 }
 
 struct Resolver {
     file: FileId,
     out: NameResolution,
-    /// The innermost enclosing **`fn` body** scope and the function's name, when
-    /// resolution is inside one (REP-22).
+    /// The innermost enclosing **`fn` body**, when resolution is inside one
+    /// (REP-22).
     ///
     /// A `fn` body's scope is a child of the scope around it, so a lookup walks
     /// straight out of the function and finds whatever the file declared — which
@@ -138,7 +170,18 @@ struct Resolver {
     /// so the question is always about the nearest enclosing `fn`. A closure at
     /// the top level therefore has none, which is why `var offset = 10` and
     /// `v.map(|x| x + offset)` is fine.
-    fn_boundary: Option<(ScopeId, String)>,
+    fn_boundary: Option<FnBoundary>,
+    /// Which `fn` names which, filled as pass 2 walks bodies. The whole of it is
+    /// recorded by `record_call_edge`, off the single funnel every name
+    /// reference goes through, so a call, a forward reference and a `fn` used as
+    /// a value are all edges without any of their sites knowing about it.
+    ///
+    /// Its only reader is `finish_captures`, asking whether a function reaches
+    /// itself — which is `N006`'s question about type declarations, one level
+    /// down (see `decl::self_referring`).
+    calls: HashMap<SymbolId, HashSet<SymbolId>>,
+    /// The `N007`s whose wording waits on `calls` being complete.
+    pending_captures: Vec<PendingCapture>,
 }
 
 impl Resolver {
@@ -147,6 +190,8 @@ impl Resolver {
             file,
             out: NameResolution::default(),
             fn_boundary: None,
+            calls: HashMap::new(),
+            pending_captures: Vec::new(),
         }
     }
 
@@ -558,15 +603,16 @@ impl Resolver {
             // nested `fn` is already `N005` above, but it is still *resolved*,
             // and leaving the boundary cleared afterwards would silence every
             // reference in the rest of the outer body.
-            let outer = self.fn_boundary.replace((
-                body_scope,
-                item.name()
+            let outer = self.fn_boundary.replace(FnBoundary {
+                scope: body_scope,
+                name: item
+                    .name()
                     .map_or_else(String::new, |t| t.text().to_string()),
-            ));
+                symbol: fn_symbol,
+            });
             self.resolve_block_inner(body_scope, &body);
             self.fn_boundary = outer;
         }
-        let _ = fn_symbol;
     }
 
     fn bind_params(&mut self, scope: ScopeId, pl: &ParamList) {
@@ -649,6 +695,18 @@ impl Resolver {
     fn resolve_expr(&mut self, scope: ScopeId, expr: &Expr) {
         match expr {
             Expr::Literal(_) => {}
+            // A hole holds a full expression, and its names are resolved on
+            // exactly the same terms as any other (§8.1, ADR-147). This one arm
+            // is what gives `"{x}"` an `N001` when `x` does not exist, a
+            // go-to-definition when it does, and — through the `refs` map this
+            // pass fills — a closure capture when the hole is in a closure body.
+            Expr::Interp(i) => {
+                for part in i.parts() {
+                    if let praxis_ast::InterpPart::Hole(hole) = part {
+                        self.resolve_expr(scope, &hole);
+                    }
+                }
+            }
             Expr::Path(p) => {
                 if let Some(name_tok) = p.name() {
                     self.resolve_name_ref(scope, &name_tok);
@@ -1030,6 +1088,7 @@ impl Resolver {
             Some((symbol, bound_in)) => {
                 self.reject_outer_binding(&name, symbol, bound_in, range);
                 self.record_ref(scope, symbol, range);
+                self.record_call_edge(symbol);
                 Some(symbol)
             }
             None => {
@@ -1052,6 +1111,15 @@ impl Resolver {
     /// The reference is still recorded afterwards, deliberately: inference then
     /// types the body as written and reports nothing further, which is `N004`'s
     /// no-cascade rule. One report per use site is the whole answer.
+    ///
+    /// *Whether* to report is decided here; *what to advise* is not, because the
+    /// advice depends on whether the function is recursive and the rest of its
+    /// body — and, under mutual recursion, another function entirely — has not
+    /// been walked yet. So the unconditional wording is pushed as a placeholder,
+    /// in source order, and `finish_captures` rewrites it in place once the call
+    /// graph is complete. Deferring the *push* instead would move every `N007`
+    /// to the end of `NameResolution::diagnostics`, which is a source-order
+    /// contract other code reads.
     fn reject_outer_binding(
         &mut self,
         name: &str,
@@ -1059,10 +1127,10 @@ impl Resolver {
         bound_in: ScopeId,
         range: TextRange,
     ) {
-        let Some((boundary, func)) = self.fn_boundary.clone() else {
+        let Some(boundary) = self.fn_boundary.clone() else {
             return;
         };
-        if self.out.scopes.is_within(bound_in, boundary) {
+        if self.out.scopes.is_within(bound_in, boundary.scope) {
             return;
         }
         let is_binding = self
@@ -1074,9 +1142,64 @@ impl Resolver {
             return;
         }
         let at = self.file_span(range_to_span(range));
+        let index = self.out.diagnostics.len();
         self.out
             .diagnostics
-            .push(function_reads_outer_binding(at, name, &func));
+            .push(function_reads_outer_binding(at, name, &boundary.name, None));
+        self.pending_captures.push(PendingCapture {
+            index,
+            at,
+            name: name.to_string(),
+            func: boundary.name,
+            symbol: boundary.symbol,
+        });
+    }
+
+    /// Record that the `fn` being walked names `target`, when `target` is itself
+    /// a `fn`.
+    ///
+    /// Over-approximate on purpose: it fires on *any* reference to a function
+    /// symbol, not only on a callee position, because a `fn` name in value
+    /// position is a closure over it (ADR-061) and `fn f() { [1].map(f) }` is as
+    /// recursive as a direct call. The cost is that passing `f` to a helper that
+    /// never invokes it also counts, which changes nothing but which of two true
+    /// sentences `N007` prints.
+    fn record_call_edge(&mut self, target: SymbolId) {
+        let Some(from) = self.fn_boundary.as_ref().and_then(|b| b.symbol) else {
+            return;
+        };
+        let is_fn = self
+            .out
+            .names
+            .get(target)
+            .is_some_and(|s| s.kind == SymbolKind::Fn);
+        if is_fn {
+            self.calls.entry(from).or_default().insert(target);
+        }
+    }
+
+    /// Settle the wording of every deferred `N007` now that the call graph is
+    /// complete: a recursive `fn` is not told to use a closure, because `N001`
+    /// forbids a closure naming itself.
+    fn finish_captures(&mut self) {
+        for pending in std::mem::take(&mut self.pending_captures) {
+            let Some(symbol) = pending.symbol else {
+                continue;
+            };
+            let Some(through) = recursion_through(symbol, &self.calls) else {
+                continue;
+            };
+            let through: Vec<String> = through
+                .into_iter()
+                .filter_map(|s| self.out.names.get(s).map(|sym| sym.name.clone()))
+                .collect();
+            self.out.diagnostics[pending.index] = function_reads_outer_binding(
+                pending.at,
+                &pending.name,
+                &pending.func,
+                Some(&through),
+            );
+        }
     }
 
     // --- type annotations --------------------------------------------------
@@ -1133,4 +1256,52 @@ fn range_to_span(range: TextRange) -> Span {
         BytePos::from(u32::from(range.start())),
         BytePos::from(u32::from(range.end())),
     )
+}
+
+/// Whether `start` reaches **itself** over `calls`, and if so which of its own
+/// direct callees the cycle runs through.
+///
+/// `Some(vec![])` is direct self-recursion — `fact` calling `fact` — and
+/// `Some(["pong"])` is a mutual pair, which is exactly the `through` a message
+/// wants to name. `None` is a function that is not recursive at all, including
+/// one that merely *calls* a recursive function: one edge out is not a cycle.
+///
+/// This is `decl.rs::self_referring`'s search at the value level — a plain
+/// depth-first reachability per node, which is the clearest way to say "reaches
+/// itself", on a graph with one node per `fn` in the file. The result is sorted
+/// because `calls`' values are a `HashSet`: without it a three-way cycle would
+/// word itself differently run to run, and a book example's expected output
+/// would flap.
+fn recursion_through(
+    start: SymbolId,
+    calls: &HashMap<SymbolId, HashSet<SymbolId>>,
+) -> Option<Vec<SymbolId>> {
+    let reaches = |target: SymbolId| {
+        let mut seen: HashSet<SymbolId> = HashSet::new();
+        let mut stack: Vec<SymbolId> = vec![target];
+        while let Some(node) = stack.pop() {
+            for next in calls.get(&node).into_iter().flatten() {
+                if *next == start {
+                    return true;
+                }
+                if seen.insert(*next) {
+                    stack.push(*next);
+                }
+            }
+        }
+        false
+    };
+    let direct = calls.get(&start)?;
+    if !direct.contains(&start) && !direct.iter().any(|s| reaches(*s)) {
+        return None;
+    }
+    let mut through: Vec<SymbolId> = direct
+        .iter()
+        .copied()
+        .filter(|s| *s != start && reaches(*s))
+        .collect();
+    // Declaration order, which for top-level `fn`s is the order the file wrote
+    // them.
+    through.sort_unstable_by_key(|s| s.0);
+    Some(through)
 }

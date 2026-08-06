@@ -39,7 +39,9 @@ pub struct ParseFail {
     /// "expected a digit, found end-of-input").
     pub input_span: (usize, usize),
     /// What the parser expected, as a short human description (`"int"`,
-    /// `"literal ':'"`, `"section header"`, …).
+    /// `"literal ':'"`, `"section header"`, ``"6 sections for `shapes`"``, …).
+    /// A `String` rather than a `&'static str` precisely so a description can
+    /// name the thing that came up short.
     pub expected: String,
     /// The source span of the failing parser expression (byte offsets into the
     /// program source). `None` when no span was threaded (an internal-only

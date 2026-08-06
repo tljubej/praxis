@@ -3,6 +3,7 @@
 **Date:** 2026-07-30
 **Status:** Accepted — implemented
 **Milestone:** Repair (REP-15)
+**Amended by:** [ADR-138](138-a-container-orders-by-the-value-and-not-by-its-printing.md) — the sort key is the value's own order, not its rendered form
 
 ## Context
 
@@ -99,8 +100,8 @@ and `for x in c` never disagree:
 | Iterable | Order | Shared with |
 |---|---|---|
 | `Vec`, `Deque`, `Range` | in place, by index | — (no snapshot) |
-| `Set` | ascending by rendered member | `set_format` (`maps::ordered_members`) |
-| `Map`, `Counter` | ascending by rendered key | `keys()`, `values()`, formatting |
+| `Set` | ascending by member | `set_format` (`maps::ordered_members`) |
+| `Map`, `Counter` | ascending by key | `keys()`, `values()`, formatting |
 | `BitSet` | ascending bit | `bitset_format` |
 | `MinHeap`, `MaxHeap` | pop order | `pop`, formatting |
 | `Grid` | row-major | `cells()` |
@@ -108,9 +109,17 @@ and `for x in c` never disagree:
 Determinism is a correctness property here and not a tidiness one, which is
 RT-16 with teeth for the third time: Rust randomizes hash-table order **per
 process**, and a `for` that concatenated its members would answer differently on
-two runs of the same program. The rendered-form sort keys are still D3's to
-replace; `write_sorted`, `ordered_entries` and `ordered_members` are the three
-places that change when `TypeDescriptor::compare` is populated.
+two runs of the same program.
+
+The sort key was the *rendered* member, because at the time no descriptor carried
+a comparison callback — so `{10, 2}` was walked `10` first, which is deterministic
+and wrong for a reader. This paragraph named `write_sorted`, `ordered_entries` and
+`ordered_members` as the three places that would change when
+`TypeDescriptor::compare` was populated, and
+[ADR-138](138-a-container-orders-by-the-value-and-not-by-its-printing.md) changed
+exactly those three. The order above is now the value's own — numeric for a
+number, element-wise for a tuple — and the determinism this decision bought is
+unchanged.
 
 A heap's is the one order here that is *meaningful* rather than merely fixed, and
 it waits on nothing: a heap carries an ordering by construction.

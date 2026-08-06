@@ -127,12 +127,23 @@ it is the wrong one.
 What is left at lowering is the `TypedExpr::MethodCall { lowering_symbol: None }`
 fallback node, unchanged, and two things can still reach it:
 
-- the body of an **uncalled generic**, whose receiver no call site pinned.
-  `monomorphize` drops uncalled polymorphic originals, so it never reaches MIR.
-- a chain that somehow does reach MIR, which is a **compiler bug**. It surfaces
-  as the MIR builder's existing ICE naming the method — the REP-40 preference: a
-  compiler bug should read as a compiler bug report, not as a wrong answer and
-  not as a user-facing type error.
+- the body of an **uncalled** function, whose receiver no call site pinned. This
+  bullet used to say `monomorphize` drops uncalled polymorphic originals so it
+  never reaches MIR, and **that is false**: ADR-057 decision 5 pins the receiver
+  to the declaration group's level, so the function generalizes to a *monotype*,
+  `Scheme::is_polymorphic()` is false, and mono's drop filter keeps it.
+  `fn f(v) { v.len() }` with `out(1)` reached MIR and ICEd for as long as this
+  bullet stood. The real answer is
+  [ADR-137](./137-a-deferred-receiver-resolves-in-rounds-and-the-channel-runs-to-a-fixpoint.md)
+  decision 3: MIR recognizes a receiver that is still an unbound variable and
+  lowers the call to an unconditional `panic`. The body is unreachable by
+  construction — every call, including one through a value, unifies the argument
+  and pins the receiver — so the `panic` is a statement of that invariant and not
+  a behaviour a program can observe.
+- a chain that somehow does reach MIR *with a concrete receiver*, which is a
+  **compiler bug**. It surfaces as the MIR builder's existing ICE naming the
+  method — the REP-40 preference: a compiler bug should read as a compiler bug
+  report, not as a wrong answer and not as a user-facing type error.
 
 ### 4. One message, and it says both halves
 
@@ -172,6 +183,13 @@ today, and it is the price of case (3) reporting at all.
 saw an unresolved receiver and reported it. It is clean at both commands now,
 because lowering no longer reports and inference correctly defers a name the
 catalog holds. The document's own example type-checks for the first time.
+
+*Amended (ADR-137).* "By accident" turned out to be the whole of it: `sum` is a
+**pipeline sink**, so MIR's `recognize_pipeline` claims the node before it can
+ask for a catalog row, and the general case was not clean at all — the same
+program with `len`, `push`, `get` or `contains` in place of `sum` reached MIR
+and ICEd. ADR-137 decision 3 makes the general case hold for the reason this
+paragraph claims.
 
 **What is now cascade-free.** Appendix D's eight diagnostics became three — two
 `sorted` and one `frequencies`, measured — and that is the honest intermediate

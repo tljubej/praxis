@@ -97,7 +97,17 @@ pub struct TypedFn {
 #[derive(Clone, Debug)]
 pub struct TypedParam {
     pub symbol: SymbolId,
-    pub name: String,
+    /// The name the programmer wrote, or `None` for a **destructuring**
+    /// parameter (`|(a, b)| …`, REP-29), whose slot holds the whole argument
+    /// and which the programmer never named — the names in `(a, b)` are the
+    /// components', bound in the body by `destructure_pattern_params`.
+    ///
+    /// `None` rather than the pattern's source text, which is what this used to
+    /// hold: MIR classifies a named parameter as a user binding and an unnamed
+    /// one as a compiler temp, so the pattern text made the crash snapshot list
+    /// a binding literally called `(a, b)` beside the `a` and `b` the source
+    /// does have (ADR-139).
+    pub name: Option<String>,
     pub ty: Type,
 }
 
@@ -199,6 +209,27 @@ pub enum TypedExpr {
     /// An integer / text / bool literal.
     Lit {
         value: Lit,
+        ty: Type,
+        span: (u32, u32),
+    },
+    /// An interpolated text literal: `"a{x}b{y}c"` (§8.1, ADR-147). `ty` is
+    /// always `Text`.
+    ///
+    /// `parts` pairs each hole with the literal text that comes **before** it,
+    /// and `trailing` is the text after the last hole — so `"a{x}b{y}c"` is
+    /// `[("a", x), ("b", y)]` with `trailing = "c"`, and an empty `parts` cannot
+    /// happen (an interpolated literal has at least one hole; a literal with none
+    /// is an ordinary [`Lit`](Self::Lit)).
+    ///
+    /// The shape is "text before each hole, plus a tail" rather than a list of
+    /// alternating pieces because that makes the invariant structural: there is
+    /// exactly one fragment per hole and exactly one left over, so no consumer
+    /// can lose a fragment or emit two in a row. The lowering folds it left with
+    /// `praxis_text_concat`, and a piece list would have made the fold's
+    /// correctness a property of the list rather than of the type.
+    Interp {
+        parts: Vec<(String, TypedExpr)>,
+        trailing: String,
         ty: Type,
         span: (u32, u32),
     },
@@ -478,7 +509,20 @@ pub enum TypedPattern {
     /// an equality compare against the scrutinee for these.
     Lit { value: Lit, ty: Type },
     /// `x` — binds the whole scrutinee to `symbol` (always matches).
-    Bind { symbol: SymbolId, ty: Type },
+    ///
+    /// `name` and `span` are the same pair [`TypedStmt::Var`] carries, and for
+    /// the same reason: ADR-125 says a name a pattern introduces is a binding
+    /// in exactly the sense a `var` is, so the crash debugger has to be able to
+    /// print it as `name: Type = value` and `p` has to be able to bind it. They
+    /// used to stop at the AST, which is why a `for` variable rendered `? = 3`
+    /// and a `match` arm's payload rendered as an anonymous compiler temp
+    /// (ADR-139).
+    Bind {
+        symbol: SymbolId,
+        name: String,
+        ty: Type,
+        span: (u32, u32),
+    },
     /// `Variant` or `Variant(sub, …)` — matches an enum variant by tag, then
     /// matches each sub-pattern against the corresponding payload slot.
     /// `enum_def_id`/`variant_idx` identify the variant; `subpatterns` is
@@ -660,6 +704,7 @@ typed_expr_children! {
     ListLit { elements: each },
     Parse { text },
     RecordLit { fields: field_each },
+    Interp { parts: field_each },
     FieldGet { receiver },
     TupleIndex { receiver },
     EnumVariant { args: each },
@@ -688,6 +733,12 @@ pub enum Lit {
     Text(String),
     Bool(bool),
     /// A Unicode scalar value (the payload of a `Char` object).
+    ///
+    /// Built from a `'#'` character literal, in an expression and in a pattern
+    /// alike (ADR-141). It predates that syntax by four milestones — the input
+    /// parser's `char`/`grid(char)` gave the language the *type* long before it
+    /// gave it a way to write one down — which is why the arms that consume it
+    /// were already in place the day the literal landed.
     Char(u32),
     /// The `Unit` value — the sole inhabitant of the `Unit` type (§4.3). This is
     /// never produced by the parser (there is no `Unit` literal syntax); it is
@@ -1182,7 +1233,7 @@ impl<'a> Lowerer<'a> {
                 let ty = self.symbol_type(symbol);
                 return Some(TypedParam {
                     symbol,
-                    name: "_".to_string(),
+                    name: Some("_".to_string()),
                     ty,
                 });
             }
@@ -1190,10 +1241,15 @@ impl<'a> Lowerer<'a> {
             let range = pat.syntax().text_range();
             let symbol = self.resolve_decl_at(range)?;
             let ty = self.symbol_type(symbol);
-            let name = pat.syntax().text().to_string();
-            return Some(TypedParam { symbol, name, ty });
+            // Nameless on purpose: the container is a slot the compiler needed,
+            // and the names the programmer wrote are the components inside it.
+            return Some(TypedParam {
+                symbol,
+                name: None,
+                ty,
+            });
         };
-        let name = name_tok.text().to_string();
+        let name = Some(name_tok.text().to_string());
         let range = name_tok.text_range();
         let symbol = self.resolve_decl_at(range)?;
         // A parameter is not an expression, so it has no entry in `expr_types`;
@@ -1418,6 +1474,7 @@ impl<'a> Lowerer<'a> {
         let span = self.node_span(expr.syntax());
         match expr {
             Expr::Literal(l) => self.lower_literal(l),
+            Expr::Interp(i) => self.lower_interp(i, span),
             Expr::Path(p) => self.lower_path(p),
             Expr::Bin(b) => self.lower_bin(b),
             Expr::Range(r) => self.lower_range(r),
@@ -1709,6 +1766,43 @@ impl<'a> Lowerer<'a> {
         format!("__closure_{n}")
     }
 
+    /// An interpolated literal (§8.1, ADR-147): the fragments' text, decoded, and
+    /// the holes' expressions, lowered.
+    ///
+    /// The pairing walks the parts in source order and treats whatever fragment
+    /// text has accumulated as "the text before the next hole". That is why a
+    /// malformed run cannot lose anything: two fragments in a row (which the
+    /// lexer cannot emit, but a tree mid-keystroke can hold) concatenate, and a
+    /// missing closing fragment leaves `trailing` empty rather than dropping a
+    /// hole.
+    ///
+    /// The **type** is read from inference like every other node's, not asserted
+    /// to be `Text` here. Inference is the pass `praxis check` and the editor
+    /// run, and a lowerer that decided a type its own would be a second answer
+    /// (ADR-133).
+    fn lower_interp(&mut self, i: &praxis_ast::InterpExpr, span: (u32, u32)) -> TypedExpr {
+        let ty = self.node_ty(i.syntax());
+        let mut parts: Vec<(String, TypedExpr)> = Vec::new();
+        let mut pending = String::new();
+        for part in i.parts() {
+            match part {
+                praxis_ast::InterpPart::Fragment(tok) => {
+                    pending.push_str(&praxis_ast::interp_fragment_text(&tok));
+                }
+                praxis_ast::InterpPart::Hole(hole) => {
+                    let lowered = self.lower_expr(&hole);
+                    parts.push((std::mem::take(&mut pending), lowered));
+                }
+            }
+        }
+        TypedExpr::Interp {
+            parts,
+            trailing: pending,
+            ty,
+            span,
+        }
+    }
+
     fn lower_literal(&mut self, lit: &Literal) -> TypedExpr {
         let span = self.node_span(lit.syntax());
         // The *value* is read off the token; the *type* is what inference gave
@@ -1765,6 +1859,24 @@ impl<'a> Lowerer<'a> {
                 let unquoted = unquote_text(raw);
                 TypedExpr::Lit {
                     value: Lit::Text(unquoted),
+                    ty,
+                    span,
+                }
+            }
+            SyntaxKind::CharLit => {
+                // The **first** construction site of a `Lit::Char` from source
+                // (ADR-141). Everything downstream of here — the exhaustiveness
+                // key, the pattern test, the interned constant — was written for
+                // a value nothing produced.
+                //
+                // A malformed literal substitutes U+0000 for the `IntLit` arm's
+                // reason: the lexer reported `''`/`'ab'`/an unclosed quote and
+                // `run` renders analysis before it lowers, so this is the same
+                // report one pass earlier rather than silence, and the typed
+                // tree stays buildable for a caller that lowers anyway.
+                let value = praxis_syntax::literal::decode_char_literal(tok.text()).unwrap_or('\0');
+                TypedExpr::Lit {
+                    value: Lit::Char(value as u32),
                     ty,
                     span,
                 }
@@ -2283,13 +2395,19 @@ impl<'a> Lowerer<'a> {
             // REP-28 corrected at the field door; this is the same correction.
             //
             // Two things can still land here, and neither wants a diagnostic.
-            // A receiver **no call site pinned** — the body of an uncalled
-            // generic — reaches lowering unresolved on purpose; `monomorphize`
-            // drops uncalled polymorphic originals, so it never reaches MIR.
-            // And a chain that somehow *does* reach MIR with `lowering_symbol:
-            // None` is a compiler bug, which surfaces as the MIR builder's ICE
-            // naming the method rather than as a user-facing type error — a
-            // compiler bug should read as a compiler bug report.
+            // A receiver **no call site pinned** — the body of a function
+            // nothing calls — reaches lowering unresolved on purpose. It also
+            // reaches MIR: `monomorphize` does not drop it, because ADR-057
+            // decision 5 pins the receiver and a pinned receiver makes the
+            // function a monotype, so `Scheme::is_polymorphic()` is false and
+            // mono's filter keeps it. MIR recognizes the still-unbound receiver
+            // and lowers the call to an unconditional `panic`, which is sound
+            // because such a body is unreachable by construction (ADR-137
+            // decision 3). And a chain that reaches MIR with a *concrete*
+            // receiver and `lowering_symbol: None` is a compiler bug, which
+            // surfaces as the MIR builder's ICE naming the method rather than as
+            // a user-facing type error — a compiler bug should read as a
+            // compiler bug report.
             //
             // The receiver and arguments are kept either way: they are
             // well-formed trees in their own right, and discarding them lost
@@ -2753,6 +2871,7 @@ impl<'a> Lowerer<'a> {
 pub fn expr_span(e: &TypedExpr) -> (u32, u32) {
     match e {
         TypedExpr::Lit { span, .. }
+        | TypedExpr::Interp { span, .. }
         | TypedExpr::Path { span, .. }
         | TypedExpr::FnValue { span, .. }
         | TypedExpr::Bin { span, .. }
@@ -2833,6 +2952,7 @@ pub fn stmt_span(s: &TypedStmt) -> (u32, u32) {
 pub fn expr_ty(e: &TypedExpr) -> Type {
     match e {
         TypedExpr::Lit { ty, .. } => *ty,
+        TypedExpr::Interp { ty, .. } => *ty,
         TypedExpr::Path { ty, .. } => *ty,
         TypedExpr::FnValue { ty, .. } => *ty,
         TypedExpr::Bin { ty, .. } => *ty,

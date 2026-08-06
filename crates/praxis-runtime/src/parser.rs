@@ -21,7 +21,7 @@ use crate::scalars;
 use crate::text::TextPayload;
 use crate::GcRef;
 use cursor::{split_lines, split_sections, trailing_blank_run, ByteRegion, Cursor, Input, Walked};
-use praxis_input_parser::{AtomicKind, ParserPlan, PlanNode, TemplateShape};
+use praxis_input_parser::{AtomicKind, ParserPlan, PlanNode, SectionItemNode, TemplateShape};
 
 /// Run the parser plan named by `raw_id` against `input`, returning the parsed
 /// result or `None` on failure (a value that names no plan → `None`; parse
@@ -913,26 +913,38 @@ fn walk_sections(
 }
 
 /// Walk named heterogeneous `sections(name: P, ..., tail: repeated(P))` (M9,
-/// §7.5). The region is split on blank lines into sections; the first `N`
-/// sections (where N = number of named fields, or fewer if a `repeated` tail is
-/// present — it takes all the rest) are parsed by the named fields in order;
-/// any remaining sections are parsed by the `repeated` tail into a `Vec`. The
-/// result is an anonymous record assembled via [`alloc_record`].
+/// §7.5). The region is split on blank lines into sections, and the named
+/// arguments consume them **through one cursor, in source order**: a
+/// `SectionItemNode::One` takes the section at the cursor, a
+/// `SectionItemNode::Counted` takes its count's worth and collects them into a
+/// `Vec`, and the unbounded `repeated(P)` tail — if there is one — takes
+/// whatever the cursor has not reached. The result is an anonymous record
+/// assembled via [`alloc_record`].
+///
+/// The cursor is what makes a counted group followable. The predecessor said
+/// "the fields take `sections[0..fields.len()]` and the tail takes the rest",
+/// which cannot express a field that wants six sections, let alone one that
+/// wants six and is followed by another field.
 fn walk_sections_named(
     rt: &Rt,
     i: &Input<'_>,
     plan: &ParserPlan,
-    fields: &'static [(&'static str, u32)],
+    fields: &'static [SectionItemNode],
     repeated_tail: Option<(&'static str, u32)>,
     region: ByteRegion,
 ) -> WalkResult {
     let sections = split_sections(i, region);
-    // Too few sections is a parse fault.
-    if sections.len() < fields.len() {
+    // Too few sections is a parse fault, for a counted group exactly as for a
+    // fixed field: a group of six that finds four is input that did not match
+    // the parser, not a `Vec` of four. Truncating it silently would be the one
+    // outcome no program can notice, since the whole point of writing the count
+    // is that the program knows how many there are.
+    let required: usize = fields.iter().map(SectionItemNode::sections_wanted).sum();
+    if sections.len() < required {
         return Err(ParseFail::at(
             region.start().offset(),
             region.len(),
-            "section header",
+            sections_shortfall(fields, sections.len()),
         ));
     }
     // Each section is a narrowing of the input, so the child's offsets are the
@@ -943,18 +955,42 @@ fn walk_sections_named(
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut captures: Vec<(Option<&'static str>, u32, GcRef)> = Vec::new();
-    for (n, (name, child)) in fields.iter().enumerate() {
-        // SAFETY: ctx is valid.
-        let value =
-            unsafe { walk_exact(rt, i, plan, *child, sections[n], "the rest of the section")? };
-        scope.root(value);
-        captures.push((Some(name), *child, value));
+    let mut at = 0usize;
+    for item in fields {
+        match item {
+            SectionItemNode::One { name, child } => {
+                // SAFETY: ctx is valid.
+                let value = unsafe {
+                    walk_exact(rt, i, plan, *child, sections[at], "the rest of the section")?
+                };
+                scope.root(value);
+                captures.push((Some(*name), *child, value));
+            }
+            SectionItemNode::Counted { name, child, count } => {
+                let mut group = Vec::with_capacity(*count as usize);
+                for section in &sections[at..at + *count as usize] {
+                    // SAFETY: ctx is valid.
+                    let value = unsafe {
+                        walk_exact(rt, i, plan, *child, *section, "the rest of the section")?
+                    };
+                    scope.root(value);
+                    group.push(value);
+                }
+                let elem_desc = child_descriptor(plan, *child);
+                let group_vec = rt.alloc_vec(elem_desc, group);
+                // Rooted before the next allocation: a collection between two
+                // sections would otherwise drop the Vec this field *is*.
+                scope.root(group_vec);
+                captures.push((Some(*name), *child, group_vec));
+            }
+        }
+        at += item.sections_wanted();
     }
     if let Some((tail_name, tail_child)) = repeated_tail {
-        // The tail consumes every remaining section, parsed per-section by its
-        // child into a Vec.
+        // The tail consumes every section the cursor has not reached, parsed
+        // per-section by its child into a Vec.
         let mut tail_items = Vec::new();
-        for section in &sections[fields.len()..] {
+        for section in &sections[at..] {
             // SAFETY: ctx is valid.
             let value = unsafe {
                 walk_exact(rt, i, plan, tail_child, *section, "the rest of the section")?
@@ -974,6 +1010,30 @@ fn walk_sections_named(
         value: record,
         next: region.end(),
     })
+}
+
+/// What a `sections(...)` with too few sections was expecting, in the words
+/// [`ParseFail`] renders after "expected".
+///
+/// A call of fixed fields keeps saying `section header`, which is the message
+/// this fault has always carried and the one the book documents: every field
+/// wants one section, so "another section" is the whole of what is missing. A
+/// counted group is different — the number is written in the program, and the
+/// reader's question is *which* group came up short — so the first item the
+/// section list cannot satisfy names itself and its count.
+fn sections_shortfall(fields: &'static [SectionItemNode], available: usize) -> String {
+    let mut at = 0usize;
+    for item in fields {
+        let wanted = item.sections_wanted();
+        if at + wanted > available {
+            if let SectionItemNode::Counted { name, count, .. } = item {
+                return format!("{count} sections for `{name}`");
+            }
+            break;
+        }
+        at += wanted;
+    }
+    "section header".to_string()
 }
 
 /// Walk `block(item, ...)` (M9, §7.5): apply sequential parsers within one

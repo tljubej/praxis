@@ -209,6 +209,20 @@ const _: () = assert!(
     "the interned-Int table has one base, and both readers must name it"
 );
 
+/// The byte offset of `small_chars` within a `RuntimeContext`: the base of the
+/// interned ASCII-`Char` table (`praxis_runtime::small_char`).
+/// `Inst::ConstGc { GcConst::Char }` loads it and then loads the element at a
+/// compile-time offset, exactly as [`SMALL_INTS_OFFSET`] does — ADR-100's "a
+/// literal is a load", applied to its second scalar (ADR-141). Computed from
+/// the `#[repr(C)]` layout, like `SLOTS_OFFSET`.
+///
+/// There is deliberately **no** `const _: () = assert!(…)` twin of the one
+/// below: that assertion exists because an `Int` has a *second* reader of the
+/// same base, `Inst::Materialize { Int }`, through
+/// `small_int::INLINE_INTERN_SITE`. `Char` has no inline interning path, so this
+/// offset has one reader and nothing to disagree with.
+const SMALL_CHARS_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, small_chars) as i64;
+
 /// The byte offsets of the two cached `Bool` immortals within a
 /// `RuntimeContext`. A `Bool` literal is one load of one of these — the same
 /// object `praxis_alloc_bool` would have answered, without the call.
@@ -2104,23 +2118,25 @@ fn lower_inst<M: Module>(
                     }
                     builder.def_var(vars[dst.0 as usize], closure_ref);
                 }
-                AllocKind::Collection { ctor, args } => {
+                AllocKind::Collection { ctor, args, init } => {
                     // M8 WS1: `Vec[T]()`, `Grid[T]()`, etc. `ctor_sym` is the
-                    // `praxis_<kind>_new` wrapper; what differs per ctor is only
-                    // the *arguments*, and resolving the element descriptor
-                    // recursively is what makes a nested collection (e.g.
-                    // `Vec[Vec[Int]]`) dispatch eq/hash correctly.
+                    // wrapper `alloc.constructor()` named, which is the filled
+                    // one for a sized construction (ADR-146) and the
+                    // `praxis_<kind>_new` one otherwise; what differs per ctor
+                    // is only the *arguments*, and resolving the element
+                    // descriptor recursively is what makes a nested collection
+                    // (e.g. `Vec[Vec[Int]]`) dispatch eq/hash correctly.
+                    use praxis_mir::ir::CollectionInit;
                     use praxis_types::CollectionCtor;
-                    let call_args: Vec<Value> = match ctor {
+                    let call_args: Vec<Value> = match (ctor, init) {
                         // BitSet is nullary (no element descriptor); elements
                         // are always Int. praxis_bitset_new takes only ctx.
-                        CollectionCtor::BitSet => Vec::new(),
-                        // Grid construction from source `Grid()`: an empty
-                        // 0×0 grid. (The input parser is the usual grid
-                        // constructor; source construction is for manual
-                        // grids filled via set.) praxis_grid_new takes
-                        // (descriptor, width, height).
-                        CollectionCtor::Grid => {
+                        (CollectionCtor::BitSet, _) => Vec::new(),
+                        // `Grid()`: the empty 0×0 grid. praxis_grid_new takes
+                        // (descriptor, width, height) raw, and both extents are
+                        // immediates because this is the only shape source can
+                        // ask of it — `Grid(w, h, fill)` goes to the arm below.
+                        (CollectionCtor::Grid, CollectionInit::Empty) => {
                             let el_desc = collection_element_descriptor_for(db, args, 0)?;
                             vec![
                                 builder.ins().iconst(GC, el_desc as i64),
@@ -2128,11 +2144,41 @@ fn lower_inst<M: Module>(
                                 builder.ins().iconst(GC, 0),
                             ]
                         }
+                        // `Vec(n, fill)` and `Grid(w, h, fill)`: the extents and
+                        // the fill are boxed operands, so both filled wrappers
+                        // take (descriptor, extents…, fill) uniformly and this
+                        // arm needs no per-ctor shape. Liveness named these
+                        // locals, so `spill_roots` above has already spilled the
+                        // fill into the shadow frame.
+                        (_, CollectionInit::Filled { count, fill }) => {
+                            let desc = collection_element_descriptor_for(db, args, 0)?;
+                            vec![
+                                builder.ins().iconst(GC, desc as i64),
+                                builder.use_var(vars[count.0 as usize]),
+                                builder.use_var(vars[fill.0 as usize]),
+                            ]
+                        }
+                        (
+                            _,
+                            CollectionInit::FilledGrid {
+                                width,
+                                height,
+                                fill,
+                            },
+                        ) => {
+                            let desc = collection_element_descriptor_for(db, args, 0)?;
+                            vec![
+                                builder.ins().iconst(GC, desc as i64),
+                                builder.use_var(vars[width.0 as usize]),
+                                builder.use_var(vars[height.0 as usize]),
+                                builder.use_var(vars[fill.0 as usize]),
+                            ]
+                        }
                         // Everything else takes one descriptor: the element
                         // type, or — for `Map` and `Counter` — the *key* type.
                         // A Map's value descriptor is adopted from the first
                         // inserted value at runtime (§11.3).
-                        _ => {
+                        (_, CollectionInit::Empty) => {
                             let desc = collection_element_descriptor_for(db, args, 0)?;
                             vec![builder.ins().iconst(GC, desc as i64)]
                         }
@@ -3838,6 +3884,24 @@ fn load_gc_const(builder: &mut FunctionBuilder, ctx: Value, konst: GcConst) -> V
                 .ins()
                 .load(GC, MemFlags::trusted(), base, elem_offset)
         }
+        GcConst::Char(c) => {
+            // `praxis-mir` only emits this for a code point
+            // `small_char::index_of` accepted, so the index exists — the
+            // `expect` documents that the two agree rather than guarding
+            // against them disagreeing, and it fires at compile time.
+            let index = praxis_runtime::small_char::index_of(c)
+                .expect("MIR emits ConstGc::Char only for an interned code point");
+            let elem_offset = (index * praxis_runtime::small_char::SMALL_CHAR_STRIDE) as i32;
+            // Two loads and no adds, for the `SmallInt` arm's reason: the whole
+            // table is `SMALL_CHAR_COUNT` × 8 bytes, so the element offset is a
+            // constant well inside `i32`.
+            let base = builder
+                .ins()
+                .load(GC, MemFlags::trusted(), ctx, SMALL_CHARS_OFFSET as i32);
+            builder
+                .ins()
+                .load(GC, MemFlags::trusted(), base, elem_offset)
+        }
         // One load: `Unit` and the two `Bool`s are cached in the context
         // directly, not behind a table, because there is a fixed, tiny number of
         // them.
@@ -4667,7 +4731,8 @@ fn tuple_schema_for(
 /// function is unchanged precisely because it was always describing *that* one.
 ///
 /// Each entry carries the source name (interned in the same arena, empty for
-/// temps), a
+/// temps — and since ADR-139 a name a pattern introduces is a binding with a
+/// real name here, where it used to arrive nameless or classified as a temp), a
 /// per-local symbol-id placeholder, the static type descriptor resolved from the
 /// MIR local's `Type` (§9.3, M10-WS2), the user-vs-temp classification, and the
 /// source span.

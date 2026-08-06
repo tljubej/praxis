@@ -1,0 +1,10 @@
+// `repeated(P, N)` takes exactly N sections, so a field can follow it.
+var data = read sections(
+    shapes: repeated(lines(int), 2),
+    regions: lines(int),
+)
+
+out(data.shapes.len())
+out(data.shapes.get(0))
+out(data.shapes.get(1))
+out(data.regions)

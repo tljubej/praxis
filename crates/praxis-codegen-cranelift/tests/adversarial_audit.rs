@@ -2127,6 +2127,51 @@ fn a_barrier_over_a_non_vec_receiver_sees_every_member() {
     assert_eq!(result.as_int(), 4);
 }
 
+/// **Decision 3, for the two barriers added by ADR-144 and ADR-145.** Each reads
+/// its receiver through that receiver's own accessor and never through
+/// `praxis_vec_get` on a foreign payload.
+///
+/// The receivers are chosen so a wrong-type read cannot be mistaken for a right
+/// answer: a `Range`'s members exist only as an arithmetic rule and a `Deque`
+/// has no snapshot symbol at all, so if the materializing walk were skipped the
+/// wrapper would be reading a `RangeVal` or a `DequePayload` as a `VecPayload`.
+#[test]
+fn reversal_and_join_read_every_receiver_through_its_own_accessor() {
+    // A `Range`: `(0..4).reversed()[0]` is 3 only if all four members were
+    // produced by the range's own walk.
+    let (runtime, result) = run_main("fn main() -> Int {\n  (0..4).reversed()[0]\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 3);
+
+    // A `Text`, whose item is the `Char` `t[i]` answers.
+    let (runtime, result) = run_main("fn main() -> Char {\n  \"héllo\".reversed()[0]\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_char(), 'o');
+
+    // A `Deque`, which indexes itself but is not a `Vec`.
+    let (runtime, result) = run_main(
+        "fn main() -> Int {\n  var d = Deque()\n  d.push_back(3)\n  d.push_front(7)\n  \
+         d.reversed()[0]\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_int(), 3);
+
+    // `join` over a `Map`'s keys: the source is a `Vec` the wrapper did not
+    // build, and the separator is the second argument rather than the receiver.
+    let (runtime, result) = run_main(
+        "fn main() -> Text {\n  var m = Map()\n  m[\"b\"] = 1\n  m[\"a\"] = 2\n  \
+         m.keys().join(\"|\")\n}\n",
+    );
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_text(), "a|b", "keys walk in the key's own order");
+
+    // And `to_text` over a `Vec[Char]` the language built for itself, rather
+    // than one that came off a `Grid`.
+    let (runtime, result) = run_main("fn main() -> Text {\n  \"abc\".reversed().to_text()\n}\n");
+    assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
+    assert_eq!(result.as_text(), "cba");
+}
+
 /// **Decision 4.** Each conversion builds the collection it names, from every
 /// member of whatever it started on.
 #[test]
@@ -2198,8 +2243,10 @@ fn a_conversion_builds_the_collection_it_names() {
 /// the sort is stable — so the answer is a function of the input alone.
 ///
 /// The whole point is a pipeline whose item is a **pair**: no composite is
-/// orderable (ADR-045), so `sorted` is unavailable the moment the source is a
-/// `Map` or a `Counter`, and "the most common value" had no spelling.
+/// orderable in the *source language* (ADR-045; the container order a `Map` now
+/// walks its keys in is a different question, ADR-138), so `sorted` is
+/// unavailable the moment the source is a `Map` or a `Counter`, and "the most
+/// common value" had no spelling.
 #[test]
 fn sorted_by_key_orders_a_pair_by_the_key_it_carries() {
     let (runtime, result) = run_main(

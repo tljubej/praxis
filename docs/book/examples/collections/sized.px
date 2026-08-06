@@ -1,0 +1,10 @@
+// `Vec(n, fill)` and `Grid(w, h, fill)`: the collection an algorithm allocates
+// for itself, rather than one it reads or grows a push at a time.
+var row = Vec(5, 0)
+var board = Grid(3, 2, '.')
+board[1, 1] = '#'
+
+out(row)
+out(board)
+out(board.width())
+out(board.height())

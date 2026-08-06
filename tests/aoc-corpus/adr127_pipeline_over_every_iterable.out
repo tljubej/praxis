@@ -22,3 +22,13 @@ true
 [(the, 3), (cat, 2)]
 3
 [a, bb, ccc]
+[2, 1]
+[3, 2, 1]
+[4, 3, 2, 1, 0]
+[c, b, a]
+a-bb-ccc
+a, b, c
+cat|dog|the
+1+2+3
+43210
+héllo

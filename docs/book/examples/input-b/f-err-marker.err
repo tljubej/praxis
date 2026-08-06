@@ -1,25 +1,25 @@
-error[I028]: a `repeated(...)` tail may appear only as the final named argument (§7.5): it consumes every remaining section, so nothing can follow it
-
-  f-err-marker.px:4:14
-  4 | var a = read sections(boards: repeated(matrix(int)), draws: csv(int))
-    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ a `repeated(...)` tail may appear only as the final named argument (§7.5): it consumes every remaining section, so nothing can follow it
-
-error[I028]: `repeated(...)` is only the final named argument of a `sections` call (§7.5)
+error[I028]: an unbounded `repeated(...)` tail may appear only as the final named argument (§7.5): it consumes every remaining section, so nothing can follow it — write `repeated(P, N)` for a group of N sections, which can
 
   f-err-marker.px:5:14
-  5 | var b = read repeated(int)
-    |              ^^^^^^^^^^^^^ `repeated(...)` is only the final named argument of a `sections` call (§7.5)
+  5 | var a = read sections(boards: repeated(matrix(int)), draws: csv(int))
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ an unbounded `repeated(...)` tail may appear only as the final named argument (§7.5): it consumes every remaining section, so nothing can follow it — write `repeated(P, N)` for a group of N sections, which can
+
+error[I028]: `repeated(...)` is only a named argument of a `sections` call (§7.5)
+
+  f-err-marker.px:6:14
+  6 | var b = read repeated(int)
+    |              ^^^^^^^^^^^^^ `repeated(...)` is only a named argument of a `sections` call (§7.5)
 
 error[I023]: `sep` needs a non-empty separator: an empty one never advances
 
-  f-err-marker.px:6:14
-  6 | var c = read sep("", int)
+  f-err-marker.px:7:14
+  7 | var c = read sep("", int)
     |              ^^^^^^^^^^^^ `sep` needs a non-empty separator: an empty one never advances
 
 error[I014]: `grid`'s ragged form is written `grid(P, ragged, fill: value)` — `ragged` and `fill:` come together or not at all (§7.5)
 
-  f-err-marker.px:7:14
-  7 | var d = read grid(char, fill: ".")
+  f-err-marker.px:8:14
+  8 | var d = read grid(char, fill: ".")
     |              ^^^^^^^^^^^^^^^^^^^^^ `grid`'s ragged form is written `grid(P, ragged, fill: value)` — `ragged` and `fill:` come together or not at all (§7.5)
 
 praxis: 4 error(s)

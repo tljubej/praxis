@@ -179,22 +179,49 @@ fn parse_args(
             Some(',') => {
                 cur.bump();
             }
-            Some(_) => args.push(parse_arg(cur, base, depth, ctor)?),
+            Some(_) => {
+                let at = args.len();
+                args.push(parse_arg(cur, base, depth, ctor, at)?);
+            }
         }
     }
 }
 
-/// One argument: a string literal, a `name: value` pair, a bare flag, or a
-/// positional parser.
+/// One argument: a string literal, a whole number, a `name: value` pair, a bare
+/// flag, or a positional parser.
+///
+/// `at` is the argument's position in the list, which only `repeated`'s count
+/// needs: a name written where a count belongs has to be told it is not a
+/// count, and by the time [`parse_expr`] has failed on it the diagnostic is
+/// about the name instead.
 fn parse_arg(
     cur: &mut Scan<'_>,
     base: usize,
     depth: usize,
     ctor: Constructor,
+    at: usize,
 ) -> Result<CallArg, ScanError> {
     skip_ws(cur);
     if cur.peek_char() == Some('"') {
         return Ok(CallArg::String(take_string(cur, base)?));
+    }
+
+    // A positional whole number — `repeated(P, 6)`'s count. Which constructors
+    // take one is `Constructor::arg_shape`'s question, not this scanner's, for
+    // the same reason the ordinary grammar does not ask it either: a count
+    // written where none belongs should be told so by name.
+    if starts_a_number(cur) {
+        let at = cur.pos();
+        let text = take_number(cur);
+        // `praxis_syntax::numeric` is the workspace's one integer decoder, so
+        // the two front ends cannot disagree about what `0x10` or `1_000` mean.
+        let Some(n) = praxis_syntax::numeric::parse_int_literal(text) else {
+            return Err(ScanError::MalformedCaptureBody {
+                byte_offset: base + at,
+                message: format!("`{text}` is not a whole number"),
+            });
+        };
+        return Ok(CallArg::Int(n));
     }
 
     // A `name:` prefix, if the next identifier is immediately followed by a
@@ -217,12 +244,13 @@ fn parse_arg(
             let value = take_keyword_value(cur);
             return Ok(CallArg::Keyword { name, value });
         }
-        // `name: repeated(P)` is the named-sections tail marker (§7.5): the
-        // field's parser is the `P`, and `repeated` says it consumes every
-        // remaining section rather than one. `build_call` refuses a bare
-        // `repeated(...)` outright (IP-09), so the marker goes through
-        // `build_repeated_tail` — the same function the HIR bridge calls, so
-        // the two front ends cannot disagree about the marker's own shape.
+        // `name: repeated(P)` / `name: repeated(P, N)` is the named-sections
+        // group marker (§7.5): the field's parser is the `P`, and `repeated`
+        // says the field takes a group of sections rather than one.
+        // `build_call` refuses a bare `repeated(...)` outright (IP-09), so the
+        // marker goes through `build_repeated_tail` — the same function the HIR
+        // bridge calls, so the two front ends cannot disagree about the
+        // marker's own shape, its count included.
         if peek_ident(cur) == Some("repeated") {
             let at = cur.pos();
             take_ident(cur);
@@ -230,7 +258,7 @@ fn parse_arg(
             if cur.peek_char() != Some('(') {
                 return Err(ScanError::MalformedCaptureBody {
                     byte_offset: base + at,
-                    message: "`repeated` needs one parser argument (§7.5)".to_string(),
+                    message: "`repeated` needs a parser argument (§7.5)".to_string(),
                 });
             }
             let args = parse_args(cur, base, depth, Constructor::Repeated)?;
@@ -245,6 +273,27 @@ fn parse_arg(
     if peek_ident(cur) == Some("ragged") {
         take_ident(cur);
         return Ok(CallArg::Flag("ragged".to_string()));
+    }
+
+    // A name after `repeated`'s parser is a count that is not a literal, and
+    // the rowan front end says so there (ADR-073 Decision 2: one rule, two
+    // spellings). Left to `parse_expr` this would report "unknown parser `n`",
+    // which is true and carries none of the fix — no name would have worked.
+    // A name that *is* a parser falls through to the shared shape check, which
+    // is where a second parser is decided.
+    if ctor == Constructor::Repeated && at >= 1 {
+        if let Some(name) = peek_ident(cur) {
+            if !crate::parser_names().any(|known| known == name) {
+                return Err(ScanError::CallShape(crate::validate::ValidationError {
+                    span: Span::at((base + cur.pos()) as u32),
+                    code: praxis_source::DiagCode::InvalidConstructorArgument,
+                    message: "`repeated`'s count must be a whole-number literal — the parser \
+                              plan is built when the program is compiled, so the count cannot \
+                              be a parser or a variable (§7.5)"
+                        .to_string(),
+                }));
+            }
+        }
     }
 
     Ok(CallArg::Parser(parse_expr(cur, base, depth)?))
@@ -290,6 +339,36 @@ fn peek_ident<'a>(cur: &mut Scan<'a>) -> Option<&'a str> {
 fn take_ident<'a>(cur: &mut Scan<'a>) -> &'a str {
     let start = cur.pos();
     while cur.peek_char().is_some_and(is_ident_continue) {
+        cur.bump();
+    }
+    &cur.src()[start..cur.pos()]
+}
+
+/// Whether a positional whole number starts at the cursor: a digit, or a `-`
+/// with a digit behind it. A lone `-` is not a number, so it still reaches
+/// [`parse_expr`] and earns that arm's diagnostic.
+fn starts_a_number(cur: &mut Scan<'_>) -> bool {
+    let rest = &cur.src()[cur.pos()..];
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_digit() => true,
+        Some('-') => chars.next().is_some_and(|c| c.is_ascii_digit()),
+        _ => false,
+    }
+}
+
+/// Consume the number at the cursor: the sign, then the run of digits and
+/// digit separators. Decoding it is [`praxis_syntax::numeric`]'s job, so a run
+/// that is not a number is reported rather than reinterpreted.
+fn take_number<'a>(cur: &mut Scan<'a>) -> &'a str {
+    let start = cur.pos();
+    if cur.peek_char() == Some('-') {
+        cur.bump();
+    }
+    while cur
+        .peek_char()
+        .is_some_and(|c| c.is_ascii_digit() || c == '_')
+    {
         cur.bump();
     }
     &cur.src()[start..cur.pos()]
@@ -363,7 +442,7 @@ fn skip_ws(cur: &mut Scan<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{AtomicKind, SkipPolicy};
+    use crate::ast::{AtomicKind, SectionItem, SkipPolicy};
 
     fn parse(text: &str) -> Result<ParserAst, ScanError> {
         parse_capture_body(text, 0, 0)
@@ -469,6 +548,64 @@ mod tests {
             parse("repeated(int)"),
             Err(ScanError::CallShape(_))
         ));
+    }
+
+    /// **The counted form is the same one rule, in this front end too.** A
+    /// bounded `repeated(P, N)` consumes exactly N sections, so the position
+    /// argument the unbounded form rests on does not apply to it: something may
+    /// follow it, and it may itself be last. The count's own refusals — zero,
+    /// and a name where a literal belongs — are the shared builder's, so a
+    /// capture body earns them without this scanner knowing what they are.
+    #[test]
+    fn a_counted_group_is_bounded_here_too() {
+        match parse("sections(shapes: repeated(lines(int), 2), regions: lines(int))") {
+            Ok(ParserAst::SectionsNamed {
+                fields,
+                repeated_tail,
+                ..
+            }) => {
+                assert!(repeated_tail.is_none(), "a counted group is not the tail");
+                assert_eq!(fields.len(), 2, "and something may follow it");
+                match &fields[0] {
+                    SectionItem::Counted {
+                        name,
+                        count,
+                        parser,
+                    } => {
+                        assert_eq!(name, "shapes");
+                        assert_eq!(count.get(), 2);
+                        assert!(matches!(parser, ParserAst::Lines { .. }));
+                    }
+                    other => panic!("expected a counted group, got {other:?}"),
+                }
+                assert_eq!(fields[1].name(), "regions");
+            }
+            other => panic!("expected SectionsNamed, got {other:?}"),
+        }
+
+        // Last is also fine — "may appear anywhere" includes the end.
+        assert!(matches!(
+            parse("sections(regions: lines(int), shapes: repeated(lines(int), 2))"),
+            Ok(ParserAst::SectionsNamed { .. })
+        ));
+
+        // A group of no sections parses nothing, and a count that is not a
+        // literal cannot exist: the plan is built when the program is compiled.
+        for refused in [
+            "sections(a: repeated(int, 0))",
+            "sections(a: repeated(int, -1))",
+            "sections(a: repeated(int, word))",
+            // A name that is not a parser either: this earns the count's own
+            // diagnostic here, not "unknown parser `n`", which is the rowan
+            // front end's answer too.
+            "sections(a: repeated(int, n))",
+            "sections(a: repeated(int, 2, 3))",
+        ] {
+            assert!(
+                matches!(parse(refused), Err(ScanError::CallShape(_))),
+                "`{refused}` must be refused by the shared shape check"
+            );
+        }
     }
 
     #[test]

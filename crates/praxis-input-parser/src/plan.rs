@@ -68,10 +68,13 @@ pub enum PlanNode {
     /// `sections(P)` (homogeneous).
     Sections { child: u32 },
     /// Named heterogeneous `sections(name: P, ..., tail: repeated(P))` (M9).
-    /// `fields` are `(name, child_index)` pairs; `repeated_tail` is the named
-    /// tail field's `(name, child_index)`, if present.
+    /// `fields` are the named arguments in source order, each contributing one
+    /// record field and consuming
+    /// [`SectionItemNode::sections_wanted`] sections; `repeated_tail` is the
+    /// unbounded tail's `(name, child_index)`, if present, and it consumes
+    /// every section the fields left.
     SectionsNamed {
-        fields: &'static [(&'static str, u32)],
+        fields: &'static [SectionItemNode],
         repeated_tail: Option<(&'static str, u32)>,
     },
     /// `block(item, ...)` (M9, §7.5). Sequential parsers within one region;
@@ -198,6 +201,46 @@ impl TemplateShape {
                 None => TemplateShape::Unit,
             },
             (false, _) => TemplateShape::Tuple,
+        }
+    }
+}
+
+/// One named argument of a heterogeneous `sections(...)` other than its
+/// unbounded tail (M9, §7.5), in plan form.
+///
+/// The count is a plain `u32` and not the [`crate::ast::RepeatCount`] newtype:
+/// the invariant was discharged upstream, where the source span was still in
+/// hand to report the violation against, and the plan is a flat `&'static`
+/// repr the runtime reads without unwrapping anything.
+#[derive(Debug)]
+pub enum SectionItemNode {
+    /// `name: P` — one section.
+    One { name: &'static str, child: u32 },
+    /// `name: repeated(P, N)` — exactly `count` consecutive sections, collected
+    /// into one `Vec` field. Never zero.
+    Counted {
+        name: &'static str,
+        child: u32,
+        count: u32,
+    },
+}
+
+impl SectionItemNode {
+    /// The record field this item contributes.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            SectionItemNode::One { name, .. } | SectionItemNode::Counted { name, .. } => name,
+        }
+    }
+
+    /// How many sections this item consumes — the number the runtime's section
+    /// cursor advances by, and the number the shortfall check sums.
+    #[must_use]
+    pub fn sections_wanted(&self) -> usize {
+        match self {
+            SectionItemNode::One { .. } => 1,
+            SectionItemNode::Counted { count, .. } => *count as usize,
         }
     }
 }
@@ -529,13 +572,24 @@ fn lower_node(b: &mut PlanBuilder<'_>, ast: &ParserAst) -> u32 {
             repeated_tail,
             ..
         } => {
-            // Lower each field's child, recording (name, child_index).
-            let field_entries: Vec<(&'static str, u32)> = fields
+            // Lower each named argument's child, keeping source order: a
+            // counted group's position among the fields is the position the
+            // runtime consumes its sections at.
+            let field_entries: Vec<SectionItemNode> = fields
                 .iter()
-                .map(|(name, p)| {
-                    let n = b.alloc_str(name);
-                    let c = lower_node(b, p);
-                    (n, c)
+                .map(|item| {
+                    let name = b.alloc_str(item.name());
+                    let child = lower_node(b, item.parser());
+                    match item {
+                        crate::ast::SectionItem::One { .. } => SectionItemNode::One { name, child },
+                        crate::ast::SectionItem::Counted { count, .. } => {
+                            SectionItemNode::Counted {
+                                name,
+                                child,
+                                count: count.get(),
+                            }
+                        }
+                    }
                 })
                 .collect();
             let tail_entry = repeated_tail.as_ref().map(|(name, p)| {
@@ -900,5 +954,70 @@ mod tests {
         // And the shape the interpreter reads back off those parts is the tuple
         // one, which is the half the node kind alone does not say.
         assert_eq!(TemplateShape::of(parts), TemplateShape::Tuple);
+    }
+
+    /// **A counted group keeps its position and its count in the plan.** The
+    /// runtime walks `fields` in order with one section cursor, so a counted
+    /// item lowered out of order — or lowered without its count — would read a
+    /// different span of sections than the source named. The plan is the last
+    /// place source order still exists.
+    #[test]
+    fn a_counted_item_keeps_its_count_and_its_position_in_the_plan() {
+        use crate::ast::{RepeatCount, SectionItem};
+
+        let ast = ParserAst::SectionsNamed {
+            fields: vec![
+                SectionItem::Counted {
+                    name: "shapes".to_string(),
+                    count: RepeatCount::new(6).expect("six sections"),
+                    parser: ParserAst::Lines {
+                        child: Box::new(ParserAst::Atomic {
+                            kind: AtomicKind::Int,
+                            span: Span::at(0),
+                        }),
+                        span: Span::at(0),
+                    },
+                },
+                SectionItem::One {
+                    name: "regions".to_string(),
+                    parser: ParserAst::Atomic {
+                        kind: AtomicKind::Char,
+                        span: Span::at(0),
+                    },
+                },
+            ],
+            repeated_tail: None,
+            span: Span::at(0),
+        };
+        let compiled = lower_to_plan(&ast);
+        let plan = compiled.plan();
+        let PlanNode::SectionsNamed {
+            fields,
+            repeated_tail,
+        } = &plan.nodes[plan.root as usize]
+        else {
+            panic!("a named `sections` lowers to a SectionsNamed node");
+        };
+        assert!(repeated_tail.is_none(), "a counted group is not the tail");
+        assert_eq!(fields.len(), 2);
+        match &fields[0] {
+            SectionItemNode::Counted { name, child, count } => {
+                assert_eq!(*name, "shapes");
+                assert_eq!(*count, 6);
+                assert!(matches!(
+                    plan.nodes[*child as usize],
+                    PlanNode::Lines { .. }
+                ));
+            }
+            other => panic!("the first field is the counted group, got {other:?}"),
+        }
+        match &fields[1] {
+            SectionItemNode::One { name, .. } => assert_eq!(*name, "regions"),
+            other => panic!("the second field follows the counted group, got {other:?}"),
+        }
+        // Two sections for `regions` to start at is what the count buys, and
+        // the runtime reads it from here.
+        assert_eq!(fields[0].sections_wanted(), 6);
+        assert_eq!(fields[1].sections_wanted(), 1);
     }
 }

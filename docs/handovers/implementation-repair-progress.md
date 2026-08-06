@@ -3920,12 +3920,23 @@ register was wrong about it, which is the part worth reading:**
   backend reads that one). The cure is to split the wrapper so its row becomes
   `Allocates`, which is ADR-017 territory and must be reconciled with REP-45's
   faulting-wrapper sweep.
-- **D19 (new)** — is there a character literal? ADR-086 made `"#"[0]` a spelling
-  that works, so the literal is ergonomics rather than a blocker. Worth recording
-  for whoever takes it: **everything below the parser already exists and is
-  dead** — `Lit::Char(u32)` has no constructor, and `AllocKind::Char`'s MIR
-  lowering and its Cranelift codegen are complete. It is a lexer, a parser arm
-  and `lower_lit`.
+- ~~**D19 (new)**~~ **answered and implemented.** `'#'` is a token, an
+  expression and a pattern; `''`/`'ab'` are `T007` and an unterminated literal
+  is `T006`; an in-range literal is `Inst::ConstGc { GcConst::Char }`, two loads
+  and an immediate compare (ADR-141). `"#"[0]` still works and is still how a
+  program reads a character out of a text it did not write down, and `Char`'s
+  *rendering* is deliberately unchanged — §16.3 makes the rendered form a sort
+  key for `Map`/`Set`/`Counter`.
+
+  **This entry's own scoping was wrong, and that is the useful part of it.** "It
+  is a lexer, a parser arm and `lower_lit`" was short by three things: a
+  `GcConst::Char` and its codegen arm, without which the literal lowers to an
+  allocation plus a `CheckFault` and is *slower* than the `"#"[0]` it replaces;
+  and `lower_pattern_test`'s `Lit::Char` arm, which was not "complete" — it was
+  an unconditional `Jump { target: on_success }`, so every `Char` pattern
+  matched every scrutinee. "Everything below the parser already exists" was true
+  of the code and false of the behaviour, and the sentence was copied forward
+  into ADR-086 and into handover 31 before anyone read the arm.
 
 **There is no ABI bump left in this round.** S19, S20 and S21 had none; H17 is
 one per stage and S18 spent the one that was available (13 → 14, with RT-13, in

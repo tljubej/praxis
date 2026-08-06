@@ -1,0 +1,7 @@
+error[Y110]: no method `len` on type `Int` taking 0 argument(s)
+
+  derived-receiver-no-row.px:2:13
+  2 |     rows[0].len()
+    |             ^^^ no method `len` on type `Int` taking 0 argument(s)
+
+praxis: 1 error(s)

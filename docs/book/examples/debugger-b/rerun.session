@@ -7,7 +7,7 @@ Backtrace:
     budget: Int = 120
     spend: Vec[Int] = [40, 40, 40]
     left: Int = 0
-    ? = 40
+    s: Int = 40
   temps:
     <tmp#1> = 120
 

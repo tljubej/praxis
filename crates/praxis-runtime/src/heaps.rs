@@ -192,7 +192,9 @@ pub static MAX_HEAP: TypeDescriptor = TypeDescriptor::builtin::<MaxHeapPayload>(
     max_heap_format,
     None,
     None,
-    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
+    // No container order: a mutable collection can never be a `Map` key or a
+    // `Set` member (ADR-057 D4), so nothing ever has to put one in a
+    // deterministic sequence (ADR-138).
     None,
 )
 .with_owned_bytes(max_heap_owned_bytes);
@@ -259,7 +261,9 @@ pub static MIN_HEAP: TypeDescriptor = TypeDescriptor::builtin::<MinHeapPayload>(
     min_heap_format,
     None,
     None,
-    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
+    // No container order: a mutable collection can never be a `Map` key or a
+    // `Set` member (ADR-057 D4), so nothing ever has to put one in a
+    // deterministic sequence (ADR-138).
     None,
 )
 .with_owned_bytes(min_heap_owned_bytes);
@@ -403,22 +407,28 @@ mod tests {
     /// An element type with no ordering leaves the heap a bag: every comparison
     /// is `Equal`, which is still a consistent total order, so `BinaryHeap`
     /// keeps its invariants.
+    ///
+    /// The fixture is a closure, which is the strongest remaining case: ADR-138
+    /// populated `compare` on every type a `Map` key can be, so `Bool` — what
+    /// this used to reach for — now has one. What is left without a `compare` is
+    /// exactly what can never be a key, and a closure is the type that can never
+    /// even be compared.
     #[test]
-    fn an_unorderable_element_type_compares_equal_rather_than_reading_bytes() {
-        let rt = crate::Runtime::new();
+    fn an_element_type_with_no_container_order_compares_equal_rather_than_reading_bytes() {
+        let mut rt = crate::Runtime::new();
         assert!(
-            !crate::scalars::BOOL.is_orderable(),
-            "Bool has no ordering (ADR-045)"
+            !crate::closures::CLOSURE.is_orderable(),
+            "a closure has no ordering of any kind (ADR-138)"
         );
-        let t = HeapEntry {
-            value: rt.alloc_bool(true),
-            descriptor: &crate::scalars::BOOL,
+        let mut ctx = rt.context();
+        // SAFETY: a live context, and a closure that captures nothing.
+        let make = |ctx: &mut crate::RuntimeContext| HeapEntry {
+            value: unsafe { crate::abi::praxis_alloc_closure(ctx, std::ptr::null(), 0) },
+            descriptor: &crate::closures::CLOSURE,
         };
-        let f = HeapEntry {
-            value: rt.alloc_bool(false),
-            descriptor: &crate::scalars::BOOL,
-        };
-        assert_eq!(t.cmp(&f), std::cmp::Ordering::Equal);
+        let a = make(&mut ctx);
+        let b = make(&mut ctx);
+        assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal);
     }
 
     /// A `MinHeap[Text]` pops lexicographically. The end-to-end proof that the

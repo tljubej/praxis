@@ -1,0 +1,105 @@
+// AoC corpus fixture: a collection built at a size (ADR-146).
+//
+// `Grid()` used to be the only grid a program could construct, and it is 0x0 —
+// so the *working* grid an algorithm allocates for itself was unwritable, and
+// day 12's packing search hand-rolled a `Vec[Bool]` with `y * w + x` at all four
+// of its use sites. This fixture is the code that omission forced, written the
+// way the language spells it now: an occupancy board, a visited mask, a distance
+// table, and a DP row.
+//
+// It is also the aliasing rule's fixture. `Vec(n, fill)` stores one value n
+// times rather than n copies of it, which is the reference semantics `var b = a`
+// already has — stated at a new site, and pinned here so that a later change to
+// deep-copy the fill is a failing test rather than a silent change of meaning.
+//
+// No input. Output: one line per section below.
+
+// A board the algorithm allocates, marks, and reads back through the bounds
+// check `contains` is — the four things the hand-rolled `Vec[Bool]` could not do.
+fn painted(w: Int, h: Int) -> Int {
+    var board = Grid(w, h, '.')
+    var y = 0
+    while y < h {
+        board[y % w, y] = '#'
+        y = y + 1
+    }
+    var painted = 0
+    for cell in board.cells() {
+        if cell == '#' { painted = painted + 1 }
+    }
+    painted
+}
+
+// A visited mask over a grid, which is the shape every flood fill and every
+// breadth-first walk over a board wants. `neighbors4` answers the in-bounds
+// neighbours, so the mask never needs its own bounds test.
+fn reachable_from(g: Grid[Char], sx: Int, sy: Int) -> Int {
+    var seen = Grid(g.width(), g.height(), false)
+    var frontier = Vec()
+    frontier.push((sx, sy))
+    seen[sx, sy] = true
+    var count = 0
+    var at = 0
+    while at < frontier.len() {
+        var cur = frontier[at]
+        at = at + 1
+        count = count + 1
+        for n in g.neighbors4(cur) {
+            if g[n.0, n.1] != '#' && !seen[n.0, n.1] {
+                seen[n.0, n.1] = true
+                frontier.push(n)
+            }
+        }
+    }
+    count
+}
+
+// A DP row: `Vec(n, fill)` in the one line that used to be a four-line `while`
+// loop pushing the fill. This is the number of ways to make `target` from the
+// given coins, which needs the row to start at "one way to make zero".
+fn ways_to_make(target: Int, coins: Vec[Int]) -> Int {
+    var ways = Vec(target + 1, 0)
+    ways[0] = 1
+    for c in coins {
+        var v = c
+        while v <= target {
+            ways[v] = ways[v] + ways[v - c]
+            v = v + 1
+        }
+    }
+    ways[target]
+}
+
+var board = Grid(3, 3, '.')
+board[1, 1] = '#'
+out(board)
+out(board.width())
+out(board.height())
+
+out(painted(4, 6))
+
+var maze = Grid(4, 3, '.')
+maze[1, 0] = '#'
+maze[1, 1] = '#'
+maze[1, 2] = '#'
+out(reachable_from(maze, 0, 0))
+out(reachable_from(maze, 3, 0))
+
+out(ways_to_make(10, [1, 2, 5]))
+out(Vec(4, 0))
+out(Vec(0, 9))
+
+// The empty forms are unchanged, and the arity is what chooses between them.
+out(Vec[Int]())
+out(Grid[Int]().width())
+
+// One value stored n times, not n values. A push into any cell is visible from
+// every other, because they are the same collection.
+var cells = Grid(2, 2, Vec())
+cells[0, 0].push(1)
+cells[1, 1].push(2)
+out(cells[0, 1])
+
+var shared = Vec(3, Vec())
+shared[2].push(7)
+out(shared)

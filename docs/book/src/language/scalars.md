@@ -2,16 +2,15 @@
 
 Praxis has six scalar types: `Int`, `Float`, `Bool`, `Char`, `Text` and `Unit`.
 They are the leaves of every value the language builds — the elements of a
-`Vec[Int]`, the keys of a `Map[Text, Int]`, the fields of a record. Five of them
-have a literal you can write. `Char` does not, and the spelling that replaces it
-is one character wide.
+`Vec[Int]`, the keys of a `Map[Text, Int]`, the fields of a record. All six have
+a literal you can write.
 
 | Type | Payload | Written as |
 |---|---|---|
 | `Int` | signed 64-bit | `42`, `1_000_000` |
 | `Float` | IEEE-754 binary64 | `3.5`, `1e10`, `2e-3` |
 | `Bool` | true or false | `true`, `false` |
-| `Char` | one Unicode scalar value | *no literal* — `"p"[0]` |
+| `Char` | one Unicode scalar value | `'p'` |
 | `Text` | immutable UTF-8 | `"praxis"` |
 | `Unit` | nothing | `()` |
 
@@ -21,7 +20,7 @@ var n: Int = 42
 var f: Float = 3.5
 var b: Bool = true
 var t: Text = "praxis"
-var c: Char = "p"[0]
+var c: Char = 'p'
 var u: Unit = ()
 
 out(n)
@@ -102,20 +101,27 @@ few diagnostics a clean `check` will not show you and `praxis run` will.
 the literal is what gets reported. `0 - 9223372036854775807 - 1` computes that
 value instead.
 
-A text literal is a double-quoted run of UTF-8. Six escapes are decoded: `\n`,
-`\t`, `\r`, `\"`, `\\` and `\0`. Anything else after a backslash is
-`T005 invalid escape in text literal` and stops compilation, with one exception:
-`` \` `` is accepted by the lexer — backticks delimit
-[parser templates](../input/templates.md) — and is *not* decoded, so it stays in
-the text as two characters. There is no `\u{...}` escape.
+A text literal is a double-quoted run of UTF-8. Eight escapes are decoded:
+`\n`, `\t`, `\r`, `\"`, `\\`, `\0`, `\{` and `\}`. The last two exist because a `{`
+opens an [interpolation hole](text.md#interpolation--renders-a-value), so a
+literal brace needs a spelling; a `}` closes nothing outside a hole and so needs
+no escape, but `\}` is accepted anyway to let a pair be written symmetrically.
+Anything else after a backslash is `T005 invalid escape in text literal` and
+stops compilation, with one exception: `` \` `` is accepted by the lexer —
+backticks delimit [parser templates](../input/templates.md) — and is *not*
+decoded, so it stays in the text as two characters. There is no `\u{...}`
+escape.
 
 ```praxis
-// The six escapes a text literal decodes.
+// The eight escapes a text literal decodes.
 out("a\tb")
 out("line\nbreak")
 out("quote: \" backslash: \\")
 out("a\rb".len())
 out("a\0b".len())
+
+// `\{` and `\}` are literal braces: a bare `{` opens an interpolation hole.
+out("a hole is \{expr\}")
 
 // A `\`` is accepted and left alone: two characters, not one.
 out("a\`b".len())
@@ -128,81 +134,110 @@ break
 quote: " backslash: \
 3
 3
+a hole is {expr}
 4
 ```
 
-## There is no character literal
+## A character literal
 
-`'a'` is not syntax. The single quote is not a token the lexer knows, so a
-program that writes one gets `T003` at the quote and then a cascade as the
-parser tries to make something of what is left between the quotes:
+A `Char` is written in single quotes: `'#'`, `'a'`, `' '`. It holds exactly one
+Unicode scalar value, and the escapes are a text literal's plus `\'` for the
+quote itself — `\'`, `\\`, `\n`, `\r`, `\t`, `\0`, `\"`, `\{` and `\}`. There are
+no `\x` or `\u{…}` escapes, in a character literal or in a text one.
 
 ```praxis
-// There is no character literal. `'a'` is not syntax.
-var c = 'a'
-out(c)
+// A character literal is one Unicode scalar in single quotes.
+var wall = '#'
+out(wall)
+out(wall == "#"[0])
+
+// The escapes are a text literal's, plus `\'` for the quote itself.
+out('\n'.to_int())
+out('\t'.to_int())
+out('\''.to_int())
+out('\\'.to_int())
+
+// One scalar, not one byte: `é` is a single character.
+out('é'.to_int())
+
+// And a `Char` can be matched on, which is what the literal is for.
+fn cell(c: Char) -> Text {
+    match c {
+        '#' => "wall"
+        '.' => "open"
+        _ => "something else"
+    }
+}
+
+for c in "#.x" {
+    out(cell(c))
+}
 ```
 
-```console
-$ praxis check char-literal.px --color never
-error[T003]: unexpected character in source
-
-  char-literal.px:2:9
-  2 | var c = 'a'
-    |         ^ unexpected character in source
-
-error[P001]: expected an expression
-
-  char-literal.px:2:9
-  2 | var c = 'a'
-    |         ^ expected an expression
-
-error[P002]: expected `;` or a line break between statements
-
-  char-literal.px:2:10
-  2 | var c = 'a'
-    |          ^ expected `;` or a line break between statements
-
-error[N001]: `a` is not defined
-
-  char-literal.px:2:10
-  2 | var c = 'a'
-    |          ^ `a` is not defined
-
-help: did you mean `c`?
-      c
-
-error[T003]: unexpected character in source
-
-  char-literal.px:2:11
-  2 | var c = 'a'
-    |           ^ unexpected character in source
-
-error[P002]: expected `;` or a line break between statements
-
-  char-literal.px:2:11
-  2 | var c = 'a'
-    |           ^ expected `;` or a line break between statements
-
-error[P001]: expected an expression
-
-  char-literal.px:2:11
-  2 | var c = 'a'
-    |           ^ expected an expression
-
-praxis: 7 error(s)
+```text
+#
+true
+10
+9
+39
+92
+233
+wall
+open
+something else
 ```
 
-The spelling that works is a one-character text and a subscript. `"#"[0]` names
-the `Char` `#`, `" "[0]` names a space, `"0"[0]` names the digit zero. That is
-what lets a `Grid[Char]` cell be compared with a character the program chose
-rather than only with another cell.
+Exactly one character is the whole rule, and the lexer holds it. `''` names no
+character and `'ab'` names two, so both are refused where they are written
+rather than becoming something the program did not mean:
 
-Correcting the type of `t[i]` without inventing a literal at the same time is
-[ADR-086](../../../decisions/086-a-text-subscript-answers-a-char.md), which
-defers the literal itself as the open decision D19 rather than smuggling it in.
-Everything below the parser for it already exists and is dead code: `Lit::Char`
-is in the HIR and nothing in the tree constructs it.
+```praxis
+// A character literal names exactly one character. These are lexical errors,
+// which is the whole point: `"##"[0]` was a well-typed program that quietly
+// meant `#`, and `""[0]` was a fault at run time.
+var two = '##'
+var none = ''
+out(two)
+out(none)
+```
+
+```text
+error[T007]: a character literal holds exactly one character
+
+  char-literal-not-one-character.px:4:11
+  4 | var two = '##'
+    |           ^^^^ a character literal holds exactly one character
+
+help: write it as a text literal
+      "##"
+
+error[T007]: empty character literal: `''` names no character
+
+  char-literal-not-one-character.px:5:12
+  5 | var none = ''
+    |            ^^ empty character literal: `''` names no character
+
+praxis: 2 error(s)
+```
+
+That is the point of the literal rather than a convenience. `"##"[0]` was a
+well-typed program that quietly meant `#`, and `""[0]` was a fault at run time;
+neither is expressible as a literal.
+
+`"#"[0]` still works and still means what it did. It is the spelling for a
+character read out of a text the program did not write down — a line it just
+parsed, a name it was given — and the literal is the spelling for one the
+program chose. `t[i] == '#'` is the common shape, with one of each.
+
+The literal is also a *load* rather than a call.
+[ADR-100](../../../decisions/100-a-small-int-is-one-object-and-a-literal-is-a-load.md)
+made an `Int` literal two loads out of an interned table, and
+[ADR-141](../../../decisions/141-a-character-is-one-token-and-a-literal-is-a-load.md)
+does the same for an ASCII `Char`, where `"#"[0]` was a runtime call that
+re-evaluated on every execution.
+
+The literal is what makes a `Char` matchable, which is the part that is not
+cosmetic — see [pattern matching](pattern-matching.md).
 
 ## Every value is an object
 
@@ -237,12 +272,12 @@ out(3.5 != 3.6)
 out(true == true)
 out(() == ())
 out("abc" == "ab" + "c")
-out("x"[0] == "x"[0])
+out('x' == 'x')
 
 out(1 < 2)
 out(1.5 <= 1.5)
 out("Z" < "a")
-out("a"[0] < "b"[0])
+out('a' < 'b')
 ```
 
 ```text

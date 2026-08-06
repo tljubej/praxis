@@ -49,8 +49,55 @@ pub enum SyntaxKind {
     /// of the dot, or an exponent. A `.` immediately followed by another `.` is
     /// a range (`..` / `..=`), never part of a float.
     FloatLit,
-    /// A double-quoted text literal, e.g. `"hello"`.
+    /// A double-quoted text literal with **no interpolation holes**, e.g.
+    /// `"hello"` — the whole literal, quotes included.
+    ///
+    /// A literal that holds a `{` is not this kind: it is an
+    /// [`InterpOpen`](Self::InterpOpen)/[`InterpMiddle`](Self::InterpMiddle)/[`InterpClose`](Self::InterpClose)
+    /// run with the holes' ordinary tokens between the fragments (§8.1,
+    /// ADR-147). **An unterminated literal is this kind either way**, holes or
+    /// not: the lexer only splits a literal it has already proved closes on its
+    /// line, so `T004` reports exactly the token it always did.
     TextLit,
+    /// The first fragment of an interpolated text literal: the opening `"`, the
+    /// literal text before the first hole, and the `{` that opens it — e.g.
+    /// `"Part 2: {` (§8.1, ADR-147).
+    ///
+    /// The delimiters are *inside* the token, one byte at each end, so the three
+    /// fragment kinds decode identically (`&text[1..len-1]` through
+    /// [`praxis_syntax::literal::decode_text_body`]) and the token stream still
+    /// tiles the source (ADR-003).
+    ///
+    /// The fragments are separate tokens rather than one opaque literal because
+    /// a name inside a hole has to be a **token at its own range** in the
+    /// lossless tree: that is the only way `praxis-hir`'s capture analysis,
+    /// which looks token ranges up in the resolver's map, sees it. A closure
+    /// body of `"{outer}"` would otherwise capture nothing and read a slot
+    /// nothing filled (ADR-147 decision 1).
+    ///
+    /// [`praxis_syntax::literal::decode_text_body`]: crate::literal::decode_text_body
+    InterpOpen,
+    /// A fragment between two holes: the `}` closing one, the literal text, and
+    /// the `{` opening the next — e.g. `} and {`. Empty text is ordinary
+    /// (`"{a}{b}"` has the two-byte fragment `}{`).
+    InterpMiddle,
+    /// The last fragment: the `}` closing the final hole, the trailing literal
+    /// text, and the closing `"` — e.g. `}!"`.
+    InterpClose,
+    /// A single-quoted character literal, e.g. `'#'` (ADR-141).
+    ///
+    /// Exactly **one** Unicode scalar, and the lexer is where that is decided:
+    /// `''` and `'ab'` are `T007`, not a silently truncated `Char`. Its escapes
+    /// are the text literal's — `\n \r \t \0 \\ \"` — plus `\'`, and there are
+    /// no `\x`/`\u{…}` forms, because two escape tables for one language is the
+    /// drift `praxis_syntax::literal`'s module doc was written to forbid.
+    ///
+    /// **This kind means the literal closed.** An unterminated run is still
+    /// pushed as a `CharLit` (losslessness, ADR-003) after a `T006`, so a
+    /// consumer must ask [`praxis_syntax::literal::decode_char_literal`] rather
+    /// than assume; there is no second kind here the way there is for a
+    /// template, because a `'` cannot open a sublanguage nobody scanned.
+    CharLit,
     /// A backtick-delimited parser template, e.g. `` `{x:int}` ``. The whole
     /// template is one token in Milestone 1; its interior is re-scanned by the
     /// input-parser lexer in Milestone 6 (§7).
@@ -311,8 +358,24 @@ pub enum SyntaxKind {
     ARG_LIST,
     /// A path: an identifier or a dotted name.
     PATH_EXPR,
-    /// A literal value (`IntLit`/`TextLit`/`true`/`false`/backtick template).
+    /// A literal value
+    /// (`IntLit`/`FloatLit`/`TextLit`/`CharLit`/`true`/`false`/backtick
+    /// template).
     LITERAL,
+    /// An interpolated text literal: `"a{x}b"` (§8.1, ADR-147).
+    ///
+    /// Its children alternate — [`InterpOpen`](Self::InterpOpen), an expression,
+    /// then zero or more [`InterpMiddle`](Self::InterpMiddle)/expression pairs,
+    /// then [`InterpClose`](Self::InterpClose) — and the expressions are
+    /// ordinary expression subtrees, not a sublanguage.
+    ///
+    /// Its own kind rather than a [`LITERAL`](Self::LITERAL) with children,
+    /// because it is not one: a `LITERAL` is a leaf whose value the lowerer
+    /// reads off a token, and every walk in the workspace that finds names,
+    /// resolves them, renames them or captures them has to descend into a hole.
+    /// Giving `LITERAL` children would have made "does this node contain a name"
+    /// a question with two answers.
+    INTERP_EXPR,
     /// A reference to a name (identifier used as a value).
     NAME_REF,
     /// A binary operator expression, e.g. `a + b`.
@@ -552,6 +615,11 @@ mod tests {
         // Tokens and trivia are not nodes; everything from SOURCE_FILE up is.
         assert!(SyntaxKind::Ident.is_token());
         assert!(SyntaxKind::IntLit.is_token());
+        // A newly inserted token kind lands *before* `SOURCE_FILE` or it is
+        // silently reclassified: `is_node` is `self >= SOURCE_FILE`, so the
+        // partition is decided by declaration order and nothing else says so.
+        assert!(SyntaxKind::CharLit.is_token());
+        assert!(!SyntaxKind::CharLit.is_node());
         assert!(SyntaxKind::KW_VAR.is_token());
         assert!(SyntaxKind::PLUS.is_token());
         assert!(SyntaxKind::EOF.is_token());

@@ -150,6 +150,17 @@ unpushed value first.
 - **ADR-057's "`item` is not unified at discharge" is superseded**, and its
   Decision 5 now has two callers rather than one. The sentence in `pin_to_level`'s
   doc comment that says TY-30 is "the one caller today" is amended with it.
+- **A *method* on the item was an ICE until
+  [ADR-137](./137-a-deferred-receiver-resolves-in-rounds-and-the-channel-runs-to-a-fixpoint.md).**
+  Decision 2 pins the fresh item variable, and this ADR justifies it by saying
+  the item is pinned "for the same reason a method receiver is" — which is
+  correct, and was only ever observable with arithmetic. `for row in v {
+  row.len() }` was `check` exit 0 followed by an `internal compiler error`,
+  because the item's `HasMethod` constraint sat one discharge round behind the
+  `Iterable` constraint that resolves the item at all. The example chosen for
+  this ADR, `docs/book/examples/types-a/generic-iterable.px`, sums the item, and
+  that is exactly why the gap survived: the one operation on an item that does
+  not go through the catalog is the one the example does.
 - **`iterable_is_answered_by_iter_item` and
   `unresolved_var_is_optimistically_iterable` still hold** — the optimism did not
   change, only what it answers *with*.

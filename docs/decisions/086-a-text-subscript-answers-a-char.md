@@ -4,6 +4,11 @@
 **Status:** accepted — implemented
 **Milestone:** Repair (register REP-65)
 **Supersedes:** nothing. Amends §4.13, which said nothing about indexing.
+**Amended by:** [ADR-141](./141-a-character-is-one-token-and-a-literal-is-a-load.md)
+(2026-08-06) — D19 is answered and the character literal exists.
+[ADR-143](./143-the-to-text-family-is-int-float-and-char.md) (2026-08-06) —
+`Char.to_text()` exists. Both bullets below are kept with dated notes rather than
+deleted.
 
 ## Context
 
@@ -62,9 +67,12 @@ was rendered as a type it is not, and the fix was to make the output match the
 type rather than teach the reader to supply context. Here the *static type* is
 wrong, not only the rendering: `out(b[4])` printing `100` is `out(1.0)` printing
 `1` with the mistake moved from the formatter into the catalog. ADR-083's reason
-for rejecting "let the context say what it is" applies verbatim — §16.3 makes the
-rendered form load-bearing as a **sort key** for `Map`, `Set` and `Counter`, so
-the rendering is an answer and not only a printing.
+for rejecting "let the context say what it is" applies verbatim: the rendered
+form has to be unambiguous on its own, because `to_text()` answers it and a
+written-down expected output is compared against it. (ADR-083's *other* leg — the
+rendered form as a container's sort key — was removed by
+[ADR-138](./138-a-container-orders-by-the-value-and-not-by-its-printing.md); this
+one is untouched.)
 
 ### 2. Exactly two conversion rows: `Char.to_int()` and `Int.to_char()`
 
@@ -107,6 +115,18 @@ HIR and *nothing constructs it* — its only readers are exhaustive-match arms �
 and `AllocKind::Char`'s MIR lowering and its Cranelift codegen are complete. D19
 is a lexer, a parser arm, and `lower_lit`. Nothing else.
 
+> **Answered by [ADR-141](./141-a-character-is-one-token-and-a-literal-is-a-load.md)
+> (2026-08-06).** D19 is closed: `'#'` is a token, an expression and a pattern.
+> The closing sentence above — "D19 is a lexer, a parser arm, and `lower_lit`.
+> Nothing else." — **was wrong by three things**, and that is the part worth
+> keeping. It missed `GcConst::Char` and its codegen arm, without which the
+> literal lowers to an allocation plus a `CheckFault` and is *slower* than the
+> workaround it replaces; and it missed that MIR's `Lit::Char` pattern-test arm
+> was an unconditional `Jump { target: on_success }`, so the syntax alone would
+> have made every `Char` pattern match every value. The under-scoping was copied
+> forward verbatim into handover 31, which is how an ADR's estimate becomes a
+> plan.
+
 ### Why not `Char.to_text()`, and why not the character-class family
 
 - **`Char.to_text()`** is one third of a gap §4.13 records in the design doc's
@@ -120,11 +140,26 @@ is a lexer, a parser arm, and `lower_lit`. Nothing else.
   **The quoted sentence is no longer true as written**, and the argument above
   survives it. `Float.to_text()` exists and prints `5.0`; `Int.to_text()` still
   reports `Y110`, and §8.1's interpolation is still specified and unimplemented.
+  (Both have since landed: [ADR-143](./143-the-to-text-family-is-int-float-and-char.md)
+  for the two `to_text` rows, and
+  [ADR-147](./147-a-hole-renders-anything-because-the-program-wrote-the-hole.md)
+  for interpolation.)
   So the family is two thirds open rather than three, and the reason for taking
   it whole is unchanged. (The traffic in the *other* direction was answered
   separately: `Text.int()`/`Text.float()` are ADR-136, and they are not part of
   this family — they read a number out of a text rather than writing one into
   it.)
+
+  **2026-08-06 ([ADR-143](./143-the-to-text-family-is-int-float-and-char.md)).**
+  The family was taken whole, and the answer was to add the two missing rows
+  rather than keep the third out. The second-spelling half of the argument did
+  not survive contact: ADR-077 refused two *accessors*, and
+  `t[i].to_text() == "#"` is not so much a second way to ask whether a character
+  is a `#` as a worse one — it allocates a `Text` to answer what a four-byte
+  compare already answers, and after ADR-141's literal it is a third form nobody
+  writes. The question the row is there for is producing output text, which had
+  no spelling at all. What the family still refuses is a universal
+  `T.to_text()`, for ADR-085 decision 2's reason.
 - **`is_digit`, `is_alpha`, `to_upper`, `to_lower`** have no design-doc surface
   asking for them, and `to_int()` expresses every one. Inventing four rows here
   is exactly what REP-46 refused to do with `wrapping_sub`/`wrapping_mul`.
@@ -159,8 +194,13 @@ reason where they meet the gap.
   `symbol_address` match, which is what REP-46's trio did. `RUNTIME_ABI_VERSION`
   is about `#[repr(C)]` layout (ADR-075) and no such type changed.
 - **`Char` ordering and rendering were already right and are untouched.**
-  `CHAR.compare` is `u32` code-point order (ADR-045); containers order by the
-  rendered form, and UTF-8 byte order *is* code-point order, so the two agree.
+  `CHAR.compare` is `u32` code-point order (ADR-045). Containers ordered by the
+  rendered form, and UTF-8 byte order *is* code-point order, so the two agreed —
+  which is why
+  [ADR-138](./138-a-container-orders-by-the-value-and-not-by-its-printing.md)
+  moved no `Char` or `Text` output at all when it made containers order by the
+  value. This conclusion survives that change verbatim, and it is worth saying so
+  rather than assuming it.
 - Two observations recorded rather than fixed, neither caused by this row:
   a `Vec[Char]` of `a` and a `Vec[Text]` of `"a"` both print `[a]` (ADR-083's
   round-trip rule cannot apply to a type with no literal to read back into —

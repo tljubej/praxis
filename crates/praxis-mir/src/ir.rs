@@ -41,6 +41,12 @@ pub struct Function {
     /// threaded to the backend so the crash debugger can separate the two in
     /// its `locals` display and name temps with their materializing expression.
     /// `Scalar` locals (which the backend never shows) default to `Temp`.
+    ///
+    /// `User` means every binding form ADR-125 lists — a `var`, a parameter, a
+    /// `for` variable and a name a pattern introduces — and nothing else. A
+    /// `User` local therefore always has a name; [`crate::verify`] enforces it,
+    /// because a `User` local without one is exactly the state that renders
+    /// `? = value` in a crash snapshot (ADR-139).
     pub debug_kinds: Vec<LocalDebugKind>,
     /// Per-local source span `[start, end)` (byte offsets) for debugger
     /// provenance — the `@ "expr"` the crash debugger prints for a temp. User
@@ -706,6 +712,22 @@ pub enum GcConst {
     /// result, `contains`, `is_empty` — is a `Scalar(Bool)` the backend
     /// re-boxes through [`Inst::Materialize`], which does not know the value.
     Bool(bool),
+    /// A `Char` inside `praxis_runtime::small_char`'s interned range, for
+    /// [`SmallInt`](Self::SmallInt)'s reason and read the same way: the backend
+    /// loads `ctx.small_chars` and indexes it by `small_char::index_of(code)`,
+    /// an offset it computes at compile time from the function the runtime
+    /// allocates through.
+    ///
+    /// The range is `0..=127`, so a literal above U+007F gets no constant and
+    /// takes `AllocKind::Char` — a real call, and a `CheckFault` after it,
+    /// because `praxis_alloc_char` validates its Unicode scalar. That asymmetry
+    /// is the table's, not this enum's, and [`GcConst::small_char`] is where it
+    /// is decided.
+    ///
+    /// ADR-107 Decision 2 predicted this variant in as many words and declined
+    /// to write it, because there was no character literal to produce one.
+    /// ADR-141 is that literal.
+    Char(u32),
 }
 
 impl GcConst {
@@ -734,6 +756,30 @@ impl GcConst {
         // this stays `const` so the range question can be asked at compile time.
         if praxis_runtime::small_int::index_of(value).is_some() {
             Some(GcConst::SmallInt(value))
+        } else {
+            None
+        }
+    }
+
+    /// [`GcConst::Char`] for a code point the runtime's table actually holds,
+    /// and `None` for one it does not.
+    ///
+    /// [`small_int`](Self::small_int)'s discipline, at a much lower ceiling:
+    /// `small_char`'s range stops at U+007F, so the *common* literal is in range
+    /// and everything above the ASCII block is not. A site that decided for
+    /// itself that its character "is obviously small" would emit a table read
+    /// for a slot that does not exist, and the failure would be the backend's
+    /// `expect` firing — or worse, a load past the end of a 128-element array.
+    /// Asking `index_of` here means a caller holding a `GcConst::Char` is
+    /// holding proof the slot exists.
+    #[inline]
+    #[must_use]
+    pub const fn small_char(code: u32) -> Option<GcConst> {
+        // `is_some()` rather than `map`, for `small_int`'s reason: `Option::map`
+        // is not a `const fn`, and this stays `const` so the range question can
+        // be asked at compile time.
+        if praxis_runtime::small_char::index_of(code).is_some() {
+            Some(GcConst::Char(code))
         } else {
             None
         }
@@ -819,10 +865,61 @@ pub enum AllocKind {
     /// element type is unknown here (a pipeline's result Vec), and the backend
     /// passes a null descriptor — which is exactly what the wrapper's own
     /// "unknown element" contract expects.
+    ///
+    /// The type arguments stay static; the *sizes and the fill* of a sized
+    /// construction (ADR-146) are `init`'s runtime operands, because they are
+    /// arbitrary expressions.
     Collection {
         ctor: praxis_types::CollectionCtor,
         args: Vec<MirType>,
+        init: CollectionInit,
     },
+}
+
+/// How an [`AllocKind::Collection`] is initialized: empty, or filled at a size
+/// (ADR-146's `Vec(n, fill)` and `Grid(w, h, fill)`).
+///
+/// **The variant is the arity.** An operand list of the wrong length for the
+/// constructor that carries it is not a mistake the builder can make and the
+/// verifier has to catch — it is not expressible. That is why this is an enum of
+/// named fields rather than a `Vec<LocalId>` beside a count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CollectionInit {
+    /// `Vec()`, `Grid()`, `Map()`, a list literal, a pipeline's collect target —
+    /// every construction that existed before ADR-146, and every one of the
+    /// seven constructors that has no sized form.
+    Empty,
+    /// `Vec(count, fill)`: `count` slots, each holding `fill`.
+    Filled { count: LocalId, fill: LocalId },
+    /// `Grid(width, height, fill)`: `width × height` cells, each holding `fill`.
+    FilledGrid {
+        width: LocalId,
+        height: LocalId,
+        fill: LocalId,
+    },
+}
+
+impl CollectionInit {
+    /// The runtime operands, in the order the wrapper takes them after its
+    /// element descriptor.
+    ///
+    /// This is the one statement of the fact. Liveness reads it to root the fill
+    /// across the allocating call, the verifier reads it to range-check the
+    /// locals, and the codegen reads the variant to build the same sequence —
+    /// so a variant that grew an operand cannot be rooted in one place and
+    /// forgotten in another.
+    #[must_use]
+    pub fn operands(&self) -> Vec<LocalId> {
+        match self {
+            CollectionInit::Empty => Vec::new(),
+            CollectionInit::Filled { count, fill } => vec![*count, *fill],
+            CollectionInit::FilledGrid {
+                width,
+                height,
+                fill,
+            } => vec![*width, *height, *fill],
+        }
+    }
 }
 
 impl AllocKind {
@@ -832,6 +929,12 @@ impl AllocKind {
     /// `praxis_*_new` wrapper — `Range` and `Seq`, which the backend refuses
     /// (they are unreachable from source: `collection_from_name` resolves the
     /// *type*, but no construction lowering exists).
+    ///
+    /// A *filled* collection answers its own wrapper, which is what gives
+    /// `Inst::fault_reason` — and therefore the verifier's `CheckFault`
+    /// requirement — the right answer for a sized construction with nothing
+    /// restating it (MIR-10). `praxis_vec_new` only allocates; `praxis_vec_filled`
+    /// faults on a negative count, and the difference is read off the row here.
     #[inline]
     #[must_use]
     pub const fn constructor(&self) -> Option<RuntimeSymbol> {
@@ -846,7 +949,19 @@ impl AllocKind {
             AllocKind::Enum { .. } => Some(RuntimeSymbol::AllocEnum),
             AllocKind::Tuple { .. } => Some(RuntimeSymbol::AllocTuple),
             AllocKind::Closure { .. } => Some(RuntimeSymbol::AllocClosure),
-            AllocKind::Collection { ctor, .. } => collection_new_symbol(*ctor),
+            AllocKind::Collection {
+                ctor,
+                init: CollectionInit::Empty,
+                ..
+            } => collection_new_symbol(*ctor),
+            AllocKind::Collection {
+                init: CollectionInit::Filled { .. },
+                ..
+            } => Some(RuntimeSymbol::VecFilled),
+            AllocKind::Collection {
+                init: CollectionInit::FilledGrid { .. },
+                ..
+            } => Some(RuntimeSymbol::GridFilled),
         }
     }
 
@@ -878,6 +993,10 @@ impl AllocKind {
 
 /// The `praxis_*_new` wrapper for a collection constructor, or `None` when
 /// there is none.
+///
+/// This answers the **empty** form only. A sized construction (ADR-146) names
+/// its own wrapper from [`CollectionInit`], because the wrapper differs by
+/// initialization and not by constructor.
 ///
 /// `Range` and `Seq` have no construction wrapper: a range is built by
 /// `praxis_range_new` from its endpoints (an [`Inst::Call`], not an `Alloc`),
@@ -1009,6 +1128,11 @@ impl Function {
     /// Append a new local, returning its id. `debug_name`/`debug_kind`/`debug_span`
     /// are the per-local debugger metadata (name, user-vs-temp classification,
     /// source span); only meaningful for `Gc` locals (the backend skips others).
+    ///
+    /// A `Gc` local classified [`LocalDebugKind::User`] must carry a name:
+    /// `User` covers every binding form ADR-125 lists, all of which the
+    /// programmer wrote a name for, and [`crate::verify`] rejects a function
+    /// that allocates one without.
     pub fn new_local(
         &mut self,
         kind: LocalKind,
@@ -1057,6 +1181,44 @@ impl Function {
     /// (scalar scratch, the return slot).
     pub fn debug_span(&self, local: LocalId) -> Option<(u32, u32)> {
         self.debug_spans.get(local.0 as usize).copied().flatten()
+    }
+
+    /// Retitle a compiler temp as the binding that *aliases* it: a pattern name
+    /// bound by reference (`match o { Some(p) => … }`) gets no slot of its own,
+    /// it reuses the one the payload was extracted into, and that slot is what
+    /// the crash snapshot shows.
+    ///
+    /// The aliasing rule this encodes: **a binding that owns a slot names it; a
+    /// binding that aliases another binding's slot does not rename it.** In
+    /// `match v { n => … }` the scrutinee local *is* `v`'s own, so relabelling
+    /// it `n` would erase a binding the programmer did write and leave two
+    /// names claiming one slot. That case is the no-op below, which is why the
+    /// call is unconditional at the aliasing site and the decision lives here.
+    ///
+    /// The type is upgraded only from [`MirType::Opaque`]: a slot that already
+    /// knows what it holds knows better than the pattern's declared type, which
+    /// may still be an unresolved inference variable.
+    pub fn adopt_binding_name(
+        &mut self,
+        local: LocalId,
+        name: &str,
+        ty: MirType,
+        span: (u32, u32),
+    ) {
+        let i = local.0 as usize;
+        if self.debug_kinds.get(i).copied() == Some(LocalDebugKind::User) {
+            // Already a binding's slot; see the aliasing rule above.
+            return;
+        }
+        let Some(slot) = self.locals.get_mut(i) else {
+            return;
+        };
+        if matches!(slot.ty, MirType::Opaque) {
+            slot.ty = ty;
+        }
+        self.debug_names[i] = Some(name.to_string());
+        self.debug_kinds[i] = LocalDebugKind::User;
+        self.debug_spans[i] = Some(span);
     }
 
     /// The `Scalar` local feeding `local`'s debug slot, and what kind of
@@ -1155,6 +1317,31 @@ mod tests {
         // `MAX_PLANS` is `1 << 20`, so this is reachable in a long-lived process
         // rather than hypothetical.
         assert_eq!(GcConst::small_int(1 << 20), None);
+    }
+
+    /// The same rule for `Char` (ADR-141), where the ceiling is low enough that
+    /// a program *routinely* names a code point past it: `small_char` interns
+    /// `0..=127`, so `'#'` is a load and `'é'` is an allocation, and the
+    /// boundary between them is decided here rather than at the four sites that
+    /// would each have to know it.
+    #[test]
+    fn a_gc_const_char_cannot_name_a_slot_the_table_does_not_have() {
+        use praxis_runtime::small_char::SMALL_CHAR_MAX;
+
+        assert_eq!(GcConst::small_char(0), Some(GcConst::Char(0)));
+        assert_eq!(
+            GcConst::small_char(SMALL_CHAR_MAX),
+            Some(GcConst::Char(SMALL_CHAR_MAX)),
+            "the ceiling is in the table"
+        );
+        // There is no floor case: the payload is unsigned and 0 is the floor.
+        assert_eq!(GcConst::small_char(SMALL_CHAR_MAX + 1), None);
+        // `é` — one past the ASCII block, and the first thing a program written
+        // in most of the world's languages runs into.
+        assert_eq!(GcConst::small_char(0xE9), None);
+        // Outside the BMP, and one past the largest scalar there is.
+        assert_eq!(GcConst::small_char(0x1_F600), None);
+        assert_eq!(GcConst::small_char(0x11_0000), None);
     }
 
     /// A `Byte` payload has no boxing wrapper, and asking for one is refused

@@ -60,7 +60,8 @@ pub static VAR_CELL: TypeDescriptor = TypeDescriptor::builtin::<VarCellPayload>(
     var_cell_format,
     None,
     None,
-    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
+    // No container order: a `VarCell` is the compiler's box for a captured
+    // binding and never a user value, so it is never a key (ADR-138).
     None,
 );
 

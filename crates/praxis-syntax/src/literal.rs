@@ -1,4 +1,4 @@
-//! The one text-literal decoder for the whole workspace (§4.3).
+//! The one literal decoder for the whole workspace (§4.3).
 //!
 //! There were two, and they disagreed (IP-08). `praxis-hir`'s `unquote_text`
 //! stripped exactly one quote at each end and decoded `\n \t \r \" \\ \0`;
@@ -10,6 +10,13 @@
 //!
 //! `praxis-syntax` depends only on `praxis-source`, so both the HIR lowerer and
 //! the input-parser's capture-body parser can reach this.
+//!
+//! [`decode_char_literal`] is here for the same rule, before it has had a chance
+//! to be broken twice: a `'a'` is decoded by the **lexer** (which is where its
+//! one-scalar rule is enforced, ADR-141), by [`crate::SyntaxKind::CharLit`]'s
+//! expression lowering and by its pattern lowering. Three callers, one decoder,
+//! and one escape table — [`decode_escape`] — shared with `"…"` so the two
+//! spellings of `\n` cannot drift apart.
 
 /// Whether `raw` is a well-formed text literal: at least `""`, quoted at both
 /// ends.
@@ -32,22 +39,32 @@ pub fn unquote_text(raw: &str) -> String {
     if !is_text_literal(raw) {
         return raw.to_string();
     }
-    let inner = &raw[1..raw.len() - 1];
+    decode_text_body(&raw[1..raw.len() - 1])
+}
+
+/// Decode the escapes of a text literal's body — the part with the delimiters
+/// already off.
+///
+/// [`unquote_text`] is this with `"` stripped from each end. The other caller is
+/// an **interpolation fragment** (§8.1, ADR-147), whose delimiters are not both
+/// quotes: `"Part 2: {` opens with `"` and closes with `{`, and the fragments
+/// between holes open and close with braces. One byte still comes off each end,
+/// and the body is decoded by the same table — which is what keeps `"a\tb"` and
+/// `"a\tb{x}"` agreeing about what `\t` is.
+#[must_use]
+pub fn decode_text_body(inner: &str) -> String {
     let mut out = String::with_capacity(inner.len());
     let mut chars = inner.chars();
     while let Some(c) = chars.next() {
         if c == '\\' {
             match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('r') => out.push('\r'),
-                Some('"') => out.push('"'),
-                Some('\\') => out.push('\\'),
-                Some('0') => out.push('\0'),
-                Some(other) => {
-                    out.push('\\');
-                    out.push(other);
-                }
+                Some(esc) => match decode_escape(esc) {
+                    Some(decoded) => out.push(decoded),
+                    None => {
+                        out.push('\\');
+                        out.push(esc);
+                    }
+                },
                 None => out.push('\\'),
             }
         } else {
@@ -55,6 +72,98 @@ pub fn unquote_text(raw: &str) -> String {
         }
     }
     out
+}
+
+/// The escape table both literal spellings read (§4.3).
+///
+/// `None` means "not an escape this language recognizes", and the two callers
+/// answer it differently — see [`unquote_text`] and [`decode_char_literal`] —
+/// because they have different amounts of room to preserve the mistake in. What
+/// they may not do is disagree about what `\n` *is*, which is why the eight rows
+/// live here rather than in each of them.
+///
+/// `\{` and `\}` joined the table with §8.1's interpolation (ADR-147): a `{` in
+/// a text literal now opens a hole, so a literal brace needs a spelling. It is
+/// an escape rather than a doubling rule (`{{`) because the language has one
+/// escape table and every other literal brace-free character already goes
+/// through it — a doubling rule would be a second mechanism that only
+/// interpolation used. `\}` is accepted so a pair can be written symmetrically;
+/// it is not *required*, since outside a hole a `}` closes nothing.
+#[must_use]
+pub fn decode_escape(esc: char) -> Option<char> {
+    match esc {
+        'n' => Some('\n'),
+        't' => Some('\t'),
+        'r' => Some('\r'),
+        '"' => Some('"'),
+        '\\' => Some('\\'),
+        '0' => Some('\0'),
+        '{' => Some('{'),
+        '}' => Some('}'),
+        _ => None,
+    }
+}
+
+/// Why a `'…'` run is not a character literal.
+///
+/// Three variants rather than one, because the lexer's message is what makes the
+/// difference between the three legible: `''` names no character, `'ab'` names
+/// two, and `'a` never closed. Collapsing them would report the length rule for
+/// a literal whose real problem is a missing quote.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CharLitError {
+    /// No closing `'` — the token ran to the end of its line or the file.
+    Unterminated,
+    /// `''`: the body is empty, so there is no character to name.
+    Empty,
+    /// `'ab'`: the body decodes to more than one Unicode scalar.
+    ///
+    /// This is the variant the feature exists for. `"ab"[0]` is a well-typed
+    /// program that silently means `a`; `'ab'` is a lexical error.
+    TooLong,
+}
+
+/// Whether `raw` is a well-formed character literal: at least `''`, quoted at
+/// both ends.
+#[must_use]
+pub fn is_char_literal(raw: &str) -> bool {
+    raw.len() >= 2 && raw.starts_with('\'') && raw.ends_with('\'')
+}
+
+/// Strip the surrounding quotes and decode the escapes of a `'…'` literal,
+/// answering the **one** Unicode scalar it names (ADR-141).
+///
+/// One quote comes off each end and the body must decode to exactly one scalar;
+/// anything else is a [`CharLitError`], which is the whole of the one-character
+/// rule and the reason the lexer asks this function rather than counting bytes.
+/// `'é'` is one character, not two.
+///
+/// An **unrecognized** escape decodes to the escaped scalar itself (`'\q'` is
+/// `q`), where [`unquote_text`] preserves the backslash verbatim. The two differ
+/// deliberately: the lexer has already reported `T005` either way, and a char
+/// literal that preserved `\q` would then have two scalars in it and earn a
+/// second, spurious "not one character" on top of the report the author already
+/// has.
+pub fn decode_char_literal(raw: &str) -> Result<char, CharLitError> {
+    if !is_char_literal(raw) {
+        return Err(CharLitError::Unterminated);
+    }
+    let inner = &raw[1..raw.len() - 1];
+    let mut chars = inner.chars();
+    let decoded = match chars.next() {
+        None => return Err(CharLitError::Empty),
+        Some('\\') => match chars.next() {
+            // `'\` at the end of the body: the closing quote was eaten by the
+            // escape, so the literal never closed.
+            None => return Err(CharLitError::Unterminated),
+            Some(esc) => decode_escape(esc).unwrap_or(esc),
+        },
+        Some(c) => c,
+    };
+    if chars.next().is_some() {
+        return Err(CharLitError::TooLong);
+    }
+    Ok(decoded)
 }
 
 /// **These four are characterization tests, not gates.**
@@ -103,5 +212,66 @@ mod tests {
         assert!(!is_text_literal("\""));
         assert!(!is_text_literal("\"a"));
         assert!(is_text_literal("\"\""));
+    }
+
+    // --- the character literal (ADR-141) ---
+
+    #[test]
+    fn one_quote_comes_off_each_end_of_a_char() {
+        assert_eq!(decode_char_literal("'a'"), Ok('a'));
+        assert_eq!(decode_char_literal("'#'"), Ok('#'));
+        assert_eq!(decode_char_literal("'\"'"), Ok('"'));
+    }
+
+    #[test]
+    fn a_char_takes_texts_escapes_plus_the_quote() {
+        assert_eq!(decode_char_literal(r"'\n'"), Ok('\n'));
+        assert_eq!(decode_char_literal(r"'\t'"), Ok('\t'));
+        assert_eq!(decode_char_literal(r"'\r'"), Ok('\r'));
+        assert_eq!(decode_char_literal(r"'\0'"), Ok('\0'));
+        assert_eq!(decode_char_literal(r"'\\'"), Ok('\\'));
+        assert_eq!(decode_char_literal(r#"'\"'"#), Ok('"'));
+        // The one escape a `"…"` does not need and a `'…'` does.
+        assert_eq!(decode_char_literal(r"'\''"), Ok('\''));
+    }
+
+    /// A multi-byte scalar is **one** character. An implementation that counted
+    /// bytes would call `'é'` two and refuse it.
+    #[test]
+    fn a_multibyte_scalar_is_one_character() {
+        assert_eq!(decode_char_literal("'é'"), Ok('é'));
+        assert_eq!(decode_char_literal("'😀'"), Ok('😀'));
+        assert_eq!(decode_char_literal("'字'"), Ok('字'));
+    }
+
+    /// The three failure modes `"##"[0]` and `""[0]` used to have at run time,
+    /// or not at all (ADR-141 Decision 2).
+    #[test]
+    fn a_char_literal_names_exactly_one_character() {
+        assert_eq!(decode_char_literal("''"), Err(CharLitError::Empty));
+        assert_eq!(decode_char_literal("'ab'"), Err(CharLitError::TooLong));
+        assert_eq!(decode_char_literal("'éé'"), Err(CharLitError::TooLong));
+        assert_eq!(decode_char_literal(r"'\na'"), Err(CharLitError::TooLong));
+        assert_eq!(decode_char_literal("'a"), Err(CharLitError::Unterminated));
+        assert_eq!(decode_char_literal("'"), Err(CharLitError::Unterminated));
+        // `'\` — the escape ate the closing quote, so nothing closed it.
+        assert_eq!(decode_char_literal(r"'\'"), Err(CharLitError::Unterminated));
+    }
+
+    /// An unknown escape answers the escaped scalar, where a `"…"` keeps the
+    /// backslash. Both are already reported as `T005`; this is the difference
+    /// between one diagnostic and two.
+    #[test]
+    fn an_unknown_char_escape_is_the_escaped_scalar() {
+        assert_eq!(decode_char_literal(r"'\q'"), Ok('q'));
+        assert_eq!(unquote_text(r#""\q""#), r"\q");
+    }
+
+    #[test]
+    fn a_non_char_literal_is_not_a_char_literal() {
+        assert!(!is_char_literal("a"));
+        assert!(!is_char_literal("'"));
+        assert!(!is_char_literal("'a"));
+        assert!(is_char_literal("''"));
     }
 }

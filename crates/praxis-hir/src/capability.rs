@@ -39,6 +39,14 @@
 //!   it is a *different* set from [`supports_ord`]: `Text` is orderable and is
 //!   not a number (TY-31).
 //!
+//! [`supports_ord`] is also a different set from the runtime's
+//! `TypeDescriptor::compare`, and the split is deliberate: this module answers
+//! what the *source language* permits (`<`, `sorted()`, a heap element), while
+//! the descriptor callback answers what order a *container* walks and prints its
+//! keys in (ADR-138). Every type [`supports_hash_stable`] admits has the second
+//! — it must, or `for k in m` would have no deterministic answer — and a tuple
+//! is the case where the two come apart.
+//!
 //! A requirement about a type that is still a variable is not answered here. It
 //! is deferred, on `praxis_types::constraint`'s channel, and discharged when the
 //! variable resolves.
@@ -354,9 +362,19 @@ pub fn supports_numeric(db: &TypeDb, t: Type) -> bool {
 /// True iff values of type `t` are orderable (§5.4 `SupportsOrd`, ADR-045):
 /// usable in a heap, sortable, or comparable with `<`/`>`/`<=`/`>=`.
 ///
-/// The orderable types are the scalars whose descriptors declare a `compare`
-/// callback: `Int`/`UInt`/`Byte`/`Float`/`Char`/`Text`. **Nothing else is** —
-/// not tuples, not collections, not records or enums, not functions.
+/// The orderable types are the scalars `Int`/`UInt`/`Byte`/`Float`/`Char`/`Text`.
+/// **Nothing else is** — not tuples, not collections, not records or enums, not
+/// functions.
+///
+/// This is the **source language's** order, and it is deliberately a different
+/// and smaller set than the **container** order a runtime descriptor's `compare`
+/// callback carries (ADR-138 decision 3). A container order exists for every type
+/// a `Map` key or `Set` member can be — including `Bool`, `Unit`, `Range` and
+/// every tuple, record and enum — because `out(m)` and `for k in m` have to name
+/// a sequence and it has to be the same sequence on two runs. Having one does
+/// not make a type comparable with `<`: a tuple has a container order and
+/// `(1, 2) < (1, 3)` is still `Y006`, which is the line below, and widening this
+/// function to "whatever has a `compare`" would quietly legalise it.
 ///
 /// This used to answer *yes* for a tuple of orderable elements, and for a
 /// collection or record of them, on the reasonable ground that a lexicographic
@@ -936,5 +954,33 @@ mod tests {
         // Equality is unchanged: it *does* recurse, and it has a lowering.
         assert!(supports_eq(&db, tup));
         assert!(supports_eq(&db, rec));
+    }
+
+    /// The negative gate for ADR-138 decision 3. Every type a `Map` key can be
+    /// now carries a runtime `compare` — a tuple, a `Bool`, a `Range` — because
+    /// a container has to walk its keys in one deterministic sequence. That is
+    /// **not** the same question as `<`, and the temptation to "fix the
+    /// inconsistency" by widening this function is exactly what this test is
+    /// here to refuse: doing so legalises `(1, 2) < (1, 3)`, which ADR-045
+    /// decision 1 rejected on the grounds that nobody had picked a semantics
+    /// for it. A key's container order is a rendering and iteration detail; `<`
+    /// is a language feature.
+    #[test]
+    fn supports_ord_is_the_source_order_and_not_the_container_order() {
+        let mut db = TypeDb::new();
+        let (a, b) = (db.int(), db.int());
+        let tup = db.pair(a, b);
+        let bool_ty = db.bool();
+        let unit = db.unit();
+
+        // All four are legal `Map` keys, so all four have a container order.
+        assert!(supports_hash_stable(&db, tup));
+        assert!(supports_hash_stable(&db, bool_ty));
+        assert!(supports_hash_stable(&db, unit));
+
+        // None of them is `<`-comparable, and none of them may become so.
+        assert!(!supports_ord(&db, tup), "(1, 2) < (1, 3) stays Y006");
+        assert!(!supports_ord(&db, bool_ty));
+        assert!(!supports_ord(&db, unit));
     }
 }

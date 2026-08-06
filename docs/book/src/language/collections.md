@@ -83,6 +83,103 @@ is not where the mistake is. The wrong *number* of arguments is `Y007`:
 error[Y007]: `BitSet` takes 0 type argument(s), but 1 were given
 ```
 
+### Building one at a size
+
+`Vec` and `Grid` also take a **size and a fill**, which is how you get the
+working collection an algorithm allocates for itself — an occupancy board, a
+visited mask, a distance table, a DP row:
+
+```praxis
+// `Vec(n, fill)` and `Grid(w, h, fill)`: the collection an algorithm allocates
+// for itself, rather than one it reads or grows a push at a time.
+var row = Vec(5, 0)
+var board = Grid(3, 2, '.')
+board[1, 1] = '#'
+
+out(row)
+out(board)
+out(board.width())
+out(board.height())
+```
+
+```text
+[0, 0, 0, 0, 0]
+[., ., ., ., #, .]
+3
+2
+```
+
+The element type comes from the fill, so `Vec(3, false)` is a `Vec[Bool]` with
+nothing written down, and the bracket form composes with it when you would
+rather say it: `Vec[Bool](3, false)`.
+
+**Only those two have a sized form.** The other seven take no arguments at all,
+and `Set(3, 0)` is an error saying so. Praxis has no arity overloading anywhere
+else — one name, one signature
+([ADR-089](../../../decisions/089-a-name-has-one-signature.md)) — and these two
+are a deliberate, closed exception, recorded with its reasoning in
+[ADR-146](../../../decisions/146-a-collection-constructors-arity-is-its-shape.md).
+`Vec` and `Grid` are the collections whose contents are addressed by position,
+which is what makes "n of them" mean something: a sized `Set` would be `n`
+copies of one element in a set, which is one element.
+
+**The fill is one value stored `n` times, not `n` copies of it.** For a scalar
+that is unobservable, but a collection fill gives you `n` names for the *same*
+collection:
+
+```praxis
+// The fill is one value stored in every slot, not one copy per slot — the same
+// reference semantics `var b = a` has. A push into any cell is visible from all
+// four, because they are the same `Vec`.
+var cells = Grid(2, 2, Vec())
+cells[0, 0].push(1)
+out(cells[1, 1])
+```
+
+```text
+[1]
+```
+
+That is the same reference semantics a collection already has everywhere else: a
+binding names an object rather than owning it, so `var b = a` does not copy and
+neither does this. If you want `n` distinct collections, build them:
+`(0..n).map(|_| Vec())`.
+
+A negative size — or one so large the runtime cannot allocate it — is not
+something `praxis check` can refuse, because the size is an ordinary `Int`
+computed at run time. It is a fault instead
+([ADR-041](../../../decisions/041-bounded-extents-fault-instead-of-aborting.md)),
+and the expression that asked for it is named in the report:
+
+```praxis
+// A size is an ordinary `Int` computed at run time, so a negative one is not
+// something `praxis check` can refuse. It is a fault.
+var n = 0 - 1
+var v = Vec(n, 0)
+out(v)
+```
+
+```text
+error: program faulted: size or extent out of range
+
+Backtrace:
+#0   <entry>
+
+  locals:
+    n: Int = -1
+    v: Vec[Int] = <uninit>
+  temps:
+    <tmp#1: Int> @ "0" = <uninit>
+    <tmp#2: Int> @ "1" = 1
+    <tmp#3: Int> @ "0 - 1" = -1
+    <tmp#5: Int> @ "0" = 0
+    <tmp#6: Vec[Int]> @ "Vec(n, 0)" = <uninit>
+```
+
+The ceiling is 2²⁸ items, which is two gigabytes of references before a single
+element object exists — a judgement about what a program plausibly asks for
+rather than what a `usize` happens to hold.
+
 ### The list literal
 
 `Vec` is the one collection with a literal
@@ -280,15 +377,22 @@ together, and reports as such.
 | `len()` | `Int` |
 | `get(Int)` | `T` — faults `IndexOutOfBounds` if out of range |
 | `is_empty()` | `Bool` |
+| `to_text()` | `Text` — the elements as one line; they must be `Char` |
 | `v[i]`, `v[i] = x` | see [Subscripting](#subscripting) |
 
 `get(i)` and `v[i]` are two spellings of one row and behave identically —
 neither answers an `Option`, and both fault out of range. There is no
 `contains`, `pop`, `insert`, `remove`, `first` or `last`; the
 [pipeline](pipelines.md) stages (`any`, `find`, `position`, `sorted`, …) are
-where those questions get asked. Reversing a sequence is not among them: there
-is no `reverse` method and no stage that answers one. The example under
-[the list literal](#the-list-literal) exercises every row above.
+where those questions get asked. Reversing is one of them: `v.reversed()`
+answers a new `Vec` and leaves the receiver alone, and there is no in-place
+`reverse`. The example under [the list literal](#the-list-literal) exercises
+every row above.
+
+`to_text()` is the odd one out on this table, because it is the only row here
+that is not about a `Vec` of anything — a `Vec[Char]` becomes the line it
+spells, which is how a `Grid` row is drawn back
+([ADR-144](../../../decisions/144-a-sequence-of-text-joins-and-a-sequence-of-char-becomes-one.md)).
 
 ## `Deque`
 
@@ -564,7 +668,7 @@ out(bits.len())
 out(bits.contains(64))
 out(bits.contains(65))
 
-// Members come out in ascending numeric order, not by rendered form.
+// Members come out in ascending numeric order.
 for n in bits {
     out(n)
 }
@@ -615,8 +719,9 @@ for i in 1..4 {
 out((1..4).count())
 out((1..4).sum())
 
-// A descending range is empty, not a countdown.
+// A descending range is empty, not a countdown. The countdown is a barrier.
 out((5..0).count())
+out((0..5).reversed())
 
 // A Range has no mutator, so it is usable as a Map key.
 var spans = Map()
@@ -633,11 +738,20 @@ out(spans[1..4])
 3
 6
 0
+[4, 3, 2, 1, 0]
 first three
 ```
 
 A descending range is empty rather than reversed, matching Python and Rust.
-There is no step or stride form.
+There is no step or stride form, and `5..0` earns no diagnostic — it is a legal
+empty collection, and the constructor clamps rather than the literal being
+refused
+([ADR-059](../../../decisions/059-a-range-is-a-value-and-a-descending-one-is-empty.md)).
+
+The countdown is written `(0..5).reversed()`, which answers a `Vec[Int]` because
+a pipeline's currency is `Vec` — not a descending `Range`, since no such value
+exists. See [barriers](pipelines.md#barriers) for why reversal needs the whole
+sequence.
 
 ## Tuples
 
@@ -697,22 +811,29 @@ per-process seed.
 | `Deque[T]` | `T` | front to back | walked in place |
 | `Range` | `Int` | ascending | walked in place |
 | `Text` | `Char` | by Unicode scalar | walked in place |
-| `Set[T]` | `T` | ascending by *rendered* form | one snapshot |
+| `Set[T]` | `T` | ascending by member | one snapshot |
 | `BitSet` | `Int` | ascending numerically | one snapshot |
 | `MinHeap[T]` | `T` | pop order (ascending) | one snapshot |
 | `MaxHeap[T]` | `T` | pop order (descending) | one snapshot |
 | `Grid[T]` | `T` | cells, row-major | one snapshot |
-| `Map[K, V]` | `(K, V)` | ascending by rendered key | two aligned snapshots |
-| `Counter[T]` | `(T, Int)` | ascending by rendered key | two aligned snapshots |
+| `Map[K, V]` | `(K, V)` | ascending by key | two aligned snapshots |
+| `Counter[T]` | `(T, Int)` | ascending by key | two aligned snapshots |
 
-"Rendered form" is literal: the sort key is the printed text rather than the
-value, because no runtime type descriptor carries a comparison callback the
-collection could use instead — not even `Int`'s. So `10` sorts before `2`, and
-this is lexicographic order, not numeric.
+"Ascending" is the **value's** order, not the printed text's: numeric for `Int`,
+`Byte` and `Float`, code-point for `Char` and `Text`, `false` before `true`, and
+element-wise left to right for a tuple, a record or an enum. It is the same
+order `sorted()` uses, so `out(s)` and `out(s.to_vec().sorted())` print the same
+sequence, and a `Map[(Int, Int), V]` over a grid comes out in reading order
+([ADR-138](../../../decisions/138-a-container-orders-by-the-value-and-not-by-its-printing.md)).
+
+Every key type has such an order, including the ones you cannot write `<` on: a
+tuple orders inside a container and `(1, 2) < (1, 3)` is still refused at check
+time. Ordering a container is a question about determinism; `<` is a question
+about the language.
 
 ```praxis
-// A hashed collection walks its members ascending by *rendered* form, so 10
-// sorts before 2. The order is fixed and seed-independent; it is not numeric.
+// A hashed collection walks its members in the *value's* order, not in the
+// order they print: 2 before 10, and the same sequence on every run.
 var seen = Set()
 for n in [1, 2, 10, 20, 3] {
     seen.insert(n)
@@ -735,40 +856,45 @@ for kv in m {
     out(kv.1)
 }
 
-// Printing a keyed collection sorts the rendered *entry*; keys(), values() and
-// a `for` sort the rendered *key*. The two orders can disagree.
+// A keyed collection prints in the order it iterates: one order, not two.
 var names = Map()
 names["a"] = 1
 names["a1"] = 2
 out(names)
 out(names.keys())
+
+// A tuple key orders element-wise, left to right — which is what makes a
+// Map[(Int, Int), V] over a grid come out in reading order.
+var grid = Map()
+grid[(1, 10)] = "b"
+grid[(1, 9)] = "a"
+grid[(0, 100)] = "z"
+out(grid)
 ```
 
 ```text
-{1, 10, 2, 20, 3}
+{1, 2, 3, 10, 20}
 1
-10
 2
-20
 3
-[1, 10, 2]
-[one, ten, two]
+10
+20
+[1, 2, 10]
+[one, two, ten]
 one
-ten
 two
-{a1: 2, a: 1}
+ten
+{a: 1, a1: 2}
 [a, a1]
+{(0, 100): z, (1, 9): a, (1, 10): b}
 ```
 
-The last two lines are where the two orders come apart. A printed `Map` or
-`Counter` is sorted on the whole rendered entry — `a1: 2` before `a: 1`, because
-`1` sorts before `:` — while `keys()`, `values()` and a `for` are sorted on the
-rendered key alone, so they answer `a` before `a1`. The table's column is the
-iteration order; a printed map is not a promise about it. The unkeyed
-collections have one order only — a `Set`, a `BitSet` and both heaps print their
-members in the order they walk them.
-
-If you want numeric order, sort: `seen.to_vec().sorted()`.
+A keyed collection prints in the order it iterates. That used not to be true:
+printing sorted the whole rendered entry, so `a1: 2` came before `a: 1` (because
+`1` sorts before `:`), while `keys()`, `values()` and a `for` sorted the key
+alone and answered `a` before `a1`. One `Map` had two orders, and a program that
+printed it and walked it disagreed with itself. There is now one order, and the
+table's column is it.
 
 The last column of the table is not decoration. A collection walked *in place*
 re-reads its length each step, so a `push` from inside the loop body is visited;
@@ -932,10 +1058,16 @@ belong here:
 - The conversion has to typecheck: `to_map` needs an item that is a `(K, V)`
   pair and `to_counter` a `(T, Int)` pair, so `[1, 2, 2].to_counter()` reports
   `expected (?T, Int), found Int`. `frequencies()` is the call that *counts*.
+- Two conversions leave the collections entirely and answer a `Text`:
+  `seq.join(sep)` on a sequence of `Text`, and `chars.to_text()` on a
+  `Vec[Char]`. They are two rows rather than one because a generic `join` and a
+  `Char`-specific one cannot both exist under one name — the reasoning is in
+  [ADR-144](../../../decisions/144-a-sequence-of-text-joins-and-a-sequence-of-char-becomes-one.md).
 
 Also absent, and a reader coming from Python or Rust will look for them:
-`Vec.contains` / `pop` / `insert` / `remove` / `reverse` / `sort` in place, set
-algebra, `Deque.rotate`, and a `Range` with a step. Each is a `Y110` naming the receiver
+`Vec.contains` / `pop` / `insert` / `remove`, in-place `reverse` and `sort`
+(`reversed()` and `sorted()` answer new `Vec`s instead), set algebra,
+`Deque.rotate`, and a `Range` with a step. Each is a `Y110` naming the receiver
 and the arity, so the compiler says which method on which type it could not
 find rather than guessing:
 

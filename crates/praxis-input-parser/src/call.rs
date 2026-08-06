@@ -9,7 +9,10 @@
 //! one into a [`ParserAst`]. Neither the shape rules nor the builders can drift
 //! from each other, because there is one of each.
 
-use crate::ast::{BlockItem, Constructor, ParserAst, Separator, SkipPolicy};
+use crate::ast::{
+    BlockItem, Constructor, InvalidRepeatCount, ParserAst, RepeatCount, SectionItem, Separator,
+    SkipPolicy,
+};
 use crate::validate::{check_call, ArgKind, ValidationError};
 use praxis_source::{DiagCode, Span};
 
@@ -21,6 +24,11 @@ pub enum CallArg {
     /// A positional string literal (`sep`'s separator, `one_of`'s set),
     /// **already decoded** by `praxis_syntax::literal::unquote_text`.
     String(String),
+    /// A positional whole-number literal — the `N` of `repeated(P, N)`,
+    /// **already decoded** by `praxis_syntax::numeric::parse_int_literal`.
+    /// Still an `i64` here: whether a number is a usable count is
+    /// [`RepeatCount`]'s question, and it is asked where the span is.
+    Int(i64),
     /// A bare keyword flag: the `ragged` of `grid(P, ragged, fill: 0)`.
     Flag(String),
     /// A named argument `name: parser_expr`.
@@ -28,8 +36,15 @@ pub enum CallArg {
     /// A named argument whose value is a keyword rather than a parser:
     /// `skip: whitespace`, `fill: 0`.
     Keyword { name: String, value: String },
-    /// The `repeated(...)` tail of a named `sections`.
-    RepeatedTail { name: String, parser: ParserAst },
+    /// A `name: repeated(...)` argument of a named `sections`. `count` is
+    /// `Some` for the bounded `repeated(P, N)` and `None` for the greedy
+    /// `repeated(P)` — the distinction the position rule below is entirely
+    /// about.
+    RepeatedTail {
+        name: String,
+        parser: ParserAst,
+        count: Option<RepeatCount>,
+    },
 }
 
 impl CallArg {
@@ -40,6 +55,7 @@ impl CallArg {
         match self {
             CallArg::Parser(_) => ArgKind::Parser,
             CallArg::String(_) => ArgKind::String,
+            CallArg::Int(_) => ArgKind::Int,
             CallArg::Flag(f) => ArgKind::Flag(f.clone()),
             CallArg::Named { name, .. } => ArgKind::Named(name.clone()),
             // **Not `Named`.** These two collapsed onto one `ArgKind` and
@@ -71,14 +87,14 @@ pub fn build_call(
     span: Span,
 ) -> Result<ParserAst, Vec<ValidationError>> {
     if ctor == Constructor::Repeated {
-        // `repeated(P)` is not a parser in its own right — it is the marker on
-        // the final named argument of a `sections` call, and it means "consume
-        // every remaining section". Anywhere else there is nothing for it to
-        // repeat over, and it used to be dropped in silence (IP-09).
+        // `repeated(...)` is not a parser in its own right — it is the marker
+        // on a named argument of a `sections` call, saying that the field takes
+        // a *group* of sections rather than one. Anywhere else there is nothing
+        // for it to repeat over, and it used to be dropped in silence (IP-09).
         return Err(vec![ValidationError {
             span,
             code: DiagCode::MisplacedRepeatedTail,
-            message: "`repeated(...)` is only the final named argument of a `sections` call (§7.5)"
+            message: "`repeated(...)` is only a named argument of a `sections` call (§7.5)"
                 .to_string(),
         }]);
     }
@@ -296,13 +312,14 @@ pub fn build_call(
     }
 }
 
-/// Build the `name: repeated(P)` tail marker of a named `sections` (§7.5).
+/// Build the `name: repeated(P)` / `name: repeated(P, N)` marker of a named
+/// `sections` (§7.5).
 ///
-/// `repeated(P)` is not a parser in its own right — it is the marker on the
-/// final named argument of a `sections` call, and the field's parser is the
-/// `P`. §7.5 gives the marker exactly one argument, and that argument must be a
-/// parser. That is the whole rule, and it lives here for the same reason
-/// [`build_call`] does: **both front ends must apply it**.
+/// `repeated(...)` is not a parser in its own right — it is the marker on a
+/// named argument of a `sections` call, and the field's parser is the `P`. §7.5
+/// gives the marker a parser and an optional count. That is the whole rule, and
+/// it lives here for the same reason [`build_call`] does: **both front ends
+/// must apply it**.
 ///
 /// They did not. The capture-body parser checked it inline; the HIR bridge
 /// unwrapped the marker with a `find_map` that returned the *first* parser-expr
@@ -311,34 +328,74 @@ pub fn build_call(
 /// and `repeated()` produced no diagnostic at all — while the identical text
 /// written inside a capture body was rejected with I022. ADR-073 claims the two
 /// front ends share one shape check; this is the function that makes the claim
-/// true for the tail marker.
+/// true for the marker.
+///
+/// The shape check is [`check_call`]'s, like every other constructor's. This
+/// function used to hand-roll its own arity test, which is the one call site
+/// ADR-073's "nothing is built before the shape is checked" never covered —
+/// and the exemption is why the count could not simply be added to the table.
 ///
 /// # Errors
 /// A non-empty [`ValidationError`] list: `ConstructorArity` (I022) for a wrong
-/// count, `InvalidConstructorArgument` (I014) for a wrong kind.
+/// count of arguments, `InvalidConstructorArgument` (I014) for a wrong kind or
+/// an unusable count.
 pub fn build_repeated_tail(
     name: String,
-    mut args: Vec<CallArg>,
+    args: Vec<CallArg>,
     span: Span,
 ) -> Result<CallArg, Vec<ValidationError>> {
-    if args.len() != 1 {
-        return Err(vec![ValidationError {
-            span,
-            code: DiagCode::ConstructorArity,
-            message: format!("`repeated` expects 1 argument, got {}", args.len()),
-        }]);
+    let kinds: Vec<ArgKind> = args.iter().map(CallArg::kind).collect();
+    let shape_errors = check_call(Constructor::Repeated, &kinds, span);
+    if !shape_errors.is_empty() {
+        return Err(shape_errors);
     }
-    match args.remove(0) {
-        CallArg::Parser(parser) => Ok(CallArg::RepeatedTail { name, parser }),
-        other => Err(vec![ValidationError {
+
+    let bad = |message: String| {
+        vec![ValidationError {
             span,
             code: DiagCode::InvalidConstructorArgument,
-            message: format!(
-                "`repeated`'s argument must be a parser, but it is {} (§7.5)",
+            message,
+        }]
+    };
+
+    let mut args = args.into_iter();
+    let parser = match args.next() {
+        Some(CallArg::Parser(parser)) => parser,
+        Some(other) => {
+            return Err(bad(format!(
+                "`repeated`'s first argument must be a parser, but it is {} (§7.5)",
                 other.kind().describe()
-            ),
-        }]),
-    }
+            )))
+        }
+        // `check_call` has already reported the empty list.
+        None => return Err(bad("`repeated` needs a parser (§7.5)".to_string())),
+    };
+    let count = match args.next() {
+        None => None,
+        Some(CallArg::Int(n)) => Some(RepeatCount::new(n).map_err(|why| {
+            bad(match why {
+                InvalidRepeatCount::NotPositive => "`repeated`'s count must be at least 1 — a \
+                                                   group of no sections parses nothing (§7.5)"
+                    .to_string(),
+                InvalidRepeatCount::TooLarge => {
+                    "`repeated`'s count must fit in 32 bits (§7.5)".to_string()
+                }
+            })
+        })?),
+        Some(other) => {
+            return Err(bad(format!(
+                "`repeated`'s count must be a whole-number literal, but it is {} — the parser \
+                 plan is built when the program is compiled, so the count cannot be a parser or \
+                 a variable (§7.5)",
+                other.kind().describe()
+            )))
+        }
+    };
+    Ok(CallArg::RepeatedTail {
+        name,
+        parser,
+        count,
+    })
 }
 
 /// The single positional parser of a call `check_call` has already accepted.
@@ -356,38 +413,60 @@ fn sole_parser(args: Vec<CallArg>) -> Option<ParserAst> {
 /// the first, and a tail written before another field was silently moved to the
 /// end, so the parser that ran was not the one that was written. `args` is in
 /// source order, which is what makes "final" a checkable claim.
+///
+/// **The position rule is the unbounded form's alone.** `repeated(P)` consumes
+/// every section that is left, so a field after it could never match — that is
+/// what "final" is an argument *from*, and it is no argument at all about
+/// `repeated(P, N)`, which consumes exactly `N` and leaves the rest. A counted
+/// group is an ordinary named argument in every respect, including being
+/// allowed to be the last one.
 fn build_sections_named(args: Vec<CallArg>, span: Span) -> Result<ParserAst, Vec<ValidationError>> {
-    let tails: Vec<usize> = args
+    let unbounded: Vec<usize> = args
         .iter()
         .enumerate()
-        .filter(|(_, a)| matches!(a, CallArg::RepeatedTail { .. }))
+        .filter(|(_, a)| matches!(a, CallArg::RepeatedTail { count: None, .. }))
         .map(|(i, _)| i)
         .collect();
-    if tails.len() > 1 {
+    if unbounded.len() > 1 {
         return Err(vec![ValidationError {
             span,
             code: DiagCode::MisplacedRepeatedTail,
-            message: "`sections` takes at most one `repeated(...)` tail (§7.5)".to_string(),
+            message: "`sections` takes at most one unbounded `repeated(...)` tail (§7.5)"
+                .to_string(),
         }]);
     }
-    if let Some(&at) = tails.first() {
+    if let Some(&at) = unbounded.first() {
         if at != args.len() - 1 {
             return Err(vec![ValidationError {
                 span,
                 code: DiagCode::MisplacedRepeatedTail,
-                message: "a `repeated(...)` tail may appear only as the final named argument \
-                          (§7.5): it consumes every remaining section, so nothing can follow it"
+                message: "an unbounded `repeated(...)` tail may appear only as the final named \
+                          argument (§7.5): it consumes every remaining section, so nothing can \
+                          follow it — write `repeated(P, N)` for a group of N sections, which can"
                     .to_string(),
             }]);
         }
     }
 
-    let mut fields: Vec<(String, ParserAst)> = Vec::new();
+    let mut fields: Vec<SectionItem> = Vec::new();
     let mut repeated_tail: Option<(String, Box<ParserAst>)> = None;
     for arg in args {
         match arg {
-            CallArg::Named { name, parser } => fields.push((name, parser)),
-            CallArg::RepeatedTail { name, parser } => {
+            CallArg::Named { name, parser } => fields.push(SectionItem::One { name, parser }),
+            CallArg::RepeatedTail {
+                name,
+                parser,
+                count: Some(count),
+            } => fields.push(SectionItem::Counted {
+                name,
+                count,
+                parser,
+            }),
+            CallArg::RepeatedTail {
+                name,
+                parser,
+                count: None,
+            } => {
                 repeated_tail = Some((name, Box::new(parser)));
             }
             // `check_call` has already refused a positional, a string or a

@@ -178,7 +178,7 @@ Praxis crash> locals
   locals:
     depths: Vec[Int] = [10, 20, 20]
     total: Int = 1
-    ? = 1
+    i: Int = 1
 ```
 
 Two things in it are worth naming.
@@ -188,15 +188,62 @@ added its `1` before the second one faulted. That is the whole point of the
 debugger — the state is the state at the moment of the fault, not a
 reconstruction.
 
-`? = 1` is the loop variable `i`. A `for` binding reaches the debugger with no
-name, so `locals` prints `?` for it and `p i` reports that `i` is not defined.
-The value is right and the label is not.
+`i: Int = 1` is the loop variable, and it is in `locals:` for the same reason
+`total` is: a `for` variable is a binding, in exactly the sense a `var` is
+([ADR-125](../../../decisions/125-a-binding-is-a-binding-and-the-compiler-decides-its-storage.md)).
+The `locals:` section is every binding the program wrote, whatever syntax
+introduced it.
 
-A pattern binding in a `match` arm loses its name the same way, and loses more:
-it is not classified as a user binding at all, so it lands among the temps as a
-line like `<tmp#7> = 7` with no type and no `@ "expr"`, and `p` will not bind
-that name either. Function and closure parameters keep their names — `w: Int = 3`
-in a `|w| …` frame — so these two are the exceptions and not the rule.
+### Every binding form, in one frame
+
+`pattern-bindings.px` writes all of them and then reads past the end of a vector:
+
+```praxis
+var xs = [1, 2, 3]
+var total = 0
+
+for item in xs {
+    total = total + item
+}
+
+var pairs = [(2, 3), (4, 5)]
+for (a, b) in pairs {
+    total = total + a * b
+}
+
+match Some(total) {
+    Some(sum) => { total = sum * 2 }
+    None => {}
+}
+
+out(xs[9])
+```
+
+```text
+  locals:
+    xs: Vec[Int] = [1, 2, 3]
+    total: Int = 64
+    item: Int = 3
+    pairs: Vec[(Int, Int)] = [(2, 3), (4, 5)]
+    a: Int = 4
+    b: Int = 5
+    sum: Int = 32
+```
+
+`item` is a plain `for` variable, `a` and `b` are a destructuring `for`'s two
+components, and `sum` is a `match` arm's payload. Each holds its last value, and
+each is a name `p` will bind: `p a * b` answers `20` at this prompt.
+
+The pair the second loop is walking has no row of its own, and that is
+deliberate. Nothing in the source named it — the names are `a` and `b` — so it is
+a compiler temp, and it shows up in the `temps:` section below as
+`<tmp#31: (Int, Int)> @ "pairs" = (4, 5)`, which says what it holds and where it
+came from. A binding is what you wrote a name for
+([ADR-139](../../../decisions/139-a-pattern-name-is-a-name-in-the-frame.md)).
+
+One binding form still reads oddly: a `var` that a closure both captures and
+writes is stored in a cell, and the frame shows the cell as a temp rather than
+the binding's value.
 
 ## What survives the fault
 

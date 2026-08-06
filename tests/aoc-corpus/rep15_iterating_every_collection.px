@@ -7,7 +7,7 @@
 //
 // A `for` iterates a **snapshot** taken once at loop entry (ADR-066), and the
 // order is the one each collection's own accessors already promise: ascending by
-// rendered form for the hashed ones, ascending bit for a `BitSet`, pop order for
+// member for the hashed ones, ascending bit for a `BitSet`, pop order for
 // a heap, row-major for a `Grid`. That is what lets this program have an
 // expected output at all — a `HashMap`'s own order is randomized per process.
 //

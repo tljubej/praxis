@@ -61,6 +61,12 @@ unsafe fn unit_hash(_: *const u8, hasher: &mut dyn DynamicHasher) {
     // Unit is a singleton; all instances hash equally.
     hash_value(hasher, &());
 }
+unsafe fn unit_compare(_: *const u8, _: *const u8) -> Ordering {
+    // A singleton has one value, so `Equal` is the only answer that agrees with
+    // `unit_equals` — and agreeing with equality is what makes it a total order
+    // rather than a shrug (ADR-138).
+    Ordering::Equal
+}
 
 /// Descriptor for the `Unit` scalar (§4.3).
 pub static UNIT: TypeDescriptor = TypeDescriptor::builtin::<UnitPayload>(
@@ -71,8 +77,10 @@ pub static UNIT: TypeDescriptor = TypeDescriptor::builtin::<UnitPayload>(
     unit_format,
     Some(unit_equals),
     Some(unit_hash),
-    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
-    None,
+    // A `Unit` can be a `Map` key, so a container has to be able to order one
+    // (ADR-138). `<` on a `Unit` is still Y006 — that is `supports_ord`'s
+    // question, and it is deliberately a different one.
+    Some(unit_compare),
 );
 
 /// `Unit`'s payload handle (REP-02). Its one value is an immortal, minted at
@@ -97,6 +105,13 @@ unsafe fn bool_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     let v = unsafe { *(payload as *const BoolPayload) };
     hash_value(hasher, &v);
 }
+unsafe fn bool_compare(a: *const u8, b: *const u8) -> Ordering {
+    // `false` before `true`, which is both the conventional order and the one
+    // the rendered forms already had — so no `Set[Bool]` prints differently for
+    // this (ADR-138).
+    // SAFETY: caller guarantees both pointers point at `BoolPayload`s.
+    unsafe { (*(a as *const BoolPayload)).cmp(&*(b as *const BoolPayload)) }
+}
 
 /// Descriptor for the `Bool` scalar (§4.3).
 pub static BOOL: TypeDescriptor = TypeDescriptor::builtin::<BoolPayload>(
@@ -107,8 +122,9 @@ pub static BOOL: TypeDescriptor = TypeDescriptor::builtin::<BoolPayload>(
     bool_format,
     Some(bool_equals),
     Some(bool_hash),
-    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
-    None,
+    // A `Bool` can be a `Map` key, so a container has to be able to order one
+    // (ADR-138). `true < false` is still Y006 — see `unit_compare`.
+    Some(bool_compare),
 );
 
 /// `Bool`'s payload handle (REP-02). Both values are immortals too (RT-03), so
@@ -119,10 +135,22 @@ pub static BOOL_PAYLOAD: Payload<BoolPayload> = Payload::new(&BOOL);
 
 unsafe fn int_trace(_: *mut u8, _: &mut dyn Tracer) {}
 unsafe fn int_drop(_: *mut u8) {}
+
+/// Render an `Int`: the decimal digits, with a leading `-` when negative.
+///
+/// Factored out of [`int_format`] so `Int.to_text()` calls *this* rather than
+/// writing a second `write!` of its own (ADR-143). `out(n)` and `n.to_text()`
+/// disagreeing would be a defect in itself, and one writer with two callers is
+/// what makes it unrepresentable instead of merely tested — the shape
+/// [`write_float`] already has.
+pub(crate) fn write_int(out: &mut dyn fmt::Write, v: IntPayload) {
+    let _ = write!(out, "{v}");
+}
+
 unsafe fn int_format(payload: *const u8, out: &mut dyn fmt::Write) {
     // SAFETY: caller guarantees `payload` points at an `IntPayload`.
     let v = unsafe { *(payload as *const IntPayload) };
-    let _ = write!(out, "{v}");
+    write_int(out, v);
 }
 unsafe fn int_equals(a: *const u8, b: *const u8) -> bool {
     // SAFETY: caller guarantees both pointers point at `IntPayload`s.
@@ -216,10 +244,15 @@ pub static BYTE_PAYLOAD: Payload<BytePayload> = Payload::new(&BYTE);
 
 unsafe fn char_trace(_: *mut u8, _: &mut dyn Tracer) {}
 unsafe fn char_drop(_: *mut u8) {}
-unsafe fn char_format(payload: *const u8, out: &mut dyn fmt::Write) {
-    // SAFETY: caller guarantees `payload` points at a validated `CharPayload`.
-    let raw = unsafe { *(payload as *const CharPayload) };
-    match char::from_u32(raw) {
+
+/// Render a `Char`: the character itself, with no quotes and no escaping.
+///
+/// Factored out of [`char_format`] for [`write_int`]'s reason (ADR-143): the
+/// `U+FFFD` fallback below is a decision about what an impossible payload looks
+/// like, and `Char.to_text()` answering something else would make one of the two
+/// wrong without saying which.
+pub(crate) fn write_char(out: &mut dyn fmt::Write, v: CharPayload) {
+    match char::from_u32(v) {
         Some(c) => {
             let _ = write!(out, "{c}");
         }
@@ -229,6 +262,12 @@ unsafe fn char_format(payload: *const u8, out: &mut dyn fmt::Write) {
             let _ = out.write_str("\u{FFFD}");
         }
     }
+}
+
+unsafe fn char_format(payload: *const u8, out: &mut dyn fmt::Write) {
+    // SAFETY: caller guarantees `payload` points at a validated `CharPayload`.
+    let raw = unsafe { *(payload as *const CharPayload) };
+    write_char(out, raw);
 }
 unsafe fn char_equals(a: *const u8, b: *const u8) -> bool {
     // SAFETY: caller guarantees both pointers point at `CharPayload`s.
@@ -585,12 +624,28 @@ mod tests {
         );
     }
 
-    /// ADR-045 decision 1: `Bool` and `Unit` have no ordering, and the absence
-    /// is what `is_orderable` reports.
+    /// `Bool` and `Unit` have a **container** order and no **source** order
+    /// (ADR-138). Both can be a `Map` key, so `out(m)` and `for k in m` have to
+    /// put them in some sequence and it has to be the same sequence twice;
+    /// `true < false` is still refused at check time, which is
+    /// `praxis_hir::capability::supports_ord`'s question and not this one.
     #[test]
-    fn bool_and_unit_declare_no_ordering() {
-        assert!(!BOOL.is_orderable());
-        assert!(!UNIT.is_orderable());
+    fn bool_and_unit_have_a_container_order_and_no_source_order() {
+        use std::ptr;
+        let (f, t): (BoolPayload, BoolPayload) = (0, 1);
+        assert_eq!(
+            unsafe { bool_compare(ptr::addr_of!(f).cast(), ptr::addr_of!(t).cast()) },
+            Ordering::Less,
+            "false sorts before true"
+        );
+        let unit: UnitPayload = ();
+        assert_eq!(
+            unsafe { unit_compare(ptr::addr_of!(unit).cast(), ptr::addr_of!(unit).cast()) },
+            Ordering::Equal,
+            "a singleton equals itself and nothing else exists to order it against"
+        );
+        assert!(BOOL.is_orderable());
+        assert!(UNIT.is_orderable());
         assert!(INT.is_orderable());
         assert!(CHAR.is_orderable());
         assert!(FLOAT.is_orderable());

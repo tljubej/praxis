@@ -81,9 +81,17 @@ praxis: 1 error(s)
 ## Ordering is not structural
 
 Equality recurses; ordering does not. The orderable types are exactly the
-scalars whose runtime descriptor carries a comparison — `Int`, `UInt`, `Byte`,
-`Float`, `Char` and `Text`. `Bool` and `Unit` have no defined order, and no
-composite has one: not a tuple, not a record, not an enum, not a collection.
+scalars `Int`, `UInt`, `Byte`, `Float`, `Char` and `Text`. `Bool` and `Unit` have
+no defined order, and no composite has one: not a tuple, not a record, not an
+enum, not a collection.
+
+That is a statement about the **source language** — `<`, `sorted()`, a heap
+element. A **container** is a different question, and there the answer recurses:
+a `Map`, `Set` or `Counter` has to walk and print its keys in one reproducible
+sequence, so every type that can be a key has a container order, tuples and
+records included, computed element-wise. Having one does not make a type
+comparable with `<`; the example below stays exactly as it is
+([ADR-138](../../../decisions/138-a-container-orders-by-the-value-and-not-by-its-printing.md)).
 
 ```praxis
 struct Point { x: Int, y: Int }

@@ -42,90 +42,79 @@ pub(crate) unsafe fn render_into(
     unsafe { (descriptor.format)(payload, out) };
 }
 
-/// Write `entries` between `open` and `close`, **sorted**, comma-separated.
+/// Write already-ordered `entries` between `open` and `close`, comma-separated.
 ///
-/// Rust's hash collections randomize their iteration order per process, so the
-/// same `Map` printed by two runs of the same program produced two different
-/// strings (RT-16). §19 promises structural, deterministic formatting, and a
-/// program whose expected output cannot be written down does not have one.
+/// It does **not** sort. It used to, on the rendered entry, because at the time
+/// that was the only total order in reach — which is why `{10: a, 9: b}` printed
+/// `10` first, and why a printed `Map` and a `for` over the same map could
+/// disagree: one sorted the whole `"key: value"` string and the other sorted the
+/// key alone, and `':'` is below `'1'` in ASCII.
 ///
-/// The sort key is the *rendered entry*, not the value: it is the only total
-/// order available today, because `TypeDescriptor::compare` is `None` on every
-/// descriptor pending design decision D3. So `{10: a, 9: b}` renders with `10`
-/// first — lexicographic, not numeric. That is a real limitation and it is
-/// stated rather than hidden; when D3 lands and `compare` is populated, this is
-/// the one place that has to change.
-pub(crate) fn write_sorted<I: Iterator<Item = String>>(
+/// Both are gone. The caller orders its keys through [`ordered_entries`] or
+/// [`ordered_members`] and renders in that order, so printing and iterating are
+/// one order by construction rather than by two sorts that happen to agree
+/// (ADR-138 decision 4). This function's only remaining job is the punctuation.
+pub(crate) fn write_ordered<I: Iterator<Item = String>>(
     out: &mut dyn fmt::Write,
     open: &str,
     entries: I,
     close: &str,
 ) {
-    let mut rendered: Vec<String> = entries.collect();
-    rendered.sort_unstable();
     let _ = out.write_str(open);
-    for (i, entry) in rendered.iter().enumerate() {
+    for (i, entry) in entries.enumerate() {
         if i > 0 {
             let _ = out.write_str(", ");
         }
-        let _ = out.write_str(entry);
+        let _ = out.write_str(&entry);
     }
     let _ = out.write_str(close);
 }
 
 /// The entries of a keyed collection in a **deterministic** order: sorted by the
-/// key's rendered form (REP-18).
+/// key's own order (REP-18, ADR-138).
 ///
 /// The order matters because `keys()` and `values()` promise to be index-aligned,
 /// and because a `HashMap`'s own iteration order is randomized per process — the
 /// same program would answer differently on two runs, which is RT-16 again in a
 /// place where the value, not just the printing, depends on it.
 ///
-/// The sort key is the same one [`write_sorted`] uses, and for the same reason:
-/// `TypeDescriptor::compare` is `None` on every descriptor pending D3, so the
-/// rendered form is the only total order available. So `{10: a, 9: b}` orders `10`
-/// first — lexicographic, not numeric. When D3 lands, `write_sorted` and this are
-/// the two places that change.
+/// The sort key is [`crate::ordering::container_cmp`], which is the key's own
+/// `TypeDescriptor::compare` — the same callback `sorted()` and a heap's `Ord`
+/// go through. That is what makes `out(m.keys())` and `out(m.keys().sorted())`
+/// agree; sorting the *rendered* key instead, which is what this did until
+/// ADR-138, put `10` before `2` and made a program that walked a `Map[Int, V]`
+/// answer in an order no reader would predict.
+///
+/// `sort_by`, not `sort_unstable_by`: `container_cmp` leaves a tie only for two
+/// keys that render identically, and a stable sort at least keeps the answer
+/// independent of the sort's own internal choices.
 ///
 /// # Safety
 /// Every key's payload must match the descriptor it carries.
 pub(crate) unsafe fn ordered_entries(entries: &HashMap<DynamicKey, GcRef>) -> Vec<(GcRef, GcRef)> {
-    let mut rows: Vec<(String, GcRef, GcRef)> = entries
-        .iter()
-        .map(|(k, v)| {
-            let mut rendered = String::new();
-            // SAFETY: the key's payload matches the descriptor it carries.
-            unsafe { render_into(&mut rendered, k.descriptor(), k.value()) };
-            (rendered, k.value(), *v)
-        })
-        .collect();
-    rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    rows.into_iter().map(|(_, k, v)| (k, v)).collect()
+    let mut rows: Vec<(GcRef, GcRef)> = entries.iter().map(|(k, v)| (k.value(), *v)).collect();
+    // SAFETY: every key's payload matches the descriptor in its own header,
+    // which is what `DynamicKey::new` reads it from.
+    rows.sort_by(|a, b| unsafe { crate::ordering::container_cmp(a.0, b.0) });
+    rows
 }
 
 /// The members of a `Set` in the same **deterministic** order
-/// [`ordered_entries`] gives a keyed collection: sorted by the member's rendered
-/// form (REP-15).
+/// [`ordered_entries`] gives a keyed collection: sorted by the member's own
+/// order (REP-15, ADR-138).
 ///
 /// `for x in s` iterates a snapshot of this (ADR-066), so the order is the
 /// program's answer and not only its printing — the same reason
-/// [`ordered_entries`] exists. It is the order [`write_sorted`] already prints a
-/// set in, so `{1, 3, 4}` and `for x in s` agree, and it moves when D3 does.
+/// [`ordered_entries`] exists. `set_format` renders in this order too, so
+/// `out(s)`, `for x in s` and `s.sorted()` are three readings of one sequence.
 ///
 /// # Safety
 /// Every member's payload must match the descriptor it carries.
 pub(crate) unsafe fn ordered_members(entries: &HashSet<DynamicKey>) -> Vec<GcRef> {
-    let mut rows: Vec<(String, GcRef)> = entries
-        .iter()
-        .map(|k| {
-            let mut rendered = String::new();
-            // SAFETY: the member's payload matches the descriptor it carries.
-            unsafe { render_into(&mut rendered, k.descriptor(), k.value()) };
-            (rendered, k.value())
-        })
-        .collect();
-    rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    rows.into_iter().map(|(_, k)| k).collect()
+    let mut rows: Vec<GcRef> = entries.iter().map(DynamicKey::value).collect();
+    // SAFETY: as `ordered_entries`.
+    rows.sort_by(|a, b| unsafe { crate::ordering::container_cmp(*a, *b) });
+    rows
 }
 
 // ===========================================================================
@@ -190,20 +179,26 @@ unsafe fn map_drop(payload: *mut u8) {
 unsafe fn map_format(payload: *const u8, out: &mut dyn fmt::Write) {
     // SAFETY: caller guarantees `payload` points at an initialized MapPayload.
     let p = unsafe { &*(payload as *const MapPayload) };
-    let entries = p.entries.iter().map(|(k, v)| {
+    // Order first, render second: a printed `Map` is the same sequence a `for`
+    // over it walks, because both read `ordered_entries` (ADR-138 decision 4).
+    // Rendering first and sorting the strings is what made `{a1: 2, a: 1}` print
+    // in an order `m.keys()` disagreed with.
+    // SAFETY: every key's payload matches the descriptor its `DynamicKey` carries.
+    let rows = unsafe { ordered_entries(&p.entries) };
+    let entries = rows.into_iter().map(|(k, v)| {
         let mut s = String::new();
-        // SAFETY: the key's payload matches the descriptor its `DynamicKey`
-        // carries, and the value's matches the one in its own header. Rendering
-        // through the *map's* value label is what printed a `Map[Text, Text]`
-        // as integers, because that label was `INT` unconditionally (REP-42).
+        // SAFETY: the key's payload matches its own header's descriptor, and so
+        // does the value's. Rendering through the *map's* value label is what
+        // printed a `Map[Text, Text]` as integers, because that label was `INT`
+        // unconditionally (REP-42).
         unsafe {
-            render_into(&mut s, k.descriptor(), k.value());
+            render_into(&mut s, k.descriptor(), k);
             let _ = s.write_str(": ");
-            render_into(&mut s, v.descriptor(), *v);
+            render_into(&mut s, v.descriptor(), v);
         }
         s
     });
-    write_sorted(out, "{", entries, "}");
+    write_ordered(out, "{", entries, "}");
 }
 
 unsafe fn map_equals(a: *const u8, b: *const u8) -> bool {
@@ -282,7 +277,9 @@ pub static MAP: TypeDescriptor = TypeDescriptor::builtin::<MapPayload>(
     map_format,
     Some(map_equals),
     Some(map_hash),
-    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
+    // No container order: a mutable collection can never be a `Map` key or a
+    // `Set` member (ADR-057 D4), so nothing ever has to put one in a
+    // deterministic sequence (ADR-138).
     None,
 )
 .with_owned_bytes(map_owned_bytes);
@@ -343,13 +340,16 @@ unsafe fn set_drop(payload: *mut u8) {
 unsafe fn set_format(payload: *const u8, out: &mut dyn fmt::Write) {
     // SAFETY: caller guarantees `payload` points at an initialized SetPayload.
     let p = unsafe { &*(payload as *const SetPayload) };
-    let entries = p.entries.iter().map(|k| {
+    // The order a `for` over this set walks (ADR-138 decision 4).
+    // SAFETY: every member's payload matches the descriptor it carries.
+    let members = unsafe { ordered_members(&p.entries) };
+    let entries = members.into_iter().map(|m| {
         let mut s = String::new();
-        // SAFETY: the key's payload matches the descriptor it carries.
-        unsafe { render_into(&mut s, k.descriptor(), k.value()) };
+        // SAFETY: the member's payload matches its own header's descriptor.
+        unsafe { render_into(&mut s, m.descriptor(), m) };
         s
     });
-    write_sorted(out, "{", entries, "}");
+    write_ordered(out, "{", entries, "}");
 }
 
 unsafe fn set_equals(a: *const u8, b: *const u8) -> bool {
@@ -389,7 +389,9 @@ pub static SET: TypeDescriptor = TypeDescriptor::builtin::<SetPayload>(
     set_format,
     Some(set_equals),
     Some(set_hash),
-    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
+    // No container order: a mutable collection can never be a `Map` key or a
+    // `Set` member (ADR-057 D4), so nothing ever has to put one in a
+    // deterministic sequence (ADR-138).
     None,
 )
 .with_owned_bytes(set_owned_bytes);
@@ -450,18 +452,21 @@ unsafe fn counter_drop(payload: *mut u8) {
 unsafe fn counter_format(payload: *const u8, out: &mut dyn fmt::Write) {
     // SAFETY: caller guarantees `payload` points at an initialized CounterPayload.
     let p = unsafe { &*(payload as *const CounterPayload) };
-    let entries = p.entries.iter().map(|(k, v)| {
+    // As `map_format`: the order is decided over the keys, then rendered.
+    // SAFETY: every key's payload matches the descriptor it carries.
+    let rows = unsafe { ordered_entries(&p.entries) };
+    let entries = rows.into_iter().map(|(k, v)| {
         let mut s = String::new();
         // SAFETY: the key's payload matches its descriptor; a Counter's values
         // are always `Int` (§6.2).
         unsafe {
-            render_into(&mut s, k.descriptor(), k.value());
+            render_into(&mut s, k.descriptor(), k);
             let _ = s.write_str(": ");
-            render_into(&mut s, &crate::scalars::INT, *v);
+            render_into(&mut s, &crate::scalars::INT, v);
         }
         s
     });
-    write_sorted(out, "{", entries, "}");
+    write_ordered(out, "{", entries, "}");
 }
 
 unsafe fn counter_equals(a: *const u8, b: *const u8) -> bool {
@@ -518,7 +523,9 @@ pub static COUNTER: TypeDescriptor = TypeDescriptor::builtin::<CounterPayload>(
     counter_format,
     Some(counter_equals),
     Some(counter_hash),
-    // Not orderable: only Int/Byte/Char/Float/Text are (ADR-045).
+    // No container order: a mutable collection can never be a `Map` key or a
+    // `Set` member (ADR-057 D4), so nothing ever has to put one in a
+    // deterministic sequence (ADR-138).
     None,
 )
 .with_owned_bytes(counter_owned_bytes);
@@ -587,10 +594,10 @@ mod tests {
         let forward = rendered(map_format, &build([1, 2, 3, 4, 5, 6]));
         let backward = rendered(map_format, &build([6, 5, 4, 3, 2, 1]));
         assert_eq!(forward, backward, "insertion order must not show through");
-        // Sorted by the *rendered* entry, which is the only total order
-        // available until D3 populates `TypeDescriptor::compare` — so `10:`
-        // would precede `2:`. Every key here is one digit, so this is also
-        // numeric order, and the test says which property it is relying on.
+        // Ordered by the key's own `compare` (ADR-138), which for `Int` is
+        // numeric. Every key here is one digit, so the lexicographic order this
+        // used to use would agree — `a_set_of_ints_orders_numerically_and_not_
+        // lexicographically` is the test that tells the two apart.
         assert_eq!(forward, "{1: 10, 2: 20, 3: 30, 4: 40, 5: 50, 6: 60}");
     }
 
@@ -680,5 +687,136 @@ mod tests {
         let backward = rendered(counter_format, &build([8, 1, 7, 2]));
         assert_eq!(forward, backward);
         assert_eq!(forward, "{1: 1, 2: 2, 7: 7, 8: 8}");
+    }
+
+    /// **The regression gate for ADR-138.** A `Set[Int]` orders by the number,
+    /// not by how the number prints.
+    ///
+    /// The handover's own case: an Advent-of-Code solve walked a `Set[Int]` and
+    /// got `10, 100, 2, 9`, because the sort key was the rendered member and
+    /// `"10" < "2"`. Nothing reported it — a wrong order out of a `for` is an
+    /// *answer*, not a formatting wart — so this is the shape of defect a test
+    /// has to hold down rather than a reader.
+    #[test]
+    fn a_set_of_ints_orders_numerically_and_not_lexicographically() {
+        let rt = crate::Runtime::new();
+        let build = |order: [i64; 4]| SetPayload {
+            element_descriptor: &crate::scalars::INT,
+            entries: order.iter().map(|&n| int_key(&rt, n)).collect(),
+        };
+        let read_back = |p: &SetPayload| -> Vec<i64> {
+            // SAFETY: every member is an `Int` matching the element descriptor.
+            unsafe { ordered_members(&p.entries) }
+                .into_iter()
+                .map(|m| unsafe { *m.payload::<i64>() })
+                .collect()
+        };
+        assert_eq!(read_back(&build([9, 10, 100, 2])), vec![2, 9, 10, 100]);
+        assert_eq!(read_back(&build([2, 100, 10, 9])), vec![2, 9, 10, 100]);
+        // …and the printing is that same sequence, which is what makes `out(s)`
+        // and `out(s.sorted())` agree.
+        assert_eq!(
+            rendered(set_format, &build([9, 10, 100, 2])),
+            "{2, 9, 10, 100}"
+        );
+    }
+
+    /// A keyed collection prints in the order it iterates (ADR-138 decision 4).
+    ///
+    /// `"a"` and `"a1"` are the pair that used to tell the two apart: printing
+    /// sorted the whole rendered *entry*, so `"a1: 2"` came before `"a: 1"`
+    /// because `'1'` (0x31) is below `':'` (0x3A), while `keys()` and a `for`
+    /// sorted the rendered *key* and answered `a, a1`. One `Map`, two orders,
+    /// and a program that printed it and walked it disagreed with itself.
+    #[test]
+    fn a_keyed_collection_prints_in_the_order_it_iterates() {
+        let rt = crate::Runtime::new();
+        let p = MapPayload {
+            key_descriptor: &crate::text::TEXT,
+            value_descriptor: &crate::scalars::INT,
+            entries: [("a1", 2), ("a", 1)]
+                .iter()
+                .map(|&(k, v)| (DynamicKey::new(rt.alloc_text(k)), rt.alloc_int(v)))
+                .collect(),
+        };
+        // SAFETY: every key is a `Text` and every value an `Int`.
+        let iterated: Vec<String> = unsafe { ordered_entries(&p.entries) }
+            .into_iter()
+            .map(|(k, _)| {
+                let mut s = String::new();
+                unsafe { render_into(&mut s, k.descriptor(), k) };
+                s
+            })
+            .collect();
+        assert_eq!(iterated, vec!["a".to_string(), "a1".to_string()]);
+        assert_eq!(rendered(map_format, &p), "{a: 1, a1: 2}");
+    }
+
+    /// A tuple key orders element-wise — day 11's memo key shape,
+    /// `Map[(Text, Int), V]`, and the reason `TUPLE.compare` had to be
+    /// populated rather than left to the rendered-form fallback: `"(a, 10)"`
+    /// sorts before `"(a, 9)"` and `(a, 9)` does not.
+    #[test]
+    fn a_tuple_keyed_map_orders_element_wise() {
+        let mut rt = crate::Runtime::new();
+        let schema: &'static crate::tuples::TupleSchema =
+            Box::leak(Box::new(crate::tuples::TupleSchema {
+                descriptors: Box::leak(
+                    vec![
+                        &crate::text::TEXT as *const TypeDescriptor,
+                        &crate::scalars::INT as *const TypeDescriptor,
+                    ]
+                    .into_boxed_slice(),
+                ),
+            }));
+        let pairs = [("a", 10), ("a", 9), ("b", 1)];
+        let values: Vec<(GcRef, GcRef)> = pairs
+            .iter()
+            .map(|&(t, n)| (rt.alloc_text(t), rt.alloc_int(n)))
+            .collect();
+        let mut ctx = rt.context();
+        let keys: Vec<GcRef> = values
+            .into_iter()
+            .map(|(t, n)| {
+                // SAFETY: a live context, and the schema names exactly these
+                // two element types.
+                unsafe {
+                    let tup = crate::abi::praxis_alloc_tuple(&mut ctx, schema);
+                    crate::abi::praxis_tuple_set(&mut ctx, tup, 0, t);
+                    crate::abi::praxis_tuple_set(&mut ctx, tup, 1, n);
+                    tup
+                }
+            })
+            .collect();
+        let p = MapPayload {
+            key_descriptor: &crate::tuples::TUPLE,
+            value_descriptor: &crate::scalars::INT,
+            entries: keys
+                .into_iter()
+                .map(|k| (DynamicKey::new(k), rt.alloc_int(0)))
+                .collect(),
+        };
+        assert_eq!(
+            rendered(map_format, &p),
+            "{(a, 9): 0, (a, 10): 0, (b, 1): 0}"
+        );
+    }
+
+    /// A `Float` key orders numerically, with NaN last (ADR-045 decision 2).
+    ///
+    /// The NaN rule was written when nothing consumed it at these three call
+    /// sites; this is the first test that ties it to the order a `Set` prints
+    /// and iterates in. Rendered-form order put `10.25` between `1.5` and `2.0`.
+    #[test]
+    fn a_float_keyed_set_orders_numerically_and_puts_nan_last() {
+        let rt = crate::Runtime::new();
+        let p = SetPayload {
+            element_descriptor: &crate::scalars::FLOAT,
+            entries: [2.0, f64::NAN, 10.25, 1.5]
+                .iter()
+                .map(|&f| DynamicKey::new(rt.alloc_float(f)))
+                .collect(),
+        };
+        assert_eq!(rendered(set_format, &p), "{1.5, 2.0, 10.25, NaN}");
     }
 }

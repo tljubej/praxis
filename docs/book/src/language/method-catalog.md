@@ -1,7 +1,7 @@
 # The method catalog
 
-Every method in Praxis is a row in one table. There are 136 of them, they live
-in `crates/praxis-stdlib/src/builtins.rs`, and there is no way to add a 137th
+Every method in Praxis is a row in one table. There are 143 of them, they live
+in `crates/praxis-stdlib/src/builtins.rs`, and there is no way to add a 144th
 from a program: the language has no `impl`, no traits, no extension methods, and
 a record carries fields but no methods. This chapter is that table.
 
@@ -89,6 +89,7 @@ the loop, so their tables below carry no **Allocates** column and their
 | `is_empty()` | `Bool` | no | no | no | True iff the vector has no elements. |
 | `len()` | `Int` | no | no | yes | Number of elements in the vector. |
 | `push(T)` | `Unit` | yes | yes | yes | Append a value to the end; returns Unit. |
+| `to_text()` | `Text` | no | yes | yes | These Chars as one Text, with nothing between them; the element type must be `Char`. |
 
 ```praxis
 var v = [10, 20, 30]
@@ -195,7 +196,8 @@ false
 halves of one question and the spelling picks which you meant.
 
 `keys()` and `values()` answer `Vec`s in a fixed, deterministic order — by the
-key's rendered form — and the two are index-aligned, so `keys()[i]` and
+key's own order, the same one `sorted()` uses, so an `Int` key comes out numeric
+— and the two are index-aligned, so `keys()[i]` and
 `values()[i]` belong together. To get both at once, walk the map: `for kv in m`
 and the pipeline rows below both yield `(K, V)` pairs, and `m.to_vec()` is the
 `Vec[(K, V)]`.
@@ -523,6 +525,7 @@ can change after it is stored`.
 | `flat_map((T) -> Vec[U])` | `Vec[U]` | — | no | Map each element to a Vec and concatenate the results. |
 | `frequencies()` | `Counter[T]` | items usable as keys | no | A Counter holding how many times each element occurs. |
 | `map((T) -> U)` | `Vec[U]` | — | no | Apply a function to each element, collecting into a Vec. |
+| `reversed()` | `Vec[T]` | — | no | A new Vec holding these elements in reverse order. |
 | `skip(Int)` | `Vec[T]` | — | no | Drop the first n elements. |
 | `sorted()` | `Vec[T]` | items orderable | yes | A new Vec holding these elements in ascending order. |
 | `sorted_by_key((T) -> K)` | `Vec[T]` | the extracted key is orderable | yes | A new Vec ordered by the key the closure extracts. |
@@ -531,15 +534,24 @@ can change after it is stored`.
 | `unique()` | `Vec[T]` | items usable as keys | no | A new Vec with duplicate elements removed, keeping first occurrences. |
 | `zip(Vec[U])` | `Vec[(T, U)]` | — | no | Pair elements with another sequence, stopping at the shorter length. |
 
-`sorted`, `sorted_by_key`, `unique` and `frequencies` are **barriers**: each
-needs the whole sequence before it can answer anything, so each is a call into
-the runtime rather than a stage the compiler folds into the loop. That is
-invisible from a program except in what it costs — the other stages are fused
-into a single pass over the source
+`sorted`, `sorted_by_key`, `unique`, `reversed`, `frequencies` and `join` are
+**barriers**: each needs the whole sequence before it can answer anything, so
+each is a call into the runtime rather than a stage the compiler folds into the
+loop. `reversed` is the clearest case of the definition — it cannot answer its
+first element until it has seen the last
+([ADR-145](../../../decisions/145-a-reversal-needs-the-whole-sequence-so-it-is-a-barrier.md)).
+Being a barrier is invisible from a program except in what it costs — the other
+stages are fused into a single pass over the source
 ([ADR-126](../../../decisions/126-a-pipeline-materializes-and-collect-named-a-step-it-takes-anyway.md)),
 which is also what the "Faults" column is measuring here: a fused stage has no
 wrapper of its own to fault, while `sorted` and `sorted_by_key` do — and
-`sorted_by_key`'s also propagates whatever the key closure raised.
+`sorted_by_key`'s also propagates whatever the key closure raised. `reversed` is
+the barrier that does *not* fault, and the two facts are the same fact: it reads
+no descriptor callback, which is also why its Requires column is empty where its
+neighbours' are not.
+
+`join` is in the sinks table below rather than here, because it answers a
+`Text` rather than a sequence.
 
 ### Sinks
 
@@ -551,6 +563,7 @@ wrapper of its own to fault, while `sorted` and `sorted_by_key` do — and
 | `count((T) -> Bool)` | `Int` | — | no | Number of elements satisfying the predicate. |
 | `find((T) -> Bool)` | `Option[T]` | — | no | The first matching element, or None. |
 | `fold(Acc, (Acc, T) -> Acc)` | `Acc` | — | no | Reduce elements left-to-right with an accumulator and combining closure. |
+| `join(Text)` | `Text` | items are `Text` | yes | These Text items concatenated with the separator between them. |
 | `max()` | `Int` | items are `Int` | yes | Largest (Int) element. Faults on an empty sequence. |
 | `max_by((T, T) -> Bool)` | `T` | — | yes | Largest element per a `(T, T) -> Bool` "less-than" comparator. |
 | `min()` | `Int` | items are `Int` | yes | Smallest (Int) element. Faults on an empty sequence. |
@@ -653,7 +666,9 @@ out(v.position(|n| n > 3))
 out(v.sorted())
 out(v.sorted_by_key(|n| 0 - n))
 out(v.unique())
+out(v.reversed())
 out(v.frequencies())
+out(["a", "b", "c"].join(", "))
 
 out(v.to_vec())
 out(v.to_set())
@@ -692,7 +707,9 @@ Some(2)
 [1, 1, 3, 4, 5]
 [5, 4, 3, 1, 1]
 [3, 1, 4, 5]
+[5, 1, 4, 1, 3]
 {1: 2, 3: 1, 4: 1, 5: 1}
+a, b, c
 [3, 1, 4, 1, 5]
 {1, 3, 4, 5}
 [3, 1, 4, 1, 5]
@@ -708,6 +725,10 @@ Some(2)
 A tuple can be a key but cannot be ordered — no composite in this language can,
 because ordering goes through one scalar comparison
 ([ADR-045](../../../decisions/045-ordering-semantics-and-the-compare-callback.md)).
+That is a statement about `<` and `sorted()`, not about a container: a
+`Map[(Int, Int), V]` still walks and prints its keys element-wise, because it has
+to walk them in *some* reproducible order
+([ADR-138](../../../decisions/138-a-container-orders-by-the-value-and-not-by-its-printing.md)).
 A record behaves exactly the same way: a fine key, not orderable. A `Vec` is
 neither one nor the other: not orderable, for the same composite reason, and not
 a key, because it can change after it has been stored. Below, the tuple fails the
@@ -836,6 +857,7 @@ directly
 | `saturating_sub(Int)` | `Int` | no | no | yes | Subtract, clamping to Int's ends instead of faulting. |
 | `to_char()` | `Char` | no | yes | yes | The `Char` with this Unicode scalar value; **faults** (`InvalidChar`) if it is negative, above `0x10FFFF`, or a surrogate. The narrowing half of the pair, as `Float.to_int` is. |
 | `to_float()` | `Float` | no | no | yes | Widen to `Float`; the explicit Int→Float conversion. |
+| `to_text()` | `Text` | no | no | yes | Format as Text — the same digits `out` writes. |
 | `wrapping_add(Int)` | `Int` | no | no | yes | Add with two's-complement wraparound instead of a fault. |
 | `wrapping_mul(Int)` | `Int` | no | no | yes | Multiply with two's-complement wraparound instead of a fault. The one row here a program could not write for itself: every arithmetic operator is checked and the language has no bitwise operators. |
 | `wrapping_sub(Int)` | `Int` | no | no | yes | Subtract with two's-complement wraparound instead of a fault. |
@@ -862,6 +884,7 @@ directly
 | Method | Result | Mutates | Faults | Allocates | What it does |
 |---|---|---|---|---|---|
 | `to_int()` | `Int` | no | no | yes | The Unicode scalar value, as an `Int`. Never faults. |
+| `to_text()` | `Text` | no | no | yes | The one-character Text holding this scalar — the same character `out` writes. Never faults. |
 
 All three receivers at once:
 
@@ -887,6 +910,8 @@ out((9223372036854775807).saturating_add(1))
 out((9223372036854775807).checked_add(1))
 out((5).checked_sub(1))
 out((3).wrapping_mul(4))
+out((1660).to_text())
+out("A"[0].to_text())
 ```
 
 ```text
@@ -908,12 +933,22 @@ true
 None
 Some(4)
 12
+1660
+A
 ```
 
 Integer arithmetic is checked by default, and the nine `wrapping_`/`saturating_`
 /`checked_` rows are how a program opts out of the fault for one operation.
-`Int` has no `to_text()` and neither does `Char`; the `to_text` family is
-`Float`'s alone today.
+
+The `to_text` family is `Int`, `Float` and `Char`, and it is closed at three:
+`Bool` has no row and there is no universal `T.to_text()`. Each of the three
+answers exactly the characters `out` writes — the method and the printer share
+one renderer per scalar, so they cannot drift apart
+([ADR-143](../../../decisions/143-the-to-text-family-is-int-float-and-char.md)).
+A labelled line does not need any of them: `"n = {n}"` renders a value of *any*
+type through the same printer, which is what closed the question these three
+rows left open
+([ADR-147](../../../decisions/147-a-hole-renders-anything-because-the-program-wrote-the-hole.md)).
 
 ## Subscripts
 
@@ -1023,6 +1058,8 @@ instead.
 out("a,b".split(","))
 out([1.5, 2.5].sum())
 out([1, 2].to_map())
+out(["a"[0]].join(""))
+out([1, 2].to_text())
 ```
 
 ```console
@@ -1045,12 +1082,26 @@ error[Y001]: expected (?T, ?U), found Int
   3 | out([1, 2].to_map())
     |            ^^^^^^ expected (?T, ?U), found Int
 
-praxis: 3 error(s)
+error[Y001]: expected Text, found Char
+
+  catalog-refusals.px:4:14
+  4 | out(["a"[0]].join(""))
+    |              ^^^^ expected Text, found Char
+
+error[Y001]: expected Char, found Int
+
+  catalog-refusals.px:5:12
+  5 | out([1, 2].to_text())
+    |            ^^^^^^^ expected Char, found Int
+
+praxis: 5 error(s)
 ```
 
 The second is why `sum` is spelled as a bound rather than a literal `Vec[Int]`
 receiver: the row still *matches* a `Vec[Float]`, so the report is about the
-element type you have rather than "no method `sum` on this type".
+element type you have rather than "no method `sum` on this type". The last two
+are the same shape, and the same reason `join` and `to_text` bound their item
+rather than naming a concrete receiver.
 
 See [method resolution](../types/method-resolution.md) for how a call finds its
 row, and [diagnostic codes](../tooling/diagnostics.md) for the full list.

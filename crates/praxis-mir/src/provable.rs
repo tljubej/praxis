@@ -25,8 +25,9 @@
 //! # What is a producer, and what is not
 //!
 //! The producers are the three shapes where **MIR wrote the descriptor down**:
-//! [`Inst::ConstGc`] (whose three variants name an interned `Int`, the `Unit`
-//! singleton and the two `Bool` singletons), [`Inst::Alloc`] (whose
+//! [`Inst::ConstGc`] (whose four variants name an interned `Int`, an interned
+//! `Char`, the `Unit` singleton and the two `Bool` singletons),
+//! [`Inst::Alloc`] (whose
 //! [`AllocKind`] *is* the class), and [`Inst::Materialize`] (whose
 //! [`ScalarKind`] is). [`Inst::MoveGc`] resolves to its source. Everything else
 //! that writes a `Gc` local — `Call`, `CallIndirect`, `LoadField`,
@@ -143,7 +144,7 @@ impl DescriptorClass {
     }
 
     /// The class of an immortal the runtime minted before the program started.
-    /// [`GcConst`] has three variants and each names its own descriptor, which
+    /// [`GcConst`] has four variants and each names its own descriptor, which
     /// is the whole reason a constant is a producer.
     #[inline]
     #[must_use]
@@ -152,6 +153,7 @@ impl DescriptorClass {
             GcConst::SmallInt(_) => DescriptorClass::Int,
             GcConst::Unit => DescriptorClass::Unit,
             GcConst::Bool(_) => DescriptorClass::Bool,
+            GcConst::Char(_) => DescriptorClass::Char,
         }
     }
 

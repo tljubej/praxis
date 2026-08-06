@@ -1,0 +1,6 @@
+// The fill is one value stored in every slot, not one copy per slot — the same
+// reference semantics `var b = a` has. A push into any cell is visible from all
+// four, because they are the same `Vec`.
+var cells = Grid(2, 2, Vec())
+cells[0, 0].push(1)
+out(cells[1, 1])

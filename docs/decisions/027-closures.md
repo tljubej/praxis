@@ -53,8 +53,33 @@ misses assigned-to captures). A name is a capture iff its symbol is a value
 binding (`Let`/`Var`/`Param`) declared *outside* the closure node's range (params
 and closure-local bindings are declared inside, so they're filtered). Dedup by
 symbol; first-seen order is the env slot index, shared by the allocation site, the
-synthetic function prologue, and (for `var`) the `VarCell`. Immutable captures
-(`let`/`param`) are `ByValue`; `var` captures are `ByCell`.
+synthetic function prologue, and (for `var`) the `VarCell`.
+
+**The scan covers nested closure literals too, and the "outside the closure
+node's range" test is the whole predicate.** A name a nested closure references
+that resolves outside the *enclosing* closure is a capture of the enclosing
+closure as well as of the nested one — it has to be, because the nested
+closure's environment is filled from the enclosing frame at the point the nested
+literal is allocated, so the enclosing closure must be holding the value in
+order to hand it over. Nothing extra is needed to keep the nested closure's own
+params and locals out: they are declared at ranges *inside* the enclosing
+closure's node, so the same `contains_range` test that filters the enclosing
+closure's own bindings filters them.
+
+This sentence is here because the implementation once disagreed with it. A guard
+that returned early when the walked body *was* a nested closure made
+`|a| |b| b + base` capture nothing, and the inner environment was then filled
+from an empty one — a silently wrong answer for a captured `Text`, a panic for
+an `Int`, a SIGSEGV for a reassigned `Int`. The braced spelling
+`|a| { |b| b + base }` was correct throughout, which is how it survived. See
+[handover 31](../handovers/31-what-an-aoc-solve-found.md) item 1.
+
+The last line of this paragraph used to read "immutable captures (`let`/`param`)
+are `ByValue`; `var` captures are `ByCell`", which is stale since
+[ADR-125](./125-a-binding-is-a-binding-and-the-compiler-decides-its-storage.md):
+what picks a cell is whether anything *reassigns* the binding, not which keyword
+declared it. `lower.rs`'s `Symbol::reassigned` check is the code of record — this
+module deliberately does not read it.
 
 ### HIR → MIR → codegen bridge
 
@@ -97,6 +122,11 @@ first-class).
   currying, returned closures whose env outlives the frame (GC'd), closures in
   collections. Closes the §19.7 criterion "compile closure pipelines with
   captured values."
+- Currying works for a closure body that *is* a closure, not only for one that
+  contains one, and a mutable capture threaded through several environments is
+  still a single shared cell. `|a| |b| b + base` and `|a| { |b| b + base }`
+  print the same `<closure:N>` and the same answer, which is the assertable form
+  of the capture-analysis rule above.
 - The `closures.rs` doc comment was updated to describe Approach B (it previously
   described the stale Approach-A sketch).
 - `praxis_closure_fn_ptr` gained a `ctx` param (unused) for ABI uniformity — every

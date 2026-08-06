@@ -1,4 +1,4 @@
-// Char and Int convert in both directions, and nothing else converts.
+// Char and Int convert in both directions, and each renders as a Text.
 var digits = "2026"
 var value = 0
 for c in digits {
@@ -8,3 +8,5 @@ out(value)
 out("A"[0].to_int())
 out(65.to_char())
 out(233.to_char())
+out("A"[0].to_text())
+out("count: " + value.to_text())

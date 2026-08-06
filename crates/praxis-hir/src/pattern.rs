@@ -46,6 +46,18 @@ use rowan::TextRange;
 use crate::lower::{Lit, TypedPattern};
 use crate::symbol::SymbolId;
 
+/// The byte span `[start, end)` of the token a pattern binds its name at, in
+/// the `(u32, u32)` shape the typed tree carries everywhere else
+/// (`Lowerer::node_span`).
+///
+/// A binding's span is the *name's*, not the enclosing pattern's: it is what
+/// the crash debugger echoes as the binding's provenance, and `Some(p)` should
+/// point at `p` and not at `Some(p)` (ADR-139).
+fn tok_span(tok: &praxis_syntax::SyntaxToken) -> (u32, u32) {
+    let r = tok.text_range();
+    (u32::from(r.start()), u32::from(r.end()))
+}
+
 /// Everything building a pattern needs, and nothing else.
 ///
 /// The list is short on purpose: it is what made the extraction from the lowerer
@@ -108,6 +120,15 @@ impl PatternBuilder<'_> {
                     SyntaxKind::TextLit => {
                         Lit::Text(praxis_syntax::literal::unquote_text(tok.text()))
                     }
+                    // Nothing is reported here: the lexer owns the one-character
+                    // rule (ADR-141) and has already said so. The substituted
+                    // U+0000 matches nothing a well-formed program can name,
+                    // which is the right value for a pattern whose literal was
+                    // refused.
+                    SyntaxKind::CharLit => Lit::Char(
+                        praxis_syntax::literal::decode_char_literal(tok.text()).unwrap_or('\0')
+                            as u32,
+                    ),
                     SyntaxKind::KW_TRUE => Lit::Bool(true),
                     SyntaxKind::KW_FALSE => Lit::Bool(false),
                     _ => return TypedPattern::Wildcard,
@@ -117,9 +138,13 @@ impl PatternBuilder<'_> {
                     Lit::Float(_) => self.db.float(),
                     Lit::Bool(_) => self.db.bool(),
                     Lit::Text(_) => self.db.text(),
-                    // Char literals don't appear in patterns (no char-literal
-                    // pattern syntax); use the scrutinee type as a fallback.
-                    Lit::Char(_) => scrutinee_ty,
+                    // A `Char` pattern is a `Char`, and answering `scrutinee_ty`
+                    // here — which is what this arm did while no char literal
+                    // could be written — would have made `match n { 'a' => … }`
+                    // over an `Int` type-check by agreeing with whatever it was
+                    // asked about. Every other literal answers its own type; so
+                    // does this one.
+                    Lit::Char(_) => self.db.char(),
                     // `Unit` literals are synthesized internally; the parser
                     // produces no Unit pattern, so this arm is defensive.
                     Lit::Unit => self.db.unit(),
@@ -177,7 +202,9 @@ impl PatternBuilder<'_> {
                     if let Some(symbol) = self.decls.get(&tok.text_range()).copied() {
                         return TypedPattern::Bind {
                             symbol,
+                            name: tok.text().to_string(),
                             ty: scrutinee_ty,
+                            span: tok_span(&tok),
                         };
                     }
                 }
@@ -343,7 +370,9 @@ impl PatternBuilder<'_> {
                         None => match self.decls.get(&name_tok.text_range()).copied() {
                             Some(symbol) => TypedPattern::Bind {
                                 symbol,
+                                name: fname.clone(),
                                 ty: field_ty,
+                                span: tok_span(&name_tok),
                             },
                             None => TypedPattern::Wildcard,
                         },

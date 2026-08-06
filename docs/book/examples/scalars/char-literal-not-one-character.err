@@ -1,0 +1,16 @@
+error[T007]: a character literal holds exactly one character
+
+  char-literal-not-one-character.px:4:11
+  4 | var two = '##'
+    |           ^^^^ a character literal holds exactly one character
+
+help: write it as a text literal
+      "##"
+
+error[T007]: empty character literal: `''` names no character
+
+  char-literal-not-one-character.px:5:12
+  5 | var none = ''
+    |            ^^ empty character literal: `''` names no character
+
+praxis: 2 error(s)

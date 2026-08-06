@@ -17,8 +17,14 @@
 //! `fn`/`struct`/`enum`/`builtin` references are never captures (a `fn` call is
 //! a static call; the others are type names).
 //!
-//! Nested closure bodies are *not* descended into — their free variables are
-//! their own captures, not this closure's.
+//! Nested closure bodies **are** descended into, and must be. A name a nested
+//! closure references that resolves *outside this* closure is a capture of this
+//! closure as well as of the nested one: the nested closure's environment is
+//! filled from this closure's frame at the point its literal is allocated, so
+//! this closure has to be holding the value in order to hand it over. The
+//! nested closure's own params and locals are declared at ranges inside
+//! `closure_range` and are filtered by the same test that filters this
+//! closure's own — so descending cannot over-capture.
 //!
 //! The result preserves first-seen order, which becomes the env slot index
 //! shared across lowering, the synthetic function prologue, and the allocation.
@@ -122,8 +128,19 @@ where
     out
 }
 
-/// The recursive walker. Descends into every expression kind *except* nested
-/// closures (their captures are their own). Records each free value binding.
+/// A **flat** scan of every token in the body's subtree — nested closures
+/// included, which is the point. `descendants_with_tokens()` already yields the
+/// whole subtree, and `record_free_var`'s "declared outside `closure_range`"
+/// test is the entire predicate: it keeps exactly the names that must live in
+/// this closure's environment and drops every binding either closure declares.
+///
+/// This function is not recursive and never calls itself; `analyze` is its only
+/// caller. It used to open with an early return when the walked expression *was*
+/// a nested closure, which meant `|a| |b| b + base` — a body that **is** a
+/// closure rather than one that merely contains one — recorded nothing, and the
+/// inner closure's environment was then filled from an empty one (handover 31
+/// item 1: a silent `Unit`, a runtime panic, or a SIGSEGV, depending on what was
+/// captured).
 fn walk<R, K>(
     expr: &Expr,
     closure_range: TextRange,
@@ -136,10 +153,6 @@ fn walk<R, K>(
     R: FnMut(SymbolId) -> Option<TextRange>,
     K: FnMut(SymbolId) -> Option<SymbolKind>,
 {
-    // A nested closure manages its own captures — do not descend into it.
-    if matches!(expr, Expr::Closure(_)) {
-        return;
-    }
     // Scan every token in the subtree. A name reference is *any* resolved NAME
     // token: a PathExpr name (a read), an AssignStmt target (a write), etc. —
     // both are captures if they resolve to an outer value binding. The resolver
@@ -147,11 +160,8 @@ fn walk<R, K>(
     // simply check membership.
     for child in expr.syntax().descendants_with_tokens() {
         if let NodeOrToken::Token(t) = child {
-            // Skip tokens inside a nested closure (their captures are their own).
-            // A nested closure's subtree is excluded by the early return above for
-            // direct closures, but a nested closure may appear as a descendant of
-            // a non-closure expr; guard by checking the token is not within any
-            // CLOSURE_EXPR descendant other than via the outer closure.
+            // Tokens inside a nested closure are scanned *deliberately*: see the
+            // module doc. Nothing here excludes them, and nothing should.
             let range = t.text_range();
             if let Some(rref) = refs.get(&range) {
                 record_free_var(*rref, range, closure_range, decl_range, kind_of, seen, out);
@@ -159,12 +169,6 @@ fn walk<R, K>(
         }
     }
 }
-
-/// Whether a token range falls inside a nested (non-outer) closure. Unused now
-/// that the walker scans tokens directly with the early-return guard on the
-/// outer closure; retained as a note for a future tighter analysis.
-#[allow(dead_code)]
-fn _inside_nested_closure() {}
 
 /// Record one free variable if it is a value binding declared outside the body.
 fn record_free_var<R, K>(
@@ -306,12 +310,19 @@ mod tests {
         );
     }
 
+    /// An inner closure's *own* bindings are never the outer closure's captures,
+    /// even though the scan reads them: `x` is the outer's param and `y` is the
+    /// inner's, and both are declared inside the outer closure node's range, so
+    /// `record_free_var`'s `contains_range` test drops them. What survives is
+    /// `o`, declared outside both — which the outer must hold in order to fill
+    /// the inner's environment.
+    ///
+    /// Renamed from `nested_closure_captures_are_separate`, which asserted the
+    /// right thing under a name that claimed the wrong rule: a nested closure's
+    /// captures are *not* separate when they resolve outside the enclosing
+    /// closure. That reading is what handover 31 item 1 was.
     #[test]
-    fn nested_closure_captures_are_separate() {
-        // The outer closure captures `o`; the inner closure `|y| x + y` captures
-        // `x` (the outer's param) but that is the inner's concern. The outer's
-        // captures should be just `o` (and `x` must NOT appear, since it is the
-        // outer's own param).
+    fn an_inner_closures_own_bindings_are_not_the_outers_captures() {
         let names = capture_names(
             "fn main() { var o = 10; var f = |x| { var g = |y| x + y; g(o) }; f(2) }",
         );
@@ -354,6 +365,135 @@ mod tests {
             names.contains(&"i".to_string()),
             "expected the loop variable captured, got {names:?}"
         );
+    }
+
+    // --- Transitive captures (handover 31 item 1) ----------------------------
+    //
+    // A closure whose body *is* a closure must capture what the inner one names
+    // from outside them both, because the inner closure's environment is filled
+    // from the outer's frame. These all answered `[]` while `walk` opened with an
+    // early return on `Expr::Closure`, and the shapes below are the ones a
+    // program actually writes.
+
+    #[test]
+    fn a_closure_whose_body_is_a_closure_captures_transitively() {
+        let names =
+            capture_names("fn main() { var base = 10; var mk = |a| |b| b + base; mk(5)(1) }");
+        assert_eq!(names, vec!["base"]);
+    }
+
+    /// Two programs that differ by one pair of braces cannot have different
+    /// environments. This is the unit-level form of the handover's gate.
+    #[test]
+    fn a_braced_body_and_a_bare_body_capture_the_same_thing() {
+        let bare =
+            capture_names("fn main() { var base = 10; var mk = |a| |b| b + base; mk(5)(1) }");
+        let braced =
+            capture_names("fn main() { var base = 10; var mk = |a| { |b| b + base }; mk(5)(1) }");
+        assert_eq!(bare, braced);
+        assert_eq!(bare, vec!["base"]);
+    }
+
+    #[test]
+    fn three_levels_of_nesting_capture_transitively() {
+        let names = capture_names(
+            "fn main() { var base = 10; var mk = |a| |b| |c| c + base; mk(1)(2)(3) }",
+        );
+        assert_eq!(names, vec!["base"]);
+    }
+
+    /// The over-capture guard: descending into the nested closure must not drag
+    /// the nested closure's own param in. `b` is declared inside the outer
+    /// closure's range, so it is a local of the outer closure, not a capture.
+    #[test]
+    fn an_inner_closures_param_is_not_the_outers_capture() {
+        let names = capture_names("fn main() { var mk = |a| |b| b + a; mk(5)(1) }");
+        assert!(names.is_empty(), "expected no captures, got {names:?}");
+    }
+
+    #[test]
+    fn an_inner_closure_local_is_not_the_outers_capture() {
+        let names = capture_names(
+            "fn main() { var base = 1; var mk = |a| |b| { var t = b + base; t }; mk(5)(1) }",
+        );
+        assert_eq!(names, vec!["base"]);
+    }
+
+    /// A name the inner closure *shadows* is not a capture: the reference
+    /// resolves to the inner param, whose declaration is inside `closure_range`.
+    #[test]
+    fn a_shadowing_inner_param_is_not_a_capture() {
+        let names =
+            capture_names("fn main() { var base = 10; var mk = |a| |base| base + 1; mk(5)(1) }");
+        assert!(names.is_empty(), "expected no captures, got {names:?}");
+    }
+
+    /// First-seen order is the env slot index, shared by the allocation site and
+    /// the synthetic function's prologue — so a transitive capture's order has to
+    /// be pinned just like a direct one's.
+    #[test]
+    fn transitive_captures_keep_first_seen_order() {
+        let names =
+            capture_names("fn main() { var a = 1; var b = 2; var mk = |x| |y| b + a; mk(0)(0) }");
+        assert_eq!(names, vec!["b", "a"]);
+    }
+
+    // --- names inside interpolation holes (§8.1, ADR-147) -------------------
+    //
+    // **This module is why interpolation is lexed the way it is.** `walk` scans
+    // `descendants_with_tokens()` and looks each token's *range* up in the
+    // resolver's `refs` map, so a name is a capture only if it is a real token
+    // at a real range in the lossless tree. An implementation that kept
+    // `"{outer}"` as one opaque `TextLit` and re-lexed the hole in a later pass
+    // answers `[]` here — and the closure is then allocated with an empty
+    // environment and reads a slot nothing filled, which is a wrong answer at
+    // run time rather than a diagnostic. Nothing about that is specific to this
+    // file; the tests are here because this is the module that would be wrong.
+
+    /// **The gate for ADR-147 decision 1.**
+    #[test]
+    fn a_hole_in_a_closure_body_captures_the_name_it_holds() {
+        let names = capture_names(r#"fn main() { var outer = 1; var f = |_| "{outer}"; f(0) }"#);
+        assert_eq!(names, vec!["outer"]);
+    }
+
+    /// A hole holds a full expression, so every name in it is a capture on the
+    /// same terms — and in first-seen order, because that order is the env slot
+    /// index.
+    #[test]
+    fn every_name_in_a_hole_is_captured_in_first_seen_order() {
+        let names =
+            capture_names(r#"fn main() { var a = 1; var b = 2; var f = |_| "{b} {a}"; f(0) }"#);
+        assert_eq!(names, vec!["b", "a"]);
+    }
+
+    /// The over-capture guard, one brace deeper: the closure's own param is
+    /// declared inside the closure's range whether it is named in a hole or in
+    /// ordinary expression position, so it is a local either way.
+    #[test]
+    fn a_param_named_in_a_hole_is_not_a_capture() {
+        let names = capture_names(r#"fn main() { var f = |x| "{x}"; f(1) }"#);
+        assert!(names.is_empty(), "expected no captures, got {names:?}");
+    }
+
+    /// A literal with no hole in it names nothing, so it captures nothing. The
+    /// negative half matters: it is what says the fragments themselves are not
+    /// being mistaken for names.
+    #[test]
+    fn a_literal_with_no_hole_captures_nothing() {
+        let names = capture_names(r#"fn main() { var outer = 1; var f = |_| "outer"; f(0) }"#);
+        assert!(names.is_empty(), "expected no captures, got {names:?}");
+    }
+
+    /// Two programs that differ only by whether the name is written inside a
+    /// hole cannot have different environments. This is the interpolation form
+    /// of `a_braced_body_and_a_bare_body_capture_the_same_thing`.
+    #[test]
+    fn a_name_in_a_hole_and_a_bare_name_capture_the_same_thing() {
+        let bare = capture_names("fn main() { var o = 10; var f = |_| o; f(0) }");
+        let in_hole = capture_names(r#"fn main() { var o = 10; var f = |_| "{o}"; f(0) }"#);
+        assert_eq!(bare, in_hole);
+        assert_eq!(bare, vec!["o"]);
     }
 
     #[test]

@@ -456,6 +456,12 @@ impl TypeRef {
 #[derive(Clone, Debug)]
 pub enum Expr {
     Literal(Literal),
+    /// `"a{x}b"` — an interpolated text literal (§8.1, ADR-147).
+    ///
+    /// Separate from [`Literal`](Self::Literal) because it is not a leaf: its
+    /// holes are expression subtrees, and every walk that looks for names has to
+    /// descend into them.
+    Interp(InterpExpr),
     Path(PathExpr),
     Bin(BinExpr),
     /// `a..b` or `a..=b` — a range (§4.11, ADR-059).
@@ -507,6 +513,7 @@ impl Expr {
     pub fn syntax(&self) -> &SyntaxNode {
         match self {
             Expr::Literal(e) => e.syntax(),
+            Expr::Interp(e) => e.syntax(),
             Expr::Path(e) => e.syntax(),
             Expr::Bin(e) => e.syntax(),
             Expr::Range(e) => e.syntax(),
@@ -547,6 +554,7 @@ impl Expr {
     fn cast_from_child(n: SyntaxNode) -> Option<Expr> {
         Some(match n.kind() {
             K::LITERAL => Expr::Literal(Literal::from_syntax(n)),
+            K::INTERP_EXPR => Expr::Interp(InterpExpr::from_syntax(n)),
             K::PATH_EXPR => Expr::Path(PathExpr::from_syntax(n)),
             K::BIN_EXPR => Expr::Bin(BinExpr::from_syntax(n)),
             K::RANGE_EXPR => Expr::Range(RangeExpr::from_syntax(n)),
@@ -960,7 +968,7 @@ impl Pattern {
         // Check for a literal.
         if syntax
             .children_with_tokens()
-            .any(|e| matches!(e, rowan::NodeOrToken::Token(t) if matches!(t.kind(), K::IntLit | K::FloatLit | K::TextLit | K::KW_TRUE | K::KW_FALSE)))
+            .any(|e| matches!(e, rowan::NodeOrToken::Token(t) if matches!(t.kind(), K::IntLit | K::FloatLit | K::TextLit | K::CharLit | K::KW_TRUE | K::KW_FALSE)))
         {
             return PatternKind::Literal;
         }
@@ -1017,15 +1025,15 @@ impl Pattern {
         })
     }
 
-    /// The literal token, if this is a literal pattern (`42`, `"hi"`, `true`,
-    /// `false`). Used by the HIR lowerer to read the value the pattern tests
-    /// against.
+    /// The literal token, if this is a literal pattern (`42`, `"hi"`, `'#'`,
+    /// `true`, `false`). Used by the HIR lowerer to read the value the pattern
+    /// tests against.
     pub fn literal_token(&self) -> Option<SyntaxToken> {
         self.syntax.children_with_tokens().find_map(|e| match e {
             rowan::NodeOrToken::Token(t)
                 if matches!(
                     t.kind(),
-                    K::IntLit | K::FloatLit | K::TextLit | K::KW_TRUE | K::KW_FALSE
+                    K::IntLit | K::FloatLit | K::TextLit | K::CharLit | K::KW_TRUE | K::KW_FALSE
                 ) =>
             {
                 Some(t)
@@ -1069,7 +1077,7 @@ impl PatternField {
 pub enum PatternKind {
     /// `_` — matches anything.
     Wildcard,
-    /// A literal: `42`, `"hi"`, `true`, `false`.
+    /// A literal: `42`, `"hi"`, `'#'`, `true`, `false`.
     Literal,
     /// A variable bind: `x` — matches anything and binds the value to `x`.
     Name(String),
@@ -1086,7 +1094,8 @@ pub enum PatternKind {
     Record(Option<String>),
 }
 
-/// A literal: `IntLit`, `TextLit`, `true`/`false`, backtick template.
+/// A literal: `IntLit`, `FloatLit`, `TextLit`, `CharLit`, `true`/`false`,
+/// backtick template.
 #[derive(Clone, Debug)]
 pub struct Literal {
     syntax: SyntaxNode,
@@ -1116,12 +1125,86 @@ impl Literal {
                     K::IntLit
                         | K::FloatLit
                         | K::TextLit
+                        | K::CharLit
                         | K::BacktickTemplate
                         | K::KW_TRUE
                         | K::KW_FALSE
                 )
             })
     }
+}
+
+/// An interpolated text literal: `"a{x}b"` (§8.1, ADR-147).
+#[derive(Clone, Debug)]
+pub struct InterpExpr {
+    syntax: SyntaxNode,
+}
+impl AstNode for InterpExpr {
+    const KIND: K = K::INTERP_EXPR;
+    fn from_syntax(syntax: SyntaxNode) -> Self {
+        Self { syntax }
+    }
+    fn syntax(&self) -> &SyntaxNode {
+        &self.syntax
+    }
+}
+
+/// One piece of an interpolated literal, in source order.
+#[derive(Clone, Debug)]
+pub enum InterpPart {
+    /// Literal text between the delimiters, already **undecoded** — the caller
+    /// gets the token so it can decode with the workspace's one decoder and
+    /// report against the token's own range.
+    Fragment(SyntaxToken),
+    /// A hole's expression.
+    Hole(Expr),
+}
+
+impl InterpExpr {
+    /// The pieces of the literal, in source order: fragment, hole, fragment,
+    /// hole, …, fragment.
+    ///
+    /// Read off `children_with_tokens` rather than reconstructed from a count,
+    /// because the order is the thing that matters and a malformed run (an
+    /// `InterpClose` the parser had to synthesize, say) still yields the pieces
+    /// it does have. A consumer that needs the invariant "n holes, n+1
+    /// fragments" must not assume it: the tree is lossless, and a file being
+    /// typed in an editor is malformed most of the time.
+    pub fn parts(&self) -> Vec<InterpPart> {
+        use rowan::NodeOrToken;
+        self.syntax
+            .children_with_tokens()
+            .filter_map(|e| match e {
+                NodeOrToken::Token(t)
+                    if matches!(t.kind(), K::InterpOpen | K::InterpMiddle | K::InterpClose) =>
+                {
+                    Some(InterpPart::Fragment(t))
+                }
+                NodeOrToken::Token(_) => None,
+                NodeOrToken::Node(n) => Expr::cast(n).map(InterpPart::Hole),
+            })
+            .collect()
+    }
+}
+
+/// Strip an interpolation fragment's two delimiters and decode its escapes.
+///
+/// One byte comes off each end whichever fragment this is — `"a{`, `}b{` and
+/// `}c"` all carry a delimiter at each end (ADR-147) — and the body goes through
+/// [`praxis_syntax::literal::decode_text_body`], the workspace's one decoder, so
+/// `"a\tb"` and `"a\tb{x}"` cannot disagree about what `\t` is.
+///
+/// A token too short to have two delimiters answers the empty string. That is
+/// unreachable from the lexer, which never emits a fragment under two bytes, and
+/// it is written as a value rather than a panic because the caller is a lowerer
+/// running over a tree an editor may have caught mid-keystroke.
+#[must_use]
+pub fn interp_fragment_text(token: &SyntaxToken) -> String {
+    let raw = token.text();
+    if raw.len() < 2 {
+        return String::new();
+    }
+    praxis_syntax::literal::decode_text_body(&raw[1..raw.len() - 1])
 }
 
 /// A name used as a value, or a callee (a bare `Ident` token, possibly followed

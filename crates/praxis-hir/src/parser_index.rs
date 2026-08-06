@@ -12,7 +12,7 @@
 //! and capture type ends, and a second scanner in the language server would be
 //! free to disagree with it. See ADR-098.
 
-use praxis_input_parser::{AtomicKind, BlockItem, ParserAst, TemplatePart};
+use praxis_input_parser::{AtomicKind, BlockItem, ParserAst, SectionItem, TemplatePart};
 use praxis_source::Span;
 use praxis_types::Type;
 use rowan::TextRange;
@@ -359,7 +359,7 @@ fn children(ast: &ParserAst) -> Vec<&ParserAst> {
             ..
         } => fields
             .iter()
-            .map(|(_, p)| p)
+            .map(SectionItem::parser)
             .chain(repeated_tail.iter().map(|(_, t)| &**t))
             .collect(),
         ParserAst::Block { items, .. } => items

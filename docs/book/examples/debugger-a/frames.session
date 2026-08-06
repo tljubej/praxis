@@ -20,7 +20,7 @@ Praxis crash> frame 2: <entry>
 Praxis crash>   locals:
     depths: Vec[Int] = [10, 20, 20]
     total: Int = 1
-    ? = 1
+    i: Int = 1
   temps:
     <tmp#1> = 10
 20

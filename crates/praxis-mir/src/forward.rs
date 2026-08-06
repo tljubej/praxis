@@ -225,11 +225,13 @@ fn consider(
     // pun verifies today, and forwarding across it would turn a punned reload
     // into a silent value substitution.
     //
-    // `can_fault` is the gate that keeps `Char` out. `AllocChar` validates its
-    // Unicode scalar, so its row is `AllocatesAndFaults` and ADR-088 puts a
-    // `CheckFault` immediately after it; deleting the producer would orphan the
-    // check and `verify::check_fault_observed` would refuse the function. It is
-    // not a conservatism — it is the exact boundary.
+    // `can_fault` is the gate that keeps an `Alloc { Char }` out. `AllocChar`
+    // validates its Unicode scalar, so its row is `AllocatesAndFaults` and
+    // ADR-088 puts a `CheckFault` immediately after it; deleting the producer
+    // would orphan the check and `verify::check_fault_observed` would refuse the
+    // function. It is not a conservatism — it is the exact boundary, and it is
+    // drawn around the *allocation*, not around `Char`: a `ConstGc { Char }`
+    // reads an interned slot, cannot fault, and is folded (ADR-141).
     if block.insts[producer].can_fault() {
         return None;
     }
@@ -247,6 +249,13 @@ fn consider(
             (GcConst::SmallInt(n), ScalarKind::Int) => How::Immediate { value: *n },
             (GcConst::Bool(b), ScalarKind::Bool) => How::Immediate {
                 value: i64::from(*b),
+            },
+            // The other half of the character literal's cost (ADR-141). Without
+            // this row `'#'` is two loads but `if c == '#'` still re-extracts
+            // the literal's payload every iteration; with it the comparison is
+            // against an immediate the code point is baked into.
+            (GcConst::Char(c), ScalarKind::Char) => How::Immediate {
+                value: i64::from(*c),
             },
             _ => return None,
         },
@@ -721,14 +730,16 @@ mod tests {
     /// after it; deleting the producer would orphan the check and
     /// `verify::check_fault_observed` would refuse the function.
     ///
-    /// **Hand-built, because no source program reaches this shape.** ADR-107
-    /// gives the language no char-literal syntax, and nothing in the tree
-    /// constructs a `Lit::Char` at all — every mention of it is a match arm, so
-    /// `build.rs`'s `AllocKind::Char` site is reachable only from an
-    /// `Int.to_char()` at run time, never from a literal. (This comment used to
-    /// say the input parser synthesized one; it does not.) A gate whose only
-    /// witness is a program that cannot be written is still a gate the pass has
-    /// to hold, and this is what holds it.
+    /// **Hand-built, because the shape is narrow.** `build.rs`'s
+    /// `AllocKind::Char` site is reached from an `Int.to_char()`, whose scalar
+    /// arrives at run time, and from a character literal above U+007F, which is
+    /// past `small_char`'s interned range (ADR-141). An in-range literal is a
+    /// `ConstGc { Char }` instead — no allocation, no check, and *folded*, which
+    /// is what [`a_const_gc_char_reload_becomes_an_immediate`] holds. The two
+    /// tests are the two sides of `can_fault`: the boundary is the allocation,
+    /// not the type.
+    ///
+    /// [`a_const_gc_char_reload_becomes_an_immediate`]: self::a_const_gc_char_reload_becomes_an_immediate
     #[test]
     fn a_char_box_is_not_forwarded_because_its_check_fault_would_be_orphaned() {
         use crate::ir::{LocalDebugKind, LocalKind, MirType};
@@ -808,6 +819,38 @@ mod tests {
         );
         crate::annotate(&mut f);
         verify(&f).unwrap_or_else(|errs| panic!("{}", crate::verify::report(&errs)));
+    }
+
+    /// The other side of `can_fault`, and the second half of the character
+    /// literal's cost (ADR-141).
+    ///
+    /// An in-range `'#'` is a `ConstGc { Char }` — a table read, which allocates
+    /// nothing and cannot fault — so its reload folds to the immediate `35`.
+    /// That is what makes `for c in line { if c == '#' { … } }` compare against
+    /// a baked-in constant instead of re-reading the boxed payload every
+    /// iteration. Without it the literal is cheaper to *build* and no cheaper to
+    /// *use*, which is most of what the loop was paying for.
+    #[test]
+    fn a_const_gc_char_reload_becomes_an_immediate() {
+        const CHAR_LOAD: InstKind = InstKind::ExtractScalar(ScalarKind::Char);
+
+        let lowered = lower_src_to_mir("fn f(c: Char) -> Bool { c == '#' }");
+        let census = Census::of_function(lowered.function("f"));
+        assert_eq!(
+            census.count(InstKind::ConstGc),
+            0,
+            "the literal's box had one consumer and it took the code point: {census:?}"
+        );
+        assert_eq!(
+            census.count(InstKind::ConstInt),
+            1,
+            "`'#'` is the immediate 35 now: {census:?}"
+        );
+        assert_eq!(
+            census.count(CHAR_LOAD),
+            1,
+            "only `c`'s payload is still read: {census:?}"
+        );
     }
 
     /// Gate 2. A box produced in one block and unboxed in another is left

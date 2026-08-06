@@ -1,0 +1,18 @@
+error: program faulted: input parse mismatch
+       at input offset 0..5: expected 3 sections for `shapes`
+       actual: 1⏎⏎2⏎
+
+Backtrace:
+#0   <entry>
+
+  locals:
+    data: { shapes: Vec[Vec[Int]], regions: Vec[Int] } = <uninit>
+  temps:
+    <tmp#1> = 1
+
+2
+
+    <tmp#2: Int> = 1
+    <tmp#6: Int> @ "data.shapes.len()" = <uninit>
+    <tmp#7: Unit> @ "out(data.shapes.len())" = <uninit>
+    <tmp#8: Unit> @ "// The count is a promise about the input, so two sections where the program // said three is a parse fault — not a `Vec` of two. The message names the // group that came up short, because the number is written in the program and // "which one" is the only thing left to say. var data = read sections( shapes: repeated(lines(int), 3), regions: lines(int), ) out(data.shapes.len())" = <uninit>

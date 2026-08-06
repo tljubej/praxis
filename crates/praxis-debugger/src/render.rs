@@ -130,8 +130,12 @@ pub fn render_backtrace<W: Write>(out: &mut W, snap: &CrashSnapshot) -> std::io:
 }
 
 /// Render the locals of frame `index` (0 = innermost), up to `limit` total,
-/// split into two labeled sections: user-written bindings first, then compiler
-/// temporaries. Each line shows the local's name (or `<tmp#N: Type>` for a
+/// split into two labeled sections: bindings first, then compiler temporaries.
+/// "Binding" is ADR-125's sense of the word — a `var`, a parameter, a `for`
+/// variable and a name a pattern introduces — so a `match` arm's payload and a
+/// destructuring `for`'s elements belong in the first section and the slot
+/// holding the whole item belongs in the second (ADR-139). Each line shows the
+/// local's name (or `<tmp#N: Type>` for a
 /// temp), its type when the [`RenderCtx`] carries a `TypeDb`, and the temp's
 /// materializing expression as `@ "expr"` when the ctx carries source text.
 /// Values are formatted through their descriptors; not-yet-written slots show
@@ -226,8 +230,17 @@ fn render_local_line<W: Write>(
     if local.is_user() {
         let name = local.name();
         if name.is_empty() {
-            // Defensive: a user-classified local should always have a name.
-            writeln!(out, "    ? = {value_display}")?;
+            // Defensive, and unreachable from compiled code:
+            // `VerifyError::UserLocalHasNoName` rejects a function that
+            // classifies a nameless slot as a binding, which is what used to
+            // put a `? = 3` where a `for` variable should be. Hand-built frames
+            // (this crate's own tests, the runtime's) still reach it, so it
+            // prints the type it does know rather than dropping that too.
+            if ty_str.is_empty() {
+                writeln!(out, "    ? = {value_display}")?;
+            } else {
+                writeln!(out, "    ?: {ty_str} = {value_display}")?;
+            }
         } else if ty_str.is_empty() {
             writeln!(out, "    {name} = {value_display}")?;
         } else {
@@ -629,6 +642,62 @@ mod tests {
         assert!(text.contains("xs ="), "user local named: {text}");
         assert!(text.contains("<tmp#1>"), "temp tagged with id: {text}");
         assert!(text.contains("<tmp#2>"), "second temp tagged: {text}");
+    }
+
+    /// The shape ADR-139 makes every binding form reach: a name and a type on
+    /// one line. Pattern bindings arrived here nameless, and the nameless
+    /// branch below is what they hit.
+    #[test]
+    fn a_named_binding_renders_its_name_and_type() {
+        let mut db = praxis_types::TypeDb::new();
+        let int_ty = db.int();
+        let snap = snap_with_locals(
+            "main",
+            vec![local(
+                "item",
+                0,
+                praxis_runtime::LOCAL_KIND_USER,
+                Some((4, 8)),
+                int_ty.to_u32(),
+            )],
+        );
+        let ctx = RenderCtx {
+            db: Some(&db),
+            source_text: None,
+        };
+        let mut out = Vec::new();
+        render_frame_locals(&mut out, &snap, 0, 12, &ctx).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("item: Int ="), "{text}");
+    }
+
+    /// The defensive branch, which `VerifyError::UserLocalHasNoName` now makes
+    /// unreachable from compiled code but which hand-built frames still reach.
+    /// It used to drop the type column as well as the name, so a `for` variable
+    /// lost both at once; a frame that cannot say *which* binding a row is
+    /// should at least say what it holds.
+    #[test]
+    fn a_nameless_binding_still_renders_its_type() {
+        let mut db = praxis_types::TypeDb::new();
+        let int_ty = db.int();
+        let snap = snap_with_locals(
+            "main",
+            vec![local(
+                "",
+                0,
+                praxis_runtime::LOCAL_KIND_USER,
+                Some((4, 8)),
+                int_ty.to_u32(),
+            )],
+        );
+        let ctx = RenderCtx {
+            db: Some(&db),
+            source_text: None,
+        };
+        let mut out = Vec::new();
+        render_frame_locals(&mut out, &snap, 0, 12, &ctx).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("?: Int ="), "{text}");
     }
 
     #[test]

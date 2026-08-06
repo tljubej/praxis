@@ -1,3 +1,26 @@
-// There is no character literal. `'a'` is not syntax.
-var c = 'a'
-out(c)
+// A character literal is one Unicode scalar in single quotes.
+var wall = '#'
+out(wall)
+out(wall == "#"[0])
+
+// The escapes are a text literal's, plus `\'` for the quote itself.
+out('\n'.to_int())
+out('\t'.to_int())
+out('\''.to_int())
+out('\\'.to_int())
+
+// One scalar, not one byte: `é` is a single character.
+out('é'.to_int())
+
+// And a `Char` can be matched on, which is what the literal is for.
+fn cell(c: Char) -> Text {
+    match c {
+        '#' => "wall"
+        '.' => "open"
+        _ => "something else"
+    }
+}
+
+for c in "#.x" {
+    out(cell(c))
+}
