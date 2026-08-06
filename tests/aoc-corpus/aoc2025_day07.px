@@ -1,0 +1,62 @@
+// AoC 2025 day 7 — "Laboratories": a tachyon manifold.
+//
+// A beam enters at `S` and always moves down. Empty space (`.`) passes it
+// through; a splitter (`^`) stops it and starts two new beams, one immediately
+// left and one immediately right of the splitter, which carry on down from the
+// splitter's own row.
+//
+// Part 1 counts splits. Two beams that arrive in the same column are one beam
+// — "they are both dumping tachyons into the same place between them" — so the
+// frontier is a *set* of columns, walked one row at a time.
+//
+// Part 2 counts timelines, where the same splitter *branches* instead of
+// merging. That is the same walk with the merge removed, so it is a DP over
+// rows from the bottom up: `ways[x]` is how many timelines a particle entering
+// column `x` of the current row heading down ends up on. A particle that leaves
+// the manifold — off the bottom or off a side — is one timeline, which is what
+// the initial row of 1s and the two out-of-bounds arms say.
+
+var manifold = read grid(char)
+var splitter = "^"[0]
+var width = manifold.width()
+var height = manifold.height()
+
+var source = match manifold.find("S"[0]) {
+    Some(p) => p,
+    None => panic("the manifold has no source"),
+}
+var sx = source.0
+var sy = source.1
+
+// Part 1 — beams merge, so carry a Set of live columns down the manifold.
+var beams = Set()
+beams.insert(sx)
+var splits = 0
+for y in sy..height {
+    splits = splits + beams.count(|x| manifold[x, y] == splitter)
+    beams = beams.flat_map(|x| {
+        if manifold[x, y] == splitter {
+            [x - 1, x + 1].filter(|c| c >= 0 && c < width)
+        } else {
+            [x]
+        }
+    }).to_set()
+}
+out(splits)
+
+// Part 2 — timelines branch, so count paths bottom-up, one row at a time.
+var ways = (0..width).map(|_| 1)
+var y = height - 1
+while y >= sy {
+    ways = (0..width).map(|x| {
+        if manifold[x, y] == splitter {
+            var left = if x > 0 { ways[x - 1] } else { 1 }
+            var right = if x + 1 < width { ways[x + 1] } else { 1 }
+            left + right
+        } else {
+            ways[x]
+        }
+    })
+    y = y - 1
+}
+out(ways[sx])

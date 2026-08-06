@@ -1,0 +1,222 @@
+// AoC 2025 day 12 — "Christmas Tree Farm": can the presents fit under the tree?
+//
+// Six present shapes, each drawn in a 3x3 diagram; then a list of W x H regions
+// with a quantity per shape. Count the regions whose presents all fit, where a
+// present may be rotated and flipped but must sit on the grid, and presents may
+// interlock but not overlap.
+//
+// This is 2D packing, which is NP-hard in general, so the program decides each
+// region with two *sound* bounds first and only searches when neither applies:
+//
+//   1. If the shapes' total filled cells exceed W*H, they cannot fit. A packing
+//      never covers more cells than the region has.
+//   2. If the number of presents is at most floor(W/3) * floor(H/3), they do
+//      fit — every shape is drawn in a 3x3 box, so cut the region into disjoint
+//      3x3 blocks and give each present its own. No interlocking needed.
+//
+// Bound 1 proves "no", bound 2 proves "yes", and neither is a heuristic. On the
+// real input they happen to decide all 1000 regions between them, so the search
+// below never runs; on the puzzle's own example they decide *none* of the three,
+// so the example is what actually exercises it.
+//
+// The search is complete. It walks the region in row-major order and, at the
+// first cell not yet decided, either leaves that cell empty or covers it with a
+// present positioned so that the present's own first cell lands exactly there.
+// Placing pieces in scan order is what keeps identical presents from being
+// tried in every permutation. The budget for empty cells is W*H minus the total
+// filled cells, which is exactly how many must be left over if every present is
+// placed — a tight bound, and the reason proving "no" terminates.
+
+// Each shape section is its `N:` header line and then the diagram, which is a
+// grid in its own right — so `block` takes the header with a template and hands
+// the rest of the section to `grid(char)`, and `find_all` reads the shape's
+// cells straight off it. The six sections have to be spelled out because a
+// `repeated(...)` tail may only be last (`I028`) and the regions follow them.
+var data = read sections(
+    s0: block(`{i:int}:`, rows: grid(char)),
+    s1: block(`{i:int}:`, rows: grid(char)),
+    s2: block(`{i:int}:`, rows: grid(char)),
+    s3: block(`{i:int}:`, rows: grid(char)),
+    s4: block(`{i:int}:`, rows: grid(char)),
+    s5: block(`{i:int}:`, rows: grid(char)),
+    regions: lines(`{w:int}x{h:int}: {counts:ws(int)}`),
+)
+
+// Row-major order, and the translation that puts the first cell of it on (0, 0).
+// Every orientation is stored that way, so "place this present with its first
+// cell on (x, y)" is just adding (x, y) to each cell.
+fn normalize(cells: Vec[(Int, Int)]) -> Vec[(Int, Int)] {
+    var ordered = cells.sorted_by_key(|p| (p.1 + 8) * 100 + (p.0 + 8))
+    var first = ordered[0]
+    ordered.map(|p| (p.0 - first.0, p.1 - first.1))
+}
+
+fn rotate(cells: Vec[(Int, Int)]) -> Vec[(Int, Int)] {
+    cells.map(|p| (0 - p.1, p.0))
+}
+
+fn flip(cells: Vec[(Int, Int)]) -> Vec[(Int, Int)] {
+    cells.map(|p| (0 - p.0, p.1))
+}
+
+// Both `normalize` results are sorted, so `==` is the right test for "the same
+// orientation" and a symmetric shape contributes fewer than eight.
+fn push_unique(list: Vec[Vec[(Int, Int)]], cand: Vec[(Int, Int)]) -> Unit {
+    var i = 0
+    while i < list.len() {
+        if list[i] == cand { return }
+        i = i + 1
+    }
+    list.push(cand)
+}
+
+fn orientations(cells: Vec[(Int, Int)]) -> Vec[Vec[(Int, Int)]] {
+    var found = Vec()
+    var cur = cells
+    var k = 0
+    while k < 4 {
+        push_unique(found, normalize(cur))
+        push_unique(found, normalize(flip(cur)))
+        cur = rotate(cur)
+        k = k + 1
+    }
+    found
+}
+
+fn fits(w: Int, h: Int, occ: Vec[Bool], cells: Vec[(Int, Int)], x: Int, y: Int) -> Bool {
+    var i = 0
+    while i < cells.len() {
+        var c = cells[i]
+        var nx = x + c.0
+        var ny = y + c.1
+        if nx < 0 || nx >= w || ny < 0 || ny >= h { return false }
+        if occ[ny * w + nx] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn mark(w: Int, occ: Vec[Bool], cells: Vec[(Int, Int)], x: Int, y: Int, v: Bool) -> Unit {
+    var i = 0
+    while i < cells.len() {
+        var c = cells[i]
+        occ[(y + c.1) * w + (x + c.0)] = v
+        i = i + 1
+    }
+}
+
+// `remaining` presents are unplaced and together cover `cells_left` cells;
+// `waste` more cells may be left empty; cells before `pos` are all decided.
+fn search(
+    w: Int,
+    h: Int,
+    occ: Vec[Bool],
+    orients: Vec[Vec[Vec[(Int, Int)]]],
+    sizes: Vec[Int],
+    counts: Vec[Int],
+    remaining: Int,
+    cells_left: Int,
+    waste: Int,
+    pos: Int,
+) -> Bool {
+    if remaining == 0 { return true }
+    var total = w * h
+    if pos >= total { return false }
+    if cells_left > total - pos { return false }
+    if occ[pos] {
+        return search(w, h, occ, orients, sizes, counts, remaining, cells_left, waste, pos + 1)
+    }
+
+    var x = pos % w
+    var y = pos / w
+    var s = 0
+    while s < counts.len() {
+        if counts[s] > 0 {
+            var shape = orients[s]
+            var o = 0
+            while o < shape.len() {
+                var cells = shape[o]
+                if fits(w, h, occ, cells, x, y) {
+                    mark(w, occ, cells, x, y, true)
+                    counts[s] = counts[s] - 1
+                    var ok = search(
+                        w, h, occ, orients, sizes, counts,
+                        remaining - 1, cells_left - sizes[s], waste, pos + 1,
+                    )
+                    counts[s] = counts[s] + 1
+                    mark(w, occ, cells, x, y, false)
+                    if ok { return true }
+                }
+                o = o + 1
+            }
+        }
+        s = s + 1
+    }
+
+    // Or leave this cell empty, while the budget allows it.
+    if waste > 0 {
+        return search(w, h, occ, orients, sizes, counts, remaining, cells_left, waste - 1, pos + 1)
+    }
+    false
+}
+
+var diagrams = Vec()
+diagrams.push(data.s0.rows)
+diagrams.push(data.s1.rows)
+diagrams.push(data.s2.rows)
+diagrams.push(data.s3.rows)
+diagrams.push(data.s4.rows)
+diagrams.push(data.s5.rows)
+
+var hash = "#"[0]
+var sizes = Vec()
+var orients = Vec()
+for d in diagrams {
+    var cells = d.find_all(hash)
+    sizes.push(cells.len())
+    orients.push(orientations(cells))
+}
+
+var fit_count = 0
+var searched = 0
+for r in data.regions {
+    var w = r.w
+    var h = r.h
+    var cellsum = 0
+    var presents = 0
+    var i = 0
+    while i < r.counts.len() {
+        cellsum = cellsum + r.counts[i] * sizes[i]
+        presents = presents + r.counts[i]
+        i = i + 1
+    }
+
+    var fits_here = false
+    if cellsum > w * h {
+        fits_here = false
+    } else if presents <= (w / 3) * (h / 3) {
+        fits_here = true
+    } else {
+        searched = searched + 1
+        var occ = Vec()
+        var k = 0
+        while k < w * h {
+            occ.push(false)
+            k = k + 1
+        }
+        var work = Vec()
+        var j = 0
+        while j < r.counts.len() {
+            work.push(r.counts[j])
+            j = j + 1
+        }
+        fits_here = search(w, h, occ, orients, sizes, work, presents, cellsum, w * h - cellsum, 0)
+    }
+
+    if fits_here { fit_count = fit_count + 1 }
+}
+
+out(fit_count)
+// How many regions neither bound settled — i.e. how much of the answer rests on
+// the search rather than on a proof. Zero on the real input, three on the example.
+out(searched)
