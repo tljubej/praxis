@@ -42,12 +42,11 @@ for y in sy..height {
         }
     }).to_set()
 }
-out(splits)
+out("Part 1: {splits}")
 
 // Part 2 — timelines branch, so count paths bottom-up, one row at a time.
 var ways = (0..width).map(|_| 1)
-var y = height - 1
-while y >= sy {
+for y in (sy..height).reversed() {
     ways = (0..width).map(|x| {
         if manifold[x, y] == splitter {
             var left = if x > 0 { ways[x - 1] } else { 1 }
@@ -57,6 +56,5 @@ while y >= sy {
             ways[x]
         }
     })
-    y = y - 1
 }
-out(ways[sx])
+out("Part 2: {ways[sx]}")

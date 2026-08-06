@@ -1,0 +1,177 @@
+// AoC 2025 day 9 — "Movie Theater": the largest rectangle on two red corners.
+//
+// Part 1 is every pair of red tiles: the rectangle they span has area
+// (|dx| + 1) * (|dy| + 1), and nothing constrains it.
+//
+// Part 2 constrains it. The red tiles are the corners of one closed rectilinear
+// loop — consecutive tiles share a row or a column, and the list wraps — and a
+// rectangle now has to lie entirely inside that loop, boundary included.
+//
+// The grid is ~98000 square, so it is never built. Every edge of the loop lies
+// on one of the 247 distinct x or 248 distinct y coordinates, so between two
+// consecutive ones nothing changes: a whole band of columns is inside or
+// outside together. Compressing to those bands turns 9.6e9 tiles into a 493 x
+// 495 grid of bands, each uniform.
+//
+// The bands alternate — one for each coordinate, one for the gap after it, and
+// the gap is skipped when the next coordinate is adjacent and the gap is empty.
+// Both corners of a candidate rectangle are red tiles, so its sides always land
+// on coordinate bands and the band grid answers exactly.
+//
+// Inside-ness per band row is a scanline: the vertical edges the row crosses,
+// paired left to right, are the spans it covers, plus any horizontal edge lying
+// on the row, which is boundary and therefore allowed. A half-open test on the
+// vertical edge (y1 <= Y < y2) is what stops a shared vertex counting twice.
+//
+// A 2D prefix sum over "blocked" then answers "is this whole rectangle inside"
+// in constant time, and the pairs are checked largest-first by only testing a
+// rectangle that would actually beat the best one so far.
+
+var pts = read lines(`{int},{int}`)
+var n = pts.len()
+
+// The band representatives: each coordinate, then one point standing for the
+// gap after it when that gap holds at least one line.
+fn band_reps(vs: Vec[Int]) -> Vec[Int] {
+    var reps = Vec()
+    var i = 0
+    while i < vs.len() {
+        reps.push(vs[i])
+        if i + 1 < vs.len() && vs[i + 1] > vs[i] + 1 { reps.push(vs[i] + 1) }
+        i = i + 1
+    }
+    reps
+}
+
+// Where each real coordinate sits in band space. A gap representative is
+// strictly between two coordinates, so it is never one of them.
+fn band_of(reps: Vec[Int], vs: Vec[Int]) -> Map[Int, Int] {
+    var known = Set()
+    for v in vs { known.insert(v) }
+    var at = Map()
+    var i = 0
+    while i < reps.len() {
+        if known.contains(reps[i]) { at[reps[i]] = i }
+        i = i + 1
+    }
+    at
+}
+
+// ---- Part 1: every pair, unconstrained.
+var best1 = 0
+var i = 0
+while i < n {
+    var a = pts[i]
+    var j = i + 1
+    while j < n {
+        var b = pts[j]
+        var area = (abs(a.0 - b.0) + 1) * (abs(a.1 - b.1) + 1)
+        if area > best1 { best1 = area }
+        j = j + 1
+    }
+    i = i + 1
+}
+out("Part 1: {best1}")
+
+// ---- Part 2: the same pairs, but the rectangle must lie inside the loop.
+var xr = band_reps(pts.map(|p| p.0).unique().sorted())
+var yr = band_reps(pts.map(|p| p.1).unique().sorted())
+var xb = band_of(xr, pts.map(|p| p.0).unique().sorted())
+var yb = band_of(yr, pts.map(|p| p.1).unique().sorted())
+var w = xr.len()
+var h = yr.len()
+
+// The loop's edges, split by orientation.
+var vert = Vec()
+var horiz = Vec()
+var k = 0
+while k < n {
+    var a = pts[k]
+    var b = pts[(k + 1) % n]
+    if a.0 == b.0 {
+        vert.push((a.0, min(a.1, b.1), max(a.1, b.1)))
+    } else {
+        horiz.push((a.1, min(a.0, b.0), max(a.0, b.0)))
+    }
+    k = k + 1
+}
+
+// One scanline per band row. `Grid(w, h, fill)` is the working grid this
+// algorithm allocates for itself — it is not read from anywhere.
+var blocked = Grid(w, h, true)
+var r = 0
+while r < h {
+    var yv = yr[r]
+    var cross = Vec()
+    for e in vert {
+        if e.1 <= yv && yv < e.2 { cross.push(e.0) }
+    }
+    var xings = cross.sorted()
+    var spans = Vec()
+    var t = 0
+    while t + 1 < xings.len() {
+        spans.push((xings[t], xings[t + 1]))
+        t = t + 2
+    }
+    for e in horiz {
+        if e.0 == yv { spans.push((e.1, e.2)) }
+    }
+
+    // Sweep the x-bands against the spans in one pass. Sorting by the left end
+    // is enough: a span whose right end is behind the current band can never
+    // cover a later one, and a span whose left end is ahead rules out every
+    // span after it too.
+    var ordered = spans.sorted_by_key(|s| s.0)
+    var c = 0
+    var p = 0
+    while c < w {
+        var xv = xr[c]
+        while p < ordered.len() && ordered[p].1 < xv { p = p + 1 }
+        if p < ordered.len() && ordered[p].0 <= xv { blocked[c, r] = false }
+        c = c + 1
+    }
+    r = r + 1
+}
+
+// A rectangle of bands is inside exactly when it contains no blocked band.
+var pre = Grid(w + 1, h + 1, 0)
+var br = 0
+while br < h {
+    var bc = 0
+    while bc < w {
+        var bit = if blocked[bc, br] { 1 } else { 0 }
+        pre[bc + 1, br + 1] = bit + pre[bc + 1, br] + pre[bc, br + 1] - pre[bc, br]
+        bc = bc + 1
+    }
+    br = br + 1
+}
+
+var pbx = Vec()
+var pby = Vec()
+for p in pts {
+    pbx.push(xb[p.0])
+    pby.push(yb[p.1])
+}
+
+var best2 = 0
+var qi = 0
+while qi < n {
+    var a = pts[qi]
+    var qj = qi + 1
+    while qj < n {
+        var b = pts[qj]
+        var area = (abs(a.0 - b.0) + 1) * (abs(a.1 - b.1) + 1)
+        // Only a rectangle that would win is worth a containment test.
+        if area > best2 {
+            var c0 = min(pbx[qi], pbx[qj])
+            var c1 = max(pbx[qi], pbx[qj])
+            var r0 = min(pby[qi], pby[qj])
+            var r1 = max(pby[qi], pby[qj])
+            var bad = pre[c1 + 1, r1 + 1] - pre[c0, r1 + 1] - pre[c1 + 1, r0] + pre[c0, r0]
+            if bad == 0 { best2 = area }
+        }
+        qj = qj + 1
+    }
+    qi = qi + 1
+}
+out("Part 2: {best2}")

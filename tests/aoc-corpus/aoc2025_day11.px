@@ -87,7 +87,9 @@ fn count_via_both(
 }
 
 var memo1 = Map()
-out(count_paths(adj, memo1, "you", "out"))
+var part1 = count_paths(adj, memo1, "you", "out")
+out("Part 1: {part1}")
 
 var memo2 = Map()
-out(count_via_both(adj, memo2, "svr", 0, "dac", "fft", "out"))
+var part2 = count_via_both(adj, memo2, "svr", 0, "dac", "fft", "out")
+out("Part 2: {part2}")

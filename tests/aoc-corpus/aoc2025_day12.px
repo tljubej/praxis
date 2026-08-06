@@ -30,15 +30,10 @@
 // Each shape section is its `N:` header line and then the diagram, which is a
 // grid in its own right — so `block` takes the header with a template and hands
 // the rest of the section to `grid(char)`, and `find_all` reads the shape's
-// cells straight off it. The six sections have to be spelled out because a
-// `repeated(...)` tail may only be last (`I028`) and the regions follow them.
+// cells straight off it. `repeated(P, 6)` is counted, and a counted tail is
+// bounded, so the region lines can follow it (ADR-140).
 var data = read sections(
-    s0: block(`{i:int}:`, rows: grid(char)),
-    s1: block(`{i:int}:`, rows: grid(char)),
-    s2: block(`{i:int}:`, rows: grid(char)),
-    s3: block(`{i:int}:`, rows: grid(char)),
-    s4: block(`{i:int}:`, rows: grid(char)),
-    s5: block(`{i:int}:`, rows: grid(char)),
+    shapes: repeated(block(`{i:int}:`, rows: grid(char)), 6),
     regions: lines(`{w:int}x{h:int}: {counts:ws(int)}`),
 )
 
@@ -62,12 +57,7 @@ fn flip(cells: Vec[(Int, Int)]) -> Vec[(Int, Int)] {
 // Both `normalize` results are sorted, so `==` is the right test for "the same
 // orientation" and a symmetric shape contributes fewer than eight.
 fn push_unique(list: Vec[Vec[(Int, Int)]], cand: Vec[(Int, Int)]) -> Unit {
-    var i = 0
-    while i < list.len() {
-        if list[i] == cand { return }
-        i = i + 1
-    }
-    list.push(cand)
+    if !list.any(|item| item == cand) { list.push(cand) }
 }
 
 fn orientations(cells: Vec[(Int, Int)]) -> Vec[Vec[(Int, Int)]] {
@@ -87,26 +77,14 @@ fn orientations(cells: Vec[(Int, Int)]) -> Vec[Vec[(Int, Int)]] {
 // is what `Grid(w, h, fill)` is for. It used to be a `Vec[Bool]` with `y * w + x`
 // written out at every use site — the language's own `Grid[T]` by hand, minus
 // the bounds check that `contains` is.
+// `contains` first, and `&&` short-circuits, so the subscript never runs off
+// the board.
 fn fits(occ: Grid[Bool], cells: Vec[(Int, Int)], x: Int, y: Int) -> Bool {
-    var i = 0
-    while i < cells.len() {
-        var c = cells[i]
-        var nx = x + c.0
-        var ny = y + c.1
-        if !occ.contains(nx, ny) { return false }
-        if occ[nx, ny] { return false }
-        i = i + 1
-    }
-    true
+    cells.all(|c| occ.contains(x + c.0, y + c.1) && !occ[x + c.0, y + c.1])
 }
 
 fn mark(occ: Grid[Bool], cells: Vec[(Int, Int)], x: Int, y: Int, v: Bool) -> Unit {
-    var i = 0
-    while i < cells.len() {
-        var c = cells[i]
-        occ[x + c.0, y + c.1] = v
-        i = i + 1
-    }
+    for c in cells { occ[x + c.0, y + c.1] = v }
 }
 
 // `remaining` presents are unplaced and together cover `cells_left` cells;
@@ -164,19 +142,10 @@ fn search(
     false
 }
 
-var diagrams = Vec()
-diagrams.push(data.s0.rows)
-diagrams.push(data.s1.rows)
-diagrams.push(data.s2.rows)
-diagrams.push(data.s3.rows)
-diagrams.push(data.s4.rows)
-diagrams.push(data.s5.rows)
-
-var hash = '#'
 var sizes = Vec()
 var orients = Vec()
-for d in diagrams {
-    var cells = d.find_all(hash)
+for shape in data.shapes {
+    var cells = shape.rows.find_all('#')
     sizes.push(cells.len())
     orients.push(orientations(cells))
 }
@@ -186,14 +155,9 @@ var searched = 0
 for r in data.regions {
     var w = r.w
     var h = r.h
-    var cellsum = 0
-    var presents = 0
-    var i = 0
-    while i < r.counts.len() {
-        cellsum = cellsum + r.counts[i] * sizes[i]
-        presents = presents + r.counts[i]
-        i = i + 1
-    }
+    // The counts and the shape sizes are index-aligned, which is what `zip` says.
+    var cellsum = r.counts.zip(sizes).map(|p| p.0 * p.1).sum()
+    var presents = r.counts.sum()
 
     var fits_here = false
     if cellsum > w * h {
@@ -203,19 +167,14 @@ for r in data.regions {
     } else {
         searched = searched + 1
         var occ = Grid(w, h, false)
-        var work = Vec()
-        var j = 0
-        while j < r.counts.len() {
-            work.push(r.counts[j])
-            j = j + 1
-        }
+        var work = r.counts.map(|c| c)
         fits_here = search(w, h, occ, orients, sizes, work, presents, cellsum, w * h - cellsum, 0)
     }
 
     if fits_here { fit_count = fit_count + 1 }
 }
 
-out(fit_count)
+out("Regions that fit: {fit_count}")
 // How many regions neither bound settled — i.e. how much of the answer rests on
 // the search rather than on a proof. Zero on the real input, three on the example.
-out(searched)
+out("Regions needing a search: {searched}")
