@@ -4,4 +4,10 @@ error[Y016]: `%` is not defined for `Float`
   2 | out(5.0 % 2.0)
     |     ^^^^^^^^^ `%` is not defined for `Float`
 
-praxis: 1 error(s)
+error[Y016]: `%=` is not defined for `Float`
+
+  float-remainder.px:5:1
+  5 | f %= 2.0
+    | ^ `%=` is not defined for `Float`
+
+praxis: 2 error(s)

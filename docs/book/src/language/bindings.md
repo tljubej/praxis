@@ -89,6 +89,57 @@ praxis: 1 error(s)
 The span is on the *target*, not the value: the binding is the thing with the
 expectation.
 
+## The compound operators
+
+There are five — `+=`, `-=`, `*=`, `/=` and `%=` — and each is its binary
+operator's rule applied to a place. `n += 1` is `n = n + 1`, so what the
+compound accepts is what the operator accepts, and the right-hand side types
+against the binding rather than being inferred on its own.
+
+```praxis
+// Each compound is its binary operator applied to a place.
+var n = 10
+n += 3
+n -= 2
+n *= 4
+n /= 3
+n %= 5
+out(n)
+
+var f = 10.0
+f += 3.0
+f -= 2.0
+f *= 4.0
+f /= 4.0
+out(f)
+
+var s = "a"
+s += "b"
+out(s)
+```
+
+```text
+4
+11.0
+ab
+```
+
+Two consequences fall straight out of "it is the binary operator":
+
+- **`%=` is `Int`-only**, because [`%` is](numbers.md#float). `f %= 2.0` is
+  `Y016`, the same refusal `f % 2.0` gets. The other four are defined for
+  `Float`.
+- **`+=` on a `Text` is concatenation**, because [`+` is](text.md#-is-the-only-arithmetic-operator).
+  It is the one compound that does not require a number.
+
+Everything else needs a numeric target, and `Y010` is the error when it does not
+get one. The operators are statements and not expressions, so `var x = (n += 1)`
+does not parse — see the [grammar](../appendix/grammar.md).
+
+`n = n + 1` is the rule and not the lowering: a target that is a field or an
+element is [evaluated once](#places-fields-and-elements), not once to read and
+again to write.
+
 ## Every binding is assignable
 
 A function parameter, a `for` loop's variable and a name introduced by a pattern

@@ -1,0 +1,19 @@
+// Each compound is its binary operator applied to a place.
+var n = 10
+n += 3
+n -= 2
+n *= 4
+n /= 3
+n %= 5
+out(n)
+
+var f = 10.0
+f += 3.0
+f -= 2.0
+f *= 4.0
+f /= 4.0
+out(f)
+
+var s = "a"
+s += "b"
+out(s)

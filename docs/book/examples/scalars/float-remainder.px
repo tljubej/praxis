@@ -1,2 +1,5 @@
-// `%` is defined for Int only.
+// `%` is defined for Int only, and `%=` is that same operation.
 out(5.0 % 2.0)
+
+var f = 5.0
+f %= 2.0

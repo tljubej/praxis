@@ -168,11 +168,14 @@ and `0.0 / 0.0` is `NaN`, exactly as IEEE-754 requires.
 
 Float arithmetic never faults. `%` is not defined for `Float` at all — there is
 no float remainder to lower it to, so it is refused at check time rather than
-computing something else:
+computing something else. `%=` is that same operation and is refused with it:
 
 ```praxis
-// `%` is defined for Int only.
+// `%` is defined for Int only, and `%=` is that same operation.
 out(5.0 % 2.0)
+
+var f = 5.0
+f %= 2.0
 ```
 
 ```console
@@ -183,8 +186,21 @@ error[Y016]: `%` is not defined for `Float`
   2 | out(5.0 % 2.0)
     |     ^^^^^^^^^ `%` is not defined for `Float`
 
-praxis: 1 error(s)
+error[Y016]: `%=` is not defined for `Float`
+
+  float-remainder.px:5:1
+  5 | f %= 2.0
+    | ^ `%=` is not defined for `Float`
+
+praxis: 2 error(s)
 ```
+
+`%=` is worth stating separately because the rule that governs the other four
+compounds would let it through: they ask for a *numeric* target, and a `Float`
+is numeric. What refuses `f %= 2.0` is not that rule but `%`'s own — the
+operator is `Int`-only wherever it appears. The four that do apply to a `Float`
+— `+=`, `-=`, `*=`, `/=` — are float arithmetic, on a binding and through a
+place alike.
 
 Unary `-` on a `Float` is IEEE-754 negation — the sign bit flipped, nothing else
 — so `-0.0` is a value distinct from `0.0`, even though the two compare equal.
@@ -346,7 +362,9 @@ Comparisons parse left-associatively but do not chain usefully: `1 < 2 < 3` is
 `Y001` for the mismatch and `Y006` because `Bool` has no order.
 
 Assignment is not in the table because it is not an expression. `=`, `+=`, `-=`,
-`*=`, `/=` and `%=` are statements; see [Bindings](bindings.md).
+`*=`, `/=` and `%=` are statements; see [Bindings](bindings.md). Each compound
+is its binary operator's rule applied to a place, so `%=` is `Int`-only exactly
+as `%` is, and `+=` concatenates a `Text` exactly as `+` does.
 
 ## The Int helpers in the prelude
 
