@@ -180,3 +180,4 @@ verifier rule only. Its decision must not claim the elision.
 - [ADR-145: A reversal needs the whole sequence, so it is a barrier](./145-a-reversal-needs-the-whole-sequence-so-it-is-a-barrier.md)
 - [ADR-146: A collection constructor's arity is its shape](./146-a-collection-constructors-arity-is-its-shape.md)
 - [ADR-147: A hole renders anything, because the program wrote the hole](./147-a-hole-renders-anything-because-the-program-wrote-the-hole.md)
+- [ADR-148: A dead block is touched only to finalize it, and the page knows whether any of its blocks needs it](./148-a-dead-block-is-touched-only-to-finalize-it.md)
