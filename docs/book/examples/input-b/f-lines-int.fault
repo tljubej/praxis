@@ -7,9 +7,5 @@ Backtrace:
 #1   <entry>
 
   temps:
-    <tmp#1> = 1
-2
-three
-4
-
+    <tmp#1> = "1\n2\nthree\n4\n"
     <tmp#2: Int> = 1

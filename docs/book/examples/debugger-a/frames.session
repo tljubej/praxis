@@ -9,7 +9,7 @@ Backtrace:
     a: Int = 20
     b: Int = 20
   temps:
-    <tmp#3: Int> @ "b - a" = <uninit>
+    <tmp#3: Int> @ "b - a" = 0
     <tmp#4: Int> @ "a / (b - a)" = <uninit>
 Entered crash debugger. 3 frame(s). Type `help` for commands.
 Praxis crash> #0   ratio
@@ -22,10 +22,7 @@ Praxis crash>   locals:
     total: Int = 1
     i: Int = 1
   temps:
-    <tmp#1> = 10
-20
-20
-
+    <tmp#1> = "10\n20\n20\n"
     <tmp#2: Int> = 1
     <tmp#3: Vec[Int]> = [10, 20, 20]
     <tmp#5: Int> @ "0" = 0
@@ -39,8 +36,9 @@ Praxis crash>   locals:
     <tmp#14: Int> = 1
     <tmp#16: Int> @ "step(depths, i)" = 1
     <tmp#17: Int> @ "total + step(depths, i)" = 1
-    <tmp#18: Unit> @ "{ total = total + step(depths, i) }" = Unit
+    <tmp#18: Unit> = Unit
     <tmp#19: Unit> @ "for i in 0..depths.len() - 1 { total = total + step(depths, i) }" = <uninit>
     <tmp#20: Unit> @ "out(total)" = <uninit>
-    <tmp#21: Unit> @ "var depths = read lines(int) fn ratio(a, b) { a / (b - a) } fn step(values, i) { ratio(values[i], values[i + 1]) } var total = 0 for i in 0..depths.len() - 1 { total = total + step(depths, i) } out(total)" = <uninit>
+    <tmp#22: Int> = 1
+    <tmp#23: Int> @ "var total = 0" = <uninit>
 Praxis crash> 

@@ -6,11 +6,6 @@ Backtrace:
 #0   main
 
   temps:
-    <tmp#1> = alpha
-beta
-
-gamma
-has space
-
+    <tmp#1> = "alpha\nbeta\n\ngamma\nhas space\n"
     <tmp#2: Int> = 1
     <tmp#4: Int> @ "(read sections(lines(word))).len()" = <uninit>

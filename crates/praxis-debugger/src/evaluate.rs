@@ -75,12 +75,35 @@ pub enum Mode {
     Heap,
 }
 
+/// What a bound local hands the synthetic function.
+///
+/// **Two variants and not three**, which is the whole repair: a snapshot local
+/// can be a reference, an elided scalar, or reclaimed storage
+/// ([`praxis_runtime::DebugValue`]), and only the third is unbindable. Reading
+/// the frame through `DebugValue::reference` collapsed the first two — a scalar
+/// answers `None` there, exactly as reclaimed storage does — so every local
+/// whose box the compiler elided became "not defined" to `p`, while the
+/// `locals` pane went on printing it.
+///
+/// Modelling the bindable pair as its own type is what stops that from
+/// recurring: `Reclaimed` is filtered at the one place it can be, and nothing
+/// downstream has to remember that a scalar is not an absence.
+#[derive(Clone, Copy)]
+enum BoundValue {
+    /// An object. The snapshot already roots it.
+    Reference(GcRef),
+    /// A payload with no box (ADR-120, ADR-121). [`exec`] boxes it to make an
+    /// ABI argument; `type` and `heap` need only the type, which the scalar
+    /// carries itself.
+    Scalar(praxis_runtime::ScalarValue),
+}
+
 /// One named, typed, valued local extracted from a snapshot frame, ready to
 /// render as a typed parameter and pass as an ABI argument.
 struct LocalBinding {
     name: String,
     ty: Type,
-    value: GcRef,
+    value: BoundValue,
 }
 
 /// The maximum number of locals **one expression may name**. The arity-dispatched
@@ -243,39 +266,101 @@ fn collect_bindings(
     db: &mut TypeDb,
     mentioned: &std::collections::HashSet<String>,
 ) -> Vec<LocalBinding> {
-    let candidates: Vec<(u32, String, praxis_runtime::GcRef)> = frame
+    let candidates: Vec<(u32, String, BoundValue)> = frame
         .locals
         .iter()
         .filter(|l| l.is_user() && is_bindable_name(&l.name()))
         .filter(|l| mentioned.contains(&l.name()))
         .filter_map(|l| {
-            // `reference()` rather than the value: a local whose box ADR-120
-            // elided holds a raw payload, and `p EXPR` binds *objects* — it
-            // roots them (`scope.root` below), recovers their type through
-            // their descriptor, and hands them to compiled code as `GcRef`
-            // arguments. None of that is available for a word. In practice no
-            // such local is ever a candidate anyway: the filter above keeps
-            // user bindings, and the forwarding only elides compiler temps.
-            l.value
-                .and_then(praxis_runtime::DebugValue::reference)
-                .map(|value| (l.type_id, l.name().to_string(), value))
+            // **A scalar is a value, not an absence.** This read used to be
+            // `DebugValue::reference`, whose contract is "the reference this
+            // names, or `None` if it is a scalar" — so an unboxed local was
+            // dropped here and `p` answered "not defined" about a name the
+            // `locals` pane was printing one line above.
+            //
+            // The comment that stood here justified it: "in practice no such
+            // local is ever a candidate anyway … the forwarding only elides
+            // compiler temps." ADR-121 made that false — a *user* binding that
+            // provably holds a scalar is not a box either — and nothing failed,
+            // because the only coverage for `p` in those scopes is the book's
+            // examples and `book-verify` was not a CI gate.
+            //
+            // Reclaimed storage is the one unbindable state, and it is refused
+            // by name rather than by falling out of a `None`.
+            match l.value? {
+                praxis_runtime::DebugValue::Reference(r) => {
+                    Some((l.type_id, l.name().to_string(), BoundValue::Reference(r)))
+                }
+                praxis_runtime::DebugValue::Scalar(s) => {
+                    Some((l.type_id, l.name().to_string(), BoundValue::Scalar(s)))
+                }
+                praxis_runtime::DebugValue::Reclaimed => None,
+            }
         })
         .collect();
     let bindings: Vec<LocalBinding> = candidates
         .into_iter()
         .filter_map(|(type_id, name, value)| {
-            // SAFETY: a `Some` value was spilled by generated code, and a
-            // snapshot local's `GcRef` is rooted by the snapshot (ADR-033).
-            let recovered = unsafe { praxis_repr::type_for_value(value, db) }.ok();
-            // F5: the fallback id is rehydrated through the arena's checked
-            // route. A frame whose `type_id` this `TypeDb` never minted has no
-            // type to bind, so the local is dropped rather than bound to
-            // whatever slot the raw index named.
-            let ty = recovered.or_else(|| db.type_from_raw(type_id))?;
+            let ty = match value {
+                BoundValue::Reference(r) => {
+                    // SAFETY: a `Some` value was spilled by generated code, and
+                    // a snapshot local's `GcRef` is rooted by the snapshot
+                    // (ADR-033).
+                    let recovered = unsafe { praxis_repr::type_for_value(r, db) }.ok();
+                    // F5: the fallback id is rehydrated through the arena's
+                    // checked route. A frame whose `type_id` this `TypeDb` never
+                    // minted has no type to bind, so the local is dropped rather
+                    // than bound to whatever slot the raw index named.
+                    recovered.or_else(|| db.type_from_raw(type_id))?
+                }
+                // **A scalar carries its own type**, so this needs neither the
+                // descriptor route nor the static id — and it is better than
+                // both for `type_for_value`'s own reason: the payload is what
+                // the value *is*, where `type_id` is what inference last said
+                // about it. There is no unboxed local whose kind is unknown,
+                // which is why this arm cannot fail and the reference arm can.
+                BoundValue::Scalar(s) => db.scalar(scalar_type_of(s)),
+            };
             Some(LocalBinding { name, ty, value })
         })
         .collect();
     keep_innermost(bindings)
+}
+
+/// The catalog-level type a runtime scalar payload *is*.
+///
+/// One arm per [`praxis_runtime::ScalarValue`] variant and no fallback, so a
+/// sixth runtime scalar is a compile error here rather than a local that
+/// silently stops binding.
+fn scalar_type_of(v: praxis_runtime::ScalarValue) -> praxis_types::ScalarType {
+    use praxis_runtime::ScalarValue as S;
+    use praxis_types::ScalarType as T;
+    match v {
+        S::Int(_) => T::Int,
+        S::Bool(_) => T::Bool,
+        S::Float(_) => T::Float,
+        S::Char(_) => T::Char,
+        S::Byte(_) => T::Byte,
+    }
+}
+
+/// Box an elided scalar so it can cross the ABI as a `GcRef`.
+///
+/// **This cannot collect, and that is what makes the call site safe.** Every
+/// `Runtime::alloc_*` scalar helper answers an immortal or goes through
+/// `Heap::alloc_unpaced`, so no collection can run between these boxes being
+/// made and the `NativeScope` in [`exec`] rooting them — which is why they are
+/// built *before* the context is minted rather than one-at-a-time inside the
+/// scope.
+fn box_scalar(runtime: &Runtime, v: praxis_runtime::ScalarValue) -> GcRef {
+    use praxis_runtime::ScalarValue as S;
+    match v {
+        S::Int(i) => runtime.alloc_int(i),
+        S::Bool(b) => runtime.alloc_bool(b),
+        S::Float(f) => runtime.alloc_float(f),
+        S::Char(c) => runtime.alloc_char(c as u32),
+        S::Byte(b) => runtime.alloc_byte(b),
+    }
 }
 
 /// The identifiers `expr_text` mentions, over-approximated from its tokens.
@@ -457,6 +542,20 @@ fn exec(
         .get(P_EXPR_FN)
         .ok_or_else(|| "internal: __p_expr FuncId not found".to_string())?;
 
+    // Box every elided scalar **here**, before the context exists and before
+    // anything can collect. [`box_scalar`] allocates unpaced, so the window
+    // between these boxes and the `scope.root` below contains no collection —
+    // which is what lets them be made outside the scope that will root them,
+    // and avoids handing `alloc_*` a `&Runtime` while `ctx` holds a `*mut Heap`
+    // derived from a `&mut` borrow of the same runtime.
+    let vals: Vec<GcRef> = bindings
+        .iter()
+        .map(|b| match b.value {
+            BoundValue::Reference(r) => r,
+            BoundValue::Scalar(s) => box_scalar(runtime, s),
+        })
+        .collect();
+
     let mut ctx: RuntimeContext = runtime.context();
     // Root the snapshot's values + the call args for the duration of the call
     // (§12.3). The synthetic fn pushes its own shadow frame at entry, but the
@@ -475,8 +574,10 @@ fn exec(
     for r in snapshot_roots {
         scope.root(r);
     }
-    for b in bindings {
-        scope.root(b.value);
+    // The boxes made above are unrooted until here, which is safe for exactly
+    // as long as nothing between the two lines collects — see `box_scalar`.
+    for v in &vals {
+        scope.root(*v);
     }
 
     // Clear the *stale* fault left by the original crash that triggered the
@@ -488,7 +589,6 @@ fn exec(
     // SAFETY: `id` is a finalized __p_expr FuncId in `jit` (just compiled); the
     // `jit` outlives the call.
     let entry_ptr = unsafe { jit.entry(id) };
-    let vals: Vec<GcRef> = bindings.iter().map(|b| b.value).collect();
     // SAFETY: entry_ptr is a finalized __p_expr entry in `jit` (alive for the
     // call); the args match the synthetic fn's params by construction (same
     // bindings → same arity → same ABI); the scope roots them across any GC.
@@ -656,7 +756,7 @@ mod tests {
             ty: foo,
             // A `LocalBinding` carries a live `GcRef`; that synthesis reads only
             // the name and type is not a licence to put an invalid one there.
-            value: runtime.alloc_int(0),
+            value: BoundValue::Reference(runtime.alloc_int(0)),
         }];
 
         let synthetic = synthesize_from(&mut db, bindings, &mentioned_idents("foo.y"), "foo.y");
@@ -696,12 +796,12 @@ mod tests {
                 LocalBinding {
                     name: "foo".to_string(),
                     ty: unwritable,
-                    value: runtime.alloc_int(1),
+                    value: BoundValue::Reference(runtime.alloc_int(1)),
                 },
                 LocalBinding {
                     name: "n".to_string(),
                     ty: int,
-                    value: runtime.alloc_int(2),
+                    value: BoundValue::Reference(runtime.alloc_int(2)),
                 },
             ]
         };
@@ -739,7 +839,7 @@ mod tests {
         let bindings = vec![LocalBinding {
             name: "ys".to_string(),
             ty: vec_of_var,
-            value: runtime.alloc_int(1),
+            value: BoundValue::Reference(runtime.alloc_int(1)),
         }];
 
         let synthetic =
@@ -1083,6 +1183,100 @@ mod tests {
             span_start: 0,
             span_end: 0,
         }
+    }
+
+    /// As [`snapshot_local`], but the slot holds a payload whose box the
+    /// compiler elided rather than a reference (ADR-121).
+    /// Written out rather than spread from [`snapshot_local`], because the
+    /// whole point of this slot is that it holds **no** `GcRef` — there is no
+    /// placeholder reference to hand that helper that would not be a lie.
+    fn scalar_local(
+        name: &'static str,
+        value: praxis_runtime::ScalarValue,
+        ty: Type,
+    ) -> praxis_runtime::context::DebugLocal {
+        praxis_runtime::context::DebugLocal {
+            source_name: name.as_ptr(),
+            name_len: name.len() as u32,
+            symbol_id: 0,
+            descriptor: std::ptr::null(),
+            value: Some(praxis_runtime::DebugValue::Scalar(value)),
+            type_id: ty.to_u32(),
+            kind: praxis_runtime::LOCAL_KIND_USER,
+            span_start: 0,
+            span_end: 0,
+        }
+    }
+
+    /// **The regression `p` shipped with.** A local whose box ADR-121 elided is
+    /// a *value*, not an absence, and `p n` must bind it — while the `locals`
+    /// pane was printing `n: Int = 7` one line above, `p n` answered
+    /// ``type error: `n` is not defined``.
+    ///
+    /// The `type_id` is deliberately `Int` in every arm while the payload is
+    /// something else, which is the second claim: a scalar's binding type comes
+    /// from **what the value is**, not from what inference last recorded — the
+    /// same argument `type_for_value` makes on the reference path.
+    ///
+    /// HOW IT GOES RED, OBSERVED: restore `collect_bindings`' old
+    /// `l.value.and_then(DebugValue::reference)` and every arm binds nothing,
+    /// because `reference()` answers `None` for a scalar exactly as it does for
+    /// reclaimed storage.
+    #[test]
+    fn an_elided_scalar_local_still_binds_and_at_its_own_type() {
+        use praxis_runtime::ScalarValue as S;
+        for (value, spelling) in [
+            (S::Int(7), "Int"),
+            (S::Bool(true), "Bool"),
+            (S::Float(2.5), "Float"),
+            (S::Char('x'), "Char"),
+        ] {
+            let mut db = TypeDb::new();
+            let int = db.int();
+            let frame = frame_with(vec![scalar_local("n", value, int)]);
+            let synthetic = synthesize(&mut db, &frame, "n");
+            assert_eq!(
+                synthetic.source,
+                format!("fn __p_expr(n: {spelling}) {{ n }}"),
+                "an unboxed {spelling} binds, at the type its payload is"
+            );
+            assert_eq!(synthetic.bindings.len(), 1, "{spelling}");
+        }
+
+        // **`Byte` is the fifth payload and the one that still does not bind**,
+        // and it is not a gap in this fix: §4.3 reserves `Byte` and `UInt`
+        // without giving them a source spelling, so `Speller::spell` refuses
+        // them and no synthetic parameter can name one. What matters is *which*
+        // refusal it earns — DBG-06's unbound note, naming the local and its
+        // unspellable type, rather than the "not defined" the reference-only
+        // read produced for every scalar alike.
+        let mut db = TypeDb::new();
+        let int = db.int();
+        let frame = frame_with(vec![scalar_local("n", S::Byte(3), int)]);
+        let synthetic = synthesize(&mut db, &frame, "n");
+        assert!(synthetic.bindings.is_empty());
+        assert_eq!(
+            synthetic.unbound,
+            vec![("n".to_string(), "Byte".to_string())],
+            "an unspellable scalar is reported as unbound, not as unknown"
+        );
+    }
+
+    /// …and reclaimed storage is the one slot state that still does not bind,
+    /// which is what keeps the fix above from being "bind everything".
+    ///
+    /// The object is gone, so there is no argument to pass. `p n` reports the
+    /// ordinary unknown-name error, and that is the honest answer here in a way
+    /// it never was for a scalar.
+    #[test]
+    fn a_reclaimed_local_is_the_one_that_does_not_bind() {
+        let mut db = TypeDb::new();
+        let int = db.int();
+        let mut local = scalar_local("n", praxis_runtime::ScalarValue::Int(1), int);
+        local.value = Some(praxis_runtime::DebugValue::Reclaimed);
+        let synthetic = synthesize(&mut db, &frame_with(vec![local]), "n");
+        assert_eq!(synthetic.source, "fn __p_expr() { n }");
+        assert!(synthetic.bindings.is_empty());
     }
 
     #[test]

@@ -10,4 +10,3 @@ Backtrace:
     x: Int = 4
   temps:
     <tmp#4> @ "v[i] = x" = <uninit>
-    <tmp#5: Unit> @ "{ v[i] = x }" = <uninit>

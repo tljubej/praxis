@@ -8,7 +8,6 @@ Backtrace:
   locals:
     pair: { a: Int, b: Int } = <uninit>
   temps:
-    <tmp#1> = 1->2
-
+    <tmp#1> = "1->2\n"
     <tmp#2: Int> = 1
     <tmp#7: Int> @ "pair.a + pair.b" = <uninit>

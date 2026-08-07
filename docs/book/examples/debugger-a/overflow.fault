@@ -10,4 +10,3 @@ Backtrace:
     <tmp#3: Int> @ "1" = 1
     <tmp#4: Int> @ "total + 1" = <uninit>
     <tmp#5: Unit> @ "out(total + 1)" = <uninit>
-    <tmp#6: Unit> @ "var total = 9223372036854775807 out(total + 1)" = <uninit>

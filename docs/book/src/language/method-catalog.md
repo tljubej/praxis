@@ -52,7 +52,6 @@ Backtrace:
     <tmp#9: Int> @ "9" = 9
     <tmp#10: Int> @ "v[9]" = <uninit>
     <tmp#11: Unit> @ "out(v[9])" = <uninit>
-    <tmp#12: Unit> @ "var v = [1, 2, 3] out(v[9])" = <uninit>
 Entered crash debugger. 1 frame(s). Type `help` for commands.
 Praxis crash> p v.len()
 3
@@ -609,7 +608,6 @@ Backtrace:
     <tmp#3: Int> = 0
     <tmp#4: Int> = 0
     <tmp#8: Unit> @ "out(v.min())" = <uninit>
-    <tmp#9: Unit> @ "var v: Vec[Int] = Vec() out(v.min())" = <uninit>
 ```
 
 ### Conversions
@@ -1033,16 +1031,15 @@ Backtrace:
 #0   <entry>
 
   locals:
-    m: Map[Text, Int] = {a: 1}
+    m: Map[Text, Int] = {"a": 1}
   temps:
-    <tmp#1: Map[Text, Int]> = {a: 1}
-    <tmp#3: Text> @ ""a"" = a
+    <tmp#1: Map[Text, Int]> = {"a": 1}
+    <tmp#3: Text> @ ""a"" = "a"
     <tmp#4: Int> @ "1" = 1
     <tmp#5: Unit> @ "m.insert("a", 1)" = Unit
-    <tmp#6: Text> @ ""b"" = b
+    <tmp#6: Text> @ ""b"" = "b"
     <tmp#7: Int> @ "m["b"]" = <uninit>
     <tmp#8: Unit> @ "out(m["b"])" = <uninit>
-    <tmp#9: Unit> @ "var m = Map() m.insert("a", 1) out(m["b"])" = <uninit>
 ```
 
 ## When a method does not resolve

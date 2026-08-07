@@ -82,7 +82,7 @@ Backtrace:
     a: Int = 20
     b: Int = 20
   temps:
-    <tmp#3: Int> @ "b - a" = <uninit>
+    <tmp#3: Int> @ "b - a" = 0
     <tmp#4: Int> @ "a / (b - a)" = <uninit>
 Entered crash debugger. 3 frame(s). Type `help` for commands.
 Praxis crash> bt
@@ -95,7 +95,7 @@ Praxis crash> locals
     a: Int = 20
     b: Int = 20
   temps:
-    <tmp#3: Int> @ "b - a" = <uninit>
+    <tmp#3: Int> @ "b - a" = 0
     <tmp#4: Int> @ "a / (b - a)" = <uninit>
 Praxis crash> quit
 ```
@@ -316,19 +316,19 @@ Backtrace:
 #0   <entry>
 
   locals:
-    xs: Vec[Int] = <uninit>
+    xs: Vec[Int] = <collected>
     i: Int = 200
     sum: Int = 40200
     j: Int = 40000
     junk: Vec[Int] = [41999]
     ys: Vec[Int] = [40200]
   temps:
+    <tmp#1: Vec[Int]> = <collected>
     <tmp#3: Int> @ "0" = 0
     <tmp#5: Int> @ "200" = 200
-    <tmp#6: Bool> @ "i < 200" = <uninit>
-    <tmp#7: Int> @ "2000" = <uninit>
-    <tmp#8: Int> @ "i + 2000" = <uninit>
-    <tmp#9: Unit> @ "xs.push(i + 2000)" = Unit
+    <tmp#6: Bool> @ "i < 200" = false
+    <tmp#7: Int> @ "2000" = 2000
+    <tmp#8: Int> @ "i + 2000" = <collected>
   …(24 more)
 Entered crash debugger. 1 frame(s). Type `help` for commands.
 Praxis crash> p ys

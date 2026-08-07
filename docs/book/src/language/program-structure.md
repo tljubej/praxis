@@ -303,7 +303,6 @@ Backtrace:
     <tmp#3: Int> @ "10" = 10
     <tmp#4: Int> @ "10 / n" = <uninit>
     <tmp#5: Unit> @ "out(10 / n)" = <uninit>
-    <tmp#6: Unit> @ "var n = 0 out(10 / n)" = <uninit>
 ```
 
 The angle brackets are the point: frame `#0` is the file, not something anybody

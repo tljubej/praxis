@@ -8,15 +8,10 @@ Backtrace:
   locals:
     points: Vec[{ x: Int, y: Int }] = <uninit>
   temps:
-    <tmp#1> = 12,7
-5,3
-9;1
-4,4
-
+    <tmp#1> = "12,7\n5,3\n9;1\n4,4\n"
     <tmp#2: Int> = 1
     <tmp#5: Int> @ "points.len()" = <uninit>
     <tmp#6: Unit> @ "out(points.len())" = <uninit>
-    <tmp#7: Unit> @ "// Every line of the input is meant to be `x,y`. One of them is not. var points = read lines(`{x:int},{y:int}`) out(points.len())" = <uninit>
 Entered crash debugger. 1 frame(s). Type `help` for commands.
 Praxis crash> input at offset 10..11:
   12,7⏎5,3⏎9;1⏎4,4⏎

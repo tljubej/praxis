@@ -4,10 +4,10 @@ Backtrace:
 #0   <entry>
 
   locals:
-    counts: Map[Text, Vec[Int]] = {ada: [1, 2, 3], alan: [4, 5]}
+    counts: Map[Text, Vec[Int]] = {"ada": [1, 2, 3], "alan": [4, 5]}
   temps:
-    <tmp#1: Map[Text, Vec[Int]]> = {ada: [1, 2, 3], alan: [4, 5]}
-    <tmp#3: Text> @ ""ada"" = ada
+    <tmp#1: Map[Text, Vec[Int]]> = {"ada": [1, 2, 3], "alan": [4, 5]}
+    <tmp#3: Text> @ ""ada"" = "ada"
     <tmp#4: Vec[Int]> @ "[1, 2, 3]" = [1, 2, 3]
     <tmp#5: Int> @ "1" = 1
     <tmp#6: Unit> = Unit
@@ -16,11 +16,11 @@ Backtrace:
     <tmp#9: Int> @ "3" = 3
     <tmp#10: Unit> = Unit
     <tmp#11> @ "counts["ada"] = [1, 2, 3]" = Unit
-    <tmp#12: Text> @ ""alan"" = alan
+    <tmp#12: Text> @ ""alan"" = "alan"
   …(17 more)
 Entered crash debugger. 1 frame(s). Type `help` for commands.
-Praxis crash> {ada: [1, 2, 3], alan: [4, 5]}
-Praxis crash> Map[Text, Vec[Int]]: {ada: [1, 2, 3], alan: [4, 5]}
+Praxis crash> {"ada": [1, 2, 3], "alan": [4, 5]}
+Praxis crash> Map[Text, Vec[Int]]: {"ada": [1, 2, 3], "alan": [4, 5]}
 Praxis crash> Vec[Int]: [1, 2, 3]
 Praxis crash> Map[Text, Vec[Int]]
 Praxis crash> 

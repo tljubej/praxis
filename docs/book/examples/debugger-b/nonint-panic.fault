@@ -4,16 +4,15 @@ Backtrace:
 #0   <entry>
 
   locals:
-    node: Text = start
+    node: Text = "start"
     visited: Vec[Int] = [1, 2]
   temps:
-    <tmp#1: Text> @ ""start"" = start
+    <tmp#1: Text> @ ""start"" = "start"
     <tmp#3: Vec[Int]> @ "[1, 2]" = [1, 2]
     <tmp#4: Int> @ "1" = 1
     <tmp#5: Unit> = Unit
     <tmp#6: Int> @ "2" = 2
     <tmp#7: Unit> = Unit
-    <tmp#9: Text> @ ""no route from "" = no route from 
-    <tmp#10: Text> @ ""no route from " + node" = no route from start
+    <tmp#9: Text> @ ""no route from "" = "no route from "
+    <tmp#10: Text> @ ""no route from " + node" = "no route from start"
     <tmp#11> @ "panic("no route from " + node)" = <uninit>
-    <tmp#12: Unit> @ "// `panic` and `assert` put their message on the fault line itself. var node = "start" var visited = [1, 2] panic("no route from " + node)" = <uninit>

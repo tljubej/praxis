@@ -4,31 +4,31 @@ Backtrace:
 #0   main
 
   locals:
-    readings: Vec[Reading] = [{ site: north, depth: 12 }, { site: south, depth: 30 }]
-    totals: Map[Text, Int] = {north: 12, south: 30}
+    readings: Vec[Reading] = [{ site: "north", depth: 12 }, { site: "south", depth: 30 }]
+    totals: Map[Text, Int] = {"north": 12, "south": 30}
     latest: Signal = Ping(30)
-    label: Text = sonar
+    label: Text = "sonar"
   temps:
-    <tmp#1: Vec[Reading]> @ "[Reading { site: "north", depth: 12 }, Reading { site: "south", depth: 30 }]" = [{ site: north, depth: 12 }, { site: south, depth: 30 }]
-    <tmp#2: Text> @ ""north"" = north
+    <tmp#1: Vec[Reading]> @ "[Reading { site: "north", depth: 12 }, Reading { site: "south", depth: 30 }]" = [{ site: "north", depth: 12 }, { site: "south", depth: 30 }]
+    <tmp#2: Text> @ ""north"" = "north"
     <tmp#3: Int> @ "12" = 12
-    <tmp#4> = { site: north, depth: 12 }
+    <tmp#4> = { site: "north", depth: 12 }
     <tmp#5: Unit> = Unit
-    <tmp#6: Text> @ ""south"" = south
+    <tmp#6: Text> @ ""south"" = "south"
     <tmp#7: Int> @ "30" = 30
-    <tmp#8> = { site: south, depth: 30 }
+    <tmp#8> = { site: "south", depth: 30 }
   …(14 more)
 Entered crash debugger. 1 frame(s). Type `help` for commands.
-Praxis crash> sonar
+Praxis crash> "sonar"
 Praxis crash> 5
 Praxis crash> 2
-Praxis crash> { site: north, depth: 12 }
+Praxis crash> { site: "north", depth: 12 }
 Praxis crash> 42
-Praxis crash> (north, 30)
-Praxis crash> long
-Praxis crash> { site: east, depth: 1 }
+Praxis crash> ("north", 30)
+Praxis crash> "long"
+Praxis crash> { site: "east", depth: 1 }
 Praxis crash> Vec[Reading]
-Praxis crash> Vec[Reading]: [{ site: north, depth: 12 }, { site: south, depth: 30 }]
+Praxis crash> Vec[Reading]: [{ site: "north", depth: 12 }, { site: "south", depth: 30 }]
 Praxis crash> 12
 Praxis crash> Map[Text, Int]
 Praxis crash> Ping(30)

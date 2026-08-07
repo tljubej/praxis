@@ -66,7 +66,6 @@ Backtrace:
     <tmp#3: Int> @ "2" = 2
     <tmp#4: Int> @ "dbg(21) * 2" = 42
     <tmp#6> @ "panic(doubled)" = <uninit>
-    <tmp#7: Unit> @ "var doubled = dbg(21) * 2 panic(doubled)" = <uninit>
 ```
 
 `panic`'s result type is `Never`, so a function can end on one and still satisfy
@@ -97,7 +96,6 @@ Backtrace:
     <tmp#4: Int> @ "3" = 3
     <tmp#5: Bool> @ "1 + 1 == 3" = false
     <tmp#6: Unit> @ "assert(1 + 1 == 3)" = <uninit>
-    <tmp#7: Unit> @ "assert(1 + 1 == 3)" = <uninit>
 ```
 
 Both `panic` and `assert` raise ordinary faults, which is why the output above

@@ -8,31 +8,10 @@ Backtrace:
   locals:
     depths: Vec[Int] = <uninit>
   temps:
-    <tmp#1> = 100
-101
-102
-103
-104
-105
-106
-107
-108
-109
-110
-111
-1O2
-113
-114
-115
-116
-117
-118
-119
-
+    <tmp#1> = "100\n101\n102\n103\n104\n105\n106\n107\n108\n109\n110\n11…"
     <tmp#2: Int> = 1
     <tmp#5: Int> @ "depths.len()" = <uninit>
     <tmp#6: Unit> @ "out(depths.len())" = <uninit>
-    <tmp#7: Unit> @ "// One integer per line, twenty of them. var depths = read lines(int) out(depths.len())" = <uninit>
 Entered crash debugger. 1 frame(s). Type `help` for commands.
 Praxis crash> input at offset 49..51:
   06⏎107⏎108⏎109⏎110⏎111⏎1O2⏎113⏎114⏎115⏎116⏎117⏎1

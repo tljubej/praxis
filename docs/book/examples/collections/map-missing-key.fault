@@ -5,7 +5,7 @@ Backtrace:
 #1   <entry>
 
   locals:
-    m: Map[Text, Int] = {ada: 36}
-    k: Text = grace
+    m: Map[Text, Int] = {"ada": 36}
+    k: Text = "grace"
   temps:
     <tmp#3: Int> @ "m[k]" = <uninit>

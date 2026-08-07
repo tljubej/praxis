@@ -616,10 +616,7 @@ Backtrace:
 #1   <entry>
 
   temps:
-    <tmp#1> = h:
-1,2
-foo
-
+    <tmp#1> = "h:\n1,2\nfoo\n"
     <tmp#2: Int> = 1
     <tmp#5: Int> @ "read block(`h:`, a: csv(int), b: word).a.len()" = <uninit>
 ```

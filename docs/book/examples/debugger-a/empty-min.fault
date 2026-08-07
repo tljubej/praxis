@@ -10,4 +10,3 @@ Backtrace:
     <tmp#3: Int> = 0
     <tmp#4: Int> = 0
     <tmp#8: Unit> @ "out(readings.min())" = <uninit>
-    <tmp#9: Unit> @ "var readings = Vec[Int]() out(readings.min())" = <uninit>

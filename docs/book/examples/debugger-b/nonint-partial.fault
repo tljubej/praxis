@@ -17,4 +17,4 @@ Backtrace:
     <tmp#10: Int> @ "totals[0]" = 10
     <tmp#11: Unit> @ "out(totals[0])" = Unit
     <tmp#12: Int> @ "1" = 1
-  …(6 more)
+  …(5 more)

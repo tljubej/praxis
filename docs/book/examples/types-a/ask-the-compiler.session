@@ -7,9 +7,9 @@ Backtrace:
   locals:
     values: Vec[Int] = [3, 4]
     total: Int = 7
-    name: Text = run
+    name: Text = "run"
   temps:
-    <tmp#4: Text> @ ""stopping here on purpose"" = stopping here on purpose
+    <tmp#4: Text> @ ""stopping here on purpose"" = "stopping here on purpose"
     <tmp#5> @ "panic("stopping here on purpose")" = <uninit>
 Entered crash debugger. 2 frame(s). Type `help` for commands.
 Praxis crash> Vec[Int]

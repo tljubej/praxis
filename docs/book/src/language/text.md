@@ -187,7 +187,7 @@ Backtrace:
 #1   <entry>
 
   locals:
-    t: Text = ab
+    t: Text = "ab"
   temps:
     <tmp#2: Int> @ "3" = 3
     <tmp#3: Char> @ "t[3]" = <uninit>

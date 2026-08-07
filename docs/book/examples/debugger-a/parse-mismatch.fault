@@ -8,10 +8,7 @@ Backtrace:
   locals:
     rows: Vec[{ name: Text, score: Int }] = <uninit>
   temps:
-    <tmp#1> = ada 36
-alan oops
-
+    <tmp#1> = "ada 36\nalan oops\n"
     <tmp#2: Int> = 1
     <tmp#5: Int> @ "rows.len()" = <uninit>
     <tmp#6: Unit> @ "out(rows.len())" = <uninit>
-    <tmp#7: Unit> @ "var rows = read lines(`{name:word} {score:int}`) out(rows.len())" = <uninit>

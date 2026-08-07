@@ -169,7 +169,7 @@ Backtrace:
     n: Int = -1
     v: Vec[Int] = <uninit>
   temps:
-    <tmp#1: Int> @ "0" = <uninit>
+    <tmp#1: Int> @ "0" = 0
     <tmp#2: Int> @ "1" = 1
     <tmp#3: Int> @ "0 - 1" = -1
     <tmp#5: Int> @ "0" = 0
@@ -289,8 +289,8 @@ Backtrace:
 #1   <entry>
 
   locals:
-    m: Map[Text, Int] = {ada: 36}
-    k: Text = grace
+    m: Map[Text, Int] = {"ada": 36}
+    k: Text = "grace"
   temps:
     <tmp#3: Int> @ "m[k]" = <uninit>
 ```

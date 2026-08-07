@@ -11,4 +11,3 @@ Backtrace:
     <tmp#4: Unit> @ "seen.insert(1000000000000000000)" = <uninit>
     <tmp#5: Int> @ "seen.len()" = <uninit>
     <tmp#6: Unit> @ "out(seen.len())" = <uninit>
-    <tmp#7: Unit> @ "var seen = BitSet() seen.insert(1000000000000000000) out(seen.len())" = <uninit>

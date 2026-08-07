@@ -46,11 +46,7 @@ Backtrace:
 #1   <entry>
 
   temps:
-    <tmp#1> = 1
-2
-three
-4
-
+    <tmp#1> = "1\n2\nthree\n4\n"
     <tmp#2: Int> = 1
 ```
 
@@ -113,8 +109,7 @@ Backtrace:
 #1   <entry>
 
   temps:
-    <tmp#1> = 12junk
-
+    <tmp#1> = "12junk\n"
     <tmp#2: Int> = 1
     <tmp#4: Int> @ "read lines(int).len()" = <uninit>
 ```
@@ -166,10 +161,7 @@ Backtrace:
 #1   <entry>
 
   temps:
-    <tmp#1> = 123
-45
-678
-
+    <tmp#1> = "123\n45\n678\n"
     <tmp#2: Int> = 1
     <tmp#4: Int> @ "read grid(digit).width()" = <uninit>
 ```
@@ -211,14 +203,10 @@ Backtrace:
   locals:
     data: { shapes: Vec[Vec[Int]], regions: Vec[Int] } = <uninit>
   temps:
-    <tmp#1> = 1
-
-2
-
+    <tmp#1> = "1\n\n2\n"
     <tmp#2: Int> = 1
     <tmp#6: Int> @ "data.shapes.len()" = <uninit>
     <tmp#7: Unit> @ "out(data.shapes.len())" = <uninit>
-    <tmp#8: Unit> @ "// The count is a promise about the input, so two sections where the program // said three is a parse fault — not a `Vec` of two. The message names the // group that came up short, because the number is written in the program and // "which one" is the only thing left to say. var data = read sections( shapes: repeated(lines(int), 3), regions: lines(int), ) out(data.shapes.len())" = <uninit>
 ```
 
 `repeated(P, N)` is the one place the program states a *number* of sections, so
@@ -253,9 +241,7 @@ Backtrace:
 #1   <entry>
 
   temps:
-    <tmp#1> = 1 -> 2
-3 => 4
-
+    <tmp#1> = "1 -> 2\n3 => 4\n"
     <tmp#2: Int> = 1
     <tmp#4: Int> @ "read lines(`{from:int} -> {to:int}`).len()" = <uninit>
 ```
@@ -298,8 +284,7 @@ Backtrace:
 #1   <entry>
 
   temps:
-    <tmp#1> = mul(2,x)
-
+    <tmp#1> = "mul(2,x)\n"
     <tmp#2: Int> = 1
     <tmp#4: Int> @ "read lines(choice( Multiply: `mul({left:int},{right:int})`, Enable: `do()`, )).len()" = <uninit>
 ```

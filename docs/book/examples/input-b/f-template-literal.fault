@@ -7,8 +7,6 @@ Backtrace:
 #1   <entry>
 
   temps:
-    <tmp#1> = 1 -> 2
-3 => 4
-
+    <tmp#1> = "1 -> 2\n3 => 4\n"
     <tmp#2: Int> = 1
     <tmp#4: Int> @ "read lines(`{from:int} -> {to:int}`).len()" = <uninit>

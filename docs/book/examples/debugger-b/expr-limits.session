@@ -11,13 +11,13 @@ Backtrace:
     e: Int = 5
     f: Int = 6
     g: Int = 7
-    squares: Vec[Int] = [0, 1, 4, 9, 16, 25, 36, 49, 64, 81, 100, 121, 144, 169, 196, 225, 256, 289, 324, 361, 400, 441, 484, 529, 576, 625, 676, 729, 784, 841, 900, 961, 1024, 1089, 1156, 1225, 1296, 1369, 1444, 1521]
+    squares: Vec[Int] = [0, 1, 4, 9, 16, 25, 36, 49, 64, 81, 100, 121, 144, ...]
   temps:
     <tmp#1: Int> @ "1" = 1
     <tmp#3: Int> @ "2" = 2
     <tmp#5: Int> @ "3" = 3
     <tmp#7: Int> @ "4" = 4
-  …(16 more)
+  …(17 more)
 Entered crash debugger. 1 frame(s). Type `help` for commands.
 Praxis crash> 21
 Praxis crash> error: the expression names 7 locals; `p` supports up to 6

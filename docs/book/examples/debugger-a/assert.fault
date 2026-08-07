@@ -11,4 +11,3 @@ Backtrace:
     <tmp#4: Bool> @ "checksum == 42" = false
     <tmp#5: Unit> @ "assert(checksum == 42)" = <uninit>
     <tmp#6: Unit> @ "out(checksum)" = <uninit>
-    <tmp#7: Unit> @ "var checksum = 41 assert(checksum == 42) out(checksum)" = <uninit>

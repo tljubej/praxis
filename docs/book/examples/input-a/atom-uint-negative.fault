@@ -6,7 +6,6 @@ Backtrace:
 #0   main
 
   temps:
-    <tmp#1> = -5
-
+    <tmp#1> = "-5\n"
     <tmp#2: Int> = 1
     <tmp#4: Unit> @ "out(read uint)" = <uninit>

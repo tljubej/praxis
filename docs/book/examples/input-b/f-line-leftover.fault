@@ -7,7 +7,6 @@ Backtrace:
 #1   <entry>
 
   temps:
-    <tmp#1> = 12junk
-
+    <tmp#1> = "12junk\n"
     <tmp#2: Int> = 1
     <tmp#4: Int> @ "read lines(int).len()" = <uninit>

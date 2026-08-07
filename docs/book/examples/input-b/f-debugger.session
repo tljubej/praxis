@@ -10,11 +10,7 @@ Backtrace:
     limit: Int = 25
     values: Vec[Int] = <uninit>
   temps:
-    <tmp#2> = 1
-2
-three
-4
-
+    <tmp#2> = "1\n2\nthree\n4\n"
     <tmp#3: Int> = 1
     <tmp#7: (Int) -> Bool> @ "|v| v < limit" = <uninit>
 Entered crash debugger. 2 frame(s). Type `help` for commands.

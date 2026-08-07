@@ -9,7 +9,7 @@ Backtrace:
     a: Int = 20
     b: Int = 20
   temps:
-    <tmp#3: Int> @ "b - a" = <uninit>
+    <tmp#3: Int> @ "b - a" = 0
     <tmp#4: Int> @ "a / (b - a)" = <uninit>
 Entered crash debugger. 3 frame(s). Type `help` for commands.
 Praxis crash> Crash debugger commands (§9.4):

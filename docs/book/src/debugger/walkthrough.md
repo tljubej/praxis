@@ -199,11 +199,11 @@ Praxis crash> locals
     <tmp#13: Unit> = Unit
     <tmp#14: Int> @ "1" = 1
     <tmp#15: Int> @ "larger + 1" = 5
-    <tmp#16: Unit> @ "{ larger = larger + 1 }" = Unit
+    <tmp#16: Unit> = Unit
     <tmp#17: Unit> = Unit
     <tmp#18: Int> @ "1" = 1
     <tmp#19: Int> @ "i + 1" = 8
-    <tmp#20: Unit> @ "{ if window(depths, i) > window(depths, i - 1) { larger = larger + 1 } i = i + 1 }" = Unit
+    <tmp#20: Unit> = Unit
     <tmp#21: Unit> @ "while i < depths.len() { if window(depths, i) > window(depths, i - 1) { larger = larger + 1 } i = i + 1 }" = <uninit>
 ```
 

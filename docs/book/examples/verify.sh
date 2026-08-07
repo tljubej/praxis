@@ -148,7 +148,15 @@ while IFS= read -r -d '' px; do
         actual="$(run_example "$dir" run "$file" ${input[@]+"${input[@]}"} --debug never 2>&1 >/dev/null)"
         # How many leading lines to compare is however many the expectation
         # already holds. A fresh one is seeded by writing the lines you want.
-        head_lines="$(wc -l <"$base.fault-head" | tr -d ' ')"
+        #
+        # `awk END{NR}` and not `wc -l`, because `check` writes every expectation
+        # with `printf '%s'` and therefore without a trailing newline — which
+        # `wc -l` undercounts by one. That made `--bless` *destructive here and
+        # only here*: each run truncated `actual` to one line fewer than the file
+        # held, wrote that back, and the next bless shortened it again. Every
+        # other expectation form is compared whole, so this is the one place the
+        # count is load-bearing.
+        head_lines="$(awk 'END { print NR }' <"$base.fault-head" | tr -d ' ')"
         (( head_lines )) || head_lines=1
         check "$label" "$base.fault-head" "$actual" "$head_lines"
 

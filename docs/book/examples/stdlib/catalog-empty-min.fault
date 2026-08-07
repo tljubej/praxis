@@ -10,4 +10,3 @@ Backtrace:
     <tmp#3: Int> = 0
     <tmp#4: Int> = 0
     <tmp#8: Unit> @ "out(v.min())" = <uninit>
-    <tmp#9: Unit> @ "var v: Vec[Int] = Vec() out(v.min())" = <uninit>

@@ -7,9 +7,6 @@ Backtrace:
 #1   <entry>
 
   temps:
-    <tmp#1> = 123
-45
-678
-
+    <tmp#1> = "123\n45\n678\n"
     <tmp#2: Int> = 1
     <tmp#4: Int> @ "read grid(digit).width()" = <uninit>

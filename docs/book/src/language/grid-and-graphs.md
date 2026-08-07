@@ -295,15 +295,13 @@ Backtrace:
   locals:
     g: Grid[Char] = [a, b, c, d]
   temps:
-    <tmp#1> = abcd
-
+    <tmp#1> = "abcd\n"
     <tmp#2: Int> = 1
     <tmp#3: Grid[Char]> = [a, b, c, d]
     <tmp#5: Int> @ "4" = 4
     <tmp#6: Int> @ "0" = 0
     <tmp#7: Char> @ "g[4, 0]" = <uninit>
     <tmp#8: Unit> @ "out(g[4, 0])" = <uninit>
-    <tmp#9: Unit> @ "var g = read grid(char) out(g[4, 0])" = <uninit>
 ```
 
 ## The `Grid[T]` method surface

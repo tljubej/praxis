@@ -31,7 +31,6 @@ Backtrace:
     <tmp#3: Int> @ "0" = 0
     <tmp#5: Int> @ "budget / people" = <uninit>
     <tmp#6: Unit> @ "out(budget / people)" = <uninit>
-    <tmp#7: Unit> @ "var budget = 100 var people = 0 out(budget / people)" = <uninit>
 ```
 
 `praxis run` exits 1. That report is the *noninteractive* form; run the same
@@ -94,7 +93,6 @@ Backtrace:
     <tmp#3: Int> @ "1" = 1
     <tmp#4: Int> @ "total + 1" = <uninit>
     <tmp#5: Unit> @ "out(total + 1)" = <uninit>
-    <tmp#6: Unit> @ "var total = 9223372036854775807 out(total + 1)" = <uninit>
 ```
 
 `abs` is in the same family: the negation of the most negative `Int` is not an
@@ -141,7 +139,6 @@ Backtrace:
     <tmp#9: Int> @ "3" = 3
     <tmp#10: Int> @ "xs[3]" = <uninit>
     <tmp#11: Unit> @ "out(xs[3])" = <uninit>
-    <tmp#12: Unit> @ "var xs = [10, 20, 30] out(xs[3])" = <uninit>
 ```
 
 Indexing a map with a key it does not hold raises **the same kind**, in the same
@@ -160,16 +157,15 @@ Backtrace:
 #0   <entry>
 
   locals:
-    ages: Map[Text, Int] = {ada: 36}
+    ages: Map[Text, Int] = {"ada": 36}
   temps:
-    <tmp#1: Map[Text, Int]> = {ada: 36}
-    <tmp#3: Text> @ ""ada"" = ada
+    <tmp#1: Map[Text, Int]> = {"ada": 36}
+    <tmp#3: Text> @ ""ada"" = "ada"
     <tmp#4: Int> @ "36" = 36
     <tmp#5> @ "ages["ada"] = 36" = Unit
-    <tmp#6: Text> @ ""alan"" = alan
+    <tmp#6: Text> @ ""alan"" = "alan"
     <tmp#7: Int> @ "ages["alan"]" = <uninit>
     <tmp#8: Unit> @ "out(ages["alan"])" = <uninit>
-    <tmp#9: Unit> @ "var ages = Map[Text, Int]() ages["ada"] = 36 out(ages["alan"])" = <uninit>
 ```
 
 The words do not say "key", which is the one place the fault line is less
@@ -206,7 +202,6 @@ Backtrace:
     <tmp#3: Int> = 0
     <tmp#4: Int> = 0
     <tmp#8: Unit> @ "out(readings.min())" = <uninit>
-    <tmp#9: Unit> @ "var readings = Vec[Int]() out(readings.min())" = <uninit>
 ```
 
 `sum()` on an empty collection is `0` and `len()` is `0` — those have answers.
@@ -238,7 +233,6 @@ Backtrace:
     <tmp#4: Bool> @ "checksum == 42" = false
     <tmp#5: Unit> @ "assert(checksum == 42)" = <uninit>
     <tmp#6: Unit> @ "out(checksum)" = <uninit>
-    <tmp#7: Unit> @ "var checksum = 41 assert(checksum == 42) out(checksum)" = <uninit>
 ```
 
 `<tmp#4: Bool> @ "checksum == 42" = false` is the assertion's own condition,
@@ -261,13 +255,12 @@ Backtrace:
 #0   <entry>
 
   locals:
-    mode: Text = diagonal
+    mode: Text = "diagonal"
   temps:
-    <tmp#1: Text> @ ""diagonal"" = diagonal
-    <tmp#3: Text> @ ""unsupported mode: "" = unsupported mode: 
-    <tmp#4: Text> @ ""unsupported mode: " + mode" = unsupported mode: diagonal
+    <tmp#1: Text> @ ""diagonal"" = "diagonal"
+    <tmp#3: Text> @ ""unsupported mode: "" = "unsupported mode: "
+    <tmp#4: Text> @ ""unsupported mode: " + mode" = "unsupported mode: diagonal"
     <tmp#5> @ "panic("unsupported mode: " + mode)" = <uninit>
-    <tmp#6: Unit> @ "var mode = "diagonal" panic("unsupported mode: " + mode)" = <uninit>
 ```
 
 The argument does not have to be `Text`: `panic(xs)` on a `Vec[Int]` produces
@@ -307,13 +300,10 @@ Backtrace:
   locals:
     rows: Vec[{ name: Text, score: Int }] = <uninit>
   temps:
-    <tmp#1> = ada 36
-alan oops
-
+    <tmp#1> = "ada 36\nalan oops\n"
     <tmp#2: Int> = 1
     <tmp#5: Int> @ "rows.len()" = <uninit>
     <tmp#6: Unit> @ "out(rows.len())" = <uninit>
-    <tmp#7: Unit> @ "var rows = read lines(`{name:word} {score:int}`) out(rows.len())" = <uninit>
 ```
 
 The offset is a byte offset into the whole input, and `⏎` is how the preview
@@ -373,7 +363,6 @@ Backtrace:
     <tmp#4: Unit> @ "seen.insert(1000000000000000000)" = <uninit>
     <tmp#5: Int> @ "seen.len()" = <uninit>
     <tmp#6: Unit> @ "out(seen.len())" = <uninit>
-    <tmp#7: Unit> @ "var seen = BitSet() seen.insert(1000000000000000000) out(seen.len())" = <uninit>
 ```
 
 A negative member raises it too. The same guard covers the sized collection

@@ -72,8 +72,7 @@ Backtrace:
   locals:
     pair: { a: Int, b: Int } = <uninit>
   temps:
-    <tmp#1> = 1->2
-
+    <tmp#1> = "1->2\n"
     <tmp#2: Int> = 1
     <tmp#7: Int> @ "pair.a + pair.b" = <uninit>
 ```
@@ -100,8 +99,7 @@ Backtrace:
 #0   main
 
   temps:
-    <tmp#1> =  x:1
-
+    <tmp#1> = " x:1\n"
     <tmp#2: Int> = 1
 ```
 
@@ -174,8 +172,7 @@ Backtrace:
   locals:
     pair: { a: Int, b: Int } = <uninit>
   temps:
-    <tmp#1> = 1->2
-
+    <tmp#1> = "1->2\n"
     <tmp#2: Int> = 1
     <tmp#7: Int> @ "pair.a + pair.b" = <uninit>
 ```
@@ -375,10 +372,7 @@ Backtrace:
 #0   main
 
   temps:
-    <tmp#1> = 1
-  
-2
-
+    <tmp#1> = "1\n  \n2\n"
     <tmp#2: Int> = 1
     <tmp#4: Int> @ "(read lines(int)).len()" = <uninit>
 ```
@@ -439,12 +433,7 @@ Backtrace:
 #0   main
 
   temps:
-    <tmp#1> = alpha
-beta
-
-gamma
-has space
-
+    <tmp#1> = "alpha\nbeta\n\ngamma\nhas space\n"
     <tmp#2: Int> = 1
     <tmp#4: Int> @ "(read sections(lines(word))).len()" = <uninit>
 ```

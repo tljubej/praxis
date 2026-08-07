@@ -10,4 +10,3 @@ Backtrace:
     <tmp#4: Int> @ "3" = 3
     <tmp#5: Bool> @ "1 + 1 == 3" = false
     <tmp#6: Unit> @ "assert(1 + 1 == 3)" = <uninit>
-    <tmp#7: Unit> @ "assert(1 + 1 == 3)" = <uninit>

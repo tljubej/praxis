@@ -6,9 +6,6 @@ Backtrace:
 #0   main
 
   temps:
-    <tmp#1> = 1
-  
-2
-
+    <tmp#1> = "1\n  \n2\n"
     <tmp#2: Int> = 1
     <tmp#4: Int> @ "(read lines(int)).len()" = <uninit>

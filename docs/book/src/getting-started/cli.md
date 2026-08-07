@@ -168,7 +168,6 @@ Backtrace:
     <tmp#3: Int> @ "0" = 0
     <tmp#5: Int> @ "total / n" = <uninit>
     <tmp#6: Unit> @ "out(total / n)" = <uninit>
-    <tmp#7: Unit> @ "var total = 10 var n = 0 out(total / n)" = <uninit>
 ```
 
 That report is the same state the interactive debugger would show you, printed

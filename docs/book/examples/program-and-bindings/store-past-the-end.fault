@@ -16,4 +16,3 @@ Backtrace:
     <tmp#9: Int> @ "3" = 3
     <tmp#10: Int> @ "4" = 4
     <tmp#11> @ "xs[3] = 4" = <uninit>
-    <tmp#12: Unit> @ "var xs = [1, 2, 3] xs[3] = 4" = <uninit>

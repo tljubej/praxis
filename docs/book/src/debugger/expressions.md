@@ -204,7 +204,7 @@ fn main() {
 Praxis crash> locals
   locals:
     n: Int = 1
-    n: Text = two
+    n: Text = "two"
     xs: Vec[Int] = [1]
 ```
 

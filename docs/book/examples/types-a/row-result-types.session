@@ -4,20 +4,20 @@ Backtrace:
 #0   <entry>
 
   locals:
-    text: Text = hello
+    text: Text = "hello"
     v: Vec[Int] = [10, 20]
-    m: Map[Text, Int] = {a: 1}
+    m: Map[Text, Int] = {"a": 1}
   temps:
-    <tmp#1: Text> @ ""hello"" = hello
+    <tmp#1: Text> @ ""hello"" = "hello"
     <tmp#3: Vec[Int]> @ "[10, 20]" = [10, 20]
     <tmp#4: Int> @ "10" = 10
     <tmp#5: Unit> = Unit
     <tmp#6: Int> @ "20" = 20
     <tmp#7: Unit> = Unit
-    <tmp#9: Map[Text, Int]> = {a: 1}
-    <tmp#11: Text> @ ""a"" = a
+    <tmp#9: Map[Text, Int]> = {"a": 1}
+    <tmp#11: Text> @ ""a"" = "a"
     <tmp#12: Int> @ "1" = 1
-  …(4 more)
+  …(3 more)
 Entered crash debugger. 1 frame(s). Type `help` for commands.
 Praxis crash> Char
 Praxis crash> Int

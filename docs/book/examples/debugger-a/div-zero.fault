@@ -11,4 +11,3 @@ Backtrace:
     <tmp#3: Int> @ "0" = 0
     <tmp#5: Int> @ "budget / people" = <uninit>
     <tmp#6: Unit> @ "out(budget / people)" = <uninit>
-    <tmp#7: Unit> @ "var budget = 100 var people = 0 out(budget / people)" = <uninit>

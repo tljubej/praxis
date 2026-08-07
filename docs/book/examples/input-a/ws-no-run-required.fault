@@ -6,6 +6,5 @@ Backtrace:
 #0   main
 
   temps:
-    <tmp#1> =  x:1
-
+    <tmp#1> = " x:1\n"
     <tmp#2: Int> = 1

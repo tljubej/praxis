@@ -130,7 +130,7 @@ Backtrace:
   locals:
     n: Int = 4
   temps:
-    <tmp#2: Int> @ "0" = <uninit>
+    <tmp#2: Int> @ "0" = 0
     <tmp#3: Int> @ "n / 0" = <uninit>
     <tmp#4: Unit> @ "return n / 0" = <uninit>
 ```

@@ -16,7 +16,6 @@ Backtrace:
     <tmp#9: Int> @ "9" = 9
     <tmp#10: Int> @ "v[9]" = <uninit>
     <tmp#11: Unit> @ "out(v[9])" = <uninit>
-    <tmp#12: Unit> @ "var v = [1, 2, 3] out(v[9])" = <uninit>
 Entered crash debugger. 1 frame(s). Type `help` for commands.
 Praxis crash> 3
 Praxis crash> error: method `push` is impure (may mutate state) — `p` rejects mutating expressions

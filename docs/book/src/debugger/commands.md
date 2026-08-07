@@ -157,7 +157,7 @@ Praxis crash> locals
     a: Int = 20
     b: Int = 20
   temps:
-    <tmp#3: Int> @ "b - a" = <uninit>
+    <tmp#3: Int> @ "b - a" = 0
     <tmp#4: Int> @ "a / (b - a)" = <uninit>
 Praxis crash> frame 1
 frame 1: step
@@ -200,14 +200,13 @@ Praxis crash> locals
     zero: Int = 0
   temps:
     <tmp#1: Int> @ "1" = 1
-    <tmp#3: Int> @ "0" = <uninit>
+    <tmp#3: Int> @ "0" = 0
     <tmp#4: Bool> @ "count > 0" = true
     <tmp#6: Int> @ "40" = 40
     <tmp#7: Int> @ "count + 40" = 41
     <tmp#9: Int> @ "0" = 0
     <tmp#11: Int> @ "count / zero" = <uninit>
     <tmp#12: Unit> @ "out(count / zero)" = <uninit>
-    <tmp#14: Unit> @ "var count = 1 if count > 0 { var count = count + 40 var zero = 0 out(count / zero) }" = <uninit>
 Praxis crash> p count
 41
 Praxis crash> quit
