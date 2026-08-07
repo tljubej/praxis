@@ -17,9 +17,9 @@
 //! registry, or the runtime's own [`option_schema`]. Schemas are therefore
 //! compared by **type identity and shape**, never by address.
 
-use std::fmt;
+use std::fmt::Write as _;
 
-use crate::descriptor::{BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
+use crate::descriptor::{BuiltinTypeId, DynamicHasher, FormatSink, Tracer, TypeDescriptor};
 use crate::records::SchemaIdentity;
 use crate::GcRef;
 
@@ -160,7 +160,7 @@ unsafe fn enum_drop(payload: *mut u8) {
     unsafe { std::ptr::drop_in_place(payload as *mut EnumPayload) };
 }
 
-unsafe fn enum_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn enum_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at an initialized EnumPayload.
     let p = unsafe { &*(payload as *const EnumPayload) };
     // The variant name comes from the schema, so `Some(3)` renders as `Some(3)`
@@ -480,7 +480,12 @@ mod alloc_tests {
 
     fn rendered(e: GcRef) -> String {
         let mut s = String::new();
-        unsafe { enum_format(e.payload::<u8>() as *const u8, &mut s) };
+        unsafe {
+            enum_format(
+                e.payload::<u8>() as *const u8,
+                &mut crate::FormatSink::display(&mut s),
+            )
+        };
         s
     }
 

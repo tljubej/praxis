@@ -1564,9 +1564,30 @@ impl GcRef {
         &p.items
     }
 
-    /// Format this value through its descriptor into `out` (§11.4). Returns the
-    /// same `&mut dyn fmt::Write` result the descriptor's `format` produced.
+    /// Format this value through its descriptor into `out` (§11.4), in the
+    /// program's own rendering — what `out(v)` writes and what `"{v}"` splices.
     pub fn format(&self, out: &mut dyn std::fmt::Write) {
+        self.format_styled(&mut crate::FormatSink::display(out));
+    }
+
+    /// Format this value into `out` in the **debugger's** rendering
+    /// ([`FormatStyle::Debug`](crate::FormatStyle::Debug)): a `Text` is a quoted
+    /// literal, at every depth.
+    ///
+    /// The pair exists because the two callers want opposite things from the
+    /// same value. A program printing a string means its characters; a debugger
+    /// showing a local means "this is a string, and here is exactly which one" —
+    /// and on a locals row the difference between `""` and no output at all is
+    /// the difference between a value and a bug report.
+    pub fn format_debug(&self, out: &mut dyn std::fmt::Write) {
+        self.format_styled(&mut crate::FormatSink::debug(out));
+    }
+
+    /// Format this value into an existing sink, keeping its style.
+    ///
+    /// The shared body of the two above, and the entry point for a caller that
+    /// already has a sink — a descriptor callback rendering a part of itself.
+    pub fn format_styled(&self, out: &mut crate::FormatSink<'_>) {
         let desc = self.descriptor();
         // SAFETY: `self`'s payload matches its descriptor.
         unsafe { (desc.format)(self.payload::<u8>() as *const u8, out) };

@@ -823,8 +823,14 @@ mod tests {
             "var s = 0\n  if n < 0 { s = 1 } else { s = 2 }",
         ));
 
-        let plain_loop = plain.innermost_loop_over(plain.function("f"), "s = s + i * 3");
-        let shifted_loop = shifted.innermost_loop_over(shifted.function("f"), "s = s + i * 3");
+        // The needle is the *expression*, not the assignment around it. An
+        // assignment to a plain binding writes the local directly and gets no
+        // slot of its own, so nothing spans `s = s + i * 3` — which is what
+        // `block_over` means by "name an expression the lowering gives a slot
+        // to". It used to be spanned anyway, by the body block's synthesized
+        // `Unit` tail, back when that tail carried the block's whole range.
+        let plain_loop = plain.innermost_loop_over(plain.function("f"), "s + i * 3");
+        let shifted_loop = shifted.innermost_loop_over(shifted.function("f"), "s + i * 3");
         assert_ne!(
             plain_loop.header, shifted_loop.header,
             "the `if` moved the numbering, which is what makes this a test"

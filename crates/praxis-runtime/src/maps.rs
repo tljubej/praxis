@@ -16,10 +16,9 @@
 //! `min=`/`max=` map updates (§6.2) live in the ABI wrappers.
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 
-use crate::descriptor::{BuiltinTypeId, Tracer, TypeDescriptor};
+use crate::descriptor::{BuiltinTypeId, FormatSink, Tracer, TypeDescriptor};
 use crate::dynamic_key::DynamicKey;
 use crate::DynamicHasher;
 use crate::GcRef;
@@ -33,7 +32,7 @@ use crate::GcRef;
 /// # Safety
 /// `value`'s payload must match `descriptor`.
 pub(crate) unsafe fn render_into(
-    out: &mut dyn fmt::Write,
+    out: &mut FormatSink<'_>,
     descriptor: &TypeDescriptor,
     value: GcRef,
 ) {
@@ -176,7 +175,7 @@ unsafe fn map_drop(payload: *mut u8) {
     unsafe { std::ptr::drop_in_place(payload as *mut MapPayload) };
 }
 
-unsafe fn map_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn map_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at an initialized MapPayload.
     let p = unsafe { &*(payload as *const MapPayload) };
     // Order first, render second: a printed `Map` is the same sequence a `for`
@@ -185,18 +184,25 @@ unsafe fn map_format(payload: *const u8, out: &mut dyn fmt::Write) {
     // in an order `m.keys()` disagreed with.
     // SAFETY: every key's payload matches the descriptor its `DynamicKey` carries.
     let rows = unsafe { ordered_entries(&p.entries) };
+    // Held across the scratch buffer below, because `write_ordered` borrows
+    // `out` for as long as the iterator it drains — so the entries cannot read
+    // the style off the sink they are ultimately written to.
+    let style = out.style();
     let entries = rows.into_iter().map(|(k, v)| {
-        let mut s = String::new();
-        // SAFETY: the key's payload matches its own header's descriptor, and so
-        // does the value's. Rendering through the *map's* value label is what
-        // printed a `Map[Text, Text]` as integers, because that label was `INT`
-        // unconditionally (REP-42).
-        unsafe {
-            render_into(&mut s, k.descriptor(), k);
-            let _ = s.write_str(": ");
-            render_into(&mut s, v.descriptor(), v);
+        let mut buf = String::new();
+        {
+            let mut s = FormatSink::styled(&mut buf, style);
+            // SAFETY: the key's payload matches its own header's descriptor, and
+            // so does the value's. Rendering through the *map's* value label is
+            // what printed a `Map[Text, Text]` as integers, because that label
+            // was `INT` unconditionally (REP-42).
+            unsafe {
+                render_into(&mut s, k.descriptor(), k);
+                let _ = s.write_str(": ");
+                render_into(&mut s, v.descriptor(), v);
+            }
         }
-        s
+        buf
     });
     write_ordered(out, "{", entries, "}");
 }
@@ -354,17 +360,22 @@ unsafe fn set_drop(payload: *mut u8) {
     unsafe { std::ptr::drop_in_place(payload as *mut SetPayload) };
 }
 
-unsafe fn set_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn set_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at an initialized SetPayload.
     let p = unsafe { &*(payload as *const SetPayload) };
     // The order a `for` over this set walks (ADR-138 decision 4).
     // SAFETY: every member's payload matches the descriptor it carries.
     let members = unsafe { ordered_members(&p.entries) };
+    // As `map_format`: the style outlives the sink it came from.
+    let style = out.style();
     let entries = members.into_iter().map(|m| {
-        let mut s = String::new();
-        // SAFETY: the member's payload matches its own header's descriptor.
-        unsafe { render_into(&mut s, m.descriptor(), m) };
-        s
+        let mut buf = String::new();
+        {
+            let mut s = FormatSink::styled(&mut buf, style);
+            // SAFETY: the member's payload matches its own header's descriptor.
+            unsafe { render_into(&mut s, m.descriptor(), m) };
+        }
+        buf
     });
     write_ordered(out, "{", entries, "}");
 }
@@ -483,22 +494,27 @@ unsafe fn counter_drop(payload: *mut u8) {
     unsafe { std::ptr::drop_in_place(payload as *mut CounterPayload) };
 }
 
-unsafe fn counter_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn counter_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at an initialized CounterPayload.
     let p = unsafe { &*(payload as *const CounterPayload) };
     // As `map_format`: the order is decided over the keys, then rendered.
     // SAFETY: every key's payload matches the descriptor it carries.
     let rows = unsafe { ordered_entries(&p.entries) };
+    // As `map_format`: the style outlives the sink it came from.
+    let style = out.style();
     let entries = rows.into_iter().map(|(k, v)| {
-        let mut s = String::new();
-        // SAFETY: the key's payload matches its descriptor; a Counter's values
-        // are always `Int` (§6.2).
-        unsafe {
-            render_into(&mut s, k.descriptor(), k);
-            let _ = s.write_str(": ");
-            render_into(&mut s, &crate::scalars::INT, v);
+        let mut buf = String::new();
+        {
+            let mut s = FormatSink::styled(&mut buf, style);
+            // SAFETY: the key's payload matches its descriptor; a Counter's
+            // values are always `Int` (§6.2).
+            unsafe {
+                render_into(&mut s, k.descriptor(), k);
+                let _ = s.write_str(": ");
+                render_into(&mut s, &crate::scalars::INT, v);
+            }
         }
-        s
+        buf
     });
     write_ordered(out, "{", entries, "}");
 }
@@ -611,10 +627,21 @@ mod tests {
 
     /// Render a payload through its own `format` callback, without allocating a
     /// GC object to hold it.
-    fn rendered<P>(format: unsafe fn(*const u8, &mut dyn fmt::Write), payload: &P) -> String {
+    fn rendered<P>(format: crate::FormatFn, payload: &P) -> String {
+        rendered_styled(format, payload, crate::FormatStyle::Display)
+    }
+
+    /// [`rendered`], in a style the caller picks — for the tests that are about
+    /// the two renderings differing.
+    fn rendered_styled<P>(
+        format: crate::FormatFn,
+        payload: &P,
+        style: crate::FormatStyle,
+    ) -> String {
         let mut s = String::new();
+        let mut sink = FormatSink::styled(&mut s, style);
         // SAFETY: `payload` is an initialized value of the type `format` reads.
-        unsafe { format((payload as *const P).cast::<u8>(), &mut s) };
+        unsafe { format((payload as *const P).cast::<u8>(), &mut sink) };
         s
     }
 
@@ -650,6 +677,42 @@ mod tests {
         // used to use would agree — `a_set_of_ints_orders_numerically_and_not_
         // lexicographically` is the test that tells the two apart.
         assert_eq!(forward, "{1: 10, 2: 20, 3: 30, 4: 40, 5: 50, 6: 60}");
+    }
+
+    /// A container's [`FormatStyle`] reaches its **elements**, including across
+    /// the scratch buffer `map_format` renders each entry into.
+    ///
+    /// This is the property that decided the design: a `format_debug` field
+    /// beside `format` would have quoted a `Text` local and left a `Text` inside
+    /// a `Map` bare, because the container's callback would have had no way to
+    /// know which of the two it was running as. The buffer is the place the
+    /// style is easiest to drop, since the entries are rendered before the sink
+    /// they end up in is written to at all.
+    #[test]
+    fn a_containers_style_reaches_the_values_inside_it() {
+        let rt = crate::Runtime::new();
+        let payload = MapPayload {
+            key_descriptor: &crate::text::TEXT,
+            value_descriptor: &crate::text::TEXT,
+            entries: [(
+                DynamicKey::new(rt.alloc_text("k")),
+                // Empty on purpose: in the program's rendering this entry's
+                // value is zero characters wide.
+                rt.alloc_text(""),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        assert_eq!(
+            rendered_styled(map_format, &payload, crate::FormatStyle::Display),
+            "{k: }",
+            "the program's rendering is unchanged, empty value and all"
+        );
+        assert_eq!(
+            rendered_styled(map_format, &payload, crate::FormatStyle::Debug),
+            r#"{"k": ""}"#,
+            "the debugger's reaches both the key and the value"
+        );
     }
 
     #[test]
@@ -795,7 +858,7 @@ mod tests {
             .into_iter()
             .map(|(k, _)| {
                 let mut s = String::new();
-                unsafe { render_into(&mut s, k.descriptor(), k) };
+                unsafe { render_into(&mut crate::FormatSink::display(&mut s), k.descriptor(), k) };
                 s
             })
             .collect();

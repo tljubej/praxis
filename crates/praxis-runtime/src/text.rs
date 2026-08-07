@@ -28,11 +28,13 @@
 //! scalars. See [`text_char_count`] and [`text_ascii_bytes`].
 
 use std::cell::Cell;
-use std::fmt;
+use std::fmt::Write as _;
 
 #[cfg(test)]
 use crate::descriptor::hash_value;
-use crate::descriptor::{BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
+use crate::descriptor::{
+    BuiltinTypeId, DynamicHasher, FormatSink, FormatStyle, Tracer, TypeDescriptor,
+};
 use crate::GcRef;
 
 /// **The ADR-115 measurement toggle** (handover 26 §6), and the only difference
@@ -489,10 +491,29 @@ unsafe fn text_drop(payload: *mut u8) {
     unsafe { std::ptr::drop_in_place(payload as *mut TextPayload) };
 }
 
-unsafe fn text_format(payload: *const u8, out: &mut dyn fmt::Write) {
+/// **The one descriptor callback that reads its sink's style**, and the reason
+/// the style exists (§11.4, [`FormatStyle`]).
+///
+/// `Display` writes the characters: that is what `out(s)` means, what `"{s}"`
+/// splices, and what `praxis run` prints for a program whose answer is a string.
+///
+/// `Debug` writes a quoted literal, because the debugger's displays give a value
+/// one line and no other context, and a bare `Text` is ambiguous there in three
+/// ways at once. An empty one writes nothing — which the renderer could only
+/// report as `<unreadable>`, since "the descriptor wrote no bytes" and "the read
+/// failed" were the same observation. One containing a `"` could not be told
+/// from two values, and one containing a newline took a row that belonged to the
+/// local underneath it.
+unsafe fn text_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at a TextPayload.
     let s = unsafe { text_str(payload as *const TextPayload) };
-    let _ = out.write_str(s);
+    let _ = match out.style() {
+        FormatStyle::Display => out.write_str(s),
+        // Through `praxis-syntax`, which owns the escape table this inverts, for
+        // F3's reason: a second copy of the rule here would be free to disagree
+        // with `decode_escape` about what `\t` is.
+        FormatStyle::Debug => out.write_str(&praxis_syntax::literal::quote_text(s)),
+    };
 }
 
 unsafe fn text_equals(a: *const u8, b: *const u8) -> bool {
@@ -560,6 +581,40 @@ mod tests {
     use super::*;
     use std::ptr;
 
+    /// `Text` is the one type whose two renderings differ, and this is the pair
+    /// (§11.4, [`FormatStyle`]).
+    ///
+    /// `Display` must stay byte-for-byte what it was: it is `out(s)`, `"{s}"`
+    /// and `praxis run`'s result line, and a quote appearing in any of those is
+    /// a change to what programs print. `Debug` is the debugger's, and the empty
+    /// string is the case that motivated it — zero bytes out is a value the
+    /// renderer could only report as unreadable.
+    #[test]
+    fn text_renders_one_way_for_the_program_and_another_for_the_debugger() {
+        let render = |s: &str, style| {
+            let payload = TextPayload::owned(s);
+            let mut buf = String::new();
+            let mut sink = crate::FormatSink::styled(&mut buf, style);
+            // SAFETY: `payload` is an initialized `TextPayload`.
+            unsafe { (TEXT.format)(ptr::addr_of!(payload) as *const u8, &mut sink) };
+            buf
+        };
+        use crate::FormatStyle::{Debug, Display};
+
+        assert_eq!(render("hello", Display), "hello");
+        assert_eq!(render("hello", Debug), "\"hello\"");
+
+        // The empty string: nothing at all, versus something.
+        assert_eq!(render("", Display), "");
+        assert_eq!(render("", Debug), "\"\"");
+
+        // And the escaping, so a value cannot end its own quoting or take a
+        // second row of a display that allots it one.
+        assert_eq!(render("a\"b", Display), "a\"b");
+        assert_eq!(render("a\"b", Debug), r#""a\"b""#);
+        assert_eq!(render("a\nb", Debug), r#""a\nb""#);
+    }
+
     #[test]
     fn owned_text_descriptor_formats_and_compares() {
         let a = TextPayload::owned("hello");
@@ -567,7 +622,12 @@ mod tests {
         let c = TextPayload::owned("world");
 
         let mut buf = String::new();
-        unsafe { (TEXT.format)(ptr::addr_of!(a) as *const u8, &mut buf) };
+        unsafe {
+            (TEXT.format)(
+                ptr::addr_of!(a) as *const u8,
+                &mut crate::FormatSink::display(&mut buf),
+            )
+        };
         assert_eq!(buf, "hello");
 
         assert!(unsafe {

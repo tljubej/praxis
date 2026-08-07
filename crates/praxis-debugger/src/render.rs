@@ -886,6 +886,51 @@ mod tests {
         );
     }
 
+    /// A local the collector emptied says so, and does not borrow `<uninit>`'s
+    /// word.
+    ///
+    /// The two are one line apart on the same display and they mean opposite
+    /// things: `<uninit>` is a slot the program never wrote — the faulting
+    /// expression, most usefully — and `<collected>` is one it wrote and
+    /// finished with, whose object a later collection took (ADR-044 decision 2
+    /// stops rooting a binding at its last *use*, not at the end of its scope).
+    /// Reading the second as the first is how `var b = "asdf"` came to render as
+    /// though the line had never run.
+    #[test]
+    fn a_collected_local_is_not_reported_as_uninitialized() {
+        let mut collected = local("b", 0, praxis_runtime::LOCAL_KIND_USER, Some((0, 9)), 0);
+        collected.value = Some(praxis_runtime::DebugValue::Reclaimed);
+        let never_written = local("c", 1, praxis_runtime::LOCAL_KIND_USER, Some((10, 19)), 0);
+        let snap = snap_with_locals("main", vec![collected, never_written]);
+        let mut out = Vec::new();
+        render_frame_locals(&mut out, &snap, 0, 12, &RenderCtx::bare()).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("b = <collected>"),
+            "the collected local names its own absence: {text}"
+        );
+        assert!(
+            text.contains("c = <uninit>"),
+            "and the unwritten one keeps the other: {text}"
+        );
+    }
+
+    /// A *temp* whose value was collected is still shown, for the reason a temp
+    /// holding a value is: it is not dead scratch. The dead-scratch filter drops
+    /// what holds nothing and explains nothing, and a collected temp explains
+    /// where its expression's result went.
+    #[test]
+    fn a_collected_temp_survives_the_dead_scratch_filter() {
+        let mut collected = local("", 4, praxis_runtime::LOCAL_KIND_TEMP, None, 0);
+        collected.value = Some(praxis_runtime::DebugValue::Reclaimed);
+        let snap = snap_with_locals("main", vec![collected]);
+        let mut out = Vec::new();
+        render_frame_locals(&mut out, &snap, 0, 12, &RenderCtx::bare()).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("<tmp#4"), "kept: {text}");
+        assert!(text.contains("<collected>"), "and rendered as such: {text}");
+    }
+
     #[test]
     fn temps_only_frame_shows_only_temps_section() {
         // No user locals → only the `temps:` section, no `locals:` header. The

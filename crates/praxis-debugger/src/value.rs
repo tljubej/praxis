@@ -33,6 +33,14 @@
 
 use std::fmt;
 
+/// What a slot renders as when the value it held has been collected
+/// ([`praxis_runtime::DebugValue::Reclaimed`]).
+///
+/// Distinct from `<uninit>`, and the distinction is the point: one is a local
+/// the program never wrote, the other a local it wrote and finished with. They
+/// were one string until the slot could tell them apart.
+pub const COLLECTED: &str = "<collected>";
+
 /// The default budget for one value on one line: how many bytes of rendered
 /// value a display keeps before cutting at the nearest element boundary.
 ///
@@ -109,9 +117,21 @@ pub fn format_bounded(value: praxis_runtime::DebugValue, budget: usize) -> Strin
         // No object, so no descriptor to dispatch through. A scalar's rendering
         // is short by construction; truncating it would only ever hide digits.
         DebugValue::Scalar(s) => return s.to_string(),
+        // A value was here; the collector has taken it (ADR-106). Worth its own
+        // word rather than `<uninit>`, which is what this used to print and
+        // which says the opposite: that the line never ran. `COLLECTED` names
+        // the mechanism the user can act on — the binding's last *use*, not its
+        // scope, is where it stopped being a root (ADR-044 decision 2), so the
+        // way to see it at the fault is to use it later.
+        DebugValue::Reclaimed => return COLLECTED.to_string(),
     };
     let mut sink = CappedSink::new();
-    reference.format(&mut sink);
+    // `format_debug`, so a `Text` is a quoted literal — at this level and at
+    // every level below it, since a container passes its style down with its
+    // writer. Without it the empty string wrote no bytes and fell into the
+    // `<unreadable>` answer below, and `["a", "", "b"]` rendered `[a, , b]`,
+    // where the middle element is not short but *absent*.
+    reference.format_debug(&mut sink);
     if sink.buf.is_empty() {
         return "<unreadable>".to_string();
     }
@@ -317,6 +337,52 @@ fn quote_open_at(prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `Text` renders quoted here, at every depth, and an empty one is
+    /// therefore visible.
+    ///
+    /// This is [`format_bounded`]'s half of the change; `text_renders_one_way_
+    /// for_the_program_and_another_for_the_debugger` in `praxis-runtime` is the
+    /// descriptor's. Both are needed: the callback can quote all it likes if this
+    /// function asks for the other rendering.
+    ///
+    /// It also makes [`truncate_rendered`]'s quoted-run tracking reachable. That
+    /// scan has always understood `"` and `\\` — see the `"a long string"` row in
+    /// its doc — against a renderer that never produced either.
+    #[test]
+    fn a_text_is_quoted_so_the_empty_one_is_visible() {
+        let mut rt = praxis_runtime::Runtime::new();
+        let render = |r: praxis_runtime::GcRef| {
+            format_bounded(praxis_runtime::DebugValue::Reference(r), DEFAULT_BUDGET)
+        };
+
+        assert_eq!(render(rt.alloc_text("asdf")), "\"asdf\"");
+        // The row that used to read `b: Text = <unreadable>`: zero bytes out of
+        // the descriptor was the only evidence the renderer had.
+        assert_eq!(render(rt.alloc_text("")), "\"\"");
+
+        // Nested, which is the case a per-type debug callback could not have
+        // reached: the element is quoted because the `Vec` passed its style down.
+        let mut ctx = rt.context();
+        // SAFETY: `ctx` is wired to `rt`; every argument is a live `GcRef` of the
+        // type the wrapper names.
+        let xs = unsafe {
+            let xs = praxis_runtime::abi::praxis_vec_new(
+                &mut ctx,
+                praxis_runtime::BuiltinTypeId::Text.descriptor(),
+            );
+            let empty = rt.alloc_text("");
+            let b = rt.alloc_text("b");
+            praxis_runtime::abi::praxis_vec_push(&mut ctx, xs, empty);
+            praxis_runtime::abi::praxis_vec_push(&mut ctx, xs, b);
+            xs
+        };
+        assert_eq!(
+            render(xs),
+            r#"["", "b"]"#,
+            "an empty element is an element, not a gap"
+        );
+    }
 
     /// The shape the whole module exists for: a collection longer than the line
     /// keeps whole elements and says that more followed.

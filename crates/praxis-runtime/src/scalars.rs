@@ -17,10 +17,10 @@
 //! carries the type, and the pairing is checked when the `static` is evaluated.
 
 use std::cmp::Ordering;
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 use crate::descriptor::{
-    hash_value, BuiltinTypeId, DynamicHasher, Payload, Tracer, TypeDescriptor,
+    hash_value, BuiltinTypeId, DynamicHasher, FormatSink, Payload, Tracer, TypeDescriptor,
 };
 use crate::heap::InlineClaimSite;
 
@@ -51,7 +51,7 @@ pub type FloatPayload = f64;
 
 unsafe fn unit_trace(_: *mut u8, _: &mut dyn Tracer) {}
 unsafe fn unit_drop(_: *mut u8) {}
-unsafe fn unit_format(_: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn unit_format(_: *const u8, out: &mut FormatSink<'_>) {
     let _ = out.write_str("Unit");
 }
 unsafe fn unit_equals(_: *const u8, _: *const u8) -> bool {
@@ -91,7 +91,7 @@ pub static UNIT_PAYLOAD: Payload<UnitPayload> = Payload::new(&UNIT);
 
 unsafe fn bool_trace(_: *mut u8, _: &mut dyn Tracer) {}
 unsafe fn bool_drop(_: *mut u8) {}
-unsafe fn bool_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn bool_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at a `BoolPayload`.
     let v = unsafe { *(payload as *const BoolPayload) };
     let _ = out.write_str(if v != 0 { "true" } else { "false" });
@@ -147,7 +147,7 @@ pub(crate) fn write_int(out: &mut dyn fmt::Write, v: IntPayload) {
     let _ = write!(out, "{v}");
 }
 
-unsafe fn int_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn int_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at an `IntPayload`.
     let v = unsafe { *(payload as *const IntPayload) };
     write_int(out, v);
@@ -203,7 +203,7 @@ pub const INT_CLAIM_SITE: InlineClaimSite = match InlineClaimSite::of(&INT) {
 
 unsafe fn byte_trace(_: *mut u8, _: &mut dyn Tracer) {}
 unsafe fn byte_drop(_: *mut u8) {}
-unsafe fn byte_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn byte_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at a `BytePayload`.
     let v = unsafe { *(payload as *const BytePayload) };
     let _ = write!(out, "{v}");
@@ -264,7 +264,7 @@ pub(crate) fn write_char(out: &mut dyn fmt::Write, v: CharPayload) {
     }
 }
 
-unsafe fn char_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn char_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at a validated `CharPayload`.
     let raw = unsafe { *(payload as *const CharPayload) };
     write_char(out, raw);
@@ -331,7 +331,7 @@ pub(crate) fn write_float(out: &mut dyn fmt::Write, v: FloatPayload) {
     }
 }
 
-unsafe fn float_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn float_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at a `FloatPayload`.
     let v = unsafe { *(payload as *const FloatPayload) };
     write_float(out, v);
@@ -439,17 +439,17 @@ mod tests {
         // Unit
         buf.clear();
         // SAFETY: Unit's format ignores its payload pointer.
-        unsafe { (UNIT.format)(ptr::null(), &mut buf) };
+        unsafe { (UNIT.format)(ptr::null(), &mut crate::FormatSink::display(&mut buf)) };
         assert_eq!(buf, "Unit");
 
         // Bool
         let t: BoolPayload = 1;
         let f: BoolPayload = 0;
         buf.clear();
-        unsafe { (BOOL.format)(ptr::addr_of!(t), &mut buf) };
+        unsafe { (BOOL.format)(ptr::addr_of!(t), &mut crate::FormatSink::display(&mut buf)) };
         assert_eq!(buf, "true");
         buf.clear();
-        unsafe { (BOOL.format)(ptr::addr_of!(f), &mut buf) };
+        unsafe { (BOOL.format)(ptr::addr_of!(f), &mut crate::FormatSink::display(&mut buf)) };
         assert_eq!(buf, "false");
         assert!(unsafe { (BOOL.equals.unwrap())(ptr::addr_of!(t), ptr::addr_of!(t)) });
         assert!(!unsafe { (BOOL.equals.unwrap())(ptr::addr_of!(t), ptr::addr_of!(f)) });
@@ -458,7 +458,12 @@ mod tests {
         let a: IntPayload = 42;
         let b: IntPayload = -7;
         buf.clear();
-        unsafe { (INT.format)(ptr::addr_of!(a) as *const u8, &mut buf) };
+        unsafe {
+            (INT.format)(
+                ptr::addr_of!(a) as *const u8,
+                &mut crate::FormatSink::display(&mut buf),
+            )
+        };
         assert_eq!(buf, "42");
         assert!(unsafe {
             (INT.equals.unwrap())(ptr::addr_of!(a) as *const u8, ptr::addr_of!(a) as *const u8)
@@ -470,19 +475,29 @@ mod tests {
         // Byte
         let by: BytePayload = 255;
         buf.clear();
-        unsafe { (BYTE.format)(ptr::addr_of!(by), &mut buf) };
+        unsafe { (BYTE.format)(ptr::addr_of!(by), &mut crate::FormatSink::display(&mut buf)) };
         assert_eq!(buf, "255");
 
         // Char
         let ch: CharPayload = 'A' as u32;
         buf.clear();
-        unsafe { (CHAR.format)(ptr::addr_of!(ch) as *const u8, &mut buf) };
+        unsafe {
+            (CHAR.format)(
+                ptr::addr_of!(ch) as *const u8,
+                &mut crate::FormatSink::display(&mut buf),
+            )
+        };
         assert_eq!(buf, "A");
 
         // Float — finite value formats via Rust's shortest round-trip form.
         let f: FloatPayload = 2.5;
         buf.clear();
-        unsafe { (FLOAT.format)(ptr::addr_of!(f) as *const u8, &mut buf) };
+        unsafe {
+            (FLOAT.format)(
+                ptr::addr_of!(f) as *const u8,
+                &mut crate::FormatSink::display(&mut buf),
+            )
+        };
         assert_eq!(buf, "2.5");
         assert!(unsafe {
             (FLOAT.equals.unwrap())(ptr::addr_of!(f) as *const u8, ptr::addr_of!(f) as *const u8)
@@ -508,13 +523,28 @@ mod tests {
         let inf: FloatPayload = f64::INFINITY;
         let neg_inf: FloatPayload = f64::NEG_INFINITY;
         buf.clear();
-        unsafe { (FLOAT.format)(ptr::addr_of!(inf) as *const u8, &mut buf) };
+        unsafe {
+            (FLOAT.format)(
+                ptr::addr_of!(inf) as *const u8,
+                &mut crate::FormatSink::display(&mut buf),
+            )
+        };
         assert_eq!(buf, "inf");
         buf.clear();
-        unsafe { (FLOAT.format)(ptr::addr_of!(neg_inf) as *const u8, &mut buf) };
+        unsafe {
+            (FLOAT.format)(
+                ptr::addr_of!(neg_inf) as *const u8,
+                &mut crate::FormatSink::display(&mut buf),
+            )
+        };
         assert_eq!(buf, "-inf");
         buf.clear();
-        unsafe { (FLOAT.format)(ptr::addr_of!(nan) as *const u8, &mut buf) };
+        unsafe {
+            (FLOAT.format)(
+                ptr::addr_of!(nan) as *const u8,
+                &mut crate::FormatSink::display(&mut buf),
+            )
+        };
         assert_eq!(buf, "NaN");
     }
 
@@ -750,7 +780,12 @@ mod tests {
         let rendered = |v: FloatPayload| {
             let mut buf = String::new();
             // SAFETY: `v` is a `FloatPayload` and `FLOAT` is its descriptor.
-            unsafe { (FLOAT.format)(std::ptr::addr_of!(v) as *const u8, &mut buf) };
+            unsafe {
+                (FLOAT.format)(
+                    std::ptr::addr_of!(v) as *const u8,
+                    &mut crate::FormatSink::display(&mut buf),
+                )
+            };
             buf
         };
         // The defect: identical to an `Int`'s rendering, so `[3.0, 5.0]` and
@@ -790,7 +825,12 @@ mod tests {
         let rendered = |v: FloatPayload| {
             let mut buf = String::new();
             // SAFETY: `v` is a `FloatPayload` and `FLOAT` is its descriptor.
-            unsafe { (FLOAT.format)(std::ptr::addr_of!(v) as *const u8, &mut buf) };
+            unsafe {
+                (FLOAT.format)(
+                    std::ptr::addr_of!(v) as *const u8,
+                    &mut crate::FormatSink::display(&mut buf),
+                )
+            };
             buf
         };
         for v in [

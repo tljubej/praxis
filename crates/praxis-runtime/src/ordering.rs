@@ -35,7 +35,7 @@
 
 use std::cmp::Ordering;
 
-use crate::descriptor::TypeDescriptor;
+use crate::descriptor::{FormatSink, TypeDescriptor};
 use crate::maps::render_into;
 use crate::GcRef;
 
@@ -102,10 +102,17 @@ pub(crate) unsafe fn slot_cmp(
 unsafe fn rendered_cmp(a: GcRef, da: &TypeDescriptor, b: GcRef, db: &TypeDescriptor) -> Ordering {
     let mut left = String::new();
     let mut right = String::new();
+    // **`display`, unconditionally.** This is an ordering, not a display: it
+    // decides the sequence a `for` over a `Map` walks and the order a `Set`
+    // prints in (ADR-138 decision 4). Reading a style off a caller would make
+    // that sequence depend on who was rendering — a program iterating one order
+    // and a debugger pane showing another — and the quoting is not neutral about
+    // it, since `"` sorts below every printable character a value could start
+    // with.
     // SAFETY: the caller guarantees each payload matches its descriptor.
     unsafe {
-        render_into(&mut left, da, a);
-        render_into(&mut right, db, b);
+        render_into(&mut FormatSink::display(&mut left), da, a);
+        render_into(&mut FormatSink::display(&mut right), db, b);
     }
     left.cmp(&right)
 }

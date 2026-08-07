@@ -1197,8 +1197,8 @@ fn dbg06_p_evaluates_a_struct_local_and_its_fields() {
         "the struct's declaration reaches the synthetic module: {out}"
     );
     assert!(
-        out.contains("{ x: { z: qweqwe }, y: 100 }"),
-        "`p foo` prints the record: {out}"
+        out.contains(r#"{ x: { z: "qweqwe" }, y: 100 }"#),
+        "`p foo` prints the record, its `Text` field quoted: {out}"
     );
     // A field read lowers to an indexed load, so these also prove the emitted
     // declaration put the fields in the order the value has them.
@@ -1220,7 +1220,7 @@ fn dbg06_type_and_heap_report_user_declared_types() {
     );
     assert!(out.contains("Foo"), "`type foo` is `Foo`: {out}");
     assert!(
-        out.contains("Foo: { x: { z: qweqwe }, y: 100 }"),
+        out.contains(r#"Foo: { x: { z: "qweqwe" }, y: 100 }"#),
         "`heap foo` prefixes the value with its type: {out}"
     );
     assert!(out.contains("Move"), "`type move` is `Move`: {out}");
@@ -1300,7 +1300,7 @@ fn dbg06_an_expression_can_write_a_type_the_program_declares() {
         "p Foo{x: Poo{z: \"hi\"}, y: 1}\np Stay\np match Step(6, 7) { Step(a, b) => a + b, Stay => 0 }\nquit\n",
     );
     assert!(
-        out.contains("{ x: { z: hi }, y: 1 }"),
+        out.contains(r#"{ x: { z: "hi" }, y: 1 }"#),
         "a record literal builds a value of the program's type: {out}"
     );
     assert!(

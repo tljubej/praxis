@@ -15,9 +15,9 @@
 //! descriptor serves every record because the per-shape knowledge lives in the
 //! schema referenced from the payload.
 
-use std::fmt;
+use std::fmt::Write as _;
 
-use crate::descriptor::{BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
+use crate::descriptor::{BuiltinTypeId, DynamicHasher, FormatSink, Tracer, TypeDescriptor};
 use crate::GcRef;
 
 /// One field of a record shape: its source name plus the descriptor for the
@@ -157,7 +157,7 @@ unsafe fn record_drop(payload: *mut u8) {
     unsafe { std::ptr::drop_in_place(payload as *mut RecordPayload) };
 }
 
-unsafe fn record_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn record_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at an initialized RecordPayload.
     let p = unsafe { &*(payload as *const RecordPayload) };
     let schema = unsafe { &*p.schema };

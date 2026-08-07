@@ -117,8 +117,10 @@ impl std::fmt::Debug for DynamicKey {
         let payload = self.value.payload::<u8>() as *const u8;
         // The format callback returns fmt::Result; discard it (debug rendering
         // is best-effort).
+        // In the debug style, which is the one a Rust `Debug` impl means: a
+        // `DynamicKey` over `""` used to render `DynamicKey(Text:)`.
         unsafe {
-            (self.descriptor.format)(payload, &mut s);
+            (self.descriptor.format)(payload, &mut crate::FormatSink::debug(&mut s));
         }
         write!(f, "DynamicKey({}:{})", self.descriptor.name, s)
     }
@@ -179,14 +181,16 @@ mod tests {
 
     unsafe fn test_trace(_: *mut u8, _: &mut dyn Tracer) {}
     unsafe fn test_drop(_: *mut u8) {}
-    unsafe fn test_format(payload: *const u8, out: &mut dyn std::fmt::Write) {
+    unsafe fn test_format(payload: *const u8, out: &mut crate::FormatSink<'_>) {
+        use std::fmt::Write as _;
         let value = unsafe { *(payload as *const i64) };
         let _ = write!(out, "{value}");
     }
     unsafe fn test_equals(a: *const u8, b: *const u8) -> bool {
         unsafe { *(a as *const i64) == *(b as *const i64) }
     }
-    unsafe fn test_format_u8(payload: *const u8, out: &mut dyn std::fmt::Write) {
+    unsafe fn test_format_u8(payload: *const u8, out: &mut crate::FormatSink<'_>) {
+        use std::fmt::Write as _;
         let value = unsafe { *payload };
         let _ = write!(out, "{value}");
     }

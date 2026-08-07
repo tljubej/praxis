@@ -6452,6 +6452,17 @@ fn a_files_top_level_statements_become_one_generated_item() {
             ..
         }
     ));
+    // And that tail is **spanless**. It used to carry the file's whole range,
+    // which is the one span in the program that is never the answer to "where?"
+    // — it reached the crash debugger as a temp whose `@ "expr"` provenance was
+    // every statement in the file collapsed onto one line.
+    assert!(
+        matches!(entry.body.tail, crate::TypedExpr::Lit { span, .. } if span == (0, 0)),
+        "the synthesized tail names no source text"
+    );
+    // The *function* still spans the file: that is what the debugger's `source`
+    // command renders, and the two spans are different questions.
+    assert_ne!(entry.span, (0, 0), "the entry item keeps the file's extent");
 
     // Its name is not an identifier, so the parser cannot produce a second
     // definition of it (ADR-064's rule for the subscript rows, at the one other
@@ -6472,6 +6483,69 @@ fn a_files_top_level_statements_become_one_generated_item() {
     );
     assert_eq!(crate::entry_point(|n| n == "main"), Some("main"));
     assert_eq!(crate::entry_point(|_| false), None);
+}
+
+/// A block that ends in a statement has a synthesized `Unit` tail, and that tail
+/// names **no source text** — at every block, not just the entry point's.
+///
+/// The span it used to carry was the block's own, which is the widest span in
+/// reach and the least useful one. Two consumers read a temp's span and both are
+/// harmed by it: the debugger prints it as `@ "expr"` provenance, so a `{ … }`
+/// spanning twenty lines is rendered as twenty lines on one row; and
+/// `praxis_debugger`'s `fault_span` picks the *narrowest* unfinished temp to
+/// decide which line a frame faulted on, a question a whole-block span can only
+/// answer wrongly.
+#[test]
+fn a_synthesized_block_tail_carries_no_span() {
+    use praxis_ast::AstNode;
+    let map = SourceMap::new();
+    let src = "fn f() -> Unit {\n  var x = 1\n}\n";
+    let id = map.intern("tail_test.px", src);
+    let parsed = parse(id, src);
+    let mut analysis = analyze_root(id, &parsed.tree);
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+    let module = crate::lower::lower(id, &root, &mut analysis);
+
+    let f = module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::TypedItem::Fn(f) if f.name == "f" => Some(f),
+            _ => None,
+        })
+        .expect("`f` is an item");
+    assert!(
+        matches!(
+            f.body.tail,
+            crate::TypedExpr::Lit {
+                value: crate::Lit::Unit,
+                span: (0, 0),
+                ..
+            }
+        ),
+        "a statement-terminated body gets a spanless Unit tail"
+    );
+    // A tail the source *did* write keeps its own span — the change is about
+    // what the compiler invents, not about erasing provenance generally.
+    let src = "fn g() -> Int {\n  var x = 1\n  x\n}\n";
+    let id = map.intern("tail_test2.px", src);
+    let parsed = parse(id, src);
+    let mut analysis = analyze_root(id, &parsed.tree);
+    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
+    let module = crate::lower::lower(id, &root, &mut analysis);
+    let g = module
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::TypedItem::Fn(f) if f.name == "g" => Some(f),
+            _ => None,
+        })
+        .expect("`g` is an item");
+    let span = match &g.body.tail {
+        crate::TypedExpr::Path { span, .. } => *span,
+        other => panic!("expected the written tail `x`, got {other:?}"),
+    };
+    assert_eq!(&src[span.0 as usize..span.1 as usize], "x");
 }
 
 /// **REP-22.** A `fn` body that names a binding declared outside it is reported

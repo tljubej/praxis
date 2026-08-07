@@ -5526,6 +5526,12 @@ fn snapshot_local_vec(snap: &praxis_runtime::CrashSnapshot, name: &str) -> Optio
         .flat_map(|f| &f.locals)
         .find(|l| l.name() == name)
         .and_then(|l| l.value)
+        // Through `reference()` — the one door from a debug value back to the
+        // heap — so the two absences a slot can hold both answer `None` here:
+        // "nothing written" and "written, then collected". A `DebugValue` that
+        // names no object has no `Vec` to read, and `as_vec` says so by
+        // panicking.
+        .and_then(praxis_runtime::DebugValue::reference)
         .map(|r| r.as_vec().iter().map(|e| e.as_int()).collect())
 }
 
@@ -5844,6 +5850,20 @@ fn main() -> Int {
         "`xs` was reclaimed by a collection inside the window between its last \
          use and the fault; the snapshot must copy an absence rather than a \
          reference into storage the allocator has since handed back out"
+    );
+    // And it is the *collected* absence, not the unwritten one — the slot says
+    // which, so the debugger can render `<collected>` where it used to have to
+    // say `<uninit>` about a `var` the program plainly ran.
+    let xs = snap
+        .frames
+        .iter()
+        .flat_map(|f| &f.locals)
+        .find(|l| l.name() == "xs")
+        .expect("`xs` is a local of the faulting frame");
+    assert_eq!(
+        xs.value,
+        Some(praxis_runtime::DebugValue::Reclaimed),
+        "a local the collector took is distinguishable from one never written"
     );
 }
 

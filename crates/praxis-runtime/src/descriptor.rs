@@ -189,12 +189,95 @@ pub type TraceFn = unsafe fn(payload: *mut u8, tracer: &mut dyn Tracer);
 /// memory is no longer valid.
 pub type DropFn = unsafe fn(payload: *mut u8);
 
+/// Which of the two renderings a `format` callback is producing.
+///
+/// Exactly one type reads this — `Text` — and it is one bit rather than a second
+/// callback per descriptor because of *nesting*: a `Vec[Text]` renders its
+/// elements through the element descriptor's `format`, so whatever distinguishes
+/// the two renderings has to travel down that recursion. A `format_debug` field
+/// beside `format` would not: `vec_format` would have to know which of the two
+/// it was itself running as in order to pick the right one for its elements, and
+/// that knowledge is exactly this enum.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FormatStyle {
+    /// The program's own rendering: `out(v)`, `"{v}"` interpolation, `to_text()`
+    /// and `praxis run`'s result line. A `Text` is its characters, because that
+    /// is what a program printing a string means (§16.1, and §8.1 for the
+    /// interpolation that shares the callback).
+    Display,
+    /// The **debugger's** rendering: a locals row, a TUI pane cell, `p EXPR`. A
+    /// `Text` is a quoted literal here, because a display that gives each value
+    /// one line and no other context cannot afford a value that renders as zero
+    /// characters, as a newline, or as something an adjacent `"` could have
+    /// ended.
+    Debug,
+}
+
+/// The writer a `format` callback appends to, carrying the [`FormatStyle`] it is
+/// rendering under.
+///
+/// A plain `&mut dyn fmt::Write` was enough while every type rendered one way.
+/// This is that, plus the one bit, and it is a wrapper rather than an extra
+/// parameter so that a container passing its writer to an element descriptor
+/// passes the style with it and cannot forget to.
+pub struct FormatSink<'a> {
+    out: &'a mut dyn fmt::Write,
+    style: FormatStyle,
+}
+
+impl<'a> FormatSink<'a> {
+    /// A sink in the program's own rendering.
+    pub fn display(out: &'a mut dyn fmt::Write) -> FormatSink<'a> {
+        FormatSink {
+            out,
+            style: FormatStyle::Display,
+        }
+    }
+
+    /// A sink in the debugger's rendering.
+    pub fn debug(out: &'a mut dyn fmt::Write) -> FormatSink<'a> {
+        FormatSink {
+            out,
+            style: FormatStyle::Debug,
+        }
+    }
+
+    /// The style this sink renders under.
+    #[must_use]
+    pub fn style(&self) -> FormatStyle {
+        self.style
+    }
+
+    /// A sink over `out` in a style read off another one.
+    ///
+    /// For the callbacks that render a part into a scratch `String` before
+    /// placing it — `map_format` orders its entries by key and has to have them
+    /// rendered to place them (ADR-138 decision 4). Such a callback holds its
+    /// [`style`](Self::style) across the buffer and rebuilds a sink around it,
+    /// which is what keeps a `Map[Text, Text]` quoting its keys and values in
+    /// the debugger, exactly as a `Vec[Text]` does without needing a buffer at
+    /// all.
+    ///
+    /// Every scratch buffer is a place the style could be dropped, and dropping
+    /// it is silent — the value still renders, just in the other rendering. The
+    /// style is `Copy` so that carrying it across is the easy thing to write.
+    pub fn styled(out: &'a mut dyn fmt::Write, style: FormatStyle) -> FormatSink<'a> {
+        FormatSink { out, style }
+    }
+}
+
+impl fmt::Write for FormatSink<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.out.write_str(s)
+    }
+}
+
 /// `format` callback shape: append the user-visible representation of the value
-/// to the given writer.
+/// to the given writer, in that writer's [`FormatStyle`].
 ///
 /// # Safety
 /// `payload` must point at a value of the descriptor's type.
-pub type FormatFn = unsafe fn(payload: *const u8, out: &mut dyn fmt::Write);
+pub type FormatFn = unsafe fn(payload: *const u8, out: &mut FormatSink<'_>);
 
 /// `equals` callback shape: structural equality between two values of the same
 /// descriptor. `None` on the descriptor means the type is not equatable.
@@ -603,7 +686,7 @@ mod tests {
     /// point is that the *type* is well-formed at Milestone 0.
     unsafe fn dummy_trace(_: *mut u8, _: &mut dyn Tracer) {}
     unsafe fn dummy_drop(_: *mut u8) {}
-    unsafe fn dummy_format(_: *const u8, _: &mut dyn fmt::Write) {}
+    unsafe fn dummy_format(_: *const u8, _: &mut FormatSink<'_>) {}
     unsafe fn dummy_eq(a: *const u8, b: *const u8) -> bool {
         a == b
     }

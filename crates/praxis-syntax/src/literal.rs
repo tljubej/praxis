@@ -104,6 +104,50 @@ pub fn decode_escape(esc: char) -> Option<char> {
     }
 }
 
+/// Write `s` as a quoted, escaped text literal — the direction
+/// [`decode_text_body`] does not go.
+///
+/// The debugger renders values, and a `Text` rendered as itself is ambiguous in
+/// three ways it cannot afford: `""` writes zero bytes and is indistinguishable
+/// from a failed read, a value containing `"` cannot be told from two values,
+/// and a value containing a newline takes a second line on a display that gives
+/// each value one. Quoting answers all three, and the escaping is what keeps the
+/// quoting honest.
+///
+/// ### What round-trips, and what does not
+///
+/// `decode_text_body(&quote_text(s)[1..len-1]) == s` for every `s` — that is the
+/// property, and [`quoting_round_trips_through_the_decoder`] is it as a test.
+///
+/// It is deliberately *not* "the output re-lexes as a literal spelling `s`".
+/// `{` opens an interpolation hole in source (§8.1) and is left unescaped here,
+/// because this text is read by a person looking at a locals pane and not by the
+/// lexer, and `{"a": 1}` is worth more on that pane than `\{"a": 1\}`. The
+/// round-trip above still holds through it: `decode_escape` only ever looks at
+/// the character *after* a backslash, so an unescaped brace decodes to itself.
+///
+/// [`quoting_round_trips_through_the_decoder`]: #
+#[must_use]
+pub fn quote_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            // The two that would make the quoting a lie, and the three that
+            // would make the value take more than its line.
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\0' => out.push_str("\\0"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Why a `'…'` run is not a character literal.
 ///
 /// Three variants rather than one, because the lexer's message is what makes the
@@ -184,6 +228,31 @@ pub fn decode_char_literal(raw: &str) -> Result<char, CharLitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every string survives quoting and decoding back, which is what makes
+    /// [`quote_text`] an inverse of the table rather than a second opinion about
+    /// it.
+    #[test]
+    fn quoting_round_trips_through_the_decoder() {
+        for s in [
+            "", "asdf", "\"", "\\", "a\"b\\c", "\n\t\r\0", "{x}", "a\\nb", "héllo",
+        ] {
+            let quoted = quote_text(s);
+            assert!(is_text_literal(&quoted), "quoted is a literal: {quoted:?}");
+            assert_eq!(unquote_text(&quoted), s, "round trip of {s:?}");
+        }
+    }
+
+    /// The visible half: an empty `Text` becomes two characters instead of
+    /// nothing at all, which is the whole reason the debugger quotes.
+    #[test]
+    fn an_empty_text_still_renders_as_something() {
+        assert_eq!(quote_text(""), "\"\"");
+        assert_eq!(quote_text("a\nb"), r#""a\nb""#, "and stays on one line");
+        // A brace is left alone: this is a rendering for a person, not a
+        // spelling for the lexer — see `quote_text`'s note.
+        assert_eq!(quote_text("{x}"), r#""{x}""#);
+    }
 
     #[test]
     fn one_quote_comes_off_each_end() {

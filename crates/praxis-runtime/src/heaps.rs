@@ -12,9 +12,9 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::fmt;
+use std::fmt::Write as _;
 
-use crate::descriptor::{BuiltinTypeId, Tracer, TypeDescriptor};
+use crate::descriptor::{BuiltinTypeId, FormatSink, Tracer, TypeDescriptor};
 use crate::GcRef;
 
 /// A heap's elements in **pop order** — the order the program would see them if
@@ -49,7 +49,7 @@ pub(crate) fn in_pop_order<T: Ord, F: Fn(&T) -> GcRef>(
 /// `MinHeap` built with no static element type used to render its `Float`s as
 /// the integers its `INT` label promised.
 unsafe fn write_in_pop_order<T: Ord, F: Fn(&T) -> GcRef>(
-    out: &mut dyn fmt::Write,
+    out: &mut FormatSink<'_>,
     items: &BinaryHeap<T>,
     value_of: F,
 ) {
@@ -135,7 +135,14 @@ impl std::fmt::Debug for HeapEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut rendered = String::new();
         // SAFETY: the entry's value is a live object of its descriptor's type.
-        unsafe { (self.descriptor.format)(self.value.payload::<u8>() as *const u8, &mut rendered) };
+        // The debug style, for `DynamicKey`'s reason: this is a Rust `Debug`
+        // impl, and a quoted string is what one of those shows.
+        unsafe {
+            (self.descriptor.format)(
+                self.value.payload::<u8>() as *const u8,
+                &mut FormatSink::debug(&mut rendered),
+            );
+        };
         write!(f, "HeapEntry({rendered})")
     }
 }
@@ -176,7 +183,7 @@ unsafe fn max_heap_drop(payload: *mut u8) {
     unsafe { std::ptr::drop_in_place(payload as *mut MaxHeapPayload) };
 }
 
-unsafe fn max_heap_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn max_heap_format(payload: *const u8, out: &mut FormatSink<'_>) {
     let p = unsafe { &*(payload as *const MaxHeapPayload) };
     // SAFETY: every element matches the heap's element descriptor.
     unsafe { write_in_pop_order(out, &p.items, |e| e.value) };
@@ -262,7 +269,7 @@ unsafe fn min_heap_drop(payload: *mut u8) {
     unsafe { std::ptr::drop_in_place(payload as *mut MinHeapPayload) };
 }
 
-unsafe fn min_heap_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn min_heap_format(payload: *const u8, out: &mut FormatSink<'_>) {
     let p = unsafe { &*(payload as *const MinHeapPayload) };
     // SAFETY: every element matches the heap's element descriptor. The stored
     // entry is `Reverse<HeapEntry>`, so pop order is ascending by element.
@@ -492,10 +499,12 @@ mod tests {
     /// Render a heap payload through its own `format` callback, without
     /// allocating a GC object to hold it — the callback takes a payload
     /// pointer, which is all a formatting test needs.
-    fn rendered<P>(format: unsafe fn(*const u8, &mut dyn fmt::Write), payload: &P) -> String {
+    fn rendered<P>(format: crate::FormatFn, payload: &P) -> String {
         let mut s = String::new();
+        // The program's own rendering, which is what these tests are about.
+        let mut sink = FormatSink::display(&mut s);
         // SAFETY: `payload` is an initialized value of the type `format` reads.
-        unsafe { format((payload as *const P).cast::<u8>(), &mut s) };
+        unsafe { format((payload as *const P).cast::<u8>(), &mut sink) };
         s
     }
 

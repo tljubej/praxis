@@ -20,9 +20,9 @@
 //! element-wise — which is a different question from the source-level `<`, and
 //! `(1, 2) < (1, 3)` is still refused at check time.
 
-use std::fmt;
+use std::fmt::Write as _;
 
-use crate::descriptor::{BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
+use crate::descriptor::{BuiltinTypeId, DynamicHasher, FormatSink, Tracer, TypeDescriptor};
 use crate::GcRef;
 
 /// The static shape of a tuple: an ordered list of element descriptors (positional,
@@ -110,7 +110,7 @@ unsafe fn tuple_drop(payload: *mut u8) {
     unsafe { std::ptr::drop_in_place(payload as *mut TuplePayload) };
 }
 
-unsafe fn tuple_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn tuple_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at an initialized TuplePayload.
     let p = unsafe { &*(payload as *const TuplePayload) };
     let schema = unsafe { &*p.schema };
@@ -359,7 +359,10 @@ mod tests {
         // renders as a Text and not as an `i64` read of its buffer pointer.
         let mut rendered = String::new();
         unsafe {
-            tuple_format(mixed.payload::<u8>() as *const u8, &mut rendered);
+            tuple_format(
+                mixed.payload::<u8>() as *const u8,
+                &mut crate::FormatSink::display(&mut rendered),
+            );
         }
         assert_eq!(rendered, "(1, hi)");
 

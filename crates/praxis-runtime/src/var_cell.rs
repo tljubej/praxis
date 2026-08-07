@@ -17,9 +17,9 @@
 //!
 //! Its `TypeId` is derived from `BuiltinTypeId::VarCell`.
 
-use std::fmt;
+use std::fmt::Write as _;
 
-use crate::descriptor::{BuiltinTypeId, Tracer, TypeDescriptor};
+use crate::descriptor::{BuiltinTypeId, FormatSink, Tracer, TypeDescriptor};
 use crate::GcRef;
 
 /// The runtime payload of a `VarCell`: a single `GcRef` slot. `#[repr(C)]` so
@@ -43,7 +43,7 @@ unsafe fn var_cell_drop(payload: *mut u8) {
     unsafe { std::ptr::drop_in_place(payload as *mut VarCellPayload) };
 }
 
-unsafe fn var_cell_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn var_cell_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at an initialized VarCellPayload.
     let _ = payload;
     // VarCells are internal; render opaquely for debugging.

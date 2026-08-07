@@ -16,9 +16,11 @@
 //! bounds are immutable once built — which is what makes a `Range` hashable and
 //! usable as a `Map` key (ADR-057 D4: the rule is mutability).
 
-use std::fmt;
+use std::fmt::Write as _;
 
-use crate::descriptor::{BuiltinTypeId, DynamicHasher, Payload, Tracer, TypeDescriptor};
+use crate::descriptor::{
+    BuiltinTypeId, DynamicHasher, FormatSink, Payload, Tracer, TypeDescriptor,
+};
 
 /// The `Range` payload: a half-open `[start, end)` interval over `Int`.
 ///
@@ -115,7 +117,7 @@ unsafe fn range_drop(_payload: *mut u8) {
 /// Render a range the way it was written. `..=` is *not* recovered: the payload
 /// is normalized, so `1..=4` and `1..5` are the same range and print the same —
 /// which is the point of normalizing.
-unsafe fn range_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn range_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at an initialized RangeVal.
     let r = unsafe { &*(payload as *const RangeVal) };
     let _ = write!(out, "{}..{}", r.start, r.end);

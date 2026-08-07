@@ -907,7 +907,10 @@ fn local_line<'a>(
     } else {
         Style::default().fg(theme::NAME)
     };
-    let value_style = if local.value.is_some() {
+    // `is_live`, not `is_some`: `<collected>` is an absence and reads like one,
+    // in the same muted italic `<uninit>` gets. The two say different things
+    // about the program and neither is a value on the screen.
+    let value_style = if local.value.is_some_and(praxis_runtime::DebugValue::is_live) {
         Style::default().fg(theme::VALUE)
     } else {
         Style::default()
@@ -1351,6 +1354,12 @@ fn fault_span(frame: &praxis_runtime::crash_snapshot::SnapshotFrame) -> Option<(
     frame
         .locals
         .iter()
+        // `is_none`, not `!is_live`: the question here is whether the expression
+        // *finished*, and a temp the collector emptied afterwards did finish.
+        // Before the slot could say so it read as unwritten, and since the pick
+        // below is the narrowest span, a collected sub-expression — `10000` in
+        // `(0..10000).to_vec()` — could win the fault line from the expression
+        // that actually faulted.
         .filter(|l| !l.is_user() && l.value.is_none())
         .filter_map(|l| l.span())
         .filter(|(s, e)| e > s)
@@ -1763,6 +1772,29 @@ mod tests {
             fault_span(&frame),
             Some((7, 17)),
             "the innermost unfinished expression, not the statement around it"
+        );
+    }
+
+    /// A temp whose value the **collector** took also finished evaluating, so it
+    /// is not where the fault is either.
+    ///
+    /// This is the same rule as the test below, at the state that used to be
+    /// indistinguishable from an unfinished temp. It matters because the pick is
+    /// the *narrowest* span: in `var c = (0..10000).to_vec()`, the boxed `10000`
+    /// is dead the moment the `Range` is built, so a big enough allocation
+    /// collects it — and its four-character span would beat the real faulting
+    /// expression on width every time.
+    #[test]
+    fn a_temp_whose_value_was_collected_is_not_the_fault_span() {
+        let mut collected = temp_with_span(1, (7, 12));
+        collected.value = Some(praxis_runtime::DebugValue::Reclaimed);
+        let unfinished = temp_with_span(2, (0, 30));
+        let frame = frame_with(vec![collected, unfinished], (0, 40));
+        assert_eq!(
+            fault_span(&frame),
+            Some((0, 30)),
+            "the expression that never finished, not the one whose result was \
+             collected"
         );
     }
 

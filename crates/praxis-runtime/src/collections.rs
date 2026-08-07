@@ -26,9 +26,9 @@
 //! is allowed to bake in. `DequePayload` and `GridPayload` are deliberately not
 //! migrated; see the ADR.
 
-use std::fmt;
+use std::fmt::Write as _;
 
-use crate::descriptor::{BuiltinTypeId, Tracer, TypeDescriptor};
+use crate::descriptor::{BuiltinTypeId, FormatSink, Tracer, TypeDescriptor};
 use crate::repr_c_vec::ReprCVec;
 use crate::DynamicHasher;
 use crate::GcRef;
@@ -150,7 +150,7 @@ unsafe fn vec_drop(payload: *mut u8) {
     unsafe { std::ptr::drop_in_place(payload as *mut VecPayload) };
 }
 
-unsafe fn vec_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn vec_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at an initialized `VecPayload`.
     let p = unsafe { &*(payload as *const VecPayload) };
     let _ = out.write_str("[");
@@ -309,7 +309,7 @@ unsafe fn deque_drop(payload: *mut u8) {
     unsafe { std::ptr::drop_in_place(payload as *mut DequePayload) };
 }
 
-unsafe fn deque_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn deque_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at an initialized DequePayload.
     let p = unsafe { &*(payload as *const DequePayload) };
     let _ = out.write_str("[");
@@ -587,7 +587,7 @@ unsafe fn grid_drop(payload: *mut u8) {
     unsafe { std::ptr::drop_in_place(payload as *mut GridPayload) };
 }
 
-unsafe fn grid_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn grid_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at an initialized GridPayload.
     let p = unsafe { &*(payload as *const GridPayload) };
     let _ = out.write_str("[");

@@ -23,9 +23,9 @@
 //! trailing params) makes the indirect call uniform per-arity and keeps the
 //! closure self-contained for fault snapshots and future borrow/move semantics.
 
-use std::fmt;
+use std::fmt::Write as _;
 
-use crate::descriptor::{BuiltinTypeId, Tracer, TypeDescriptor};
+use crate::descriptor::{BuiltinTypeId, FormatSink, Tracer, TypeDescriptor};
 use crate::GcRef;
 
 /// The runtime payload of a closure value: the function pointer plus the
@@ -55,7 +55,7 @@ unsafe fn closure_drop(payload: *mut u8) {
     unsafe { std::ptr::drop_in_place(payload as *mut ClosurePayload) };
 }
 
-unsafe fn closure_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn closure_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at an initialized ClosurePayload.
     let p = unsafe { &*(payload as *const ClosurePayload) };
     // Closures have no source-level printable form; render as `<closure>` with

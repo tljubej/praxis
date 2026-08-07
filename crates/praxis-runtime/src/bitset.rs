@@ -12,9 +12,9 @@
 //! reads its two leading words inline for `bs.contains(x)` (ADR-118 part 2);
 //! [`INLINE_BITSET_SITE`] is the one value that says where they are.
 
-use std::fmt;
+use std::fmt::Write as _;
 
-use crate::descriptor::{BuiltinTypeId, DynamicHasher, Tracer, TypeDescriptor};
+use crate::descriptor::{BuiltinTypeId, DynamicHasher, FormatSink, Tracer, TypeDescriptor};
 use crate::repr_c_vec::ReprCVec;
 
 /// A value a `BitSet` can actually hold: non-negative, and small enough that
@@ -192,7 +192,7 @@ unsafe fn bitset_drop(payload: *mut u8) {
     unsafe { std::ptr::drop_in_place(payload as *mut BitSetPayload) };
 }
 
-unsafe fn bitset_format(payload: *const u8, out: &mut dyn fmt::Write) {
+unsafe fn bitset_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at an initialized BitSetPayload.
     let p = unsafe { &*(payload as *const BitSetPayload) };
     let _ = out.write_str("{");
@@ -319,7 +319,12 @@ mod tests {
         // The same rule the formatter uses, so `out(b)` and a `for` agree.
         let mut rendered = String::new();
         // SAFETY: `b` is an initialized BitSetPayload.
-        unsafe { bitset_format((&b as *const BitSetPayload).cast::<u8>(), &mut rendered) };
+        unsafe {
+            bitset_format(
+                (&b as *const BitSetPayload).cast::<u8>(),
+                &mut crate::FormatSink::display(&mut rendered),
+            )
+        };
         assert_eq!(rendered, "{0, 5, 63, 64, 130}");
         // An empty one yields nothing rather than one member or forever.
         let empty = BitSetPayload {

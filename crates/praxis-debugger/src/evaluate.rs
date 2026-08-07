@@ -152,7 +152,10 @@ pub fn evaluate(
     assert_read_only(&typed_fn.body.tail)?;
     let result = exec(runtime, snapshot, &synthetic, generation)?;
     let mut out = String::new();
-    result.format(&mut out);
+    // The debugger's rendering, as on the locals rows: `p s` on an empty `Text`
+    // answered `<unreadable>` when it should have answered `""`, and the two
+    // displays disagreeing about the same value is its own defect.
+    result.format_debug(&mut out);
     Ok(if out.is_empty() {
         "<unreadable>".to_string()
     } else {
@@ -195,7 +198,9 @@ pub fn heap(
     let result = exec(runtime, snapshot, &synthetic, generation)?;
     let type_str = crate::synth::humanize(&synthetic.minted, &fresh_db.render(expr_ty));
     let mut value_str = String::new();
-    result.format(&mut value_str);
+    // As `evaluate`: `heap` is a debugger display, and `Text: ` with nothing
+    // after it was never the answer.
+    result.format_debug(&mut value_str);
     Ok(if value_str.is_empty() {
         format!("{type_str}: <unreadable>")
     } else {

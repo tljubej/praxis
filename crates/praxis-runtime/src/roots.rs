@@ -28,9 +28,11 @@
 //! The sixth arm is the crash debugger's frames, and it is weak (ADR-106): the
 //! collector never traces it — tracing it would re-merge the two sets ADR-044
 //! split and undo MIR-01 — but it does *scan* it, once per collection,
-//! immediately after the sweep, nulling every debug slot whose object that
-//! sweep reclaimed. A debug value is therefore always a live object or an
-//! absence, never a dangling reference.
+//! immediately after the sweep, marking every debug slot whose object that
+//! sweep reclaimed. A debug value is therefore always a live object or a stated
+//! absence, never a dangling reference — and the absence says *which* absence it
+//! is ([`crate::debug::RECLAIMED_WORD`]): a slot the collector emptied is not a
+//! slot nothing was ever written into.
 
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -81,8 +83,8 @@ impl RootSet for () {
 /// the collection. A filter applied later — at the snapshot, at the render —
 /// cannot distinguish a block that died from one that died and came back.
 pub trait WeakSet {
-    /// Null every entry of this set whose object the just-finished sweep
-    /// reclaimed, and answer how many were nulled.
+    /// Mark every entry of this set whose object the just-finished sweep
+    /// reclaimed, and answer how many were marked.
     ///
     /// The count is for tests and for the measurement ADR-106 records; nothing
     /// on the collection path reads it.

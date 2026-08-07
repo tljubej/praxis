@@ -949,12 +949,18 @@ pub fn lower(
             // A file has no value: every top-level statement runs for effect and
             // the tail is Unit. `out(overlaps(segments, false))` is a statement
             // here, not a result — which is why nothing is printed twice.
+            //
+            // Spanless for `lower_block`'s reason, and this is the site that
+            // made the point: the file's own range here gave the entry point's
+            // return temp a span covering **the whole program**, and the
+            // debugger rendered it as one whitespace-collapsed line of every
+            // statement in the file.
             body: TypedBlock {
                 stmts: entry_stmts,
                 tail: TypedExpr::Lit {
                     value: Lit::Unit,
                     ty: unit,
-                    span,
+                    span: (0, 0),
                 },
                 ty: unit,
             },
@@ -1291,10 +1297,24 @@ impl<'a> Lowerer<'a> {
                 stmts.push(s);
             }
         }
+        // A block whose last child is a statement has no value of its own, so
+        // one is synthesized. It is **spanless**: no source text materializes
+        // it, and the block's own range — which this used to carry — is a lie
+        // that reaches the user. A MIR local's span is what the crash debugger
+        // renders as `@ "expr"` provenance and what `fault_span` reads to pick
+        // the line a frame faulted on, and on both counts a temp claiming the
+        // whole block is worse than a temp claiming nothing: the first prints
+        // the entire block on one line, the second offers the widest possible
+        // span as a candidate for the narrowest question there is.
+        //
+        // `(0, 0)` is `error_expr`'s and `unit_lit`'s existing spelling for
+        // "synthetic, no source". The debugger's own dead-scratch rule then
+        // drops the temp entirely when it never received a value, which is the
+        // right outcome for a slot no program text asked for.
         let tail = tail.unwrap_or(TypedExpr::Lit {
             value: Lit::Unit,
             ty: self.unit,
-            span: self.node_span(block.syntax()),
+            span: (0, 0),
         });
         let ty = expr_ty(&tail);
         Some(TypedBlock { stmts, tail, ty })

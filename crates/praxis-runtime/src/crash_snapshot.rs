@@ -471,11 +471,16 @@ mod tests {
         assert_eq!(snapshot.len(), 1);
         let local = &snapshot.frames[0].locals[0];
         assert_eq!(
-            local.value, None,
+            local.value,
+            Some(crate::debug::DebugValue::Reclaimed),
             "the snapshot copied the reissued block under `xs`, whose static \
              descriptor is Int — a `Float` rendered as an `Int`, and a strong \
              root to it out of `CrashSnapshot::push_roots`"
         );
+        // And it is the *collected* absence, not the unwritten one. `guard.set`
+        // above wrote this slot; a snapshot that reported `None` here would be
+        // saying the store never happened.
+        assert_ne!(local.value, None, "a written slot never reads as unwritten");
 
         let mut out = Vec::new();
         snapshot.push_roots(&mut out);

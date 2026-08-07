@@ -71,8 +71,8 @@ pub use debug::{
     LOCAL_KIND_TEMP, LOCAL_KIND_USER,
 };
 pub use descriptor::{
-    BuiltinTypeId, CompareFn, DropFn, DynamicHasher, EqualsFn, FormatFn, HashFn, StructHasher,
-    TraceFn, Tracer, TypeDescriptor, TypeId, BUILTINS,
+    BuiltinTypeId, CompareFn, DropFn, DynamicHasher, EqualsFn, FormatFn, FormatSink, FormatStyle,
+    HashFn, StructHasher, TraceFn, Tracer, TypeDescriptor, TypeId, BUILTINS,
 };
 pub use gc::{GcHeader, GcRef, HeapId};
 pub use heap::{

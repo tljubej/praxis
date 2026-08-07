@@ -280,6 +280,22 @@ pub enum DebugValue {
     Reference(GcRef),
     /// A payload whose box the compiler elided (ADR-120).
     Scalar(ScalarValue),
+    /// A reference that **was** here and whose object the collector has since
+    /// reclaimed (ADR-106's weak arm, [`RECLAIMED_WORD`]).
+    ///
+    /// Carries nothing, deliberately: the object is gone, and this variant
+    /// exists to say *that* rather than to say anything about it. It is the
+    /// third thing a slot can be, and until it existed the first and the third
+    /// were the same word — so a `var` the program had finished using rendered
+    /// `<uninit>`, which reads as "this never ran" about a line that did.
+    ///
+    /// Reaching one is ordinary, not exceptional. ADR-044 decision 2 nulls a
+    /// shadow slot the moment its local dies, so a binding stops being a root at
+    /// its last use rather than at the end of its scope; any collection after
+    /// that point is free to take it, while the debug slot goes on naming it.
+    /// `var b = "asdf"` followed by an allocation big enough to collect is the
+    /// whole recipe.
+    Reclaimed,
 }
 
 impl DebugValue {
@@ -294,8 +310,27 @@ impl DebugValue {
     pub fn reference(self) -> Option<GcRef> {
         match self {
             DebugValue::Reference(r) => Some(r),
-            DebugValue::Scalar(_) => None,
+            // A scalar has no reference and a reclaimed slot no longer has one.
+            // The second is what keeps the post-sweep scan idempotent — a slot
+            // it already cleared cannot be poison-checked again, because there
+            // is no pointer left to check — and what keeps `push_roots` from
+            // rooting storage the sweep has handed back.
+            DebugValue::Scalar(_) | DebugValue::Reclaimed => None,
         }
+    }
+
+    /// Whether this slot still holds something the debugger can render.
+    ///
+    /// The question `value.is_some()` used to answer on its own, back when the
+    /// only two states were "a value" and "nothing yet". A reclaimed slot is
+    /// `Some` — a value *was* written — but there is nothing left to show, so
+    /// every consumer that used to branch on `Option` has to say which of the
+    /// two it meant. This is the "renderable" half; `fault_span`'s question is
+    /// the other one, and it wants `is_some()`: a temp whose expression finished
+    /// is not where the frame faulted, whatever became of the result.
+    #[must_use]
+    pub fn is_live(self) -> bool {
+        !matches!(self, DebugValue::Reclaimed)
     }
 
     /// Read this value as an `Int`, whether it is still boxed or was elided
@@ -312,6 +347,7 @@ impl DebugValue {
             DebugValue::Reference(r) => r.as_int(),
             DebugValue::Scalar(ScalarValue::Int(v)) => *v,
             DebugValue::Scalar(other) => panic!("not an Int: {other:?}"),
+            DebugValue::Reclaimed => panic!("the object this slot named was reclaimed"),
         }
     }
 
@@ -326,6 +362,7 @@ impl DebugValue {
         match self {
             DebugValue::Reference(r) => r.as_vec(),
             DebugValue::Scalar(other) => panic!("a scalar is not a Vec: {other:?}"),
+            DebugValue::Reclaimed => panic!("the object this slot named was reclaimed"),
         }
     }
 }
@@ -372,12 +409,58 @@ pub struct DebugLocalMeta {
     pub slot_kind: DebugSlotKind,
 }
 
+/// The word [`DebugFrameStackHeader::clear_reclaimed`] writes over a reference
+/// slot whose object the sweep took, and the one word
+/// [`DebugLocalMeta::read`] decodes as [`DebugValue::Reclaimed`].
+///
+/// ### Why a reserved word costs nothing, where the zero word cost a payload
+///
+/// [`DebugSlotKind::store_bias`] documents the trade the *unwritten* state
+/// forces: a scalar slot has 2^64 payloads and 2^64 words, so reserving one word
+/// costs one payload, and the bias only chooses which. Reserving a second word
+/// here looks like the same trade and is not, because this word is only ever
+/// **interpreted** in a [`DebugSlotKind::Reference`] slot — and a reference slot
+/// has far fewer than 2^64 inhabitants. `align_of::<GcHeader>()` is 8 (asserted
+/// in `crate::gc`, and `BLOCK_GRANULE` is that same alignment), so no `GcRef`
+/// can ever be 1. Scalar slots keep every payload they had; `Int` still loses
+/// only `i64::MIN`, to the bias, and nothing to this.
+///
+/// The clear used to write `None`, which is the *other* reserved word — and
+/// therefore said "nothing was ever written here" about a slot whose value the
+/// collector had just taken. Those are different facts about the program: one is
+/// a line that never ran, the other a line that ran and whose result is simply
+/// no longer around to show.
+///
+/// ### Not an ABI change
+///
+/// Generated code only ever **stores** into a debug value slot
+/// (`store_debug_local` is a `str` at a fixed displacement, with no matching
+/// load), so no compiled program can observe this word — a store past the clear
+/// overwrites it, which is exactly the right behaviour if a local is written
+/// again. That is why this does not join the `RUNTIME_ABI_VERSION` changelog
+/// alongside ADR-120 part 2's entry: that one versioned a word generated code
+/// *writes and the runtime reads*, and this one is written and read by the
+/// runtime alone.
+pub const RECLAIMED_WORD: usize = 1;
+
+/// No `GcRef` can collide with [`RECLAIMED_WORD`]: a `GcRef` points at a
+/// `GcHeader`, whose alignment `crate::gc` pins at 8, so its low three bits are
+/// always clear. This is that argument as a compile error.
+const _: () = {
+    assert!(
+        RECLAIMED_WORD != 0,
+        "zero is already `None` — the other state"
+    );
+    assert!(RECLAIMED_WORD % std::mem::align_of::<crate::GcHeader>() != 0);
+};
+
 impl DebugLocalMeta {
     /// Decode one value slot's word under this local's [`slot_kind`](Self::slot_kind).
     ///
     /// **The only place a slot word becomes something typed**, and therefore the
     /// only place the reference/scalar question is asked. `None` is "nothing has
-    /// been written here yet".
+    /// been written here yet"; [`DebugValue::Reclaimed`] is the third state, a
+    /// reference slot whose object the collector took after it was written.
     ///
     /// ### The zero word, and the one thing a scalar slot cannot say
     ///
@@ -408,6 +491,16 @@ impl DebugLocalMeta {
     pub unsafe fn read(&self, word: Option<GcRef>) -> Option<DebugValue> {
         let word = word?;
         if self.slot_kind == DebugSlotKind::Reference {
+            // The reserved word first, because the whole point of reserving it
+            // is that the reference arm never sees it: a `GcRef` built from
+            // `RECLAIMED_WORD` would be handed to `crash_snapshot`, rooted, and
+            // dereferenced through a descriptor it does not have. The test is
+            // confined to this arm — in a scalar slot the same bits are the
+            // payload `1`, and that slot's object, if it ever had one, is not
+            // this stack's business.
+            if word.as_ptr() as usize == RECLAIMED_WORD {
+                return Some(DebugValue::Reclaimed);
+            }
             return Some(DebugValue::Reference(word));
         }
         // Not a reference: recover the raw bits without ever forming something
@@ -534,10 +627,16 @@ impl DebugFrameEntry {
 /// collector must not **trace** these slots; ADR-044 decision 2 nulls a shadow
 /// slot the moment its local dies, and this stack deliberately does not.
 ///
-/// It does scan them, after every sweep, and null the ones whose object that
+/// It does scan them, after every sweep, and mark the ones whose object that
 /// sweep reclaimed — see [`DebugFrameStackHeader::clear_reclaimed`] and
 /// ADR-106. That is the difference between keeping a value *alive* and keeping
 /// a slot *valid*, and only the second is this stack's business.
+///
+/// So a slot's word is one of three things, not two: zero (nothing written),
+/// [`RECLAIMED_WORD`] (written, then collected), or a value. `Option<GcRef>`
+/// spells the first and the third; the second is a reserved word inside the
+/// `Some` half, which costs nothing because a reference slot's inhabitants are
+/// aligned pointers.
 pub type DebugValueStack = SlotStack<Option<GcRef>>;
 /// The header generated code bump-allocates value slots against.
 pub type DebugValueStackHeader = SlotStackHeader<Option<GcRef>>;
@@ -622,14 +721,14 @@ pub const DEBUG_FRAME_STACK_SLOTS: usize = MAX_RECURSION_DEPTH as usize + 1;
 // ---------------------------------------------------------------------------
 
 impl DebugFrameStackHeader {
-    /// Null every claimed debug value slot whose object the sweep that just
-    /// finished reclaimed, and answer how many were nulled.
+    /// Mark every claimed debug value slot whose object the sweep that just
+    /// finished reclaimed, and answer how many were marked.
     ///
     /// This is the entire content of [`RuntimeRoots`](crate::RuntimeRoots)' one
     /// weak arm. It retains nothing: it runs *after* the mark and the sweep have
     /// already decided what dies, and its only effect is to replace a reference
-    /// to storage that no longer holds an object with the absence
-    /// `Option<GcRef>` already spells.
+    /// to storage that no longer holds an object with [`RECLAIMED_WORD`], the
+    /// absence that says how it became one.
     ///
     /// ### Why `is_poisoned`, and why here
     ///
@@ -717,10 +816,17 @@ impl DebugFrameStackHeader {
                     continue;
                 };
                 if r.header().is_poisoned() {
-                    // SAFETY: as above. Nulling is correct for a reference slot
-                    // and would be a *lie* in a scalar one — zero is a payload
-                    // there — which is the second reason the arms are separate.
-                    unsafe { *slot = None };
+                    // SAFETY: as above. Writing this word is correct for a
+                    // reference slot and would be a *lie* in a scalar one — `1`
+                    // is a payload there — which is the second reason the arms
+                    // are separate.
+                    //
+                    // Written as a machine word rather than as an
+                    // `Option<GcRef>`, for `DebugFrameGuard::set_scalar`'s
+                    // reason: no `GcRef` should exist at this address even
+                    // momentarily, and a slot word is dereferenceable only after
+                    // `DebugLocalMeta::read` has said what it is.
+                    unsafe { *slot.cast::<usize>() = RECLAIMED_WORD };
                     cleared += 1;
                 }
             }
@@ -1131,14 +1237,32 @@ mod tests {
             "the weak arm must not have retained it — that is the merge ADR-044 \
              refuses, and it would make this test pass for the wrong reason"
         );
+        // SAFETY: slot `i` decoded under local `i`'s own metadata, which is
+        // `read`'s whole precondition.
+        let (written, unwritten) = unsafe {
+            (
+                metas[1].read(guard.values()[1]),
+                metas[0].read(guard.values()[0]),
+            )
+        };
         assert_eq!(
-            guard.values()[1],
-            None,
+            written,
+            Some(DebugValue::Reclaimed),
             "the debug slot still names swept storage; the next allocation \
              reissues that block and the slot then names an object of another \
              type"
         );
-        assert_eq!(guard.values()[0], None, "slot 0 was never written");
+        assert_eq!(
+            written.and_then(DebugValue::reference),
+            None,
+            "and nothing can follow it back into the heap"
+        );
+        // The contrast this test exists to draw, now that the slot can draw it:
+        // slot 1 was written and collected, slot 0 was never written, and the
+        // two used to be the same word. A debugger reading them apart is the
+        // difference between `<collected>` and `<uninit>` on a locals line.
+        assert_eq!(unwritten, None, "slot 0 was never written");
+        assert_ne!(written, unwritten, "the two absences are not one absence");
         drop(guard);
     }
 
@@ -1242,7 +1366,53 @@ mod tests {
         drop(guard);
     }
 
-    /// The control: the *same* word in a `Reference` slot is nulled. Without
+    /// [`RECLAIMED_WORD`] is reserved in a `Reference` slot and **only** there:
+    /// the same word in a scalar slot is that slot's payload, and reads back as
+    /// one.
+    ///
+    /// This is the property that makes the reserved word free where the
+    /// `store_bias` trade is not. The adversarial case is the cheapest one to
+    /// reach: `Byte`'s bias is 1, so the payload `0` — the most ordinary byte
+    /// there is — stores *exactly* this word. A decode that tested for the
+    /// sentinel before consulting the `slot_kind` would answer `Reclaimed` for
+    /// `0u8`, and would do it for `false` and for `'\0'` too, all three biased
+    /// the same way.
+    #[test]
+    fn the_reclaimed_word_is_a_payload_in_a_scalar_slot() {
+        let metas = one_reference_and_one_scalar(DebugSlotKind::Byte);
+        let meta = meta_for(b"f", &metas, (0, 0));
+        let mut f = Fixture::new();
+        let ctx = f.ctx_ptr();
+        // SAFETY: `ctx` is wired to `f.rt`, and `meta`/`metas` outlive the guard.
+        let mut guard = unsafe { push_frame(ctx, &meta) };
+        guard.set_scalar_payload(1, DebugSlotKind::Byte, 0);
+        assert_eq!(
+            guard.values()[1].map(|v| v.as_ptr() as usize),
+            Some(RECLAIMED_WORD),
+            "the premise: this payload really does store the reserved word"
+        );
+
+        // SAFETY: slot 1 is local 1's, which is the pairing `read` requires.
+        let seen = unsafe { metas[1].read(guard.values()[1]) };
+        assert_eq!(
+            seen,
+            Some(DebugValue::Scalar(ScalarValue::Byte(0))),
+            "a scalar slot has no reserved words — its `slot_kind` decides \
+             before the word does"
+        );
+
+        // And a collection does not change that: the scan never reaches a
+        // scalar slot, so nothing here can turn into the other reading.
+        f.rt.collect_now();
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { metas[1].read(guard.values()[1]) },
+            Some(DebugValue::Scalar(ScalarValue::Byte(0))),
+        );
+        drop(guard);
+    }
+
+    /// The control: the *same* word in a `Reference` slot is cleared. Without
     /// it, a scan that had quietly stopped clearing anything at all would pass
     /// the test above.
     #[test]
@@ -1261,7 +1431,12 @@ mod tests {
 
         f.rt.collect_now();
 
-        assert_eq!(guard.values()[1], None, "a reference slot is scanned");
+        // SAFETY: slot 1 decoded under local 1's own metadata.
+        assert_eq!(
+            unsafe { metas[1].read(guard.values()[1]) },
+            Some(DebugValue::Reclaimed),
+            "a reference slot is scanned"
+        );
         drop(guard);
     }
 
@@ -1422,14 +1597,20 @@ mod tests {
         // SAFETY: the payload is a real `FloatPayload` on this stack frame.
         let f = 3.0_f64;
         unsafe {
-            (crate::scalars::FLOAT.format)(std::ptr::addr_of!(f) as *const u8, &mut out);
+            (crate::scalars::FLOAT.format)(
+                std::ptr::addr_of!(f) as *const u8,
+                &mut crate::FormatSink::display(&mut out),
+            );
         }
         assert_eq!(out, ScalarValue::Float(3.0).to_string(), "ADR-083's `.0`");
         let mut out = String::new();
         let b: crate::scalars::BoolPayload = 1;
         // SAFETY: as above, for a `BoolPayload`.
         unsafe {
-            (crate::scalars::BOOL.format)(std::ptr::addr_of!(b).cast::<u8>(), &mut out);
+            (crate::scalars::BOOL.format)(
+                std::ptr::addr_of!(b).cast::<u8>(),
+                &mut crate::FormatSink::display(&mut out),
+            );
         }
         assert_eq!(out, ScalarValue::Bool(true).to_string());
     }
@@ -1456,7 +1637,13 @@ mod tests {
         f.rt.collect_now();
 
         assert!(inner_guard.values().is_empty());
-        assert_eq!(outer_guard.values()[0], None);
+        // SAFETY: slot 0 decoded under local 0's own metadata.
+        assert_eq!(
+            unsafe { metas[0].read(outer_guard.values()[0]) },
+            Some(DebugValue::Reclaimed),
+            "the outer frame's slot was still reached by a scan the empty \
+             frame took part in"
+        );
         drop(inner_guard);
         drop(outer_guard);
     }

@@ -2071,7 +2071,7 @@ mod tests {
     unsafe fn probe_drop(payload: *mut u8) {
         unsafe { std::ptr::drop_in_place(payload as *mut DropProbe) };
     }
-    unsafe fn probe_format(_: *const u8, _: &mut dyn std::fmt::Write) {}
+    unsafe fn probe_format(_: *const u8, _: &mut crate::FormatSink<'_>) {}
 
     static DROP_PROBE: TypeDescriptor = TypeDescriptor::for_test::<DropProbe>(
         1,
@@ -2189,7 +2189,12 @@ mod tests {
         let mut out = String::new();
         let desc = vec_ref.descriptor();
         // SAFETY: vec_ref's payload is a VecPayload.
-        unsafe { (desc.format)(vec_ref.payload::<u8>() as *const u8, &mut out) };
+        unsafe {
+            (desc.format)(
+                vec_ref.payload::<u8>() as *const u8,
+                &mut crate::FormatSink::display(&mut out),
+            )
+        };
         assert_eq!(out, "[10, 20, 30]");
     }
 
@@ -2247,7 +2252,12 @@ mod tests {
         assert_eq!(heap.stats().live_count, 6);
 
         let mut out = String::new();
-        unsafe { (outer.descriptor().format)(outer.payload::<u8>() as *const u8, &mut out) };
+        unsafe {
+            (outer.descriptor().format)(
+                outer.payload::<u8>() as *const u8,
+                &mut crate::FormatSink::display(&mut out),
+            )
+        };
         assert_eq!(out, "[[1, 2], [3]]");
     }
 
