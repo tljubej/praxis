@@ -1,9 +1,9 @@
 # Entering the debugger
 
 When a program [faults](faults.md), `praxis run` either prints the crash report
-and exits 1, or prints the crash report and then gives you a prompt at the point
-of the crash. Which one you get is the `--debug` flag, and its default reads the
-terminal.
+and exits 1, or prints the crash report and then hands you the debugger at the
+point of the crash. Which one you get is the `--debug` flag, and its default
+reads the terminal.
 
 ```console
 $ praxis run day07.px --input day07.txt              # --debug auto
@@ -24,6 +24,18 @@ session and `> out.txt` does not swallow it.
 
 Exit is 1 on a fault either way. Quitting the debugger does not change that: a
 program that faulted has still faulted.
+
+## Two surfaces
+
+Entering the debugger on a terminal opens the
+[full-screen debugger](tui.md) — the frame chain, source and locals at once, with
+the arrow keys moving between frames. Entering it on a pipe gives the
+`Praxis crash>` prompt that the [command reference](commands.md) documents.
+
+Both drive the same commands, so nothing in this chapter is true of only one of
+them. The difference is presentation, and it follows the terminal rather than a
+flag: `--debug always` reaching a pipe still takes the prompt, which is what
+keeps every scripted session in this book reproducible.
 
 ## Driving it from a pipe
 

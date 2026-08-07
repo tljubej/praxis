@@ -112,6 +112,19 @@ impl Repl {
         self.selected
     }
 
+    /// Select frame `index`, ignoring an index past the end of the chain.
+    ///
+    /// This is the `frame N` command's effect without its output, for the TUI's
+    /// keyboard navigation: a keypress moves the cursor and the panes redraw, so
+    /// there is no line to print. Out-of-range is silently ignored rather than
+    /// reported, because the only caller clamps to the chain first — the guard is
+    /// here so that a future one cannot desynchronize `selected` from `frames`.
+    pub fn select(&mut self, index: usize) {
+        if index < self.snapshot.len() {
+            self.selected = index;
+        }
+    }
+
     /// Run `p EXPR` / `type EXPR` against the selected frame (§9.5, M10b-WS4).
     /// Splits the snapshot/frame borrow (immutable) from the session borrow
     /// (mutable: the runtime hosts the call) so both coexist. Degrades to a

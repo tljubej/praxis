@@ -257,11 +257,26 @@ pub fn run(
                 // stdin that is now at EOF.
                 praxis_runtime::clear_input_reader();
                 let mut repl = praxis_debugger::repl::Repl::new_session(snapshot, session);
-                let stdin = std::io::stdin();
-                let mut stdin = stdin.lock();
-                let stderr = std::io::stderr();
-                let mut stderr = stderr.lock();
-                repl.run(&mut stdin, &mut stderr);
+                // The full-screen debugger when there is a terminal to take over,
+                // the line REPL otherwise. `--debug=always` in a script and a
+                // piped command list both land in the second branch, and must:
+                // the TUI needs keystrokes to read and a screen to draw on, and
+                // with neither it would show a frozen screen against EOF.
+                //
+                // The noninteractive report above has already been written to
+                // stderr, i.e. to the *primary* screen. The TUI draws on the
+                // alternate screen, so quitting it restores that report — the
+                // crash stays in the scrollback instead of vanishing with the UI.
+                if praxis_debugger::tui::should_use_tui() {
+                    let tui = praxis_debugger::tui::Tui::new(repl, kind, message.clone());
+                    repl = praxis_debugger::tui::run(tui)?;
+                } else {
+                    let stdin = std::io::stdin();
+                    let mut stdin = stdin.lock();
+                    let stderr = std::io::stderr();
+                    let mut stderr = stderr.lock();
+                    repl.run(&mut stdin, &mut stderr);
+                }
                 // Drop the snapshot, then the heap, then the JIT generations
                 // its objects pointed into (F13, H15). `teardown` is what makes
                 // that order a compile-time obligation.

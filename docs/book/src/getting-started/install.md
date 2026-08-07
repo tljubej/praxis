@@ -17,8 +17,8 @@ components = ["rustfmt", "clippy"]
 
 `rustup` reads that file when you run any `cargo` command inside the checkout,
 so it selects — and if necessary installs — the right toolchain for you. The
-workspace declares `rust-version = "1.80"` as its minimum; anything newer on the
-stable channel is fine.
+workspace declares `rust-version = "1.88"` as its minimum — the floor its own
+dependencies impose — and anything newer on the stable channel is fine.
 
 Nothing else is required to build the compiler. Praxis links Cranelift for code
 generation, so there is no LLVM to install.

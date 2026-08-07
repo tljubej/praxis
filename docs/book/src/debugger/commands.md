@@ -1,6 +1,8 @@
 # Command reference
 
-Fifteen commands, and `help` lists all of them:
+Fifteen commands, and `help` lists all of them. They are the same fifteen on
+either surface: the transcripts here show the `Praxis crash>` prompt, and the
+[full-screen debugger](tui.md) runs each of them from its `:` line.
 
 ```text
 Crash debugger commands (§9.4):
@@ -143,7 +145,10 @@ Either section is omitted when it is empty; a frame with no slots at all prints
 `  (no locals in this frame)`. Temps that hold nothing and explain nothing (no
 value *and* no source span) are dropped rather than shown as noise.
 
-Unlike the banner, `locals` has no cap: it prints the whole frame.
+Unlike the banner, `locals` caps no *number* of slots: it prints the whole frame.
+Each individual value is bounded, though, and cut at an element boundary with
+`...` marking the remainder — so a `Vec` of ten thousand elements reads
+`[0, 1, 2, ...]` instead of burying the rest of the frame under itself.
 
 ```text
 Entered crash debugger. 3 frame(s). Type `help` for commands.
@@ -343,7 +348,9 @@ holding. The line numbers are real.
 The carets cover the *frame's* extent, which is the whole function, not the
 faulting line. Each line is underlined to its own end and a `...` marks that the
 span continues onto the next one. To find the faulting subexpression, read the
-`@ "expr"` annotations in `locals`.
+`@ "expr"` annotations in `locals` — or use the
+[full-screen debugger](tui.md), whose source pane marks the faulting line and
+underlines the subexpression, having recovered both from those same annotations.
 
 An out-of-range or non-numeric `N` is not an error — `source 99` and `source zz`
 both fall back to the selected frame. And the entry frame's extent is the whole

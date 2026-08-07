@@ -24,7 +24,13 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/tljubej/praxis"
-rust-version = "1.80"
+# The floor the dependency graph actually imposes, not an aspiration: `ratatui`
+# (the crash debugger's TUI) declares 1.88, and nothing in the workspace builds
+# below what its dependencies require. CI installs the `rust-toolchain.toml`
+# pin (`stable`) and there is no separate MSRV job, so this number is a claim
+# about the graph rather than something a build verifies — keep it honest by
+# raising it with the dependencies instead of leaving it where Milestone 0 set it.
+rust-version = "1.88"
 
 [workspace.dependencies]
 # Shared crates reference a single version from here.
@@ -39,6 +45,11 @@ cranelift-native = "0.134"
 crossbeam-channel = "0.5"
 insta = "1"
 proptest = "1"
+# The crash debugger's full-screen TUI. `crossterm` is a default feature and
+# ratatui re-exports it as `ratatui::crossterm`, so the terminal backend needs no
+# second direct dependency here — and cannot drift out of step with the version
+# ratatui itself was built against.
+ratatui = "0.30"
 rowan = "0.16"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -18,6 +18,8 @@ pub mod render;
 pub mod repl;
 pub mod session;
 pub mod synth;
+pub mod tui;
+pub mod value;
 
 /// Marker documenting that this crate was a skeleton through Milestone 9 and
 /// fills at Milestone 10.

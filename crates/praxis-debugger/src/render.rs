@@ -309,27 +309,16 @@ fn provenance(local: &DebugLocal, ctx: &RenderCtx<'_>) -> Option<String> {
     }
 }
 
-/// Format a `GcRef` value through its descriptor (§11.4). Falls back to
-/// `<unreadable>` if the descriptor is null or the format produces nothing.
+/// Format a `GcRef` value through its descriptor (§11.4), bounded to one line.
+///
+/// This is deliberately *not* the unbounded render `praxis run` uses for the
+/// program result. A locals row has one line, and a `Vec` holding ten thousand
+/// elements spends it — and the next screenful — on a value whose shape was
+/// legible by the third element. [`crate::value::format_bounded`] cuts at an
+/// element boundary and marks the remainder, so `[10, 20, 30, ...]` reads as the
+/// collection it is while leaving the rest of the frame visible.
 fn format_value(value: praxis_runtime::DebugValue) -> String {
-    use praxis_runtime::DebugValue;
-    let reference = match value {
-        DebugValue::Reference(r) => r,
-        // A temp whose box ADR-120 elided (part 2). There is no object and so
-        // no descriptor to dispatch through — `ScalarValue`'s own `Display`
-        // stands in, and it lives next to the descriptor callbacks precisely so
-        // the two renderings cannot drift.
-        DebugValue::Scalar(s) => return s.to_string(),
-    };
-    let mut out = String::new();
-    // The GcRef's `format` reads its descriptor and writes through it. This is
-    // the same path `praxis run` uses to print the program result.
-    reference.format(&mut out);
-    if out.is_empty() {
-        "<unreadable>".to_string()
-    } else {
-        out
-    }
+    crate::value::format_bounded(value, crate::value::DEFAULT_BUDGET)
 }
 
 /// Render the selected frame's source extent (§9.4 `source`, M10b-WS3).
