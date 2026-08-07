@@ -13,15 +13,24 @@
 //! fixed it — every host runs it after `annotate` and refuses to compile MIR
 //! that fails.
 //!
-//! [`forward`] is the crate's one *optimization*, and it runs inside
-//! `lower_module` rather than beside it, because it deletes safepoints and so
-//! must precede [`annotate`] (ADR-120, ADR-108 §1).
+//! [`forward`] and [`promote`] are the crate's *optimizations*, and both run
+//! inside `lower_module` rather than beside it, because each deletes safepoints
+//! and so must precede [`annotate`] (ADR-120, ADR-121, ADR-108 §1).
+//!
+//! They run in that order and the order is load-bearing, not alphabetical.
+//! [`forward`] is a peephole over the box/unbox pairs the builder's single
+//! return convention emits, and it leaves behind exactly the boxes that cross a
+//! block boundary; [`promote`] is the whole-function pass that decides those
+//! slots' representation. Running `promote` first would make it price
+//! materializations `forward` was about to delete, and decline promotions on the
+//! strength of a cost that was never going to be paid.
 
 pub mod annot;
 pub mod build;
 pub mod forward;
 pub mod ir;
 pub mod liveness;
+pub mod promote;
 pub mod provable;
 pub mod verify;
 
@@ -45,6 +54,7 @@ pub use ir::{
     Local, LocalId, LocalKind, MirType, Overflow, ScalarKind, Terminator,
 };
 pub use liveness::{annotate, defs};
+pub use promote::promote_scalars;
 pub use provable::{DescriptorClass, ProvableDescriptors};
 pub use verify::{defines, verify, VerifyError};
 

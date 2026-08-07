@@ -403,14 +403,21 @@ fn lower_function_capturing<M: Module>(
     // the *order of two stores* depend on hash seeding — same MIR in, different
     // CLIF out, which is what the snapshot suites and `PRAXIS_DUMP_CLIF` cannot
     // have.
-    let elided_box_slots: HashMap<LocalId, Vec<u32>> = {
-        let mut map: HashMap<LocalId, Vec<u32>> = HashMap::new();
+    //
+    // The bias travels with the slots (ADR-121 decision 2). It is a property of
+    // the *payload width*, which is the scalar local's, and it is resolved here
+    // rather than at the store so that the runtime's `store_bias` is asked once
+    // per local instead of once per emitted instruction — and so `store_elided_
+    // boxes_of` cannot reach a slot without the bias that decodes it.
+    let elided_box_slots: HashMap<LocalId, (i64, Vec<u32>)> = {
+        let mut map: HashMap<LocalId, (i64, Vec<u32>)> = HashMap::new();
         for (&boxed, &slot) in &debug_slot {
-            if let Some((scalar, _)) = mir.debug_scalar_source(boxed) {
-                map.entry(scalar).or_default().push(slot);
+            if let Some((scalar, kind)) = mir.debug_scalar_source(boxed) {
+                let bias = debug_slot_kind_of(kind).store_bias();
+                map.entry(scalar).or_insert((bias, Vec::new())).1.push(slot);
             }
         }
-        for slots in map.values_mut() {
+        for (_, slots) in map.values_mut() {
             slots.sort_unstable();
         }
         map
@@ -1424,7 +1431,10 @@ struct SpillCtx<'a> {
     /// used to write them is gone (ADR-120 part 2). Empty for every function
     /// the forwarding pass did not touch, which is what makes this cost nothing
     /// where it buys nothing.
-    elided_box_slots: &'a HashMap<LocalId, Vec<u32>>,
+    /// Per `Scalar` local that stands in for an elided or promoted box: the
+    /// store bias its payload width takes (ADR-121 decision 2) and the debug
+    /// slots its definitions must write.
+    elided_box_slots: &'a HashMap<LocalId, (i64, Vec<u32>)>,
 }
 
 impl SpillCtx<'_> {
@@ -1617,11 +1627,25 @@ impl SpillCtx<'_> {
         local: LocalId,
         vars: &[Variable],
     ) {
-        let Some(slots) = self.elided_box_slots.get(&local) else {
+        let Some((bias, slots)) = self.elided_box_slots.get(&local) else {
             return;
         };
         let values_base = builder.use_var(self.debug_values_var);
-        let val = builder.use_var(vars[local.0 as usize]);
+        let raw = builder.use_var(vars[local.0 as usize]);
+        // The bias (ADR-121 decision 2), so that a payload of `0` is not the
+        // all-zero word a claim leaves behind and `var i = 0` does not render
+        // `<uninit>`. One `iadd_imm` on a register that is about to be stored
+        // anyway; `DebugLocalMeta::read` subtracts the same constant, taken from
+        // the same `store_bias`.
+        //
+        // `bias == 0` for a width that needs none is emitted as the `iadd_imm`
+        // too rather than branched around: Cranelift folds `x + 0` in the
+        // egraph mid-end, so the branch would buy nothing and would be a second
+        // place that decides whether a slot is biased.
+        // `_s` (sign-extending) rather than `_u`: the bias is an `i64` and
+        // `Int`'s is `i64::MIN`, which a zero-extending immediate would not
+        // reproduce.
+        let val = builder.ins().iadd_imm_s(raw, *bias);
         for &slot in slots {
             builder.ins().store(
                 MemFlags::trusted(),
@@ -2643,6 +2667,29 @@ fn lower_inst<M: Module>(
             builder.switch_to_block(fallthrough);
         }
         Inst::MoveGc { dst, src } => {
+            let v = builder.use_var(vars[src.0 as usize]);
+            builder.def_var(vars[dst.0 as usize], v);
+        }
+        // `MoveGc`'s arm, verbatim, and the duplication is the point (ADR-121).
+        //
+        // Every MIR local is one Cranelift `Variable` of type `GC` (`I64`)
+        // regardless of kind, so both moves are the same `def_var` of a
+        // `use_var` and neither needs a conversion: a `Scalar(Float)` local
+        // already holds `f64::to_bits()`, which is what the scalar channel
+        // carries, and a `Scalar(Bool)` holds the zero-extended byte. Writing
+        // one arm for both would say the two instructions are interchangeable
+        // *here*, which is true, and thereby lose that they are not
+        // interchangeable in MIR, where one may cross the collector's boundary
+        // and the other may not — the distinction `verify`'s two rules exist to
+        // keep. The cost of a second arm is three lines; the cost of merging
+        // them is that a future reader takes the merge for a licence.
+        //
+        // The `kind` is unread here for the same reason: it is a *MIR*
+        // invariant, checked by `VerifyError::MoveScalarKindMismatch` before the
+        // backend sees the function, not a code-generation choice. Cranelift's
+        // copy propagation removes the resulting move outright, which is what
+        // makes a promoted slot cost nothing rather than merely less.
+        Inst::MoveScalar { dst, src, kind: _ } => {
             let v = builder.use_var(vars[src.0 as usize]);
             builder.def_var(vars[dst.0 as usize], v);
         }
@@ -4805,11 +4852,7 @@ fn build_function_debug_meta(
         // metadata is the `Gc` one — the scalar never enters this loop.
         let slot_kind = match mir.debug_scalar_source(local.id) {
             None => DebugSlotKind::Reference,
-            Some((_, ScalarKind::Int)) => DebugSlotKind::Int,
-            Some((_, ScalarKind::Bool)) => DebugSlotKind::Bool,
-            Some((_, ScalarKind::Float)) => DebugSlotKind::Float,
-            Some((_, ScalarKind::Char)) => DebugSlotKind::Char,
-            Some((_, ScalarKind::Byte)) => DebugSlotKind::Byte,
+            Some((_, kind)) => debug_slot_kind_of(kind),
         };
         metas.push(DebugLocalMeta {
             source_name: name.as_ptr(),
@@ -4832,6 +4875,28 @@ fn build_function_debug_meta(
     // Interned so the same function lowered twice into one generation costs one
     // copy of the name as well as one copy of the metadata.
     generation.function_debug_meta(generation.alloc_str(&mir.name), mir.span, metas)
+}
+
+/// The runtime's slot kind for a MIR payload width.
+///
+/// **One statement of the map, and it has two readers** (ADR-121 decision 2):
+/// `build_function_debug_meta`, which records the kind in each local's
+/// `DebugLocalMeta`, and the `elided_box_slots` map, which derives the store
+/// bias from it. Written inline at the first of those until the second existed;
+/// two copies would let the kind a slot is *tagged* with disagree with the bias
+/// its stores are *encoded* with, which decodes every value in that slot wrong
+/// by a constant — a wrong answer in a crash snapshot, silently.
+///
+/// Exhaustive, so a new [`ScalarKind`] is a build error rather than a slot
+/// tagged `Reference`, which is the one unsound answer (see [`DebugSlotKind`]).
+const fn debug_slot_kind_of(kind: ScalarKind) -> DebugSlotKind {
+    match kind {
+        ScalarKind::Int => DebugSlotKind::Int,
+        ScalarKind::Bool => DebugSlotKind::Bool,
+        ScalarKind::Float => DebugSlotKind::Float,
+        ScalarKind::Char => DebugSlotKind::Char,
+        ScalarKind::Byte => DebugSlotKind::Byte,
+    }
 }
 
 /// The runtime descriptor for values of type `ty`, or a compile error.
@@ -7331,28 +7396,31 @@ mod tests {
         );
     }
 
-    /// **Five runtime type proofs per iteration of that loop — W6's
-    /// denominator, and it has moved twice.** Every `Inst::ExtractScalar` is one
-    /// `emit_scalar_load`, which is one descriptor proof (ADR-102), so this
-    /// census is the site count.
+    /// **No runtime type proofs per iteration of that loop — W6's denominator,
+    /// and it has now moved three times, to zero.** Every `Inst::ExtractScalar`
+    /// is one `emit_scalar_load`, which is one descriptor proof (ADR-102), so
+    /// this census is the site count.
     ///
-    /// Handover 25 §3 said seven, by hand. This test said **nine** when W6
-    /// wrote it, and nine was right: eight `Int` reloads and the condition's
-    /// `Bool` are what `build.rs` emits. Then ADR-120's block-local forwarding
-    /// landed in the same wave and deleted four of the nine — three interior
-    /// nodes of the two expression trees, and the whole
+    /// Handover 25 §3 said seven, by hand. This test said **nine** when W6 wrote
+    /// it, and nine was right: eight `Int` reloads and the condition's `Bool`
+    /// are what `build.rs` emits. ADR-120's block-local forwarding then deleted
+    /// four — three interior nodes of the two expression trees, and the whole
     /// `Materialize{Bool}`/`ExtractScalar{Bool}` round trip of the `while`
-    /// condition.
+    /// condition. **ADR-121 deleted the last five by promoting the slots they
+    /// read from**, so there is no longer an object here whose descriptor could
+    /// be proved.
     ///
-    /// **W6 is worth ten machine instructions per iteration here, not
-    /// eighteen**, and the amendment at the end of ADR-116 is where that is
-    /// restated with both arms re-measured on this tree. Neither number was
-    /// wrong when it was written; they are two trees. `mir_shape.rs`'s
-    /// `the_sample_loop_proves_a_scalars_descriptor_five_times_per_iteration`
+    /// **W6 is worth nothing per iteration of this loop, because this loop no
+    /// longer contains what W6 makes cheaper.** That is not W6 being wrong — a
+    /// proof site survives at every value the runtime minted, which is most of a
+    /// program that touches a collection — but a figure quoted as "W6 per
+    /// iteration of the sample loop" is now a figure about an absence. Handover
+    /// 28 §2 is this repo's record of misreading two such numbers.
+    /// `mir_shape.rs`'s `the_sample_loop_proves_no_scalars_descriptor_at_all`
     /// carries the same count from outside this crate, with the table of all
-    /// three answers.
+    /// four answers.
     #[test]
-    fn the_sample_loop_proves_five_descriptors_per_iteration_where_nine_were_written() {
+    fn the_sample_loop_proves_no_descriptors_per_iteration_where_nine_were_written() {
         use praxis_mir::test_support::{lower_src_to_mir, Census, InstKind};
 
         let lowered = lower_src_to_mir(SAMPLE_LOOP);
@@ -7362,9 +7430,15 @@ mod tests {
         let proofs = per_iteration.count(InstKind::ExtractScalar(praxis_mir::ScalarKind::Int))
             + per_iteration.count(InstKind::ExtractScalar(praxis_mir::ScalarKind::Bool));
         assert_eq!(
-            proofs, 5,
-            "five `Int` reads survive the forwarding and the `Bool` does not: \
-             {per_iteration:?}"
+            proofs, 0,
+            "nothing in this loop is an object any more: {per_iteration:?}"
+        );
+        // The control: zero proofs because nothing is boxed, not because
+        // nothing is computed.
+        assert_eq!(
+            per_iteration.count(InstKind::IntBinOp),
+            3,
+            "the arithmetic is untouched: {per_iteration:?}"
         );
     }
 

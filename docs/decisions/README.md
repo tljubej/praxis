@@ -153,7 +153,7 @@ verifier rule only. Its decision must not claim the elision.
 - [ADR-118: A `Vec[T]`'s three words are the compiler's to read, and a `VecDeque`'s are not, and a call removed from a loop is not a count that goes down (complete — part 1 W4a, part 2 W4b + the W4 orphan)](./118-a-vecs-three-words-are-the-compilers-to-read.md)
 - [ADR-119: Generated code claims the block, and what makes that safe is that nothing between the pacing branch and the last store can collect](./119-generated-code-claims-the-block-and-nothing-between-can-collect.md)
 - [ADR-120: A box with one reader in its own block is not a box, and the value it cost the debugger is given back by a slot that knows it is not a reference (complete — part 1 W8-S0, part 2 W8-S0b)](./120-a-box-with-one-reader-in-its-own-block-is-not-a-box.md)
-- [ADR-121: *reserved* — W8-S1, `Gc`→`Scalar` demotion for loop-carried locals; behind the wave-5 gate](./121-slug.md)
+- [ADR-121: A slot that provably holds a scalar is not a box, and changing what a slot holds is not substitution (W8-S1; the wave-5 gate, opened)](./121-a-slot-that-holds-a-scalar-is-not-a-box.md)
 - [ADR-122: A descriptor the compiler wrote is provable, and a parameter is not](./122-a-descriptor-the-compiler-wrote-is-provable-and-a-parameter-is-not.md)
 - [ADR-123: *reserved* — W12, two code variants selected by `--debug never`; handover 26 defers it](./123-slug.md)
 - [ADR-124: A field and a sequence element are places, and a store replaces what is already there](./124-a-field-and-a-sequence-element-are-places.md)

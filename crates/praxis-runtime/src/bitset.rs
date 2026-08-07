@@ -265,10 +265,27 @@ pub static BITSET: TypeDescriptor = TypeDescriptor::builtin::<BitSetPayload>(
 ///
 /// # Safety
 /// `payload` must point at an initialized `BitSetPayload`.
+impl BitSetPayload {
+    /// The bytes this payload owns outside its GC block — the buffer, not the
+    /// spine's three words.
+    ///
+    /// **One statement of the size, with two readers** (ADR-121). The
+    /// descriptor's `owned_bytes` callback charges it once at construction;
+    /// the ABI wrapper that can *grow* this collection reads it either side of
+    /// the mutation and charges the delta, so the pacer sees a buffer that
+    /// doubled. Writing the capacity arithmetic at the growth site instead
+    /// would be a second spelling of this line, and the two would drift the
+    /// first time an element type changed width.
+    #[must_use]
+    pub(crate) fn owned_bytes(&self) -> usize {
+        self.words.capacity() * std::mem::size_of::<u64>()
+    }
+}
+
 unsafe fn bitset_owned_bytes(payload: *const u8) -> usize {
     // SAFETY: caller guarantees `payload` points at an initialized BitSetPayload.
     let p = unsafe { &*(payload as *const BitSetPayload) };
-    p.words.capacity() * std::mem::size_of::<u64>()
+    p.owned_bytes()
 }
 
 #[cfg(test)]

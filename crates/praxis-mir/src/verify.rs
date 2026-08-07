@@ -153,6 +153,25 @@ pub enum VerifyError {
         dst: LocalId,
         src: LocalId,
     },
+    /// A [`Inst::MoveScalar`](crate::ir::Inst::MoveScalar) whose source or
+    /// destination is not a [`LocalKind::Scalar`] slot of the `kind` it names.
+    ///
+    /// [`MoveGcFromScalar`](Self::MoveGcFromScalar)'s mirror, and it guards a
+    /// mirror-image failure with a worse ending. That rule stops a raw word from
+    /// entering a slot the collector dereferences; this one stops a `GcRef` from
+    /// entering a slot the collector **ignores** — a reference the marker never
+    /// traces, so the object it names is swept while live and the next read is a
+    /// use-after-free. The width half is the same pun [`crate::forward`]'s gate 4
+    /// refuses: moving a `Bool` word into an `Int` slot verifies under a rule
+    /// that checks only kinds, and re-boxes one byte as eight.
+    MoveScalarKindMismatch {
+        func: String,
+        block: BlockId,
+        inst: usize,
+        dst: LocalId,
+        src: LocalId,
+        kind: ScalarKind,
+    },
     /// A GC safepoint whose [`RootSlots`](crate::RootSlots) was never filled.
     /// An *annotated empty* set is a real answer; an unannotated one means the
     /// liveness pass did not run, and the backend would spill nothing.
@@ -319,6 +338,20 @@ impl std::fmt::Display for VerifyError {
                  the Scalar/Gc boundary; use Materialize",
                 block.0
             ),
+            VerifyError::MoveScalarKindMismatch {
+                func,
+                block,
+                inst,
+                dst,
+                src,
+                kind,
+            } => write!(
+                f,
+                "{func}: block {} inst {inst}: MoveScalar {dst:?} <- {src:?} names \
+                 {kind:?}, but both slots must be Scalar({kind:?}); use ExtractScalar \
+                 to cross the Gc/Scalar boundary",
+                block.0
+            ),
             VerifyError::UnannotatedSafepoint { func, block, inst } => write!(
                 f,
                 "{func}: block {} inst {inst}: safepoint has no annotated root set",
@@ -464,6 +497,30 @@ pub fn verify(f: &Function) -> Result<(), Vec<VerifyError>> {
                             inst: i,
                             dst: *dst,
                             src: *src,
+                        });
+                    }
+                }
+                // The mirror rule (ADR-121). Both slots must be `Scalar` **of
+                // the named kind**: `LocalKind::Scalar(k)` carries the width, so
+                // asking for equality here costs nothing and closes the pun that
+                // `MoveGcFromScalar`'s membership test would leave open.
+                //
+                // Read out of `f.locals` directly rather than against a second
+                // precomputed set: `gc` exists because the root-slot rule asks
+                // its question once per slot in every set at every safepoint,
+                // and this asks about two locals at one instruction.
+                Inst::MoveScalar { dst, src, kind } => {
+                    let is = |l: &LocalId| {
+                        f.locals.get(l.0 as usize).map(|s| s.kind) == Some(LocalKind::Scalar(*kind))
+                    };
+                    if !is(dst) || !is(src) {
+                        errs.push(VerifyError::MoveScalarKindMismatch {
+                            func: f.name.clone(),
+                            block: bid,
+                            inst: i,
+                            dst: *dst,
+                            src: *src,
+                            kind: *kind,
                         });
                     }
                 }
@@ -794,6 +851,7 @@ pub fn defines(inst: &Inst) -> Option<LocalId> {
         | Inst::Call { dst, .. }
         | Inst::CallIndirect { dst, .. }
         | Inst::MoveGc { dst, .. }
+        | Inst::MoveScalar { dst, .. }
         | Inst::LoadCapture { dst, .. }
         | Inst::LoadField { dst, .. }
         | Inst::LoadTupleElem { dst, .. }
@@ -838,6 +896,7 @@ fn operands(inst: &Inst) -> Vec<LocalId> {
         | Inst::EnumTag { dst, src }
         | Inst::EnumPayloadGet { dst, src, .. }
         | Inst::MoveGc { dst, src }
+        | Inst::MoveScalar { dst, src, .. }
         | Inst::FloatNeg { dst, src } => v.extend([*dst, *src]),
         Inst::StoreScalar { dst_gc, src, .. } => v.extend([*dst_gc, *src]),
         Inst::StoreField { record, value, .. } => v.extend([*record, *value]),

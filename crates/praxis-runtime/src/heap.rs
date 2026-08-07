@@ -21,7 +21,7 @@
 //!      This runs inside the collection because a reclaimed block is only
 //!      *recognisable* as one between the sweep and the next allocation.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::ptr::NonNull;
@@ -571,6 +571,10 @@ pub struct Heap {
     live_bytes: Cell<usize>,
     /// How the next paced threshold is chosen. Not a `Cell` — see [`Pacer`].
     pacer: Pacer,
+    /// The mark phase's grey set, kept across collections so the collector does
+    /// not allocate a buffer proportional to the live set on every one of them.
+    /// See [`Heap::mark`], which is where the reason is written down.
+    mark_worklist: RefCell<Vec<GcRef>>,
 }
 
 /// What ran a collection. Only allocation pressure grows the pacing threshold:
@@ -930,6 +934,7 @@ impl Heap {
             immortal_pages: Cell::new(std::ptr::null_mut()),
             live_bytes: Cell::new(0),
             pacer,
+            mark_worklist: RefCell::new(Vec::new()),
         }
     }
 
@@ -1178,6 +1183,44 @@ impl Heap {
     #[cfg(test)]
     pub(crate) fn bytes_since_collect(&self) -> usize {
         self.bytes_since_collect.get()
+    }
+
+    /// Charge `bytes` of *owned* growth — a collection's backing buffer
+    /// reallocating — against the pacing counter.
+    ///
+    /// # The gap this closes, and why it only became visible with ADR-121
+    ///
+    /// [`Heap::alloc_raw`] charges `stride + owned_bytes_of(payload)` once, at
+    /// construction. Its comment then explains why growth afterwards was left
+    /// uncharged:
+    ///
+    /// > Growth *after* this point — a `push` that reallocates — is still
+    /// > uncharged; **its elements are themselves paced allocations**, so the
+    /// > residual under-count is the spine, not the contents.
+    ///
+    /// That was true and load-bearing, and ADR-121 falsified the premise. When
+    /// every scalar the program computed was a heap object, an allocation-light
+    /// program did not exist: the arithmetic feeding a `push` paced the
+    /// collector even when the `push` itself did not. Promotion deletes exactly
+    /// those allocations, so a program whose memory is mostly *buffers* — `bfs`,
+    /// whose adjacency lists are a `Vec` of `Vec`s — stopped advancing the
+    /// counter at all. Measured: `bfs` went from **41 collections to 6**, and
+    /// its peak resident set from 61 MiB to 224, with an identical live set and
+    /// a *smaller* GC page heap. The collector was not running because nothing
+    /// told it anything had happened.
+    ///
+    /// So the spine is charged now too, and the pacer's input is the memory the
+    /// program actually took rather than the share of it that happened to be
+    /// shaped like an object.
+    ///
+    /// Cheap by construction: callers invoke this only on the reallocation path,
+    /// which amortized doubling already makes rare, and it is a load, an add and
+    /// a store. It deliberately does **not** collect — the caller decides where
+    /// its safepoint is, and every one of them already polls
+    /// [`Heap::maybe_collect`] on entry.
+    pub fn charge_owned_growth(&self, bytes: usize) {
+        self.bytes_since_collect
+            .set(self.bytes_since_collect.get().saturating_add(bytes));
     }
 
     /// Allocate an immortal object: same layout as [`Heap::alloc`], but on a
@@ -1668,7 +1711,38 @@ impl Heap {
 
     /// Mark phase: set the page bit of every reachable object.
     fn mark(&self, roots: &dyn RootSet) {
-        let mut worklist: Vec<GcRef> = Vec::new();
+        // **The grey set is reused across collections, and that is a memory
+        // decision rather than a speed one.**
+        //
+        // This used to be a fresh `Vec::new()` per collection, grown by doubling
+        // to the size of the transitive closure and dropped at the end of the
+        // phase. On `pipeline`'s 1M-element working set that is an 8 MiB buffer
+        // reached through the whole doubling ladder — 1, 2, 4, 8 — and freed
+        // again, sixty-odd times in one run. macOS's allocator does not return
+        // large freed regions to the OS promptly; it caches them, and `vmmap`
+        // showed **64 cached `MALLOC_LARGE (empty)` regions holding 489 MiB**
+        // against 4 regions and 16 MiB before ADR-121. Live malloc bytes were
+        // ~84 MiB in both, so none of that half-gigabyte was in use — it was
+        // resident, and `peak_rss` counts resident.
+        //
+        // ADR-121 did not create the churn; it made the same churn happen in
+        // less wall-clock time, which is what pushed the cache from 4 regions to
+        // 64. That distinction matters for who owns the fix: the collector
+        // should not allocate a buffer proportional to the live set on every
+        // collection, whatever the compiler above it is doing.
+        //
+        // `clear()` keeps the capacity, so after the first collection the mark
+        // phase allocates nothing at all. The retained buffer is bounded by the
+        // largest transitive closure the program has ever had — never more than
+        // the live set, which the heap is already holding.
+        //
+        // A `RefCell` rather than the `Cell` the rest of this struct uses,
+        // because a `Vec` is not `Copy`. Collection is not re-entrant, so the
+        // borrow cannot overlap; if some future tracer callback made it
+        // re-entrant, `borrow_mut` panics loudly rather than corrupting the grey
+        // set, which is the right failure for a collector invariant.
+        let mut worklist = self.mark_worklist.borrow_mut();
+        worklist.clear();
         roots.push_roots(&mut worklist);
 
         // The tracer enqueues child references onto the worklist. The grey set

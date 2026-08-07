@@ -325,7 +325,7 @@ pub(crate) fn uses(inst: &Inst) -> Vec<LocalId> {
             v.extend(args.iter().copied());
             v
         }
-        Inst::MoveGc { src, .. } => vec![*src],
+        Inst::MoveGc { src, .. } | Inst::MoveScalar { src, .. } => vec![*src],
         Inst::LoadField { src, .. } | Inst::LoadTupleElem { src, .. } => vec![*src],
         Inst::LoadCapture { closure, .. } => vec![*closure],
         Inst::EnumTag { src, .. } => vec![*src],
@@ -337,6 +337,90 @@ pub(crate) fn uses(inst: &Inst) -> Vec<LocalId> {
         Inst::ConstFloat { .. } => vec![],
         // The value is an immediate; the table it indexes is reached through
         // `ctx`, which is not a MIR local.
+        Inst::ConstGc { .. } => vec![],
+        Inst::CheckFault { .. } => vec![],
+    }
+}
+
+/// [`uses`], by mutable reference: every operand field an instruction reads,
+/// where a caller can write a different local into it.
+///
+/// **This is [`crate::promote`]'s correctness mechanism, and it is directly
+/// under [`uses`] so the two can be diffed by eye.** That pass changes what a
+/// *slot* holds — a `Gc` local becomes a `Scalar` one — so every instruction
+/// naming that local must be rewritten or the promotion must be refused. A
+/// missed field there is not a missed optimization the way [`crate::forward`]'s
+/// is: it leaves a reader of a slot whose representation has changed under it,
+/// which is a payload word read as a reference. So this match has **no `_`
+/// arm** and never gets one; a new [`Inst`] variant is a build error here, which
+/// is the whole reason the enumeration is worth having twice.
+///
+/// The arms are `uses`' arms with the derefs removed, in the same order, and the
+/// two functions must be edited together. `Alloc`'s scalar-payload arm
+/// (`Int`/`Bool`/`Char`/`Float`) is included for that reason alone: a promoted
+/// local can never appear there, because those fields hold a `Scalar` local
+/// already and promotion only ever moves a `Gc` local — but leaving the arm out
+/// would make this a *subset* of `uses` rather than its twin, and a subset is
+/// the thing nobody can check by eye.
+pub(crate) fn uses_mut(inst: &mut Inst) -> Vec<&mut LocalId> {
+    match inst {
+        Inst::Alloc {
+            alloc:
+                crate::ir::AllocKind::Int { value }
+                | crate::ir::AllocKind::Bool { value }
+                | crate::ir::AllocKind::Char { value }
+                | crate::ir::AllocKind::Float { value },
+            ..
+        } => vec![value],
+        Inst::Alloc {
+            alloc: crate::ir::AllocKind::Record { fields, .. },
+            ..
+        } => fields.iter_mut().collect(),
+        Inst::Alloc {
+            alloc: crate::ir::AllocKind::Tuple { elements, .. },
+            ..
+        } => elements.iter_mut().collect(),
+        Inst::Alloc {
+            alloc: crate::ir::AllocKind::Enum { args, .. },
+            ..
+        } => args.iter_mut().collect(),
+        Inst::Alloc {
+            alloc: crate::ir::AllocKind::Unit | crate::ir::AllocKind::Text { .. },
+            ..
+        } => vec![],
+        Inst::Alloc {
+            alloc: crate::ir::AllocKind::Closure { captures, .. },
+            ..
+        } => captures.iter_mut().collect(),
+        Inst::Alloc {
+            alloc: crate::ir::AllocKind::Collection { init, .. },
+            ..
+        } => init.operands_mut(),
+        Inst::ExtractScalar { src, .. } => vec![src],
+        Inst::StoreScalar { dst_gc, src, .. } => vec![dst_gc, src],
+        Inst::StoreField { record, value, .. } => vec![record, value],
+        Inst::Materialize { src, .. } => vec![src],
+        Inst::IntBinOp { lhs, rhs, .. } => vec![lhs, rhs],
+        Inst::FloatBinOp { lhs, rhs, .. } => vec![lhs, rhs],
+        Inst::FloatNeg { src, .. } => vec![src],
+        Inst::IntCmp { lhs, rhs, .. } => vec![lhs, rhs],
+        Inst::FloatCmp { lhs, rhs, .. } => vec![lhs, rhs],
+        Inst::Call { args, .. } => args.iter_mut().collect(),
+        Inst::CallIndirect { callee, args, .. } => {
+            let mut v = vec![callee];
+            v.extend(args.iter_mut());
+            v
+        }
+        Inst::MoveGc { src, .. } | Inst::MoveScalar { src, .. } => vec![src],
+        Inst::LoadField { src, .. } | Inst::LoadTupleElem { src, .. } => vec![src],
+        Inst::LoadCapture { closure, .. } => vec![closure],
+        Inst::EnumTag { src, .. } => vec![src],
+        Inst::EnumPayloadGet { src, .. } => vec![src],
+        Inst::StructEq { lhs, rhs, .. } => vec![lhs, rhs],
+        Inst::ValueCmp { lhs, rhs, .. } => vec![lhs, rhs],
+        Inst::BitsetContains { set, member, .. } => vec![set, member],
+        Inst::ConstInt { .. } => vec![],
+        Inst::ConstFloat { .. } => vec![],
         Inst::ConstGc { .. } => vec![],
         Inst::CheckFault { .. } => vec![],
     }

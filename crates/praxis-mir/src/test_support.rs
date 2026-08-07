@@ -73,6 +73,45 @@ pub struct Lowered {
 /// whatever the recovery path emitted.
 #[must_use]
 pub fn lower_src_to_mir(src: &str) -> Lowered {
+    lower_src_through(src, Stage::Optimized)
+}
+
+/// The same, stopping at the MIR **the builder itself wrote** — before
+/// [`crate::forward`] and before [`crate::promote`].
+///
+/// This is the door ADR-108's tests read through, and the reason is that a
+/// builder-shape assertion and an optimized function are different subjects. The
+/// hoist ADR-108 exists for moves a loop-invariant literal's `Alloc` into the
+/// preheader; ADR-121 then deletes that `Alloc`, because the slot it filled is
+/// no longer a box. Asserted against the finished article the test reads zero
+/// allocations in the preheader and fails — with the hoist working exactly as
+/// designed. The same goes for every test whose subject is "what does
+/// `lower_stmt` emit here": a `Bool` pattern's `ExtractScalar`, a `for` loop's
+/// re-materialized index.
+#[must_use]
+pub fn lower_src_to_mir_unoptimized(src: &str) -> Lowered {
+    lower_src_through(src, Stage::Raw)
+}
+
+/// The same, with [`crate::forward`] run and [`crate::promote`] not — ADR-120's
+/// gate, for [`lower_src_to_mir_unoptimized`]'s reason one layer up.
+#[must_use]
+pub fn lower_src_to_mir_forwarded(src: &str) -> Lowered {
+    lower_src_through(src, Stage::Forwarded)
+}
+
+/// How far down the pipeline a [`Lowered`] was taken.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Stage {
+    /// The builder's own output.
+    Raw,
+    /// …plus ADR-120's block-local forwarding.
+    Forwarded,
+    /// …plus ADR-121's promotion: what the backend actually compiles.
+    Optimized,
+}
+
+fn lower_src_through(src: &str, stage: Stage) -> Lowered {
     let map = SourceMap::new();
     let file = map.intern("shape_test.px", src);
     let parsed = parse(file, src);
@@ -95,7 +134,11 @@ pub fn lower_src_to_mir(src: &str) -> Lowered {
         module.diagnostics
     );
     let module = monomorphize(module, &analysis.names, &mut analysis.db);
-    let funcs = lower_module(&module, &mut analysis.db);
+    let funcs = match stage {
+        Stage::Raw => crate::build::lower_module_unoptimized(&module, &mut analysis.db),
+        Stage::Forwarded => crate::build::lower_module_forwarded(&module, &mut analysis.db),
+        Stage::Optimized => lower_module(&module, &mut analysis.db),
+    };
     Lowered {
         src: src.to_string(),
         funcs,
@@ -260,6 +303,11 @@ pub enum InstKind {
     CallIndirect,
     CheckFault,
     MoveGc,
+    /// Parameterized by width, like [`InstKind::Materialize`] and
+    /// [`InstKind::ExtractScalar`] and for their reason: ADR-121's headline is a
+    /// count per scalar kind — `mandelbrot` is a `Float` result and `vm` a `Bool`
+    /// one — and a single `MoveScalar` row would report their sum.
+    MoveScalar(ScalarKind),
     LoadCapture,
     LoadField,
     StoreField,
@@ -304,6 +352,7 @@ impl From<&Inst> for InstKind {
             Inst::CallIndirect { .. } => InstKind::CallIndirect,
             Inst::CheckFault { .. } => InstKind::CheckFault,
             Inst::MoveGc { .. } => InstKind::MoveGc,
+            Inst::MoveScalar { kind, .. } => InstKind::MoveScalar(*kind),
             Inst::LoadCapture { .. } => InstKind::LoadCapture,
             Inst::LoadField { .. } => InstKind::LoadField,
             Inst::StoreField { .. } => InstKind::StoreField,
@@ -577,6 +626,14 @@ fn reachable_from(func: &Function, start: BlockId) -> Vec<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The forwarded door (ADR-121, and `forward.rs`'s test module for the full
+    // reason). The two `mandelbrot` counts below are ADR-120's headline stated
+    // from the other side — "the two survivors are the loop-carried `x` and
+    // `y`" — so they must read the MIR that sentence describes. ADR-121 takes
+    // those two to zero, and `promote::tests::a_loop_carried_float_is_promoted`
+    // is where that is asserted.
+    use super::lower_src_to_mir_forwarded as lower_src_to_mir;
 
     const FLOAT_BOX: InstKind = InstKind::Materialize(ScalarKind::Float);
 

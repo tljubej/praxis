@@ -323,11 +323,52 @@ def main() -> None:
     w(
         "Peak resident set for the same runs. The live data in every one of these "
         "programs is small and bounded — `hashwork` holds at most 65536 map entries, "
-        "`primes` and `collatz` hold nothing at all — and since the collector's "
-        "threshold gained a ceiling the Praxis column reflects that: it is the live "
-        "set plus a bounded amount of not-yet-collected garbage, rather than half of "
-        "everything the program ever allocated. See *The collector's pacer has a "
-        "ceiling* below for what it was."
+        "`primes` and `collatz` hold nothing at all — and for six of the eight the "
+        "Praxis column reflects that: it is the live set plus a bounded amount of "
+        "not-yet-collected garbage, rather than half of everything the program ever "
+        "allocated. See *The collector's pacer has a ceiling* below."
+    )
+    w("")
+    w(
+        "**Two of the eight had to be repaired to keep reading that way, and what "
+        "broke them is worth more than the numbers.** ADR-121 removes most of a "
+        "program's scalar allocations — and the collector was being paced by them. "
+        "`pipeline` went to **592 MiB** and `bfs` to **224**, against 110 and 61 on "
+        "the same tree with the promotion toggle reverted. Neither was the compiler's "
+        "fault, and neither was over-retention: traced across both arms the live set "
+        "and the page heap were identical, and `bfs`'s page heap was *smaller*."
+    )
+    w("")
+    w(
+        "The first was the mark phase allocating a fresh `Vec` for its grey set on "
+        "every collection — 8 MiB on a million-element working set, reached through "
+        "the whole doubling ladder and freed again, sixty times a run. `vmmap` showed "
+        "**64 cached `MALLOC_LARGE (empty)` regions holding 489 MiB** where the "
+        "reverted arm held 4 and 16 MiB; live malloc bytes were ~84 MiB in both, so "
+        "none of that half-gigabyte was in use. The grey set is now kept across "
+        "collections and the mark phase allocates nothing."
+    )
+    w("")
+    w(
+        "The second is the sharper one. `Heap::alloc_raw` charges the pacer at "
+        "construction, and left a collection's *later* growth uncharged on a stated "
+        "premise: **\"its elements are themselves paced allocations, so the residual "
+        "under-count is the spine, not the contents.\"** That was true, and ADR-121 "
+        "falsified it — when every scalar was a heap object an allocation-light "
+        "program did not exist, and the arithmetic feeding a `push` paced the "
+        "collector even when the `push` did not. `bfs` fell from **41 collections to "
+        "6**, and a 256 KiB threshold still bought only 10, because nothing was "
+        "advancing the counter at all. **Every collection that can grow a buffer now "
+        "charges the growth** — `Vec`, both ends of `Deque`, `Map`, `Set`, `Counter`, "
+        "`BitSet` and both heaps — measured through the same `owned_bytes` the "
+        "descriptor already used, so the size formula has one statement rather than a "
+        "second one at each growth site. `bfs` collects 16 times and peaks at 55 MiB; "
+        "`pipeline` peaks below where it started. **A pacer driven by allocation "
+        "volume has a hidden dependency on the compiler not being good at removing "
+        "allocations**, and that is the finding to carry forward rather than either "
+        "number. Nine tests in `abi.rs` pin it per collection, each pushing only "
+        "interned `Int`s so the spine is the one thing that can charge; all nine fail "
+        "with the charge removed."
     )
     w("")
     w("| Benchmark | Rust | Python | Praxis | Praxis retained per second |")
@@ -496,20 +537,29 @@ def main() -> None:
     )
     w("")
     w(
-        "1. **Stop allocating for scalars.** §4.3 explicitly reserves this: "
-        "*later optimizations [may] intern small integers, use tagged pointers, or "
-        "eliminate allocations through escape analysis… [they] must preserve reference "
-        "and aliasing semantics.* Nothing else in this report is worth as much. "
-        f"`collatz` — the benchmark whose inner loop is pure arithmetic and nothing "
-        f"else — is {px_rs['collatz']:.0f}× Rust; `hashwork`, whose inner loop is a "
-        f"hash probe both languages pay identically, is {px_rs['hashwork']:.0f}×. The "
-        "difference between those two figures is the boxing."
+        "1. ~~**Stop allocating for scalars.**~~ **Done for slots that do not escape, "
+        "and that was most of it.** "
+        "[ADR-121](../docs/decisions/121-a-slot-that-holds-a-scalar-is-not-a-box.md) "
+        "promotes a `Gc` slot whose every definition provably produces an `Int`, "
+        "`Bool` or `Float` to a raw `Scalar` slot for its whole life, materializing "
+        "only where a value genuinely escapes. `dump.rs`'s canonical loop went from "
+        "**114–197 machine instructions per iteration across four hot paths to 39 "
+        "across one**, and its body now holds no `ExtractScalar`, no `Materialize` "
+        "and no `Alloc` at all. "
+        f"`collatz` is {px_rs['collatz']:.0f}× Rust where it was 9×, and `mandelbrot` "
+        f"{px_rs['mandelbrot']:.0f}× where it was 10×."
     )
     w(
-        "2. **Escape analysis on MIR.** The same §4.3 sentence. A loop-local "
-        "accumulator that never escapes its function needs no heap object at all, and "
-        "the fused pipelines of §6.3 are exactly the shape where the intermediate "
-        "values are provably local."
+        "2. **What is left of it is the escaping half**, and it is now the larger "
+        "half. A scalar stored into a collection, passed as a call argument, or "
+        "returned is still boxed — `ProvableDescriptors` has no proof for a parameter "
+        "(it has no defining instruction) or for a value the runtime minted, which is "
+        "the sound answer without an ABI change and is exactly why `vm` and `tree` "
+        f"moved least. `pipeline` at {px_rs['pipeline']:.0f}× and `tree` at "
+        f"{px_rs['tree']:.0f}× are where the remaining boxes are: the elements "
+        "themselves, and the arguments and results of calls. Passing scalars unboxed "
+        "across the call boundary is the next package, and it touches closures, the "
+        "runtime and the debugger."
     )
     done = (
         f"it costs {abs(gc_time - 1) * 100:.1f}% "

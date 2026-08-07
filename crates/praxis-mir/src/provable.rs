@@ -763,7 +763,12 @@ mod tests {
 mod census {
     use super::*;
     use crate::ir::{BlockId, Function};
-    use crate::test_support::{lower_src_to_mir, Lowered};
+    // The forwarded door (ADR-121, and `forward.rs`'s test module for the full
+    // reason). Every figure in this census is documented as a *post-W8-S0*
+    // measurement — "the post-W8-S0 inner-loop census, to the site" — so it must
+    // read the MIR that description names.
+    use crate::test_support::lower_src_to_mir_forwarded as lower_src_to_mir;
+    use crate::test_support::Lowered;
 
     /// How many `ExtractScalar` sites in a region are provable, in both columns.
     #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]

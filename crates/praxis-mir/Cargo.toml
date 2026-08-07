@@ -86,6 +86,25 @@ adr120b-arm-a = []
 # except when staging that arm.
 unproved-extract-scalar = []
 
+# ADR-121 arm A. `promote::promote_scalars` returns 0 without looking at the
+# function, so every scalar-typed binding keeps its `Gc` slot and every
+# loop-carried assignment keeps the `Materialize` per iteration and the guarded
+# `ExtractScalar` per use that ADR-120's census left behind. `forward_boxes`
+# still runs, so the two arms differ in the whole-function transform alone —
+# which is what makes this an A/B of ADR-121 rather than of both passes.
+#
+#     cargo build --release -p praxis-cli                          # arm B
+#     cargo build --release -p praxis-cli \
+#         --features praxis-mir/adr121-arm-a                        # arm A
+#
+# **It makes the compiler emit slower code on purpose**, on `adr120-arm-a`'s
+# precedent and for handover 26 §6's reason: the A/B baseline must be this branch
+# with this package's one toggle reverted, never an older commit — ADR-113
+# records what the wrong baseline cost (14.4% claimed where the truth was 0.8%).
+# `cargo test` with it on fails this crate's promotion tests and the backend's
+# shape assertions, which is the toggle working.
+adr121-arm-a = []
+
 # Doctests are not run (see the justfile and README): rustdoc has to analyze the
 # whole crate before it can find out there are none, and the result is never
 # cached, so `cargo test` paid ~6s per crate for it on every run.

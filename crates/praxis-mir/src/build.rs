@@ -35,6 +35,20 @@ use crate::ir::{
 /// from `AllocKind::Closure` at the allocation site.
 #[must_use]
 pub fn lower_module(module: &TypedModule, db: &mut TypeDb) -> Vec<Function> {
+    let mut funcs = lower_module_raw(module, db);
+    // The optimizations run *here* rather than beside `lower_module` at each of
+    // the five hosts. Each deletes safepoints, so each has to run before
+    // `crate::annotate` computes a slot set per safepoint; every host does
+    // `lower_module → annotate → verify` in that order, so the last line of this
+    // function is the one place that ordering holds with no host edited — which
+    // is ADR-108 §1's stated reason for refusing a standalone pass. Every
+    // closure and adapter is covered because they are in `funcs` by now.
+    optimize(&mut funcs);
+    funcs
+}
+
+/// Everything [`lower_module`] does except [`optimize`].
+fn lower_module_raw(module: &TypedModule, db: &mut TypeDb) -> Vec<Function> {
     let bindings = Bindings {
         escaping: &module.escaping_vars,
         reassigned: &module.reassigned_vars,
@@ -68,14 +82,56 @@ pub fn lower_module(module: &TypedModule, db: &mut TypeDb) -> Vec<Function> {
     for adapter in &adapted {
         funcs.push(lower_fn_value_adapter(adapter, db));
     }
-    // Block-local box/unbox forwarding (ADR-120), and it is *here* rather than
-    // beside `lower_module` at each of the five hosts. It deletes safepoints, so
-    // it has to run before `crate::annotate` computes a slot set per safepoint;
-    // every host does `lower_module → annotate → verify` in that order, so the
-    // last line of this function is the one place that ordering holds with no
-    // host edited — which is ADR-108 §1's stated reason for refusing a
-    // standalone pass. Every closure and adapter above is covered because they
-    // are in `funcs` by now.
+    funcs
+}
+
+/// The two optimizations, in the order they must run in.
+///
+/// Split out of [`lower_module`] so that [`lower_module_unoptimized`] can stop
+/// before them and [`crate::test_support`] can stop *between* them. That is not
+/// a pass manager and does not reopen ADR-108 §1: there is no registry, no
+/// ordering table and no host that calls either pass — `lower_module` is still
+/// the one door production code has, and it still runs both.
+///
+/// **What the split buys is that each package's gate keeps measuring its own
+/// package.** ADR-108's tests assert that a loop-invariant literal's `Alloc`
+/// moved to the preheader, and ADR-121 deletes that `Alloc` outright, so run
+/// against the finished article those tests fail while the hoist they check is
+/// still working perfectly. Read against the builder's own output they go on
+/// saying what they were written to say. Seventeen tests across four modules
+/// went red when ADR-121 landed and not one of them had found a defect.
+fn optimize(funcs: &mut [Function]) {
+    for func in funcs {
+        // Block-local box/unbox forwarding first (ADR-120).
+        crate::forward::forward_boxes(func);
+        // …then the whole-function slot-representation pass, on the same line
+        // of reasoning and under the same ordering constraint (ADR-121). It runs
+        // *after* forwarding deliberately: that pass deletes the box/unbox pairs
+        // this one would otherwise have to price, and a materialization already
+        // destined for deletion is a cost the profitability rule must not charge
+        // a candidate for. See `lib.rs`'s header.
+        crate::promote::promote_scalars(func);
+    }
+}
+
+/// [`lower_module`] stopping before [`optimize`]: the MIR the builder itself
+/// wrote.
+///
+/// **Test-only, and the gate is the feature rather than a convention.** A host
+/// that lowered through this door would ship a compiler with both optimizations
+/// off; `cargo build` cannot reach it, on `crate::test_support`'s own reasoning
+/// and through the same flag.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn lower_module_unoptimized(module: &TypedModule, db: &mut TypeDb) -> Vec<Function> {
+    lower_module_raw(module, db)
+}
+
+/// [`lower_module`] with forwarding but not promotion — ADR-120's gate.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn lower_module_forwarded(module: &TypedModule, db: &mut TypeDb) -> Vec<Function> {
+    let mut funcs = lower_module_raw(module, db);
     for func in &mut funcs {
         crate::forward::forward_boxes(func);
     }
@@ -5722,8 +5778,33 @@ mod tests {
     /// driver ([`crate::test_support::lower_src_to_mir`]). It used to be a
     /// second copy of that driver, which is how it came to be the only one of
     /// the three that skipped monomorphization.
+    /// **The builder's own output**, not the finished article.
+    ///
+    /// Every test in this module asks what `lower_*` *emitted*, so it must read
+    /// MIR before the two passes that rewrite it. That was the same thing until
+    /// ADR-121: `forward` only ever deleted a box/unbox pair the builder had
+    /// just written, so no assertion here could see the difference. Promotion
+    /// can — it deletes the hoisted `Alloc` five of ADR-108's tests check the
+    /// position of, and the `ExtractScalar`/`Materialize` two more name
+    /// directly. See `test_support::lower_src_to_mir_unoptimized`.
     fn lower_src_to_mir(src: &str) -> (Vec<Function>, praxis_hir::Analysis) {
-        let lowered = crate::test_support::lower_src_to_mir(src);
+        let lowered = crate::test_support::lower_src_to_mir_unoptimized(src);
+        (lowered.funcs, lowered.analysis)
+    }
+
+    /// The builder's output **with ADR-120's forwarding applied**, for the one
+    /// test in this module whose subject needs it.
+    ///
+    /// `a_char_pattern_emits_a_comparison_and_not_a_jump` counts two
+    /// `ExtractScalar { Char }` where the builder writes four, and says so:
+    /// "`forward` has already folded both to immediates by this point, which is
+    /// why there are two of these and not four". Its subject is a builder shape
+    /// — that a `Char` pattern test *branches* rather than jumping — but its
+    /// denominator is post-forwarding, so it is the exception the helper above
+    /// is not, and it says which door it reads rather than looking like it
+    /// forgot.
+    fn lower_src_forwarded(src: &str) -> (Vec<Function>, praxis_hir::Analysis) {
+        let lowered = crate::test_support::lower_src_to_mir_forwarded(src);
         (lowered.funcs, lowered.analysis)
     }
 
@@ -7876,7 +7957,7 @@ mod tests {
     /// jumps to success is not defensive.
     #[test]
     fn a_char_pattern_emits_a_comparison_and_not_a_jump() {
-        let (funcs, _) = lower_src_to_mir(
+        let (funcs, _) = lower_src_forwarded(
             "fn f(c: Char) -> Int {\n  match c {\n    '#' => 1\n    '.' => 2\n    _ => 3\n  }\n}",
         );
         let f = funcs.iter().find(|f| f.name == "f").expect("f");

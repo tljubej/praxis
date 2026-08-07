@@ -162,6 +162,73 @@ pub enum DebugSlotKind {
     Byte,
 }
 
+impl DebugSlotKind {
+    /// What generated code adds to a payload before storing it into a debug
+    /// slot, and what [`DebugLocalMeta::read`] subtracts on the way out
+    /// (ADR-121 decision 2).
+    ///
+    /// # The problem this solves, and why it could be ignored until now
+    ///
+    /// A slot is one word and a claim zeroes its run, so the all-zero word means
+    /// "nothing written here yet". For a [`Reference`](Self::Reference) slot
+    /// that is *exact* — a `GcRef` is `NonNull`. For a scalar slot it cannot be:
+    /// there are 2^64 payloads and 2^64 words, so **some** payload must collide
+    /// with "unwritten", and no encoding avoids it. The only question is which.
+    ///
+    /// Storing the payload raw makes the collision `0` — and therefore `false`,
+    /// and `0.0`. ADR-120 part 2 accepted that, correctly, because the only
+    /// slots it reached were temps whose box the block-local forwarding had
+    /// elided, and `<tmp#3: Int> @ "0" = <uninit>` is a poor line in a rare
+    /// place. ADR-121 promotes *bindings*, so the same collision reaches
+    /// `var i = 0` — which is not a rare place. It is close to the most common
+    /// line a Praxis program has.
+    ///
+    /// # What each kind gives up instead
+    ///
+    /// The bias is chosen per kind so the collision lands on a value the
+    /// language does not hold, or barely does:
+    ///
+    /// | kind | bias | the one payload that reads `<uninit>` |
+    /// |---|---:|---|
+    /// | [`Reference`](Self::Reference) | 0 | none — `NonNull` has no zero |
+    /// | [`Bool`](Self::Bool) | 1 | **none**: two payloads, biased to 1 and 2 |
+    /// | [`Char`](Self::Char) | 1 | **none**: `0..=0x10FFFF` biased clear of zero |
+    /// | [`Byte`](Self::Byte) | 1 | **none**: `0..=255` biased clear of zero |
+    /// | [`Float`](Self::Float) | 1 | one quiet NaN (`0xFFFF_FFFF_FFFF_FFFF`) |
+    /// | [`Int`](Self::Int) | `i64::MIN` | `i64::MIN` |
+    ///
+    /// Three of the six lose nothing at all, because their payloads do not fill
+    /// the word. `Float` loses one NaN bit pattern out of the 2^52 that are NaN,
+    /// and every one of them prints `NaN` anyway. `Int` genuinely loses a value
+    /// a program could compute — and `i64::MIN` against `0` is the whole trade,
+    /// made in the direction where the losing case is a number nothing reaches
+    /// by accident. `small_int`'s range starts at `-256`, and the sentinel
+    /// idiom that module names is `-1`; neither is anywhere near this.
+    ///
+    /// # Why not a written-marker, which would lose nothing
+    ///
+    /// A parallel byte per slot, zeroed by the claim and set by each store, is
+    /// exact. It is also **a second store per definition** in generated code, on
+    /// the path ADR-120 part 2 already measures at 2.4% of the suite. This is one
+    /// `iadd_imm` against a register that is about to be stored anyway — an ALU
+    /// operation with no memory traffic, which the same measurement cannot see.
+    /// Exactness here is worth an instruction, not a store.
+    #[inline]
+    #[must_use]
+    pub const fn store_bias(self) -> i64 {
+        match self {
+            // Must stay exact: `crash_snapshot` hands this word back as a real
+            // reference, and a biased pointer is not one.
+            DebugSlotKind::Reference => 0,
+            DebugSlotKind::Int => i64::MIN,
+            DebugSlotKind::Bool
+            | DebugSlotKind::Float
+            | DebugSlotKind::Char
+            | DebugSlotKind::Byte => 1,
+        }
+    }
+}
+
 /// One scalar payload read out of a debug slot, decoded under the slot's
 /// [`DebugSlotKind`].
 ///
@@ -319,15 +386,15 @@ impl DebugLocalMeta {
     /// `NonNull` and can never be zero (F18, the niche this module's header
     /// describes).
     ///
-    /// For a scalar slot it is **not** exact: the payloads `0`, `false` and
-    /// `0.0` are all the zero word, so a temp that genuinely computed zero
-    /// reads back as `<uninit>`. That is the price of keeping one machine word
-    /// per slot, and it is paid in the safe direction — the slot under-reports a
-    /// value it holds and never reports a value it does not. ADR-120 part 2
-    /// records why the alternatives (a second word per slot, or a prologue store
-    /// per scalar slot to write a sentinel) are per-*call* costs against a
-    /// per-*call* debugger gain, and `a_scalar_slot_holding_zero_reads_as_uninit`
-    /// pins the behaviour so a later package changes it deliberately.
+    /// For a scalar slot it cannot be exact — 2^64 payloads do not fit in 2^64
+    /// words beside an "unwritten" state — so exactly one payload per kind reads
+    /// back as `<uninit>`. **Which one is [`DebugSlotKind::store_bias`]'s
+    /// choice**, and since ADR-121 it is no longer `0`: three kinds lose nothing,
+    /// `Float` loses one NaN, and `Int` loses `i64::MIN`. The direction of the
+    /// error is unchanged and is the safe one — a slot under-reports a value it
+    /// holds and never reports a value it does not.
+    /// `an_int_slot_holding_i64_min_reads_as_uninit_and_zero_does_not` pins both
+    /// halves.
     ///
     /// # Safety
     /// `word` must be the current content of a live value slot belonging to a
@@ -347,7 +414,11 @@ impl DebugLocalMeta {
         // dereferenceable from them. `GcRef` is `#[repr(transparent)]` over a
         // `NonNull`, so this is the address-as-integer read `strict_provenance`
         // sanctions and not a load through the pointer.
-        let bits = word.as_ptr() as usize as u64;
+        // …and undo the bias generated code applied on the way in (ADR-121
+        // decision 2). Wrapping, because the bias is chosen precisely so that
+        // one payload wraps to the all-zero word — and that payload is the one
+        // the `word?` above has already answered `None` for.
+        let bits = (word.as_ptr() as usize as u64).wrapping_sub(self.slot_kind.store_bias() as u64);
         let scalar = match self.slot_kind {
             // Unreachable: the branch above returned. Spelled out rather than
             // `unreachable!()` so this match stays total over the enum and a
@@ -786,6 +857,20 @@ impl DebugFrameGuard {
         }
     }
 
+    /// Record `payload` as local `index`'s value **the way generated code does**
+    /// — biased by its slot kind (ADR-121 decision 2).
+    ///
+    /// [`set_scalar`](Self::set_scalar)'s counterpart, and the two exist for the
+    /// two different questions a test can ask. That one writes a machine word
+    /// and is what an adversarial state needs (a payload that *is* a plausible
+    /// heap address). This one writes a *payload* and is what a round-trip needs:
+    /// since the bias, a test that stores a raw word and expects
+    /// [`DebugLocalMeta::read`] to answer it back is asserting that the encoding
+    /// does not exist.
+    pub fn set_scalar_payload(&mut self, index: usize, kind: DebugSlotKind, payload: u64) {
+        self.set_scalar(index, payload.wrapping_add(kind.store_bias() as u64));
+    }
+
     /// This frame's value slots, as the crash snapshot reads them.
     #[must_use]
     pub fn values(&self) -> &[Option<GcRef>] {
@@ -1135,14 +1220,20 @@ mod tests {
 
         f.rt.collect_now();
 
-        // SAFETY: slot 1 is local 1's, which is the pairing `read` requires.
-        let seen = unsafe { metas[1].read(guard.values()[1]) };
+        // **The claim is about the word**, asserted on the word itself rather
+        // than through `read`. It used to be asserted through `read`, which was
+        // the same statement while a scalar slot stored its payload verbatim;
+        // since ADR-121 decision 2 biases the encoding, a decode here would be
+        // comparing `bits` against `bits - i64::MIN` and the test would be about
+        // the bias rather than about the scan.
         assert_eq!(
-            seen,
-            Some(DebugValue::Scalar(ScalarValue::Int(bits as i64))),
+            guard.values()[1].map(|v| v.as_ptr() as usize as u64),
+            Some(bits),
             "the scan nulled a scalar slot, which means it read the word as a \
              reference and dereferenced its header"
         );
+        // SAFETY: slot 1 is local 1's, which is the pairing `read` requires.
+        let seen = unsafe { metas[1].read(guard.values()[1]) };
         assert_eq!(
             seen.and_then(DebugValue::reference),
             None,
@@ -1202,7 +1293,7 @@ mod tests {
             let ctx = f.ctx_ptr();
             // SAFETY: `ctx` is wired to `f.rt`, and `meta`/`metas` outlive the guard.
             let mut guard = unsafe { push_frame(ctx, &meta) };
-            guard.set_scalar(1, bits);
+            guard.set_scalar_payload(1, kind, bits);
             // SAFETY: slot 1 is local 1's.
             let seen = unsafe { metas[1].read(guard.values()[1]) };
             assert_eq!(seen, Some(DebugValue::Scalar(expected)), "{kind:?}");
@@ -1210,29 +1301,114 @@ mod tests {
         }
     }
 
-    /// **The one thing a scalar slot cannot say**, pinned so a later package
-    /// changes it deliberately rather than discovers it.
+    /// **The one thing an `Int` slot cannot say**, pinned so a later package
+    /// changes it deliberately rather than discovers it — and pinned at the
+    /// value ADR-121 decision 2 moved it *to*.
     ///
     /// A claim zeroes its run and zero means "nothing written here yet", which
-    /// is exact for a `Reference` slot — a `GcRef` is `NonNull` — and is not
-    /// exact for a scalar one, because `0`, `false` and `0.0` are all the zero
-    /// word. The slot therefore under-reports a value it holds; it never
-    /// reports a value it does not, which is the direction to be wrong in.
+    /// is exact for a `Reference` slot (a `GcRef` is `NonNull`) and cannot be
+    /// exact for a scalar one: 2^64 payloads do not fit in 2^64 words beside an
+    /// "unwritten" state. Exactly one payload per kind is therefore lost, and
+    /// the bias chooses which.
+    ///
+    /// It used to be `0`, which is what made `var i = 0` render `<uninit>` the
+    /// moment ADR-121 started promoting bindings. It is now `i64::MIN`. Both
+    /// halves are asserted here, because the test is worth nothing without the
+    /// second: a bias that lost *both* would pass the first line.
     #[test]
-    fn a_scalar_slot_holding_zero_reads_as_uninit() {
+    fn an_int_slot_holding_i64_min_reads_as_uninit_and_zero_does_not() {
         let metas = one_reference_and_one_scalar(DebugSlotKind::Int);
         let meta = meta_for(b"f", &metas, (0, 0));
         let mut f = Fixture::new();
         let ctx = f.ctx_ptr();
         // SAFETY: `ctx` is wired to `f.rt`, and `meta`/`metas` outlive the guard.
         let mut guard = unsafe { push_frame(ctx, &meta) };
-        guard.set_scalar(1, 0);
+
+        guard.set_scalar_payload(1, DebugSlotKind::Int, i64::MIN as u64);
         // SAFETY: slot 1 is local 1's.
         assert_eq!(
             unsafe { metas[1].read(guard.values()[1]) },
             None,
-            "a written zero and an unwritten slot are the same word, and the \
-             honest answer for the pair is the absence"
+            "`i64::MIN` is the payload the bias spends: it and an unwritten \
+             slot are the same word, and the honest answer for the pair is the \
+             absence"
+        );
+
+        guard.set_scalar_payload(1, DebugSlotKind::Int, 0);
+        // SAFETY: slot 1 is local 1's.
+        assert_eq!(
+            unsafe { metas[1].read(guard.values()[1]) },
+            Some(DebugValue::Scalar(ScalarValue::Int(0))),
+            "and `0` — the payload `var i = 0` holds — round-trips, which is \
+             the whole of what decision 2 bought"
+        );
+        drop(guard);
+    }
+
+    /// The three kinds whose payloads do not fill the word lose **nothing**, and
+    /// that is a stronger claim than "the collision moved".
+    ///
+    /// `Bool` has two payloads, `Byte` 256 and `Char` rather more; biased by one
+    /// none of them can reach the all-zero word, so every value of all three
+    /// round-trips. Without this the table in [`DebugSlotKind::store_bias`] is a
+    /// claim nothing checks — and the case that matters is `false`, which is as
+    /// common in a crash snapshot as `0` is.
+    #[test]
+    fn the_bounded_scalar_kinds_lose_no_payload_at_all() {
+        let cases: [(DebugSlotKind, u64, ScalarValue); 3] = [
+            (DebugSlotKind::Bool, 0, ScalarValue::Bool(false)),
+            (DebugSlotKind::Byte, 0, ScalarValue::Byte(0)),
+            (DebugSlotKind::Char, 0, ScalarValue::Char('\0')),
+        ];
+        for (kind, payload, expected) in cases {
+            let metas = one_reference_and_one_scalar(kind);
+            let meta = meta_for(b"f", &metas, (0, 0));
+            let mut f = Fixture::new();
+            let ctx = f.ctx_ptr();
+            // SAFETY: `ctx` is wired to `f.rt`, and `meta`/`metas` outlive the guard.
+            let mut guard = unsafe { push_frame(ctx, &meta) };
+            guard.set_scalar_payload(1, kind, payload);
+            // SAFETY: slot 1 is local 1's.
+            assert_eq!(
+                unsafe { metas[1].read(guard.values()[1]) },
+                Some(DebugValue::Scalar(expected)),
+                "{kind:?}'s zero payload is not the unwritten word"
+            );
+            drop(guard);
+        }
+    }
+
+    /// `0.0` round-trips and the NaN the bias spends does not.
+    ///
+    /// `Float` is the kind that *does* fill the word, so it loses one pattern
+    /// like `Int` — but the pattern it loses is a quiet NaN, and every NaN
+    /// renders `NaN` anyway. The pair is asserted for
+    /// `an_int_slot_holding_i64_min_reads_as_uninit_and_zero_does_not`'s reason.
+    #[test]
+    fn a_float_slot_keeps_zero_and_spends_one_nan() {
+        let metas = one_reference_and_one_scalar(DebugSlotKind::Float);
+        let meta = meta_for(b"f", &metas, (0, 0));
+        let mut f = Fixture::new();
+        let ctx = f.ctx_ptr();
+        // SAFETY: `ctx` is wired to `f.rt`, and `meta`/`metas` outlive the guard.
+        let mut guard = unsafe { push_frame(ctx, &meta) };
+
+        guard.set_scalar_payload(1, DebugSlotKind::Float, 0.0_f64.to_bits());
+        // SAFETY: slot 1 is local 1's.
+        assert_eq!(
+            unsafe { metas[1].read(guard.values()[1]) },
+            Some(DebugValue::Scalar(ScalarValue::Float(0.0))),
+            "`0.0` round-trips"
+        );
+
+        let spent = u64::MAX;
+        assert!(f64::from_bits(spent).is_nan(), "and what it costs is a NaN");
+        guard.set_scalar_payload(1, DebugSlotKind::Float, spent);
+        // SAFETY: slot 1 is local 1's.
+        assert_eq!(
+            unsafe { metas[1].read(guard.values()[1]) },
+            None,
+            "which is the one pattern the bias spends"
         );
         drop(guard);
     }

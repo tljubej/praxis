@@ -43,8 +43,8 @@ fn a_float_temporary_reaches_the_backend_as_a_materialize_of_a_float() {
     );
 }
 
-/// **Handover 25 §3's loop has five type-proof sites per iteration. It had
-/// nine, and handover 25 said seven.**
+/// **Handover 25 §3's loop proves no scalar's descriptor at all. It proved
+/// five, before that nine, and handover 25 said seven.**
 ///
 /// Every `ExtractScalar` of a wired scalar is one `emit_scalar_load`, and
 /// `emit_scalar_load` is the language's only descriptor-proof emitter, so this
@@ -52,36 +52,44 @@ fn a_float_temporary_reaches_the_backend_as_a_materialize_of_a_float() {
 ///
 /// ### Why the number moved, and what it was
 ///
-/// The three answers are three different trees, and each was right on its own:
+/// The four answers are four different trees, and each was right on its own:
 ///
 /// | tree | proofs per iteration |
 /// |---|---:|
 /// | handover 25 §3, hand-counted at `e4f42e6` | 7 (wrong) |
 /// | this census when W6 and W7 wrote it (ADR-116, ADR-117) | **9** |
-/// | this tree, with ADR-120's forwarding merged | **5** |
+/// | with ADR-120's block-local forwarding merged | **5** |
+/// | this tree, with ADR-121's promotion merged | **0** |
 ///
 /// Nine was the count of what `build.rs` *emits* — eight `ExtractScalar{Int}`
 /// (two operands each for `i * 3`, `acc + …`, `i + 1` and `i < limit`) plus the
-/// condition's `ExtractScalar{Bool}`. ADR-120 part 1 then deleted four of them:
-/// the box/unbox pair at every interior node of the expression trees, and the
-/// whole `Materialize{Bool}` → `ExtractScalar{Bool}` → `Branch` shape of the
-/// `while` condition, which is why the `Bool` line below is now zero rather
-/// than one.
+/// condition's `ExtractScalar{Bool}`. ADR-120 part 1 deleted four of them: the
+/// box/unbox pair at every interior node of the expression trees, and the whole
+/// `Materialize{Bool}` → `ExtractScalar{Bool}` → `Branch` shape of the `while`
+/// condition. **ADR-121 deleted the remaining five by deleting what they read
+/// from**: `i`, `acc` and `limit` are `Scalar` slots now, so there is no object
+/// whose descriptor could be proved. The loop body is `ConstInt`, `IntBinOp`,
+/// `IntCmp`, `CheckFault` and `MoveScalar` and nothing else.
 ///
-/// **This is the double count handover 21 §3.6 recorded and handover 26 §7 trap
-/// 7 warned about**, and it arrived as a failing test rather than as a wrong
-/// number in a report — which is the wave structure working. W6 and W7 each
-/// independently counted nine and each pinned it, correcting handover 25; both
-/// were right, and neither could see that the package beside them in the same
-/// wave was about to delete four of the nine. The amendments in ADR-116 and
-/// ADR-117 restate their per-iteration figures against this denominator.
+/// **The 9 → 5 step is the double count handover 21 §3.6 recorded and handover
+/// 26 §7 trap 7 warned about**, and it arrived as a failing test rather than as
+/// a wrong number in a report — which is the wave structure working. W6 and W7
+/// each independently counted nine and each pinned it, correcting handover 25;
+/// both were right, and neither could see that the package beside them in the
+/// same wave was about to delete four of the nine.
 ///
-/// The count is asserted rather than printed because it is load-bearing twice
-/// over: it is the denominator of ADR-116's headline, and a later package that
-/// removes proof sites (W11's backend half) has to be measured against a figure
-/// that was checked rather than remembered.
+/// **ADR-116's headline has no denominator left in this loop, and that is the
+/// consequence to carry forward rather than a tidy ending.** W6 traded three
+/// ALU operations for one L1 load *per descriptor proof*; at zero proofs it is
+/// worth zero here. It is not worth zero everywhere — a proof site survives
+/// wherever the value came out of the runtime, which `provable`'s suite census
+/// counts at 122 sites across the eight benchmarks — but any figure quoted for
+/// W6 or W7 "per iteration of the sample loop" is now a figure about a loop that
+/// no longer contains the thing being measured. Handover 28 §2 is the record of
+/// this repo misreading two such numbers; this note exists so the third is not
+/// misread the same way.
 #[test]
-fn the_sample_loop_proves_a_scalars_descriptor_five_times_per_iteration() {
+fn the_sample_loop_proves_no_scalars_descriptor_at_all() {
     let lowered = lower_src_to_mir(
         "var i = 0\n\
          var acc = 0\n\
@@ -102,15 +110,29 @@ fn the_sample_loop_proves_a_scalars_descriptor_five_times_per_iteration() {
     // per-iteration count.
     assert_eq!(
         census.count(InstKind::ExtractScalar(ScalarKind::Int)),
-        5,
-        "three of the builder's eight `Int` reloads were interior nodes of an \
-         expression tree and are forwarded away (ADR-120): {census:?}"
+        0,
+        "ADR-120 forwarded away the three interior nodes of the expression \
+         trees, and ADR-121 removed the other five by promoting `i`, `acc` and \
+         `limit` to `Scalar` slots — there is no object left to read: {census:?}"
     );
     assert_eq!(
         census.count(InstKind::ExtractScalar(ScalarKind::Bool)),
         0,
         "the `while` condition used to unbox the `Bool` it had just boxed; \
          ADR-120's terminator rewrite means it never boxes it: {census:?}"
+    );
+    // The other half of the same claim, and the control for it: a census that
+    // counts zero reloads because the loop stopped *computing* rather than
+    // stopped boxing would pass the assertion above and be a catastrophe.
+    assert_eq!(
+        census.count(InstKind::IntBinOp),
+        3,
+        "`i * 3`, `acc + …` and `i + 1` — the arithmetic is untouched: {census:?}"
+    );
+    assert_eq!(
+        census.count(InstKind::Materialize(ScalarKind::Int)),
+        0,
+        "and nothing is boxed on the way back: {census:?}"
     );
     assert_eq!(
         census.count(InstKind::CheckFault),

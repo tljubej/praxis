@@ -1,12 +1,30 @@
 //! The mid-level IR data structures (§13.5, ADR-015).
 //!
 //! MIR is deliberately **not SSA**: it is a sea of basic blocks operating over
-//! named [`Local`] slots. Every language value lives in a [`Local`] of kind
-//! [`LocalKind::Gc`] (holding a uniform `GcRef`); transient scalar payloads
-//! (an `i64` loaded out of an `Int` object for a local computation) live in a
-//! [`LocalKind::Scalar`] and **must not** survive a GC safepoint — the lowering
-//! materializes a fresh `GcRef` from them before any safepoint, call, store, or
-//! return (§10.3). The Cranelift backend turns this slot-based CFG into SSA.
+//! named [`Local`] slots. A language value lives either in a [`Local`] of kind
+//! [`LocalKind::Gc`] (holding a uniform `GcRef`) or — once [`crate::promote`]
+//! has chosen the slot's representation — in a [`LocalKind::Scalar`] holding the
+//! payload word itself (ADR-121). The Cranelift backend turns this slot-based
+//! CFG into SSA.
+//!
+//! **A `Scalar` local may cross a GC safepoint, and this paragraph used to say
+//! it may not.** The rule the lowering actually follows is the `Gc`-side one:
+//! the collector dereferences everything the shadow frame holds, so no raw word
+//! may enter a rootable slot (P0-03), and [`crate::verify`]'s `RootIsNotGc` and
+//! `MoveGcFromScalar` are that rule stated directly. The converse — a *payload*
+//! outliving a safepoint — was never the same claim and was never checked:
+//! `ScalarLiveAcrossSafepoint` is unimplemented on purpose, and
+//! [`crate::verify`]'s header carries the argument, which is that a scalar is a
+//! **copy** of a payload and so cannot dangle when the object it was loaded from
+//! is collected. The eager `lower_seq_*` accumulators have depended on that
+//! since they were written. ADR-121 depends on it deliberately rather than
+//! incidentally, which is why the sentence is now stated instead of contradicted.
+//!
+//! The two transitions between the kinds are unchanged: [`Inst::Materialize`]
+//! (`Scalar` → `Gc`, an allocation and therefore a safepoint) and
+//! [`Inst::ExtractScalar`] (`Gc` → `Scalar`, a guarded payload read).
+//! [`Inst::MoveGc`] and [`Inst::MoveScalar`] each move a word within one kind,
+//! and neither crosses.
 //!
 //! The fault protocol (§10.4) is woven in: a [`Inst::CheckFault`] tests the
 //! context's `pending_fault` and diverts to a [`Terminator::Fault`] edge when a
@@ -504,6 +522,42 @@ pub enum Inst {
     /// [`Materialize`](Self::Materialize) is the one legal `Scalar` → `Gc`
     /// transition.
     MoveGc { dst: LocalId, src: LocalId },
+    /// Copy one `Scalar` local into another (a move; no allocation).
+    /// **`Scalar` → `Scalar` only**, and of one `kind`: this is [`MoveGc`]'s
+    /// counterpart on the other side of the boundary, and neither instruction
+    /// crosses it. [`Materialize`](Self::Materialize) and
+    /// [`ExtractScalar`](Self::ExtractScalar) remain the only two transitions.
+    ///
+    /// [`MoveGc`]: Self::MoveGc
+    ///
+    /// **Why this exists, when [`crate::forward`] deliberately did without it.**
+    /// That pass is block-local and rewrites a *consuming instruction's operand
+    /// field*, so it never needs to move a word between two slots; ADR-120
+    /// records refusing this variant for exactly that reason. [`crate::promote`]
+    /// is whole-function and cannot use that mechanism, because the slot it
+    /// promotes is **assigned** — `acc = acc + i` lowers to a `MoveGc` into the
+    /// binding's existing slot, and MIR is not SSA, so a `LocalId` does not name
+    /// one value and operand rewriting has nothing to rewrite to. Promoting that
+    /// slot's *representation* turns its `MoveGc` into this (ADR-121).
+    ///
+    /// **Not a safepoint and cannot fault**: it allocates nothing and calls
+    /// nothing, so it carries no [`RootSlots`] and no
+    /// [`DebugSlots`] and no [`CheckFault`](Self::CheckFault) follows. The
+    /// backend emits one `def_var` of a `use_var`, which Cranelift's copy
+    /// propagation removes outright — the instruction costs nothing in the
+    /// emitted code, which is what makes a promoted slot free rather than merely
+    /// cheaper.
+    ///
+    /// It *does* define a local, so [`crate::liveness::defs`] names it and the
+    /// backend's `store_debug_defs` writes the debug slot of every box promotion
+    /// elided in its favour. That is the whole of how a promoted `var` stays
+    /// renderable in a crash snapshot (ADR-120 part 2's mechanism, ADR-121's
+    /// second reader).
+    MoveScalar {
+        dst: LocalId,
+        src: LocalId,
+        kind: ScalarKind,
+    },
     /// Read capture slot `index` out of a closure's environment into a `Gc`
     /// local (M7, §4.10). Emitted once per capture in a synthetic closure
     /// function's prologue.
@@ -664,6 +718,7 @@ impl Inst {
             | Inst::FloatNeg { .. }
             | Inst::FloatCmp { .. }
             | Inst::MoveGc { .. }
+            | Inst::MoveScalar { .. }
             | Inst::CheckFault { .. } => None,
         }
     }
@@ -918,6 +973,27 @@ impl CollectionInit {
                 height,
                 fill,
             } => vec![*width, *height, *fill],
+        }
+    }
+
+    /// The same operands, by mutable reference, for
+    /// [`crate::liveness::uses_mut`] and therefore for [`crate::promote`].
+    ///
+    /// Written directly under [`operands`](Self::operands) and matching it arm
+    /// for arm, because "the one statement of the fact" above is only true while
+    /// the two agree: a variant this misses is an operand promotion rewrites the
+    /// *reader* of and not the collection construction that also names it,
+    /// leaving one instruction holding a `LocalId` whose slot has changed kind.
+    /// Neither match has a `_` arm, so a new variant is a build error in both.
+    pub fn operands_mut(&mut self) -> Vec<&mut LocalId> {
+        match self {
+            CollectionInit::Empty => Vec::new(),
+            CollectionInit::Filled { count, fill } => vec![count, fill],
+            CollectionInit::FilledGrid {
+                width,
+                height,
+                fill,
+            } => vec![width, height, fill],
         }
     }
 }

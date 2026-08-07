@@ -570,7 +570,15 @@ mod tests {
 
     use super::*;
     use crate::ir::LocalKind;
-    use crate::test_support::{lower_src_to_mir, Census, InstKind, Lowered};
+    // **The forwarded door, not the finished one** (ADR-121). Every number in
+    // this module is a statement about what *this* pass leaves behind, and
+    // several of the doc comments below say so in as many words — "the two that
+    // remain are `x` and `y`, which are W8-S1's". Promotion then removes them,
+    // so read through `lower_src_to_mir` these tests would assert ADR-121's
+    // output while claiming to measure ADR-120's, and reverting promotion would
+    // present as a failure here. The alias keeps the call sites unedited.
+    use crate::test_support::lower_src_to_mir_forwarded as lower_src_to_mir;
+    use crate::test_support::{Census, InstKind, Lowered};
     use crate::verify::verify;
 
     const INT_BOX: InstKind = InstKind::Materialize(ScalarKind::Int);

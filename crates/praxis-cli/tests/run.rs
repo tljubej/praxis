@@ -1908,3 +1908,80 @@ fn a_hole_renders_an_int_and_plus_still_refuses_one() {
         "only the `+` is an error; the hole above it is not: {rendered}"
     );
 }
+
+/// **ADR-121's one observable consequence, and exactly how far it reaches.**
+///
+/// `DynamicKey::eq` opens with a pointer-identity fast path, which is reflexive
+/// for every type whose `equals` is — and `Float`'s is not, because IEEE-754
+/// says NaN is not equal to itself. So whether two NaNs deduplicate as `Set`
+/// members has always depended on whether they arrived as one object or two,
+/// and the language has always answered the two spellings differently: two
+/// `0.0 / 0.0` expressions build two objects and do not deduplicate, while two
+/// reads of one binding hand over one object and do.
+///
+/// Promotion turns a promoted `Float` into a `Scalar` slot materialized afresh
+/// at each use, which moves the second spelling onto the first's answer. **It
+/// does that only where the profitability rule promotes**, and this test is
+/// both sides of that boundary:
+///
+/// * `s` — a NaN bound and inserted twice, with no arithmetic. `promote`'s rule
+///   sees one box removed against two added and declines, so the value stays
+///   one object and the set still answers **1**. This is the shape a program
+///   that uses a float as a key actually has, which is why the change is far
+///   narrower than "promotion breaks NaN keys".
+/// * `u` — the same NaN carried through a loop first. That makes it worth
+///   promoting, the two `insert`s hand over two objects, and the set answers
+///   **2**. This is the case that changed.
+///
+/// Both numbers are asserted rather than one, because the pair is the finding:
+/// a program's answer here now depends on whether an optimizer promoted a slot.
+/// ADR-121 records that, records the two fixes that would make the question moot
+/// (gating the fast path on the descriptor's reflexivity, or refusing `Float` as
+/// a `CapKind::HashStable` type the way Rust refuses `f64: Hash`), and records
+/// that neither is in this package.
+#[test]
+fn a_nan_key_deduplicates_or_not_depending_on_whether_its_slot_was_promoted() {
+    let dir = scratch_dir();
+    let src = dir.join("nan-keys.px");
+    std::fs::write(
+        &src,
+        "fn main() {\n\
+         \x20   var zero = 0.0\n\
+         \x20   var nan = zero / zero\n\
+         \x20   var s = Set()\n\
+         \x20   s.insert(nan)\n\
+         \x20   s.insert(nan)\n\
+         \x20   out(s.len())\n\
+         \x20   var t = Set()\n\
+         \x20   t.insert(0.0 / 0.0)\n\
+         \x20   t.insert(0.0 / 0.0)\n\
+         \x20   out(t.len())\n\
+         \x20   var x = zero / zero\n\
+         \x20   var i = 0\n\
+         \x20   while i < 3 {\n\
+         \x20       x = x + 0.0\n\
+         \x20       i = i + 1\n\
+         \x20   }\n\
+         \x20   var u = Set()\n\
+         \x20   u.insert(x)\n\
+         \x20   u.insert(x)\n\
+         \x20   out(u.len())\n\
+         }\n",
+    )
+    .expect("write the source");
+
+    let output = Command::new(bin_path())
+        .args(["run", "--debug=never", "--input", "/dev/null"])
+        .arg(&src)
+        .output()
+        .expect("failed to run praxis");
+    let _ = std::fs::remove_file(&src);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "1\n2\n2\n",
+        "`s` is unpromoted and unchanged, `t` never deduplicated, and `u` is \
+         the promoted case that moved from 1 to 2: {stderr}"
+    );
+}

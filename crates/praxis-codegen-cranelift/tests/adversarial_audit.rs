@@ -1995,9 +1995,21 @@ fn small_scalars_are_extracted_at_their_own_width() {
     let bools = comparison_shapes_for(
         "fn main() -> Bool {\n  var a = 1 == 1\n  var b = 2 == 2\n  a == b\n}\n",
     );
+    // Since ADR-121 the strongest form of this is what actually happens: `a` and
+    // `b` are promoted to `Scalar(Bool)` slots, so the comparison is an
+    // `IntCmp` over two raw words and there is **no** payload read to get the
+    // width of. The property under test is "a `Bool` is never read as an
+    // eight-byte `Int`", and no read at all satisfies it more completely than a
+    // one-byte read does — so the assertion is the absence of the defect, not
+    // the presence of the instruction that used to avoid it.
     assert!(
-        bools.contains("extract:Bool"),
-        "a Bool comparison loads a Bool: {bools:?}"
+        !bools.contains("extract:Int"),
+        "a Bool is never read as an eight-byte Int: {bools:?}"
+    );
+    assert!(
+        bools.contains("extract:Bool") || !bools.iter().any(|s| s.starts_with("extract:")),
+        "a Bool comparison reads the payload at its own width, or reads no \
+         payload because promotion left no object to read: {bools:?}"
     );
 }
 
@@ -2017,6 +2029,17 @@ fn small_scalars_are_extracted_at_their_own_width() {
 /// objects and the margin below stops being a margin. The offset keeps all
 /// three thousand elements real allocations, which is what makes "freed almost
 /// nothing" a statement about the shadow slot rather than about interning.
+///
+/// **The second loop has to allocate, and saying so is ADR-121's doing.** Its
+/// job is to run the collector while `main`'s frame is live — a slot that is
+/// never scanned cannot be observed to have been nulled — and it used to do
+/// that as a side effect of `sum = sum + j` boxing a fresh out-of-range `Int`
+/// per iteration. Promotion turns both `sum` and `j` into `Scalar` slots, so
+/// that loop became pure register arithmetic that allocates nothing, no
+/// collection ran in *either* program, and the two heaps came out at 3003 and
+/// 3004 live objects — a difference of one, and the test read it as `xs` still
+/// being rooted. The pressure is now a `Vec` per iteration that dies at the end
+/// of it, which is allocation no scalar optimization can remove.
 #[test]
 fn a_dead_local_stops_being_reachable_from_its_frame() {
     const FILL_AND_LOOP: &str = "\
@@ -2030,7 +2053,9 @@ fn main() -> Int {
   var sum = 0
   var j = 0
   while j < 20000 {
-    sum = sum + j
+    var garbage = Vec()
+    garbage.push(j + 2000)
+    sum = sum + garbage.len()
     j = j + 1
   }
   sum";

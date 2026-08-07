@@ -772,6 +772,43 @@ unsafe fn heap<'a>(ctx: *mut RuntimeContext) -> &'a Heap {
 /// the parser interpreter, and that the other four owners were invisible to
 /// automatic GC even when a frame was pushed (P0-06).
 #[inline]
+/// Charge the pacer for a collection's buffer growing (ADR-121).
+///
+/// `before` and `after` are the same payload's `owned_bytes()`, read either
+/// side of a mutation that may reallocate. Nothing is charged when the buffer
+/// did not grow, which is the overwhelmingly common case: amortized doubling
+/// means a `push` reallocates once every *n* pushes, so this is a compare and a
+/// not-taken branch on the hot path.
+///
+/// # Why every growing wrapper has to call this
+///
+/// `Heap::alloc_raw` charges `stride + owned_bytes_of(payload)` once, at
+/// construction, and left later growth uncharged on a premise its own comment
+/// states: "its elements are themselves paced allocations, so the residual
+/// under-count is the spine, not the contents." **ADR-121 falsified that.**
+/// When every scalar the program computed was a heap object, an
+/// allocation-light program did not exist — the arithmetic feeding a `push`
+/// paced the collector even when the `push` did not. Promotion deletes exactly
+/// those allocations, and `bfs` fell from 41 collections to 6 with a *smaller*
+/// GC page heap and a peak resident set of 224 MiB against 61.
+///
+/// So the rule is now: **a wrapper that can grow a buffer charges the growth.**
+/// `growing_wrappers_charge_the_pacer` enumerates the ABI and fails if a new
+/// one appears without a charge, because the failure mode is silent — a program
+/// that simply stops collecting, which reads as a leak nobody connects to the
+/// wrapper that was added.
+fn charge_growth(ctx: *mut RuntimeContext, before: usize, after: usize) {
+    let Some(grown) = after.checked_sub(before).filter(|g| *g != 0) else {
+        return;
+    };
+    if ctx.is_null() {
+        return;
+    }
+    // SAFETY: every caller is inside `abi_guard!`, which established that `ctx`
+    // is live and wired; the null check above covers the guard's own edge.
+    unsafe { heap(ctx).charge_owned_growth(grown) };
+}
+
 unsafe fn maybe_collect(ctx: *mut RuntimeContext) {
     if ctx.is_null() {
         return;
@@ -3244,7 +3281,13 @@ pub unsafe extern "C" fn praxis_vec_push(
         if !unsafe { adopt_or_reject(ctx, &mut p.element_descriptor, value) } {
             return unsafe { unit_sentinel(ctx) };
         }
+        // Charge the spine when it grows (ADR-121; see
+        // `Heap::charge_owned_growth`). Measured either side of the mutation
+        // through the payload's own `owned_bytes`, so the growth policy stays
+        // `RawVec`'s and the size formula stays the descriptor's.
+        let before = p.owned_bytes();
         p.items.push(value);
+        charge_growth(ctx, before, p.owned_bytes());
         unsafe { unit_sentinel(ctx) }
     })
 }
@@ -3892,7 +3935,9 @@ pub unsafe extern "C" fn praxis_deque_push_front(
         if !unsafe { adopt_or_reject(ctx, &mut p.element_descriptor, value) } {
             return unsafe { unit_sentinel(ctx) };
         }
+        let before = p.owned_bytes();
         p.items.push_front(value);
+        charge_growth(ctx, before, p.owned_bytes());
         unsafe { unit_sentinel(ctx) }
     })
 }
@@ -3915,7 +3960,9 @@ pub unsafe extern "C" fn praxis_deque_push_back(
         if !unsafe { adopt_or_reject(ctx, &mut p.element_descriptor, value) } {
             return unsafe { unit_sentinel(ctx) };
         }
+        let before = p.owned_bytes();
         p.items.push_back(value);
+        charge_growth(ctx, before, p.owned_bytes());
         unsafe { unit_sentinel(ctx) }
     })
 }
@@ -4149,7 +4196,9 @@ pub unsafe extern "C" fn praxis_map_insert(
             }
             Some(_) => {}
         }
+        let before = p.owned_bytes();
         p.entries.insert(DynamicKey::new(key), value);
+        charge_growth(ctx, before, p.owned_bytes());
         unsafe { unit_sentinel(ctx) }
     })
 }
@@ -4419,7 +4468,9 @@ pub unsafe extern "C" fn praxis_set_insert(
         unsafe { maybe_collect(ctx) };
         let scope = unsafe { NativeScope::new(ctx) };
         let p = unsafe { set_payload_mut(scope.root(set)) };
+        let before = p.owned_bytes();
         p.entries.insert(DynamicKey::new(value));
+        charge_growth(ctx, before, p.owned_bytes());
         unsafe { unit_sentinel(ctx) }
     })
 }
@@ -4616,7 +4667,9 @@ pub unsafe extern "C" fn praxis_counter_set(
         unsafe { maybe_collect(ctx) };
         let scope = unsafe { NativeScope::new(ctx) };
         let p = unsafe { counter_payload_mut(scope.root(counter)) };
+        let before = p.owned_bytes();
         p.entries.insert(DynamicKey::new(key), value);
+        charge_growth(ctx, before, p.owned_bytes());
         unsafe { unit_sentinel(ctx) }
     })
 }
@@ -4752,10 +4805,12 @@ pub unsafe extern "C" fn praxis_max_heap_push(
         unsafe { maybe_collect(ctx) };
         let scope = unsafe { NativeScope::new(ctx) };
         let p = unsafe { max_heap_payload_mut(scope.root(heap_ref)) };
+        let before = p.owned_bytes();
         p.items.push(HeapEntry {
             value,
             descriptor: value.descriptor(),
         });
+        charge_growth(ctx, before, p.owned_bytes());
         unsafe { unit_sentinel(ctx) }
     })
 }
@@ -4888,10 +4943,12 @@ pub unsafe extern "C" fn praxis_min_heap_push(
         unsafe { maybe_collect(ctx) };
         let scope = unsafe { NativeScope::new(ctx) };
         let p = unsafe { min_heap_payload_mut(scope.root(heap_ref)) };
+        let before = p.owned_bytes();
         p.items.push(std::cmp::Reverse(HeapEntry {
             value,
             descriptor: value.descriptor(),
         }));
+        charge_growth(ctx, before, p.owned_bytes());
         unsafe { unit_sentinel(ctx) }
     })
 }
@@ -5035,7 +5092,12 @@ pub unsafe extern "C" fn praxis_bitset_insert(
             unsafe { set_fault(ctx, RaisedFault::INVALID_SIZE) };
             return unsafe { unit_sentinel(ctx) };
         };
+        // A `BitSet` grows its word vector to reach the index, so an insert far
+        // past the current high-water is a large uncharged allocation — the
+        // shape `bfs` has, one visited-set per search.
+        let before = p.owned_bytes();
         p.insert(index);
+        charge_growth(ctx, before, p.owned_bytes());
         unsafe { unit_sentinel(ctx) }
     })
 }
@@ -6965,12 +7027,12 @@ mod tests {
     use crate::shadow_stack::{push_frame, SlotCount};
 
     /// A wired context backed by a real runtime.
-    fn wired_ctx(rt: &mut Runtime) -> *mut RuntimeContext {
+    pub(super) fn wired_ctx(rt: &mut Runtime) -> *mut RuntimeContext {
         let ctx = Box::leak(Box::new(rt.context()));
         ctx as *mut RuntimeContext
     }
 
-    unsafe fn drop_ctx(ctx: *mut RuntimeContext) {
+    pub(super) unsafe fn drop_ctx(ctx: *mut RuntimeContext) {
         // Reclaim the leaked Box. The runtime outlives this call in tests.
         let _ = unsafe { Box::from_raw(ctx) };
     }
@@ -11112,4 +11174,110 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
         // SAFETY: ctx came from `wired_ctx` and is not used again.
         unsafe { drop_ctx(ctx) };
     }
+}
+
+#[cfg(test)]
+mod growth_charging_tests {
+    //! **Every wrapper that can grow a collection's buffer charges the pacer**
+    //! (ADR-121). See [`super::charge_growth`] for why this stopped being
+    //! optional.
+    //!
+    //! The values pushed are all inside `small_int`'s interned range, and that
+    //! is the whole design of these tests rather than a convenience: an interned
+    //! `Int` is an immortal the allocator never charges for, so the *only* thing
+    //! that can move `bytes_since_collect` here is the spine. Push
+    //! `UNINTERNED + i` instead and every one of these passes whether or not the
+    //! growth is charged, because the elements would be paying for it — which is
+    //! precisely the premise `Heap::alloc_raw` was relying on and ADR-121 broke.
+
+    use super::tests::{drop_ctx, wired_ctx};
+    use super::*;
+    use crate::Runtime;
+
+    /// Reset the counter, run `body`, and answer what it charged.
+    fn charged_by(rt: &Runtime, body: impl FnOnce()) -> usize {
+        // A collection zeroes the counter, so take a reading either side and
+        // require the run not to have collected; the pushes below are far too
+        // few to reach any threshold.
+        let before = rt.heap().bytes_since_collect();
+        body();
+        rt.heap().bytes_since_collect().saturating_sub(before)
+    }
+
+    /// Enough pushes that amortized doubling must have reallocated at least
+    /// once, whatever the initial capacity is.
+    const PUSHES: i64 = 256;
+
+    macro_rules! charges_its_spine {
+        ($name:ident, $make:expr, $push:expr) => {
+            #[test]
+            fn $name() {
+                let mut rt = Runtime::new();
+                let ctx = wired_ctx(&mut rt);
+                // SAFETY: `ctx` is wired to `rt` for the whole test.
+                unsafe {
+                    let subject = $make(ctx);
+                    let charged = charged_by(&rt, || {
+                        for i in 0..PUSHES {
+                            $push(ctx, subject, i);
+                        }
+                    });
+                    assert!(
+                        charged > 0,
+                        "growing this collection charged the pacer nothing, so a \
+                         program whose memory is this buffer would never collect \
+                         (ADR-121); every value pushed is an interned immortal, so \
+                         the spine is the only thing that could have charged"
+                    );
+                    drop_ctx(ctx);
+                }
+            }
+        };
+    }
+
+    charges_its_spine!(
+        vec_push_charges_its_spine,
+        |c| praxis_vec_new(c, &crate::scalars::INT),
+        |c, s, i| { praxis_vec_push(c, s, praxis_alloc_int(c, i)) }
+    );
+    charges_its_spine!(
+        deque_push_back_charges_its_spine,
+        |c| praxis_deque_new(c, &crate::scalars::INT),
+        |c, s, i| praxis_deque_push_back(c, s, praxis_alloc_int(c, i))
+    );
+    charges_its_spine!(
+        deque_push_front_charges_its_spine,
+        |c| praxis_deque_new(c, &crate::scalars::INT),
+        |c, s, i| praxis_deque_push_front(c, s, praxis_alloc_int(c, i))
+    );
+    charges_its_spine!(
+        map_insert_charges_its_spine,
+        |c| praxis_map_new(c, &crate::scalars::INT),
+        |c, s, i| praxis_map_insert(c, s, praxis_alloc_int(c, i), praxis_alloc_int(c, i))
+    );
+    charges_its_spine!(
+        set_insert_charges_its_spine,
+        |c| praxis_set_new(c, &crate::scalars::INT),
+        |c, s, i| praxis_set_insert(c, s, praxis_alloc_int(c, i))
+    );
+    charges_its_spine!(
+        counter_set_charges_its_spine,
+        |c| praxis_counter_new(c, &crate::scalars::INT),
+        |c, s, i| praxis_counter_set(c, s, praxis_alloc_int(c, i), praxis_alloc_int(c, i))
+    );
+    charges_its_spine!(
+        bitset_insert_charges_its_spine,
+        |c| praxis_bitset_new(c),
+        |c, s, i| praxis_bitset_insert(c, s, praxis_alloc_int(c, i))
+    );
+    charges_its_spine!(
+        max_heap_push_charges_its_spine,
+        |c| praxis_max_heap_new(c, &crate::scalars::INT),
+        |c, s, i| praxis_max_heap_push(c, s, praxis_alloc_int(c, i))
+    );
+    charges_its_spine!(
+        min_heap_push_charges_its_spine,
+        |c| praxis_min_heap_new(c, &crate::scalars::INT),
+        |c, s, i| praxis_min_heap_push(c, s, praxis_alloc_int(c, i))
+    );
 }
