@@ -566,6 +566,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::VecIsEmpty => praxis_vec_is_empty as *const (),
         RuntimeSymbol::VecJoin => praxis_vec_join as *const (),
         RuntimeSymbol::VecLen => praxis_vec_len as *const (),
+        RuntimeSymbol::VecChunks => praxis_vec_chunks as *const (),
         RuntimeSymbol::VecFilled => praxis_vec_filled as *const (),
         RuntimeSymbol::VecNew => praxis_vec_new as *const (),
         RuntimeSymbol::VecPush => praxis_vec_push as *const (),
@@ -574,6 +575,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::VecSortedByKey => praxis_vec_sorted_by_key as *const (),
         RuntimeSymbol::VecToText => praxis_vec_to_text as *const (),
         RuntimeSymbol::VecUnique => praxis_vec_unique as *const (),
+        RuntimeSymbol::VecWindows => praxis_vec_windows as *const (),
         RuntimeSymbol::WriteStdout => praxis_write_stdout as *const (),
     };
     ptr as *const u8
@@ -3694,6 +3696,162 @@ pub unsafe extern "C" fn praxis_vec_reversed(ctx: *mut RuntimeContext, vec: GcRe
         let p = unsafe { vec_payload(vec) };
         let items: Vec<GcRef> = p.items.iter().rev().copied().collect();
         unsafe { vec_of(ctx, p.element_descriptor, items.into_iter()) }
+    })
+}
+
+/// The group size `chunks(n)` and `windows(n)` share, or `None` when `n` names no
+/// group at all (ADR-149).
+///
+/// **The only thing either wrapper refuses.** A run of zero elements is not a
+/// short run — chunking a non-empty sequence into them has no finite answer, and
+/// sliding one along it has no useful one — and a negative run names nothing.
+/// Every other `n` has an answer, including one larger than the receiver: a
+/// `chunks` wider than the sequence is one short chunk, a `windows` wider than it
+/// is no windows. So this returns an `Option` of a size rather than clamping to
+/// one, and the two callers spell those two answers themselves.
+///
+/// There is no upper bound here and none is missing. Both results are *shorter*
+/// than the receiver — one group per start position at most — so neither can
+/// ask for an extent [`VecExtent`](crate::collections::VecExtent) would refuse,
+/// which is the bound `praxis_vec_filled` needs and these do not.
+fn group_size(n: i64) -> Option<usize> {
+    if n <= 0 {
+        return None;
+    }
+    usize::try_from(n).ok()
+}
+
+/// The `Vec[Vec[T]]` both groupings answer, built from the half-open source
+/// ranges `groups` names (ADR-149).
+///
+/// **The outer label is `collections::VEC` at every length, and it is *passed*
+/// rather than inferred** (ADR-149 decision 1). Which label belongs there is not
+/// this wrapper's choice — `outer.push(inner)` builds a `Vec[Vec[T]]` today and
+/// `adopt_or_reject` labels it `VEC`, so anything else would disagree with
+/// `push`. What is chosen here is only that it is written down: letting
+/// [`vec_of`] infer it from the first group would answer `VEC` for
+/// `[1].chunks(2)` and *null* for `[].chunks(2)` — one type with two labels, and
+/// the null is the one `vec_format` renders as `[]` (P0-11, REP-41).
+///
+/// That is [`praxis_grid_positions`]'s argument, not a new one: it passes
+/// `&tuples::TUPLE` for the same reason, and `Grid(0, 0, 1).positions()` is the
+/// same empty case. Naming the label is what a wrapper does whenever its result's
+/// element kind is not its receiver's.
+///
+/// The inner labels *are* the receiver's own, passed through unchanged the way
+/// `praxis_vec_reversed` passes its one through, null included.
+///
+/// # Safety
+/// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`; every
+/// range `groups` yields must lie within its length.
+unsafe fn vec_of_groups(
+    ctx: *mut RuntimeContext,
+    vec: GcRef,
+    groups: impl Iterator<Item = (usize, usize)>,
+) -> GcRef {
+    // SAFETY: caller guarantees `vec` is a valid Vec.
+    let element_descriptor = unsafe { vec_payload(vec) }.element_descriptor;
+    let outer = unsafe { praxis_vec_new(ctx, &crate::collections::VEC as *const _) };
+    let scope = unsafe { NativeScope::new(ctx) };
+    let op = unsafe { vec_payload_mut(scope.root(outer)) };
+    for (start, end) in groups {
+        // The elements are read out of the receiver, which the caller's shadow
+        // frame roots across this call, so the untraced `Vec<GcRef>` below holds
+        // nothing a collection inside `vec_of` could reclaim — the receiver
+        // holds every one of them too. That is `praxis_vec_unique`'s argument at
+        // a second site, and it is why the *groups* are what need rooting and
+        // the items are not: an inner `Vec` is reachable from nothing until it
+        // is pushed, which is why it is pushed before the next one is built.
+        //
+        // SAFETY: caller guarantees `vec` is a valid Vec and that `start..end`
+        // lies within its length.
+        let items: Vec<GcRef> = unsafe { vec_payload(vec) }.items[start..end].to_vec();
+        let inner = unsafe { vec_of(ctx, element_descriptor, items.into_iter()) };
+        op.items.push(inner);
+    }
+    outer
+}
+
+/// `seq.chunks(n)` — these elements in consecutive non-overlapping runs of `n`,
+/// the last short if the length does not divide (ADR-149). The receiver is not
+/// touched.
+///
+/// `[1, 2, 3, 4, 5].chunks(2)` is `[[1, 2], [3, 4], [5]]`. An empty receiver
+/// answers `[]` at any size, and an `n` at or above the length answers one chunk
+/// holding everything.
+///
+/// Raises `FaultKind::InvalidSize` and answers Unit when `n` is not positive —
+/// [`group_size`] has the reason, and it is the wrapper's whole faulting
+/// surface. It reads **no descriptor callback**, so unlike `sorted` there is no
+/// element it can be handed that it cannot group.
+///
+/// # Safety
+/// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef` and `n` a
+/// valid `Int` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_vec_chunks(
+    ctx: *mut RuntimeContext,
+    vec: GcRef,
+    n: GcRef,
+) -> GcRef {
+    abi_guard!("praxis_vec_chunks", ctx, {
+        // SAFETY: caller guarantees `n` is a valid Int.
+        let Some(size) = group_size(unsafe { int_payload(n) }) else {
+            unsafe { set_fault(ctx, RaisedFault::INVALID_SIZE) };
+            return unsafe { unit_sentinel(ctx) };
+        };
+        // SAFETY: caller guarantees `vec` is a valid Vec.
+        let len = unsafe { vec_payload(vec) }.items.len();
+        // Every `size`th position starts a chunk; the last one stops at the end
+        // rather than past it, which is the short tail.
+        let groups = (0..len)
+            .step_by(size)
+            .map(move |s| (s, (s + size).min(len)));
+        unsafe { vec_of_groups(ctx, vec, groups) }
+    })
+}
+
+/// `seq.windows(n)` — every consecutive run of exactly `n`, each starting one
+/// element after the last (ADR-149). The receiver is not touched.
+///
+/// `[1, 2, 3, 4].windows(2)` is `[[1, 2], [2, 3], [3, 4]]`. Elements are shared,
+/// not copied: the `2` in the first window and the `2` in the second are one
+/// object, which is the language's reference semantics rather than a rule of
+/// this wrapper.
+///
+/// **A window that does not fit is dropped rather than shortened**, which is the
+/// one place this and [`praxis_vec_chunks`] answer differently: `[1, 2].windows(5)`
+/// is `[]`, because a run of five is a run of five. It is not the fault below
+/// arriving late — "which runs of five are there" has an answer for a sequence
+/// of two, and that answer is none.
+///
+/// Raises `FaultKind::InvalidSize` and answers Unit when `n` is not positive,
+/// for [`praxis_vec_chunks`]'s reason.
+///
+/// # Safety
+/// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef` and `n` a
+/// valid `Int` `GcRef`.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_vec_windows(
+    ctx: *mut RuntimeContext,
+    vec: GcRef,
+    n: GcRef,
+) -> GcRef {
+    abi_guard!("praxis_vec_windows", ctx, {
+        // SAFETY: caller guarantees `n` is a valid Int.
+        let Some(size) = group_size(unsafe { int_payload(n) }) else {
+            unsafe { set_fault(ctx, RaisedFault::INVALID_SIZE) };
+            return unsafe { unit_sentinel(ctx) };
+        };
+        // SAFETY: caller guarantees `vec` is a valid Vec.
+        let len = unsafe { vec_payload(vec) }.items.len();
+        // Written as a subtraction guarded by its own comparison rather than a
+        // `saturating_sub`: `len - size` saturating to zero would answer *one*
+        // window for a receiver too short to hold any, and the empty answer is
+        // the whole point of the branch.
+        let starts = if size <= len { len - size + 1 } else { 0 };
+        let groups = (0..starts).map(move |s| (s, s + size));
+        unsafe { vec_of_groups(ctx, vec, groups) }
     })
 }
 
@@ -7777,6 +7935,226 @@ mod tests {
             );
             assert_eq!(praxis_vec_reversed(ctx, closures).as_vec().len(), 2);
             assert!(!rt.has_pending_fault(), "reversal asks for no callback");
+
+            praxis_vec_sorted(ctx, closures);
+            assert!(rt.has_pending_fault(), "ordering still asks for `compare`");
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// The shape of both groupings, read back as nested `Int`s.
+    ///
+    /// # Safety
+    /// `answer` must be a valid `Vec[Vec[Int]]` `GcRef`.
+    unsafe fn groups_of_int(answer: GcRef) -> Vec<Vec<i64>> {
+        answer
+            .as_vec()
+            .iter()
+            .map(|inner| inner.as_vec().iter().map(|r| r.as_int()).collect())
+            .collect()
+    }
+
+    /// **ADR-149.** `chunks` partitions: every element appears once, in order,
+    /// and a length the size does not divide leaves a *short last chunk* rather
+    /// than dropping the tail or padding it.
+    #[test]
+    fn vec_chunks_partitions_and_keeps_a_short_tail() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let ints: Vec<GcRef> = (1..=5).map(|n| rt.alloc_int(n)).collect();
+            let source = rt.alloc_vec(&scalars::INT, ints);
+
+            let two = rt.alloc_int(2);
+            let answer = praxis_vec_chunks(ctx, source, two);
+            assert!(!rt.has_pending_fault());
+            assert_eq!(groups_of_int(answer), vec![vec![1, 2], vec![3, 4], vec![5]]);
+
+            // A size that divides leaves no short chunk, which is the same rule
+            // and is worth pinning beside the one that does.
+            let five = rt.alloc_int(5);
+            assert_eq!(
+                groups_of_int(praxis_vec_chunks(ctx, source, five)),
+                vec![vec![1, 2, 3, 4, 5]],
+            );
+
+            // Wider than the receiver is not a fault: it is one short chunk.
+            let nine = rt.alloc_int(9);
+            assert_eq!(
+                groups_of_int(praxis_vec_chunks(ctx, source, nine)),
+                vec![vec![1, 2, 3, 4, 5]],
+            );
+
+            let still: Vec<i64> = source.as_vec().iter().map(|r| r.as_int()).collect();
+            assert_eq!(still, vec![1, 2, 3, 4, 5], "the receiver is not touched");
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **ADR-149.** `windows` slides by one and keeps only the runs that fit, so
+    /// a receiver shorter than the size answers `[]` rather than one short run —
+    /// the one place the two groupings differ.
+    #[test]
+    fn vec_windows_slide_by_one_and_drop_a_run_that_does_not_fit() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let ints: Vec<GcRef> = (1..=4).map(|n| rt.alloc_int(n)).collect();
+            let source = rt.alloc_vec(&scalars::INT, ints);
+
+            let two = rt.alloc_int(2);
+            assert_eq!(
+                groups_of_int(praxis_vec_windows(ctx, source, two)),
+                vec![vec![1, 2], vec![2, 3], vec![3, 4]],
+            );
+            assert!(!rt.has_pending_fault());
+
+            // Exactly the length is one window; one past it is none. Off by one
+            // here is the whole difference between `[]` and a wrong answer.
+            let four = rt.alloc_int(4);
+            assert_eq!(
+                groups_of_int(praxis_vec_windows(ctx, source, four)),
+                vec![vec![1, 2, 3, 4]],
+            );
+            let five = rt.alloc_int(5);
+            let none = praxis_vec_windows(ctx, source, five);
+            assert!(
+                none.as_vec().is_empty(),
+                "a run of five does not fit in four"
+            );
+            assert!(
+                !rt.has_pending_fault(),
+                "not fitting is an answer, not a fault"
+            );
+
+            // Windows share their elements rather than copying them, which is
+            // the language's reference semantics and not a rule of this wrapper.
+            let answer = praxis_vec_windows(ctx, source, two);
+            let first = answer.as_vec()[0].as_vec()[1].as_ptr();
+            let second = answer.as_vec()[1].as_vec()[0].as_ptr();
+            assert_eq!(first, second, "the overlapping element is one object");
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **ADR-149.** The only thing either grouping refuses: a run of `n <= 0` is
+    /// not a short run, it is not a run, so there is no sequence of them to
+    /// answer with.
+    ///
+    /// The empty receiver is here beside it because it is the case that looks
+    /// like a fault and is not — `[].chunks(2)` is `[]`, the same way `[]`
+    /// reverses to `[]`.
+    #[test]
+    fn a_group_size_of_zero_or_less_is_an_invalid_size_fault() {
+        for size in [0i64, -1, i64::MIN] {
+            for (name, wrapper) in [
+                (
+                    "chunks",
+                    praxis_vec_chunks as unsafe extern "C" fn(_, _, _) -> _,
+                ),
+                ("windows", praxis_vec_windows),
+            ] {
+                let mut rt = Runtime::new();
+                let ctx = wired_ctx(&mut rt);
+                // SAFETY: ctx wired.
+                unsafe {
+                    let source = rt.alloc_vec(&scalars::INT, vec![rt.alloc_int(1)]);
+                    let n = rt.alloc_int(size);
+                    let answer = wrapper(ctx, source, n);
+                    assert!(rt.has_pending_fault(), "{name}({size}) must fault");
+                    assert_eq!(rt.fault(), crate::FaultKind::InvalidSize, "{name}({size})");
+                    assert!(
+                        std::ptr::eq(answer.descriptor(), &scalars::UNIT),
+                        "{name}({size}) answers the Unit sentinel"
+                    );
+                }
+                unsafe { drop_ctx(ctx) };
+            }
+        }
+
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let empty = rt.alloc_vec(&scalars::INT, vec![]);
+            let two = rt.alloc_int(2);
+            assert!(praxis_vec_chunks(ctx, empty, two).as_vec().is_empty());
+            assert!(praxis_vec_windows(ctx, empty, two).as_vec().is_empty());
+            assert!(
+                !rt.has_pending_fault(),
+                "an empty receiver is an empty answer"
+            );
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **ADR-149 decision 1.** The outer `Vec` is labelled `VEC` at every length
+    /// and the inner ones carry the receiver's element descriptor.
+    ///
+    /// The **empty** answer is the whole reason this test exists, and it is the
+    /// only part that is a choice: `VEC` is what `outer.push(inner)` already
+    /// produces, so a non-empty grouping could hardly answer anything else and
+    /// asserting it proves little. With the label inferred from the first group
+    /// there would be none to read, and `[1, 2].windows(5)` would carry a null
+    /// where `[1, 2].windows(2)` carries `VEC` — one type with two labels, and
+    /// the null is the one `vec_format` renders as `[]` and `push` treats as
+    /// "adopt whatever arrives" (P0-11).
+    #[test]
+    fn a_grouping_labels_the_outer_vec_even_when_it_is_empty() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let source = rt.alloc_vec(&scalars::INT, vec![rt.alloc_int(1), rt.alloc_int(2)]);
+            let two = rt.alloc_int(2);
+            let five = rt.alloc_int(5);
+
+            for answer in [
+                praxis_vec_chunks(ctx, source, two),
+                praxis_vec_windows(ctx, source, two),
+                // The two that come out empty, and the reason this test exists.
+                praxis_vec_windows(ctx, source, five),
+                praxis_vec_chunks(ctx, rt.alloc_vec(&scalars::INT, vec![]), two),
+            ] {
+                let p = vec_payload(answer);
+                assert!(
+                    std::ptr::eq(p.element_descriptor, &crate::collections::VEC),
+                    "the outer Vec holds Vecs whether or not it holds any"
+                );
+                for inner in p.items.iter() {
+                    assert!(std::ptr::eq(
+                        vec_payload(*inner).element_descriptor,
+                        &scalars::INT
+                    ));
+                }
+            }
+        }
+        unsafe { drop_ctx(ctx) };
+    }
+
+    /// **ADR-149.** A grouping reads no descriptor callback, so a `Vec` of a
+    /// type with no `compare` groups where `sorted` faults — `reversed`'s claim,
+    /// and the runtime half of these two rows carrying no capability bound.
+    #[test]
+    fn a_grouping_needs_no_callback_where_sorted_needs_compare() {
+        let mut rt = Runtime::new();
+        let ctx = wired_ctx(&mut rt);
+        // SAFETY: ctx wired.
+        unsafe {
+            let closures = rt.alloc_vec(
+                &crate::closures::CLOSURE,
+                vec![
+                    praxis_alloc_closure(ctx, std::ptr::null(), 0),
+                    praxis_alloc_closure(ctx, std::ptr::null(), 0),
+                    praxis_alloc_closure(ctx, std::ptr::null(), 0),
+                ],
+            );
+            let two = rt.alloc_int(2);
+            assert_eq!(praxis_vec_chunks(ctx, closures, two).as_vec().len(), 2);
+            assert_eq!(praxis_vec_windows(ctx, closures, two).as_vec().len(), 2);
+            assert!(!rt.has_pending_fault(), "grouping asks for no callback");
 
             praxis_vec_sorted(ctx, closures);
             assert!(rt.has_pending_fault(), "ordering still asks for `compare`");

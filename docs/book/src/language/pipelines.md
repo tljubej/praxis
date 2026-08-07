@@ -233,6 +233,8 @@ result.
 | `reversed()` | — | `Vec[T]`, back to front — no requirement on `T` |
 | `frequencies()` | — | `Counter[T]` |
 | `join(sep)` | `Text` | `Text` — the items must be `Text` |
+| `chunks(n)` | `Int` | `Vec[Vec[T]]` — consecutive runs of `n`, last may be short |
+| `windows(n)` | `Int` | `Vec[Vec[T]]` — every run of exactly `n`, sliding by one |
 
 `reversed` is the barrier with an empty requirement column, and that is its own
 claim rather than an omission: `sorted` reads the element's `compare` callback
@@ -250,8 +252,91 @@ spelling is `[1, 2].map(|n| n.to_text()).join(",")`. A sequence of `Char` uses
 `to_text()` instead, which is a `Vec[Char]` row rather than a pipeline one
 ([ADR-144](../../../decisions/144-a-sequence-of-text-joins-and-a-sequence-of-char-becomes-one.md)).
 
-`chunks` and `windows` are not implemented. Both answer `Vec[Vec[T]]`, and what
-descriptor the outer vector carries is an open question.
+`chunks` and `windows` are the two that answer a sequence *of sequences*, and
+what separates them is what happens to a group that does not fill
+([ADR-149](../../../decisions/149-a-chunking-partitions-and-a-window-slides.md)).
+A chunking partitions: every element appears once, in order, and a length the
+size does not divide leaves a short last chunk. A window slides by one and keeps
+only the runs that fit, so a sequence shorter than the size answers `[]`.
+
+```praxis
+// The two barriers that answer a sequence of sequences.
+fn main() {
+    var v = [1, 2, 3, 4, 5]
+
+    // A chunking partitions: every element once, and a short last chunk.
+    out(v.chunks(2))
+    // A window slides by one and keeps only the runs that fit.
+    out(v.windows(2))
+    // Larger than the sequence: one short chunk, and no windows at all.
+    out(v.chunks(9))
+    out(v.windows(9))
+
+    // What they are for: "compare each element with its neighbour".
+    out(v.windows(2).count(|p| p[1] > p[0]))
+
+    // A group is a sequence in its own right, so the chain continues on it.
+    out(v.windows(2).map(|p| p.sum()))
+    out(v.chunks(2).map(|c| c.count()))
+}
+```
+
+```text
+[[1, 2], [3, 4], [5]]
+[[1, 2], [2, 3], [3, 4], [4, 5]]
+[[1, 2, 3, 4, 5]]
+[]
+4
+[3, 5, 7, 9]
+[2, 2, 1]
+```
+
+Both names are plural because both answer many things, which is what every other
+such row in the catalog is called: `frequencies`, `positions`, `cells`, `keys`,
+`items`.
+
+Groups **share** their elements rather than copying them. The `2` in
+`v.windows(2)`'s first group and the `2` in its second are one object, which is
+the same aliasing `var b = a` already has.
+
+Both fault on a size of zero or less, and that is the only thing either refuses.
+A run of zero elements is not a short run — chunking a non-empty sequence into
+them has no finite answer — and a negative one names nothing. A size *larger*
+than the sequence is not that fault, as the example above shows: `chunks`
+answers one short chunk and `windows` answers none.
+
+```praxis
+// A run of zero elements is not a short run, so there is no sequence of them.
+fn main() {
+    var v = [1, 2, 3]
+    out(v.chunks(0))
+}
+```
+
+```text
+error: program faulted: size or extent out of range
+
+Backtrace:
+#0   main
+
+  locals:
+    v: Vec[Int] = [1, 2, 3]
+  temps:
+    <tmp#1: Vec[Int]> @ "[1, 2, 3]" = [1, 2, 3]
+    <tmp#2: Int> @ "1" = 1
+    <tmp#3: Unit> = Unit
+    <tmp#4: Int> @ "2" = 2
+    <tmp#5: Unit> = Unit
+    <tmp#6: Int> @ "3" = 3
+    <tmp#7: Unit> = Unit
+    <tmp#9: Int> @ "0" = 0
+    <tmp#10: Vec[Vec[Int]]> @ "v.chunks(0)" = <uninit>
+    <tmp#11: Unit> @ "out(v.chunks(0))" = <uninit>
+```
+
+The `Vec[Vec[Int]]` in that report is the answer's real type: a group is a
+sequence, not a flattened run of elements, and `<uninit>` is the slot the fault
+left unwritten.
 
 `sum`, `product`, `min` and `max` are `Int` operations, not generically numeric.
 `[1.5, 2.5].sum()` is `error[Y001]: expected Int, found Float`. For anything
@@ -552,7 +637,8 @@ carry one.
 ## Barriers
 
 ```praxis
-// The six combinators that need the whole sequence before they answer.
+// Six of the eight combinators that need the whole sequence before they
+// answer. `chunks` and `windows` are above, with the groups they build.
 fn main() {
     var v = [3, 1, 4, 1, 5, 9, 2, 6, 5]
 

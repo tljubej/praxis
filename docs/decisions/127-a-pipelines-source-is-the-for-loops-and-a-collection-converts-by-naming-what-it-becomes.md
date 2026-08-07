@@ -416,9 +416,14 @@ case where the chain does not exist.
   on ten receivers instead of one. That duplication is inherited, not introduced
   — `v.count()` and `v.len()` both exist today — and closing it is its own
   decision.
-- **`chunks` and `windows` stay deferred.** Their `Vec[Vec[T]]` result is still
+- ~~**`chunks` and `windows` stay deferred.** Their `Vec[Vec[T]]` result is still
   the unanswered descriptor-labelling question M8-WS11 recorded, and nothing here
-  answers it.
+  answers it.~~ **Superseded by
+  [ADR-149](./149-a-chunking-partitions-and-a-window-slides.md)**, which lands
+  both rows on this decision's generic receiver — and finds that the labelling
+  question was not open: `outer.push(inner)` already builds a `Vec[Vec[T]]`
+  labelled `VEC`, and four grid wrappers already name a result label their
+  receiver cannot supply. The spelling stays `windows`, as written here.
 
 ## Implementation order
 
@@ -536,6 +541,11 @@ Step 8 is a paste.
 > `v.map(f).filter(p).sum()` is one loop with zero intermediate `Vec`s, and
 > `v.map(f).to_set()` is one loop that inserts into the `Set` directly.
 >
-> `chunks` and `windows` remain deferred — they answer `Vec[Vec[T]]`, which needs
+> ~~`chunks` and `windows` remain deferred — they answer `Vec[Vec[T]]`, which needs
 > a rule for what the outer vector's element type is labelled with, and nothing
-> in this document forces one.
+> in this document forces one.~~
+
+**Superseded by [ADR-149](./149-a-chunking-partitions-and-a-window-slides.md).**
+The rule the paragraph above asks for is "the outer `Vec` is labelled `VEC`,
+passed rather than inferred, at every length"; `language/pipelines.md` carries
+the two rows now, spelled `chunks(n)` and `windows(n)`.

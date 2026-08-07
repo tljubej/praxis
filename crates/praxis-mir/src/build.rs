@@ -7609,12 +7609,17 @@ mod tests {
     /// **ADR-127 decision 3.** A barrier is called on its receiver *materialized
     /// as a `Vec`*, never on the receiver local.
     ///
-    /// The three are `RuntimeSymbol` rows over a real `VecPayload`, and their
+    /// Each is a `RuntimeSymbol` row over a real `VecPayload`, and their
     /// receiver is now `Iterable`. Leaving them on `Vec[T]` was the alternative
     /// and it was rejected because it makes `set.map(f).sorted()` legal and
     /// `set.sorted()` a `Y110` — a rule nobody can hold in their head. Getting it
     /// wrong in the other direction is the defect `IterPlan` was built out of, so
     /// the materialization is not optional and this is what says so per row.
+    ///
+    /// The two groupings (ADR-149) are here for the same reason and one more:
+    /// they take an argument, so the row that would get this wrong is one where
+    /// the receiver is materialized *after* the size is lowered. Both are one
+    /// wrapper call over one materialization, whatever the receiver.
     #[test]
     fn a_barrier_materializes_a_non_vec_receiver_before_the_wrapper() {
         for (name, wrapper) in [
@@ -7622,6 +7627,8 @@ mod tests {
             ("unique()", RuntimeSymbol::VecUnique),
             ("frequencies()", RuntimeSymbol::VecFrequencies),
             ("sorted_by_key(|x| x)", RuntimeSymbol::VecSortedByKey),
+            ("chunks(2)", RuntimeSymbol::VecChunks),
+            ("windows(2)", RuntimeSymbol::VecWindows),
         ] {
             // A `Set` has a snapshot symbol, so the materialization is that one
             // call — literally "its plan's snapshot symbol before the wrapper".

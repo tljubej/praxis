@@ -2957,6 +2957,52 @@ fn a_barrier_declares_what_its_element_must_be() {
     ));
 }
 
+/// **ADR-149.** The two groupings answer `Vec[Vec[T]]` — the one catalog result
+/// that nests a collection inside a collection — and the nesting has to survive
+/// inference, not merely be written in the row.
+///
+/// The flattened answer is the failure this is aimed at: a row declaring
+/// `Vec[T]` would make `[1, 2].chunks(1)` a `Vec[Int]`, every use of a group as
+/// a sequence would then be a `Y110` or worse, and nothing about the row's own
+/// text would look wrong. So the assertion is on the *rendered* type, at both
+/// levels.
+///
+/// The element threads through from the receiver rather than being invented:
+/// a `Text` receiver groups into `Vec[Vec[Char]]`, and a `Map` into pairs.
+#[test]
+fn a_grouping_answers_a_sequence_of_sequences() {
+    for name in ["chunks", "windows"] {
+        assert_eq!(
+            expr_type(&format!("[1, 2, 3].{name}(2)")),
+            "Vec[Vec[Int]]",
+            "`{name}` groups without flattening"
+        );
+        // Every receiver, through the item a `for` would yield.
+        assert_eq!(expr_type(&format!("\"ab\".{name}(1)")), "Vec[Vec[Char]]");
+        assert_eq!(expr_type(&format!("(0..4).{name}(2)")), "Vec[Vec[Int]]");
+
+        // A group is a sequence in its own right, so the pipeline continues on
+        // it. This is the half a type assertion alone would not catch: the row
+        // could render right and still not compose.
+        assert!(is_clean_with_lower(&format!(
+            "var v = Vec[Int]()\nv.push(1)\nout(v.{name}(1).map(|g| g.sum()).sum())"
+        )));
+
+        // The size is an `Int` and any `Int` expression will do — it is not a
+        // literal-only parameter, which is the shape MIR-03 was.
+        assert!(is_clean_with_lower(&format!(
+            "fn size() -> Int {{ 2 }}\nfn main() -> Unit {{ out([1, 2].{name}(size()).count()) }}"
+        )));
+        assert!(has_type_error(&format!("out([1, 2].{name}(\"two\"))")));
+    }
+
+    // No capability bound at all, which is `reversed`'s claim: a `Vec` of
+    // closures groups where `sorted()` earns `Y006`.
+    assert!(is_clean_with_lower(
+        "var v = Vec()\nv.push(|x| x + 1)\nv.push(|x| x + 2)\nout(v.windows(2).count())"
+    ));
+}
+
 /// **REP-33 half (a).** The barrier's bound rides the **constraint channel**, so
 /// an element the program has not named yet is answered when something names it.
 ///

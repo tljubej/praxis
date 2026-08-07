@@ -412,6 +412,14 @@ runtime_symbols! {
     ValueToText = "praxis_value_to_text": (Ctx, Gc) -> Gc, Allocates;
     VarCellGet = "praxis_var_cell_get": (Ctx, Gc) -> Gc, Pure;
     VarCellSet = "praxis_var_cell_set": (Ctx, Gc, Gc) -> Gc, Pure;
+    // `chunks(n)` and `windows(n)` (ADR-149). The pair that answers `Vec[Vec[T]]`,
+    // and the two rows in this manifest that fault on an **argument** rather than
+    // on an element: a run of `n <= 0` elements is not a short run, it is not a
+    // run, so `InvalidSize` is raised before either walks anything. They read no
+    // descriptor callback — the grouping is by position — so that fault is the
+    // only one either has, which is what makes them `AllocatesAndFaults` where
+    // `VecReversed` beside them is `Allocates`.
+    VecChunks = "praxis_vec_chunks": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     // `Vec(n, fill)` (ADR-146). `VecNew` beneath it only allocates; this one
     // faults, because a count is a runtime `Int` and `VecExtent::new` refuses a
     // negative or oversized one (ADR-041 decision 1).
@@ -446,6 +454,8 @@ runtime_symbols! {
     VecSortedByKey = "praxis_vec_sorted_by_key": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     VecToText = "praxis_vec_to_text": (Ctx, Gc) -> Gc, AllocatesAndFaults;
     VecUnique = "praxis_vec_unique": (Ctx, Gc) -> Gc, Allocates;
+    // The sliding half of `VecChunks`'s pair; see that row for why it faults.
+    VecWindows = "praxis_vec_windows": (Ctx, Gc, Gc) -> Gc, AllocatesAndFaults;
     WriteStdout = "praxis_write_stdout": (Ctx, Gc) -> GcUnit, Pure;
 }
 
@@ -648,6 +658,32 @@ mod tests {
             RuntimeSymbol::VecSorted.sig().effect,
             Effect::AllocatesAndFaults,
             "the neighbour this is contrasted with still orders through `compare`"
+        );
+    }
+
+    /// **ADR-149.** A grouping declares that it faults, where the barrier it
+    /// most resembles does not.
+    ///
+    /// `reversed` and a grouping read the same nothing of their elements, so the
+    /// obvious tidying is to give them the same effect. They must not have it:
+    /// a grouping refuses a size of zero or less, and a row marked `Allocates`
+    /// would emit no `CheckFault` — the fault would be set into a context
+    /// nothing reads, and `chunks(0)` would answer a Unit sentinel typed as a
+    /// `Vec[Vec[T]]` (ADR-088).
+    #[test]
+    fn a_grouping_declares_the_fault_a_reversal_has_not() {
+        for sym in [RuntimeSymbol::VecChunks, RuntimeSymbol::VecWindows] {
+            assert_eq!(sym.sig().effect, Effect::AllocatesAndFaults, "{sym}");
+            assert_eq!(
+                sym.sig().params.len(),
+                3,
+                "{sym} takes the context, the receiver and the size"
+            );
+        }
+        assert_eq!(
+            RuntimeSymbol::VecReversed.sig().effect,
+            Effect::Allocates,
+            "the neighbour this is contrasted with still has nothing to refuse"
         );
     }
 

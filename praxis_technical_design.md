@@ -879,7 +879,7 @@ Streaming stages and sinks:
 
 Barriers — they need the whole sequence before answering, so they are runtime calls rather than fused stages, and a chain ends at one and begins again from its result:
 
-- `sorted`, `sorted_by_key`, `unique`, `frequencies`, `reversed`, `join`
+- `sorted`, `sorted_by_key`, `unique`, `frequencies`, `reversed`, `join`, `chunks`, `windows`
 
 `sorted_by_key(|item| key)` is how a keyed collection orders its items: no composite is orderable (ADR-045), so a pipeline whose item is a pair has no `sorted`, and the closure extracts an orderable key from an item that is not.
 
@@ -904,7 +904,7 @@ var back = top.to_counter()
 
 The compiler fuses every non-barrier chain into a single loop over the source (ADR-029). A receiver that indexes itself — `Vec`, `Deque`, `Range`, `Text` — is walked in place with no intermediate allocation; the rest are snapshotted once before the loop, which is what a `for` over them already does (ADR-127). `v.map(f).filter(p).sum()` is one loop with zero intermediate `Vec`s, and `v.map(f).to_set()` is one loop that inserts into the `Set` directly.
 
-`chunks` and `windows` remain deferred — they answer `Vec[Vec[T]]`, which needs a rule for what the outer vector's element type is labelled with, and nothing in this document forces one.
+`chunks(n)` and `windows(n)` are the two barriers that answer a sequence of sequences (ADR-149). A chunking partitions — every element once, in order, with a short last chunk when the length does not divide — and a window slides by one and keeps only the runs that fit, so `[1, 2].windows(5)` is `[]` where `[1, 2].chunks(5)` is `[[1, 2]]`. Both fault with `InvalidSize` on a size of zero or less, which is the only thing either refuses: a run of zero elements is not a short run, and a negative one names nothing. The `Vec[Vec[T]]` they answer labels the outer vector `VEC` at every length — passed rather than inferred, because the empty answer has no first element to infer from.
 
 ### 6.4 Grid
 

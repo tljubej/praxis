@@ -105,14 +105,17 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(seq_count())
         .entry(seq_count_if())
         // The barrier combinators (§6.3). Runtime symbols rather than
-        // intrinsics — see the block comment above their definitions, including
-        // why `chunks`/`windows` are still absent.
+        // intrinsics — see the block comment above their definitions.
         .entry(seq_sorted())
         .entry(seq_sorted_by_key())
         .entry(seq_unique())
         .entry(seq_reversed())
         .entry(seq_frequencies())
         .entry(seq_join())
+        // The two groupings (ADR-149). Barriers too, and the only rows whose
+        // result nests a collection inside a collection.
+        .entry(seq_chunks())
+        .entry(seq_windows())
         // M8-WS11: the remaining non-barrier combinators. Each is an intrinsic
         // fused by the MIR pipeline recognizer.
         .entry(seq_take())
@@ -2171,13 +2174,24 @@ fn seq_count_if() -> MethodEntry {
 // row — `Vec[Char].to_text()`, defined beside `vec_is_empty` — and a
 // sequence-of-`Int` joins by rendering first: `ns.map(|n| n.to_text()).join(",")`.
 //
-// **`chunks` and `windows` are still deferred, and here is the reason.** Both
-// answer `Vec[Vec[T]]`, so their wrapper has to label the *outer* Vec with
-// `collections::VEC` while the inner ones keep the element descriptor — a
-// second descriptor decision that no program in the design document forces.
-// Appendix D needs `sorted` and `frequencies`; `unique` is here because it is
-// the same `Vec[T] -> Vec[T]` shape with the same descriptor and therefore
-// costs nothing extra. Guessing the `Vec[Vec[T]]` labelling would.
+// **`chunks` and `windows` answer `Vec[Vec[T]]`, and the descriptor question
+// this comment used to defer them over was already answered** (ADR-149). The
+// note said the wrappers "have to label the *outer* Vec with `collections::VEC`
+// while the inner ones keep the element descriptor", and that sentence is the
+// whole rule — there was nothing left to choose. `outer.push(inner)` already
+// builds a `Vec[Vec[T]]` and `adopt_or_reject` already labels it `VEC`, so a
+// wrapper answering anything else would disagree with `push`; and a wrapper
+// naming a label its receiver cannot supply is what `praxis_grid_positions` and
+// three siblings have done since M8, with `&tuples::TUPLE`.
+//
+// What the deferral was really protecting is worth keeping: *don't commit to
+// surface no program forces*. That is why these arrive with a program that
+// forces them rather than with the three barriers above.
+//
+// They are barriers for `reversed`'s reason and not for a new one: a grouping
+// is a fact about positions in the whole sequence, so neither can answer its
+// first group from one element. And they are the two rows in the catalog that
+// fault on an *argument* — see [`seq_chunks`].
 
 /// `sorted` — a new `Vec` in ascending order (§6.3).
 ///
@@ -2239,6 +2253,79 @@ fn seq_reversed() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecReversed),
         doc: "A new Vec holding these elements in reverse order.",
+        stability: Stability::Stable,
+    }
+}
+
+/// `Vec[Vec[T]]` — what `chunks` and `windows` answer (ADR-149).
+///
+/// The one result pattern in the catalog that nests a collection inside a
+/// collection, and it is written once for both rows so the two cannot come to
+/// disagree about their shape. `pattern_to_type` recurses, so nothing else is
+/// needed to instantiate it.
+fn vec_of_vec_of_t() -> TypePattern {
+    TypePattern::Collection {
+        ctor: CollectionCtor::Vec,
+        args: vec![vec_of_t()],
+    }
+}
+
+/// `chunks(n)` — these elements in consecutive runs of `n`, the last short if
+/// the length does not divide (ADR-149).
+///
+/// **No capability bound, for `reversed`'s reason**: a grouping reads no
+/// descriptor callback — not `compare`, not `equals`, not `hash` — so a `Vec` of
+/// closures chunks. What it *does* have that `reversed` has not is a fault, and
+/// the fault is on the argument rather than on an element: `n <= 0` is refused
+/// with `InvalidSize` before the receiver is walked. A run of zero elements is
+/// not a short run, it is not a run — chunking any non-empty sequence into them
+/// has no finite answer — and a negative one names nothing at all. That is the
+/// row's whole faulting surface, which is why its manifest row is
+/// `AllocatesAndFaults` and `reversed`'s is `Allocates`.
+///
+/// A *short last chunk* is not that fault and must not be confused with it:
+/// `[1, 2, 3].chunks(2)` is `[[1, 2], [3]]`, because the question "which
+/// consecutive runs of two are there" has an answer for a sequence of three and
+/// the trailing element is part of it. `windows` is where a group that does not
+/// fit is dropped instead, and the two differ there because they are asking
+/// different questions.
+fn seq_chunks() -> MethodEntry {
+    MethodEntry {
+        receiver: iterable_of_t(),
+        name: "chunks",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: vec_of_vec_of_t(),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecChunks),
+        doc: "Consecutive non-overlapping runs of n; the last may be shorter. \
+              Faults if n is not positive.",
+        stability: Stability::Stable,
+    }
+}
+
+/// `windows(n)` — every consecutive run of exactly `n`, each starting one element
+/// after the last (ADR-149).
+///
+/// Plural, like `chunks` beside it and like every other row that answers many
+/// things — `frequencies`, `positions`, `cells`, `keys`, `items`. It is Rust's
+/// spelling too, and it is what §6.3 and ADR-029 have called this row since
+/// before it existed.
+///
+/// **A window that does not fit is dropped, and that is not the `chunks` fault
+/// arriving late.** `[1, 2].windows(5)` is `[]`: "which runs of five are there"
+/// is a perfectly good question about a sequence of two, and its answer is
+/// none. What has no answer is a run of `n <= 0`, which is the same
+/// `InvalidSize` [`seq_chunks`] raises and for the same reason.
+fn seq_windows() -> MethodEntry {
+    MethodEntry {
+        receiver: iterable_of_t(),
+        name: "windows",
+        params: vec![TypePattern::Scalar(ScalarType::Int)],
+        result: vec_of_vec_of_t(),
+        purity: Purity::Pure,
+        lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecWindows),
+        doc: "Every consecutive run of exactly n, sliding by one. Empty if n \
+              exceeds the length; faults if n is not positive.",
         stability: Stability::Stable,
     }
 }
@@ -3725,6 +3812,58 @@ mod tests {
             "a barrier is a runtime call, not a fused stage: reversal cannot \
              answer its first element until it has seen the last"
         );
+    }
+
+    /// **ADR-149.** The two groupings are barriers that answer `Vec[Vec[T]]`,
+    /// carry no capability bound, and fault.
+    ///
+    /// Three claims, each of which a later edit could undo for a plausible
+    /// reason, so each is asserted rather than described:
+    ///
+    /// * **The nesting.** A row declaring `Vec[T]` would flatten the answer and
+    ///   nothing in the row's own text would look wrong.
+    /// * **The absent bound.** `sorted` and `unique` sit beside these with one
+    ///   each, and a tidying edit that gave these one to match would take away
+    ///   the `Vec` of closures that groups today — with no wrapper behaviour to
+    ///   justify it, because a grouping calls no descriptor callback.
+    /// * **The fault.** It is the one place these differ from `reversed`, and it
+    ///   is what makes `chunks(0)` observable at all: MIR emits a `CheckFault`
+    ///   after a call only when the wrapper declares one, so an `Allocates` row
+    ///   here would set `InvalidSize` into a context nothing reads and hand the
+    ///   program a Unit sentinel typed as a `Vec[Vec[T]]` (ADR-088).
+    #[test]
+    fn a_grouping_answers_a_nested_vec_with_no_bound_and_can_fault() {
+        let cat = builtin_catalog();
+        let receiver = iterable_of_t();
+        for (name, symbol) in [
+            ("chunks", abi::RuntimeSymbol::VecChunks),
+            ("windows", abi::RuntimeSymbol::VecWindows),
+        ] {
+            let row = cat
+                .by_receiver_and_name(&receiver, name)
+                .next()
+                .unwrap_or_else(|| panic!("Iterable.{name} exists"));
+            assert_eq!(
+                row.result,
+                vec_of_vec_of_t(),
+                "`{name}` groups without flattening"
+            );
+            assert_eq!(row.params, vec![TypePattern::Scalar(ScalarType::Int)]);
+            assert_eq!(row.purity, Purity::Pure);
+            assert!(
+                row.bounds().is_empty(),
+                "a grouping reads no descriptor callback ({name})"
+            );
+            assert!(
+                row.can_fault(),
+                "`{name}(0)` names no run, and the program has to be able to see that"
+            );
+            assert!(
+                matches!(row.lowering, MethodLowering::RuntimeSymbol(s) if s == symbol),
+                "a grouping is a barrier: it cannot answer its first group from \
+                 one element ({name})"
+            );
+        }
     }
 
     /// **REP-46.** §4.12's overflow alternatives are three modes over three

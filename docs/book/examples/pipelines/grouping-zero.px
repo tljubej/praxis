@@ -1,0 +1,5 @@
+// A run of zero elements is not a short run, so there is no sequence of them.
+fn main() {
+    var v = [1, 2, 3]
+    out(v.chunks(0))
+}

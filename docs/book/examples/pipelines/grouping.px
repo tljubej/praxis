@@ -1,0 +1,19 @@
+// The two barriers that answer a sequence of sequences.
+fn main() {
+    var v = [1, 2, 3, 4, 5]
+
+    // A chunking partitions: every element once, and a short last chunk.
+    out(v.chunks(2))
+    // A window slides by one and keeps only the runs that fit.
+    out(v.windows(2))
+    // Larger than the sequence: one short chunk, and no windows at all.
+    out(v.chunks(9))
+    out(v.windows(9))
+
+    // What they are for: "compare each element with its neighbour".
+    out(v.windows(2).count(|p| p[1] > p[0]))
+
+    // A group is a sequence in its own right, so the chain continues on it.
+    out(v.windows(2).map(|p| p.sum()))
+    out(v.chunks(2).map(|c| c.count()))
+}

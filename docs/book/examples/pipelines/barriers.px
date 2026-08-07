@@ -1,4 +1,5 @@
-// The six combinators that need the whole sequence before they answer.
+// Six of the eight combinators that need the whole sequence before they
+// answer. `chunks` and `windows` are above, with the groups they build.
 fn main() {
     var v = [3, 1, 4, 1, 5, 9, 2, 6, 5]
 

@@ -10014,6 +10014,173 @@ fn a_reversed_vec_is_new_and_needs_nothing_of_its_elements() {
     assert_eq!(result.as_int(), 2);
 }
 
+// --- ADR-149: the two groupings ---------------------------------------------
+
+/// **ADR-149.** `chunks(n)` partitions: every element once, in order, and a
+/// length the size does not divide leaves a short last chunk.
+///
+/// `325` is three chunks, the first holding two elements and the last holding
+/// one — the tail neither dropped nor padded.
+#[test]
+fn chunks_partitions_and_keeps_a_short_last_chunk() {
+    let src = "fn main() -> Int {\n  var c = [1, 2, 3, 4, 5].chunks(2)\n  \
+               c.count() * 100 + c.get(0).count() * 10 + c.get(2).count()\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 321);
+
+    // The elements themselves, read back through the nested subscript — which
+    // is the half a count cannot see.
+    let src = "fn main() -> Int {\n  var c = [1, 2, 3, 4, 5].chunks(2)\n  \
+               c[1][0] * 10 + c[1][1]\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 34);
+
+    // A size at or above the length is one chunk, not a fault and not one
+    // chunk per element.
+    let src = "fn main() -> Int {\n  [1, 2, 3].chunks(9).count() * 10 + \
+               [1, 2, 3].chunks(9).get(0).count()\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 13);
+
+    // …and an empty receiver is an empty answer, at any size.
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.chunks(2).count()\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 0);
+}
+
+/// **ADR-149.** `windows(n)` slides by one and keeps only the runs that fit, so
+/// a receiver shorter than the size answers `[]` — the one place the two
+/// groupings differ, and the one worth a test of its own.
+///
+/// The sums `[3, 5, 7]` are what the shape is *for*: "compare each element with
+/// its neighbour" has a spelling that does not index.
+#[test]
+fn windows_slide_by_one_and_drop_a_run_that_does_not_fit() {
+    let src = "fn main() -> Int {\n  var w = [1, 2, 3, 4].windows(2)\n  \
+               w.count() * 100 + w[0][1] * 10 + w[2][0]\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 323);
+
+    // Exactly the length is one window; one past it is none. Off by one here is
+    // the difference between the empty answer and a wrong one.
+    let src = "fn main() -> Int {\n  [1, 2, 3].windows(3).count() * 10 + \
+               [1, 2, 3].windows(4).count()\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(
+        result.as_int(),
+        10,
+        "a run that does not fit is dropped, not faulted"
+    );
+
+    // The shape in use: how many neighbouring pairs increase.
+    let src = "fn main() -> Int {\n  [1, 3, 2, 5].windows(2).count(|p| p[1] > p[0])\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+}
+
+/// **ADR-149.** The only thing either grouping refuses. A run of zero elements
+/// is not a short run — chunking a non-empty sequence into them has no finite
+/// answer — and a negative one names nothing, so both raise `InvalidSize`
+/// before they walk anything.
+///
+/// It is the fault `Vec(0 - 1, 0)` raises, reached from an *argument to a
+/// pipeline row* for the first time (ADR-041 decision 1, ADR-146 decision 5).
+#[test]
+fn a_group_size_of_zero_or_less_faults() {
+    for src in [
+        "fn main() -> Int { [1, 2, 3].chunks(0).count() }",
+        "fn main() -> Int { [1, 2, 3].windows(0).count() }",
+        "fn main() -> Int { [1, 2, 3].chunks(0 - 1).count() }",
+        "fn main() -> Int { [1, 2, 3].windows(0 - 1).count() }",
+        // An empty receiver does not excuse the size: the question is still
+        // unanswerable, and answering `[]` would hide a bug in the size.
+        "fn main() -> Int {\n  var v = Vec()\n  v.chunks(0).count()\n}",
+    ] {
+        let (rt, _r) = run_main(src);
+        assert!(rt.has_pending_fault(), "{src} must fault");
+        assert_eq!(rt.fault(), praxis_runtime::FaultKind::InvalidSize, "{src}");
+    }
+}
+
+/// **ADR-149, and ADR-127 decision 3 at two new rows.** A grouping is a
+/// barrier: it takes any of the ten iterables, materialized first, and a chain
+/// starts again from its `Vec[Vec[T]]` result.
+///
+/// The composition on *both* sides is the part worth pinning. A stage in front
+/// of it feeds it (`filter(...).chunks(2)`), and a stage behind it consumes the
+/// groups (`windows(2).map(|w| w.sum())`) — which only works if the result is a
+/// real sequence of real sequences rather than a flattened one.
+#[test]
+fn a_grouping_takes_every_iterable_and_a_chain_starts_again_from_it() {
+    // A `Range`, walked in place.
+    let src = "fn main() -> Int {\n  var c = (0..6).chunks(3)\n  \
+               c.count() * 10 + c[1][2]\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 25);
+
+    // A `Text`, whose item is a `Char`.
+    let src = "fn main() -> Char {\n  \"abcd\".windows(2)[1][1]\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_char(), 'c');
+
+    // A `Set`, through its own snapshot accessor rather than `praxis_vec_get`.
+    let src = "fn main() -> Int {\n  var s = Set()\n  s.insert(4)\n  \
+               s.chunks(1).count() * 10 + s.chunks(1)[0][0]\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 14);
+
+    // A stage in front: the groups are of what *survived*, not of the source.
+    let src = "fn main() -> Int {\n  var c = [1, 2, 3, 4, 5].filter(|n| n % 2 == 1).chunks(2)\n  \
+               c.count() * 100 + c[0][1] * 10 + c[1][0]\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 235);
+
+    // …and a stage behind it, which needs each group to be a sequence in its
+    // own right. `[1,2,3,4].windows(2)` summed is `[3, 5, 7]`, total 15.
+    let src = "fn main() -> Int {\n  [1, 2, 3, 4].windows(2).map(|w| w.sum()).sum()\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 15);
+}
+
+/// **ADR-149.** A grouping reads no descriptor callback, so a `Vec` of closures
+/// groups where `sorted()` and `unique()` are refused at check time — the claim
+/// `reversed` makes, at the two rows that were added beside it.
+///
+/// The other half is that a group is a *view*: the overlapping element of two
+/// windows is one object, which is the language's reference semantics rather
+/// than a rule of these rows. A mutation through one window is visible in the
+/// next, and that is the same aliasing `var b = a` has.
+#[test]
+fn a_grouping_needs_nothing_of_its_elements_and_shares_them() {
+    let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(|x| x + 1)\n  \
+               v.push(|x| x + 2)\n  v.push(|x| x + 3)\n  \
+               v.windows(2).count() * 10 + v.chunks(2).count()\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 22);
+
+    // The shared element: pushing through the first window's tail is seen
+    // through the second window's head, because they are one `Vec`.
+    let src = "fn main() -> Int {\n  var a = Vec()\n  var b = Vec()\n  var c = Vec()\n  \
+               var outer = Vec()\n  outer.push(a)\n  outer.push(b)\n  outer.push(c)\n  \
+               var w = outer.windows(2)\n  w[0][1].push(9)\n  w[1][0].count()\n}";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 1, "the overlapping element is one object");
+}
+
 // --- ADR-146: sized collection constructors ---------------------------------
 
 /// `Vec(n, fill)` end to end: `n` slots, every one the fill, and zero is a

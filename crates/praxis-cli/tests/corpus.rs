@@ -62,10 +62,10 @@ fn every_corpus_program_runs_and_prints_the_answer_it_documents() {
     // aoc-corpus, 8 input-parsers)" while the tree held 24 (18 and 6), and
     // neither number was checkable against the other. Bumping this when a
     // program lands is the price of the doc and the gate stating one fact.
-    // Today: 33 under `tests/aoc-corpus`, 13 under `tests/input-parsers`.
+    // Today: 34 under `tests/aoc-corpus`, 13 under `tests/input-parsers`.
     assert!(
-        programs.len() >= 46,
-        "expected at least 46 programs in the corpus under {}, found {}. \
+        programs.len() >= 47,
+        "expected at least 47 programs in the corpus under {}, found {}. \
          If you added one, raise this floor; if you removed one, say why.",
         root.display(),
         programs.len()
