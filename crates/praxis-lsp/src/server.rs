@@ -133,6 +133,12 @@ fn capabilities(encoding: Encoding) -> ServerCapabilities {
             // `.` for members; the three template characters because completion
             // inside a parser expression fires on text that is not yet an
             // expression.
+            //
+            // **Registering a character is not agreeing to answer on it.** `{`
+            // and `:` mean something in a template and something else entirely
+            // in ordinary code, and the editor cannot tell which it just typed
+            // — only the resolved context can. So the list stays wide and
+            // `completion::trigger_answers_here` narrows it per request.
             trigger_characters: Some(vec![
                 ".".to_string(),
                 "`".to_string(),
@@ -304,14 +310,33 @@ impl Server {
                     crate::hover::hover(&snapshot, offset, s.encoding)
                 })
             }
-            lsp_types::request::Completion::METHOD => self
-                .answer::<lsp_types::CompletionParams, _>(id, req, |s, uri, offset| {
-                    let snapshot = s.snapshot(uri)?;
-                    let ctx = snapshot.completion_context(offset);
-                    Some(CompletionResponse::Array(crate::completion::items(
-                        &snapshot, &ctx,
-                    )))
-                }),
+            lsp_types::request::Completion::METHOD => {
+                let params: lsp_types::CompletionParams = match parse_params(&req) {
+                    Ok(p) => p,
+                    Err(e) => return invalid(id, &e),
+                };
+                let uri = params.text_document_position.text_document.uri.clone();
+                let Some(doc) = self.docs.get(&uri) else {
+                    return ok(id, serde_json::Value::Null);
+                };
+                let offset = doc
+                    .positions()
+                    .offset(params.text_document_position.position, self.encoding);
+                let Some(snapshot) = self.snapshot(&uri) else {
+                    return ok(id, serde_json::Value::Null);
+                };
+                let ctx = snapshot.completion_context(offset);
+                // A menu the editor opened on a typed character is only owed
+                // where that character means what it was registered for
+                // (`completion::trigger_answers_here`). An empty list closes
+                // the widget; the next word character starts a fresh request
+                // that is not gated at all.
+                let items = match typed_trigger(params.context.as_ref()) {
+                    Some(c) if !crate::completion::trigger_answers_here(c, &ctx) => Vec::new(),
+                    _ => crate::completion::items(&snapshot, &ctx),
+                };
+                ok(id, CompletionResponse::Array(items))
+            }
             lsp_types::request::SignatureHelpRequest::METHOD => self
                 .answer::<lsp_types::SignatureHelpParams, _>(id, req, |s, uri, offset| {
                     let snapshot = s.snapshot(uri)?;
@@ -671,6 +696,21 @@ impl HasPosition for lsp_types::TextDocumentPositionParams {
     fn position(self) -> (Uri, lsp_types::Position) {
         (self.text_document.uri, self.position)
     }
+}
+
+/// The character the editor fired a completion request on, when a character is
+/// what fired it.
+///
+/// `INVOKED` covers both <kbd>Ctrl</kbd>+<kbd>Space</kbd> and the editor's own
+/// suggest-as-you-type, and carries no character; a client that omits `context`
+/// altogether says no more than that. Both are requests, not reflexes, and
+/// [`crate::completion::trigger_answers_here`] never sees them.
+fn typed_trigger(ctx: Option<&lsp_types::CompletionContext>) -> Option<&str> {
+    let ctx = ctx?;
+    if ctx.trigger_kind != lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER {
+        return None;
+    }
+    ctx.trigger_character.as_deref()
 }
 
 fn parse_params<T: serde::de::DeserializeOwned>(req: &Request) -> Result<T, serde_json::Error> {

@@ -6,6 +6,9 @@
 //! expression — and the second half is a rendering of tables the compiler
 //! already owns (`builtin_catalog`, `AtomicKind::ALL`, `Constructor::ALL`).
 //!
+//! [`trigger_answers_here`] sits between them and answers a different question:
+//! not *what* to offer but *whether the editor was right to ask*.
+//!
 //! **Nothing here carries a second list of names.** A method comes from
 //! `praxis_stdlib::completion::completion_data`, generated from the catalog the
 //! compiler dispatches through; an atomic from `AtomicKind::ALL`; a constructor
@@ -42,6 +45,45 @@ pub fn context_at(snapshot: &Snapshot, offset: u32) -> CompletionContext {
         return ctx;
     }
     CompletionContext::Lexical { prefix }
+}
+
+/// Whether a menu the editor opened *because a character was typed* belongs
+/// here.
+///
+/// A trigger character is a promise the editor keeps literally: it fires the
+/// instant that character is typed, wherever it is typed. `.` can afford that,
+/// because a `.` in Praxis is always a member access. The template characters
+/// cannot. They are registered for the parser sublanguage, where `` `{n:int}` ``
+/// needs a menu over text that is not yet an expression — but the same
+/// characters carry ordinary meanings outside a template, and `{` carries the
+/// most ordinary one there is: it opens every block. `fn main() {`, `if x {`,
+/// `match d {` each resolved to [`CompletionContext::Lexical`] with an empty
+/// prefix, so the editor was handed every name in the file, pre-selected, at the
+/// exact moment the user was about to *invent* a name — and an editor that
+/// accepts a selected row on <kbd>Enter</kbd> then commits the first one.
+///
+/// So each character answers only where it means what it was registered for.
+/// The gate is on trigger characters **alone**: an explicit request
+/// (<kbd>Ctrl</kbd>+<kbd>Space</kbd>) and the editor's own suggest-as-you-type
+/// both arrive as `INVOKED`, and neither is ever suppressed — the lexical list
+/// after `{` is still one keystroke away, which is the difference between a
+/// menu offered and a menu imposed.
+#[must_use]
+pub fn trigger_answers_here(trigger: &str, ctx: &CompletionContext) -> bool {
+    match trigger {
+        "." => matches!(ctx, CompletionContext::Dot { .. }),
+        "`" | ":" => matches!(ctx, CompletionContext::Parser { .. }),
+        // `Name {` is the one place outside a template where a brace introduces
+        // a closed list of names, and offering a record's own fields there is
+        // the reason `{` is worth registering at all.
+        "{" => matches!(
+            ctx,
+            CompletionContext::Parser { .. } | CompletionContext::RecordFields { .. }
+        ),
+        // Not a character this server registered. Some other client's idea of a
+        // trigger is not this function's to veto.
+        _ => true,
+    }
 }
 
 /// The identifier characters immediately before `offset` — what the user has

@@ -450,6 +450,97 @@ fn the_server_accepts_the_stdio_flag_clients_append() {
     assert_eq!(session.finish(), 0);
 }
 
+/// A brace that opens a **block** does not open a menu; one that opens a
+/// **record literal** does.
+///
+/// `{` is registered as a trigger character for the parser sublanguage, where
+/// `` `{n:int}` `` needs a menu over text that is not yet an expression. The
+/// editor fires it wherever the character is typed, so before this gate every
+/// `fn f() {` and every `if x {` popped the whole lexical list — pre-selected,
+/// over an empty prefix, at the moment the user was about to type a name that
+/// is by definition not in it — and the next <kbd>Enter</kbd> committed its
+/// first row.
+///
+/// This has to be a wire test: what distinguishes the two cases is
+/// `params.context`, which the query layer never sees. And the second half is
+/// the half that keeps the gate honest — a fix that simply dropped `{` from the
+/// trigger list would pass the first assertion and lose `P {` → `x`, `y`.
+#[test]
+fn a_trigger_character_opens_a_menu_only_where_it_means_something() {
+    let mut session = Session::start();
+    initialize(&mut session);
+
+    let uri = "file:///trigger.px";
+    session.send(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": { "textDocument": {
+            "uri": uri, "languageId": "praxis", "version": 1,
+            "text": "struct P { x: Int, y: Int }\nfn main() -> Unit {\n  var p = P {}\n}\n"
+        }}
+    }));
+
+    let brace_triggered = |line: u32, character: u32, id: i64| {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+                "context": { "triggerKind": 2, "triggerCharacter": "{" }
+            }
+        })
+    };
+
+    // Just after the `{` of `fn main() -> Unit {`.
+    session.send(&brace_triggered(1, 19, 30));
+    let block = session.recv_response(30);
+    let items = block["result"].as_array().expect("an item array");
+    assert!(
+        items.is_empty(),
+        "a block's `{{` must not open a menu, got {} items: {block}",
+        items.len()
+    );
+
+    // Just after the `{` of `P {}` — a record literal's own field names.
+    session.send(&brace_triggered(2, 13, 31));
+    let record = session.recv_response(31);
+    let labels: Vec<&str> = record["result"]
+        .as_array()
+        .expect("an item array")
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    assert!(
+        labels.contains(&"x") && labels.contains(&"y"),
+        "a record literal's `{{` still offers its fields, got {labels:?}"
+    );
+
+    // The same block position, asked for rather than fired at: `INVOKED` is a
+    // request and is never gated.
+    session.send(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 32, "method": "textDocument/completion",
+        "params": {
+            "textDocument": { "uri": uri },
+            "position": { "line": 1, "character": 19 },
+            "context": { "triggerKind": 1 }
+        }
+    }));
+    let invoked = session.recv_response(32);
+    let labels: Vec<&str> = invoked["result"]
+        .as_array()
+        .expect("an item array")
+        .iter()
+        .filter_map(|i| i["label"].as_str())
+        .collect();
+    assert!(
+        labels.contains(&"main"),
+        "Ctrl+Space at the same offset still answers, got {labels:?}"
+    );
+
+    shutdown(&mut session);
+    assert_eq!(session.finish(), 0);
+}
+
 /// A client that exits without shutting down gets `1`, which is the protocol's
 /// own rule and not an arbitrary code.
 #[test]

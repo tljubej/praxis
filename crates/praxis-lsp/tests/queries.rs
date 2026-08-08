@@ -434,6 +434,70 @@ fn lexical_completion_offers_declared_names_and_filters_by_prefix() {
     );
 }
 
+/// A trigger character earns the menu only where it means what it was
+/// registered for.
+///
+/// The three template characters exist for the parser sublanguage; outside one
+/// `{` opens every block and `:` introduces every type annotation, and the
+/// context resolved there is `Lexical` with an empty prefix — every name in the
+/// file, offered over a name the user has not finished inventing. The gate is
+/// per-character rather than per-context on purpose: `{` keeps `Name { … }`,
+/// which is the one non-template place a brace introduces a closed list.
+#[test]
+fn a_template_trigger_character_is_silent_outside_a_template() {
+    use praxis_lsp::completion::trigger_answers_here;
+
+    let block = "fn helper() -> Int { 1 }\nfn main() -> Unit {\n  var t = 1\n}\n";
+    let s = snap(block);
+    let brace = s.completion_context(at(block, "Unit {") + 6);
+    assert!(
+        !trigger_answers_here("{", &brace),
+        "a block's `{{` must not open a menu, context was {brace:?}"
+    );
+    // …and the list behind it is exactly the one that must not appear.
+    assert!(
+        labels_at(&s, at(block, "Unit {") + 6).contains(&"out".to_string()),
+        "the gate, not an empty list, is what keeps this out of the editor"
+    );
+
+    let annotation = "fn f(n: Int) -> Int { n }\n";
+    let s = snap(annotation);
+    let colon = s.completion_context(at(annotation, ": Int") + 1);
+    assert!(
+        !trigger_answers_here(":", &colon),
+        "a type annotation's `:` must not open a menu, context was {colon:?}"
+    );
+
+    let record = "struct P { x: Int, y: Int }\nfn main() -> Unit { var p = P {} }\n";
+    let s = snap(record);
+    let lit = s.completion_context(at(record, "P {}") + 3);
+    assert!(
+        trigger_answers_here("{", &lit),
+        "a record literal's `{{` still answers, context was {lit:?}"
+    );
+
+    let template = "var v = read `{n:int}`\n";
+    let s = snap(template);
+    for (trigger, offset) in [("{", 1), (":", 3)] {
+        let ctx = s.completion_context(at(template, "{n:int}") + offset);
+        assert!(
+            trigger_answers_here(trigger, &ctx),
+            "`{trigger}` is why these are registered at all, context was {ctx:?}"
+        );
+    }
+
+    let dot = "fn main() -> Unit { var v = [1].reversed() }\n";
+    let s = snap(dot);
+    assert!(
+        trigger_answers_here(".", &s.completion_context(at(dot, ".reversed") + 1)),
+        "`.` is unambiguous and is not gated"
+    );
+    assert!(
+        !trigger_answers_here(".", &s.completion_context(at(dot, "var v") + 4)),
+        "…but only where it actually is a member access"
+    );
+}
+
 /// A record literal's field names come from the record's own definition.
 #[test]
 fn completion_in_a_record_literal_offers_its_fields() {
