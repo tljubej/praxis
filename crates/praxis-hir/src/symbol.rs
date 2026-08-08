@@ -24,7 +24,7 @@ impl SymbolId {
     /// - name resolution found nothing for a reference, so lowering has no
     ///   symbol to record (`lower_path`, `lower_call`);
     /// - the name is a *method*, which resolves to a catalog entry rather than
-    ///   a declaration and so has no id by construction (HIR-02, `hover`).
+    ///   a declaration and so has no id by construction (`hover`).
     ///
     /// It is reserved rather than merely unused:
     /// [`NameTable::insert`](crate::NameTable::insert) mints ids from the
@@ -32,10 +32,9 @@ impl SymbolId {
     /// declarations in one file.
     ///
     /// Naming it is the point. `names.get(UNRESOLVED)` returns `None`, exactly
-    /// like a genuine miss does, so nothing downstream is forced to notice —
-    /// and a callee that quietly carried it once lowered to a direct call
-    /// through no function at all and took the host down (`fs.get(0)(100)`,
-    /// M8 adversarial audit).
+    /// like a genuine miss does, so nothing downstream is forced to notice — and
+    /// a callee that carries it must never be lowered to a direct call, which
+    /// would branch through no function at all (`fs.get(0)(100)`).
     pub const UNRESOLVED: SymbolId = SymbolId(u32::MAX);
 
     #[inline]
@@ -64,13 +63,13 @@ pub enum SymbolKind {
     /// A built-in scalar *type* name (`Int`, `Text`, …) seeded into the root
     /// scope. Distinct from [`Builtin`](Self::Builtin) because the prelude holds
     /// both, and only one of them may appear in type position: `out` is a name
-    /// that resolves, and `var x: out = 1` was accepted on exactly that basis
-    /// (TY-11).
+    /// that resolves, so `var x: out = 1` would otherwise be accepted purely
+    /// because the name was found.
     BuiltinType,
-    /// A `struct Name { … }` declaration (M7, §4.5). A type-name symbol; its
+    /// A `struct Name { … }` declaration (§4.5). A type-name symbol; its
     /// scheme carries the record's [`Type`](praxis_types::Type) once registered.
     Struct,
-    /// An `enum Name { … }` declaration (M7, §4.6). A type-name symbol; its
+    /// An `enum Name { … }` declaration (§4.6). A type-name symbol; its
     /// scheme carries the enum's [`Type`](praxis_types::Type) once registered.
     Enum,
     /// One variant of an `enum` declaration, as a *constructor* name in scope
@@ -78,11 +77,10 @@ pub enum SymbolKind {
     /// returning the enum type for a payload variant, the enum type itself for
     /// a payload-less one.
     ///
-    /// Distinct from [`Fn`](Self::Fn), which is what it used to be bound as,
-    /// because "is this name a constructor" is otherwise only answerable by
-    /// looking the *text* up in the root scope — and a local shadowing a
-    /// variant answers yes (HIR-03). It is also not answerable from the scheme
-    /// alone: `var A = Empty` has the enum type too.
+    /// Distinct from [`Fn`](Self::Fn) because "is this name a constructor" is
+    /// otherwise only answerable by looking the *text* up in the root scope —
+    /// where a local shadowing a variant answers yes. It is also not answerable
+    /// from the scheme alone: `var A = Empty` has the enum type too.
     EnumVariant,
 }
 
@@ -90,11 +88,10 @@ impl SymbolKind {
     /// Whether a name bound to this kind denotes a **type**, and so may appear
     /// in type position.
     ///
-    /// The complement is every kind that denotes a *value*: `var`, a
-    /// parameter, a function, and the prelude's value builtins. Annotation
-    /// validation used to ask only whether the name resolved at all, so
-    /// `var Alias = 1` made `Alias` a legal annotation that silently named no
-    /// type (TY-11).
+    /// The complement is every kind that denotes a *value*: `var`, a parameter,
+    /// a function, and the prelude's value builtins. Annotation validation asks
+    /// this rather than whether the name resolved at all, or `var Alias = 1`
+    /// would make `Alias` a legal annotation that names no type.
     #[must_use]
     pub fn is_type(self) -> bool {
         matches!(
@@ -120,8 +117,8 @@ pub struct Symbol {
     /// only place that can tell a write to a shadowed binding from a write to
     /// the one that shadowed it.
     ///
-    /// It is the replacement for the `let`/`var` distinction (ADR-125), and it
-    /// carries the two consequences that distinction used to carry:
+    /// It is what stands in for the `let`/`var` distinction (ADR-125), and it
+    /// carries that distinction's two consequences:
     ///
     /// - **Generalization** (§5.3). A binding nothing reassigns may be
     ///   generalized under the value restriction; a reassigned one may not.

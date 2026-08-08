@@ -1,4 +1,4 @@
-//! The declaration pass and the sealed type environment (F19).
+//! The declaration pass and the sealed type environment.
 //!
 //! Two things happen before a single expression is inferred:
 //!
@@ -7,23 +7,22 @@
 //!    [`Type`] is recorded against the symbol the resolver minted for its name.
 //! 2. **Function signatures.** Every top-level `fn` gets a monomorphic
 //!    placeholder variable, so a call to one declared later unifies against the
-//!    same variable that declaration will resolve (TY-22).
+//!    same variable that declaration will resolve.
 //!
 //! Both land in a [`TypeEnv`] that is **sealed** — it has no mutator outside
 //! this module — so "a type name the resolver accepted, with no `Type`" is not
-//! a state expression inference can observe. It used to be the normal state:
-//! `infer_top_stmt` ran in source order, so `fn bad(p: Point)` above
-//! `struct Point { … }` read a symbol whose scheme was still `None`, silently
-//! degraded the annotation to a fresh variable, and checked nothing (TY-10).
+//! a state expression inference can observe. Inferring in source order would
+//! reach it: `fn bad(p: Point)` above `struct Point { … }` would read a symbol
+//! whose scheme is still `None`, degrade the annotation to a fresh variable,
+//! and check nothing.
 //!
 //! Resolving an annotation to a [`Type`] also lives here, in [`Annotations`],
 //! because the declaration pass and inference must do it the same way: a name
 //! in type position resolves through the symbol the *resolver* bound it to
 //! (`type_refs`), not through a scope lookup at the point of use. That is what
-//! makes a user `enum` reachable at all — the old lookup asked for a
-//! `SymbolKind::Struct` and answered `None` for everything else, so an `enum`
-//! annotation resolved to a fresh variable and `lookup_enum_type` was dead
-//! code (TY-09).
+//! makes a user `enum` reachable at all: a lookup keyed on `SymbolKind::Struct`
+//! answers `None` for everything else, and the `enum` annotation degrades to a
+//! fresh variable.
 
 use std::collections::{HashMap, HashSet};
 
@@ -139,32 +138,28 @@ impl Declare<'_> {
     /// Register every top-level type declaration, a declaration whose
     /// dependencies are all registered first.
     ///
-    /// Source order is not dependency order and never was — resolution has been
-    /// two-pass since M7 precisely so a `struct` name is visible above its
-    /// declaration. Inference was not, so the *name* resolved and the *type*
-    /// did not exist yet (TY-10).
+    /// Source order is not dependency order: resolution is two-pass precisely
+    /// so a `struct` name is visible above its declaration, which means a pass
+    /// registering in source order can resolve a name whose type does not exist
+    /// yet.
     ///
     /// # A declaration that never becomes ready is recursive, and is reported
     ///
-    /// **REP-14 / ADR-063.** The loop below stalls when every remaining
-    /// declaration waits on another remaining one, which means at least one of
-    /// them reaches *itself*: `struct Node { next: Node }`, or `struct A { b: B }`
-    /// / `struct B { a: A }`. Recursive types are a language feature this compiler
-    /// does not have (ADR-052), and the stall used to be handled by declaring the
-    /// remainder anyway, so a recursive member fell back to a **fresh type
-    /// variable** and said nothing.
-    ///
-    /// That was not merely silence. A variable unifies with everything, so
-    /// `struct Node { next: Node, value: Int }` accepted `Node { next: 7, value: 1
-    /// }` and ran it — one unchecked member per recursive declaration.
+    /// **ADR-063.** The loop below stalls when every remaining declaration waits
+    /// on another remaining one, which means at least one of them reaches
+    /// *itself*: `struct Node { next: Node }`, or `struct A { b: B }` /
+    /// `struct B { a: A }`. Recursive types are a language feature this compiler
+    /// does not have (ADR-052), and declaring the stalled remainder anyway would
+    /// fall back to a **fresh type variable** per recursive member — which
+    /// unifies with everything, so `struct Node { next: Node, value: Int }`
+    /// would accept `Node { next: 7, value: 1 }` and run it.
     ///
     /// The cycle members are reported (`N006`) and then registered with what is
     /// known, which is still a fresh variable: the declaration has been reported,
     /// and a second report per use of it would be a cascade. The loop then
     /// **resumes**, because a declaration that was only waiting *behind* a cycle
     /// is not itself recursive and must still get a real type — `struct C { a: A }`
-    /// written above a recursive `A`/`B` pair had the same silent variable, and
-    /// accepted a `Text` in its `A` field.
+    /// written above a recursive `A`/`B` pair is an ordinary declaration.
     fn declare_types(&mut self, root: &SourceFile) {
         let mut pending: Vec<TypeDecl> = root
             .stmts()
@@ -250,7 +245,7 @@ impl Declare<'_> {
         }
     }
 
-    /// Register a `struct` declaration's type (M7, §4.5): resolve each field's
+    /// Register a `struct` declaration's type (§4.5): resolve each field's
     /// annotation, build the `RecordDef`, and record the resulting `Type`.
     fn declare_struct(&mut self, symbol: SymbolId, item: &StructItem) {
         let Some(name_tok) = item.name() else { return };
@@ -280,7 +275,7 @@ impl Declare<'_> {
         self.bind_type(symbol, ty);
     }
 
-    /// Register an `enum` declaration's type (M7, §4.6) and give each variant
+    /// Register an `enum` declaration's type (§4.6) and give each variant
     /// constructor a type: `(payload…) -> Enum`, or the enum type itself for a
     /// payload-less variant (which is used as a path, not a call).
     fn declare_enum(&mut self, symbol: SymbolId, item: &EnumItem) {
@@ -297,8 +292,9 @@ impl Declare<'_> {
                 .iter()
                 .map(|t| self.resolve_or_fresh(Some(t)))
                 .collect();
-            // TY-05: one payload representation. The `is_empty` normalization
-            // this replaces was the manual half of the same equivalence.
+            // One payload representation: an empty payload vec *is* a
+            // payload-less variant (`EnumVariantDef::bare`), so this arm needs
+            // no special case for one.
             variants.push(EnumVariantDef::new(vname, payload.clone()));
             if let Some(vtok) = v.name() {
                 variant_info.push((payload, vtok.text_range()));
@@ -350,13 +346,13 @@ impl Declare<'_> {
         }
     }
 
-    /// Mint the signature placeholder of every top-level `fn` (TY-22).
+    /// Mint the signature placeholder of every top-level `fn`.
     ///
     /// The placeholder is a plain variable, minted at whatever level the caller
     /// has open — which must be the group's body level, not the level the group
-    /// binds at (TY-01): unifying it with the derived function type lowers that
-    /// type's variables to the placeholder's level, so a placeholder one level
-    /// out would clamp every parameter and result and no signature could ever
+    /// binds at: unifying it with the derived function type lowers that type's
+    /// variables to the placeholder's level, so a placeholder one level out
+    /// would clamp every parameter and result and no signature could ever
     /// generalize.
     fn declare_signatures(&mut self, root: &SourceFile) {
         for stmt in root.stmts() {
@@ -419,7 +415,7 @@ fn mentioned_types(decl: &TypeDecl, type_refs: &HashMap<TextRange, SymbolId>) ->
 }
 
 /// The indices of the declarations in `pending` that can reach **themselves**
-/// through the mention graph — the ones that are genuinely recursive (REP-14).
+/// through the mention graph — the ones that are genuinely recursive.
 ///
 /// A stalled topological pass leaves more than the cycle behind: a declaration
 /// that merely *waits on* a cycle member is stuck too, and it is not the mistake.
@@ -498,8 +494,8 @@ impl<'a> Annotations<'a> {
     /// something with no type — already reported by resolution as `N002`/`N003`,
     /// or by this pass as `Y007` — and the caller falls back to inference.
     pub(crate) fn resolve(&mut self, ty: &TypeRef) -> Option<Type> {
-        // The wrapper accepts all three annotation node kinds (TY-08), so its
-        // node is already the thing to dispatch on.
+        // The wrapper accepts all three annotation node kinds, so its node is
+        // already the thing to dispatch on.
         self.resolve_node(ty.syntax())
     }
 
@@ -582,9 +578,7 @@ impl<'a> Annotations<'a> {
             praxis_types::TypeData::Tuple(els) => els.clone(),
             praxis_types::TypeData::Unit => Vec::new(),
             // A single param: the type itself, not a re-interned copy of its
-            // shape. `intern` is `pub(crate)` since F5, and this was the one
-            // site outside the arena that needed it — for no reason, since the
-            // representative handle was already in hand.
+            // shape — the representative handle is already in hand.
             _ => vec![rep],
         }
     }
@@ -594,17 +588,17 @@ impl<'a> Annotations<'a> {
     ///
     /// The user case reads the symbol the *resolver* bound the name to. A scope
     /// lookup here would be a second, weaker answer to a question resolution
-    /// already answered — and the one it gave was wrong for an `enum`, which it
-    /// simply did not look for (TY-09).
+    /// already answered — and one that has to know to look for an `enum` as well
+    /// as a `struct`.
     ///
-    /// The nullary-collection case is TY-34's: a name with no brackets never
-    /// reached [`collection_from_name`], so `fn f(r: Range)` and
-    /// `fn f(b: BitSet)` resolved to *nothing* and the parameter silently became
-    /// a fresh variable — which then unified with whatever the body did to it.
-    /// A first-class range you cannot annotate is half a value (D6), and `BitSet`
-    /// had the same hole. Routing a bare name through the same door also makes a
-    /// bracket-less `Vec` a `Y007` ("expected 1 type argument, got 0") instead of
-    /// a silent variable, which is exactly what that code says.
+    /// The nullary-collection case: a name with no brackets must still reach
+    /// [`collection_from_name`], or `fn f(r: Range)` and `fn f(b: BitSet)`
+    /// resolve to *nothing* and the parameter silently becomes a fresh variable
+    /// that unifies with whatever the body does to it. A first-class range you
+    /// cannot annotate is half a value (D6), and `BitSet` is the same. Routing a
+    /// bare name through the same door also makes a bracket-less `Vec` a `Y007`
+    /// ("expected 1 type argument, got 0") instead of a silent variable, which
+    /// is exactly what that code says.
     fn named_type(&mut self, name: &SyntaxToken) -> Option<Type> {
         let scalar = match name.text() {
             "Int" => ScalarType::Int,
@@ -635,10 +629,10 @@ impl<'a> Annotations<'a> {
         args: Vec<Type>,
         range: TextRange,
     ) -> Option<Type> {
-        // `Option[T]` (M9): an application of the prelude's *one* `Option` def
-        // (F12). It used to register a fresh def per annotation site, so the
-        // annotation and the `Some`/`None` value it described were two nominal
-        // types that only a relaxed unification arm put back together (TY-06).
+        // `Option[T]`: an application of the prelude's *one* `Option` def. A
+        // fresh def per annotation site would make the annotation and the
+        // `Some`/`None` value it describes two nominal types, joined only by a
+        // relaxed unification arm.
         if name == "Option" {
             let want = 1;
             let got = args.len();
@@ -659,9 +653,9 @@ impl<'a> Annotations<'a> {
             return Some(self.db.option_of(elem));
         }
         let ctor = collection_ctor_for(name)?;
-        // The ctor declares how many type args it takes, and F5 is what finally
-        // consults it (TY-07). A wrong arity used to intern a type nothing could
-        // unify with, so the user saw a `Y001` about a type they never wrote.
+        // The ctor declares how many type args it takes, and a wrong arity is
+        // reported here: interning one anyway makes a type nothing can unify
+        // with, and the user sees a `Y001` about a type they never wrote.
         let want = ctor.arity();
         let got = args.len();
         match CollectionArgs::new(ctor, args) {
@@ -691,14 +685,13 @@ fn direct_ident(node: &SyntaxNode) -> Option<SyntaxToken> {
     })
 }
 
-/// A tuple type from `els`, honouring the arity invariant (F5).
+/// A tuple type from `els`, honouring the arity invariant.
 ///
 /// The parser and the tuple-expression path can both hand over fewer than two
 /// elements, and `TupleElems` refuses to represent either degenerate case as a
 /// tuple — correctly, because neither *is* one: `()` is `Unit`, and a lone
-/// parenthesized element is that element. Interning a one-element `Tuple` was
-/// how the old `db.tuple(els)` produced a type that could never unify with
-/// anything.
+/// parenthesized element is that element. Interning a one-element `Tuple`
+/// produces a type that could never unify with anything.
 pub(crate) fn tuple_or_degenerate(db: &mut TypeDb, mut els: Vec<Type>) -> Type {
     match els.len() {
         0 => db.unit(),

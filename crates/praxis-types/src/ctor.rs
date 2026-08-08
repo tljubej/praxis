@@ -1,10 +1,9 @@
-//! Validated constructor payloads (F5, TY-07).
+//! Validated constructor payloads (F5).
 //!
-//! A [`TypeDb`](crate::TypeDb) constructor used to take a bare `Vec`, so every
-//! illegal shape was one call away: a one-element tuple, a `Map[T]`, a record
-//! with two fields called `x`. The checks existed — but at the *syntax* callers,
-//! which meant the parser-template synthesizer and the prelude seeding (neither
-//! of which goes through a syntax caller) skipped them.
+//! A [`TypeDb`](crate::TypeDb) constructor taking a bare `Vec` would put every
+//! illegal shape one call away: a one-element tuple, a `Map[T]`, a record with
+//! two fields called `x`. Checking at the *syntax* callers is not enough — the
+//! parser-template synthesizer and the prelude seeding do not go through one.
 //!
 //! Each type here is a shape that has already been checked, and it is the only
 //! way to reach the corresponding constructor. Validation happens once, at
@@ -19,8 +18,8 @@ use crate::CollectionCtor;
 ///
 /// A one-element "tuple" is not a tuple — the parser keeps a single
 /// parenthesized type as the inner type — and a zero-element one is `Unit`.
-/// [`TypeData::Tuple`](crate::TypeData::Tuple) documented that invariant;
-/// this is what enforces it.
+/// [`TypeData::Tuple`](crate::TypeData::Tuple) documents that invariant; this
+/// is what enforces it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TupleElems(Box<[Type]>);
 
@@ -49,11 +48,10 @@ impl TupleElems {
 
 /// A collection's type arguments, shaped so the arity *is* the variant.
 ///
-/// `CollectionCtor::arity` existed and nothing called it; a `Map[Int]` was one
-/// `db.collection` away. Matching the shape against the ctor is still
-/// [`TypeDb::collection`](crate::TypeDb::collection)'s job — a `Unary` handed to
-/// `Map` is caught there — but a *wrong-length* argument list can no longer even
-/// be spelled.
+/// Matching the shape against the ctor is still
+/// [`TypeDb::collection`](crate::TypeDb::collection)'s job — a `Unary` handed
+/// to `Map` is caught there — but a *wrong-length* argument list cannot even be
+/// spelled.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CollectionArgs {
     /// `BitSet`, `Range`.
@@ -107,8 +105,8 @@ impl CollectionArgs {
 /// A record definition's fields: name-unique, in declaration order.
 ///
 /// Order is preserved because it is the construction and display order (§5.6);
-/// uniqueness is checked because `RecordDef::field` resolves by name and
-/// silently answered the first of a duplicate pair.
+/// uniqueness is checked because `RecordDef::field` resolves by name and would
+/// silently answer the first of a duplicate pair.
 #[derive(Clone, Debug)]
 pub struct FieldSet(Box<[RecordFieldDef]>);
 
@@ -172,7 +170,7 @@ impl VariantSet {
     }
 
     /// Validate `(name, payload)` pairs. An empty payload is a payload-less
-    /// variant (TY-05).
+    /// variant.
     ///
     /// # Errors
     /// As [`new`](Self::new).

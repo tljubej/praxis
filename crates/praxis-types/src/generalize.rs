@@ -10,17 +10,12 @@
 //! and partial inference: a var that will be constrained by a *later* binding
 //! never gets quantified, because it was created at the outer level.
 //!
-//! # A scheme owns its binders (F10, TY-03)
+//! # A scheme owns its binders (F10)
 //!
-//! Quantification used to be recorded twice: in the scheme's `quantified` list
-//! *and* as a `VarState::Generalized` flag on the arena slot. The two could
-//! disagree, and did — `Scheme::monotype(t)` has no binders by construction, but
-//! a later `generalize` of a *different* binding could flip a variable inside
-//! `t` to `Generalized`, leaving a monotype whose body contained a variable
-//! nothing would ever substitute and unification would refuse to link.
-//!
-//! There is one record now, and it belongs to the scheme. `generalize` mutates
-//! nothing; `instantiate` substitutes by binder membership.
+//! Quantification is recorded in exactly one place, the scheme's binder list.
+//! `generalize` mutates nothing and `instantiate` substitutes by binder
+//! membership, so generalizing one binding cannot change what another scheme's
+//! body means.
 
 use crate::constraint::Constraint;
 use crate::data::VarState;
@@ -36,17 +31,16 @@ pub struct Scheme {
     /// cosmetic (it only affects pretty-printed names) but kept stable for
     /// reproducible diagnostics and snapshots.
     ///
-    /// Private: a scheme's binders and its body are one fact, and letting a
-    /// caller set one without the other is how the arena flag and the list came
-    /// apart in the first place.
+    /// Private: a scheme's binders and its body are one fact, and no caller may
+    /// set one without the other.
     binders: Vec<VarId>,
-    /// The capability requirements on those binders (F10, TY-29).
+    /// The capability requirements on those binders (F10).
     ///
-    /// A requirement inference discovered while checking the body — `a == b`
-    /// needs `Eq(?a)` — used to be *decided against the unresolved variable*
-    /// (optimistically: yes) and then thrown away, so `equal(f, g)` at a
-    /// function type compiled. It rides here instead, and every instantiation
-    /// re-emits it against the fresh variables the use site chose.
+    /// A requirement inference discovers while checking the body — `a == b`
+    /// needs `Eq(?a)` — rides here rather than being decided against the
+    /// still-unresolved variable and discarded. Every instantiation re-emits it
+    /// against the fresh variables the use site chose, so `equal(f, g)` at a
+    /// function type is refused at the site that chose the function type.
     ///
     /// Only constraints on this scheme's own binders are kept. One on a
     /// variable the enclosing scope still owns is not this scheme's to carry —
@@ -108,9 +102,8 @@ impl TypeDb {
     /// scope has been exited), so vars introduced by later/outer bindings are not
     /// stolen.
     ///
-    /// Mutates nothing (F10). It used to rewrite each quantified variable's
-    /// arena slot, which is what let one scheme's generalization corrupt
-    /// another's body.
+    /// Mutates nothing (F10): the binders are recorded on the scheme, and no
+    /// quantified variable's arena slot is rewritten.
     #[must_use]
     pub fn generalize(&mut self, body: Type) -> Scheme {
         self.generalize_at(body, self.level())
@@ -138,7 +131,7 @@ impl TypeDb {
         // it just quantified. The rest stay pending for the enclosing binding,
         // which either discharges them or generalizes them itself. Taking all
         // of them would steal a requirement on an outer variable; taking none
-        // is the discard TY-29 is about.
+        // would discard the requirement altogether.
         let constraints = self.claim_constraints(&binders);
         Scheme {
             binders,
@@ -173,7 +166,7 @@ impl TypeDb {
     /// each binder was replaced by, in binder order.
     ///
     /// The mapping is what a caller needs to say *which* type a use site chose
-    /// for each quantified variable — monomorphization's key (MONO-01).
+    /// for each quantified variable — monomorphization's key.
     #[must_use]
     pub fn instantiate_with_mapping(&mut self, scheme: &Scheme) -> (Type, Vec<Type>) {
         if scheme.binders.is_empty() {
@@ -224,8 +217,8 @@ pub(crate) fn substitute(db: &mut TypeDb, t: Type, vars: &[VarId], to: &[Type]) 
 /// binding site becomes a binder of the scheme being built.
 ///
 /// Inspection only — it collects binders and rebuilds no type, so the scheme
-/// body stays the very type that was generalized. Since F10 it does not write
-/// to the arena at all.
+/// body stays the very type that was generalized, and nothing is written to the
+/// arena.
 struct Generalizer<'a, 'q> {
     db: &'a mut TypeDb,
     memo: FoldMemo,
@@ -255,11 +248,11 @@ impl TypeFolder for Generalizer<'_, '_> {
 /// counterpart, and everything else is rebuilt only where that substitution
 /// reached.
 ///
-/// TY-02 is the identity preservation the fold gives for free: a body with no
-/// applicable binder comes back as the *same* handle instead of a fresh copy of
-/// the whole tree, so instantiating a monomorphic-in-practice scheme stops
-/// growing the arena — and stops minting a specialized record or enum def per
-/// use site when no field type needed substituting.
+/// The fold preserves identity for free: a body with no applicable binder comes
+/// back as the *same* handle instead of a fresh copy of the whole tree, so
+/// instantiating a monomorphic-in-practice scheme does not grow the arena — and
+/// does not mint a specialized record or enum def per use site when no field
+/// type needed substituting.
 struct Instantiator<'a, 'q> {
     db: &'a mut TypeDb,
     memo: FoldMemo,
@@ -275,11 +268,10 @@ impl TypeFolder for Instantiator<'_, '_> {
         &mut self.memo
     }
     fn fold_var(&mut self, t: Type, var: VarId, _state: &VarState) -> Type {
-        // Binder membership is the whole test (F10). It used to also require
-        // the arena to say `Generalized`, which is a fact about *some* scheme
-        // rather than this one — so a variable this scheme binds could be
-        // skipped because another scheme had not marked it, and a variable it
-        // does not bind could be substituted because another scheme had.
+        // Binder membership is the whole test (F10). Any arena-side "is
+        // generalized" mark would be a fact about *some* scheme rather than
+        // this one, and could both skip a variable this scheme binds and
+        // substitute one it does not.
         match self.binders.iter().position(|q| *q == var) {
             Some(idx) => self.mapping[idx],
             None => t,

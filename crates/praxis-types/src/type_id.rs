@@ -5,9 +5,10 @@
 //! arena representation exists: every binding, expression, and constraint carries
 //! types by value rather than through `Rc<RefCell<…>>` (ADR-007).
 //!
-//! The names are deliberately distinct from [`praxis_runtime::TypeId`](::praxis_runtime::descriptor::TypeId)
-//! (the *runtime* descriptor id) — this is the *static* type system's id, and the
-//! two must never be confused. The static `Type` ids are only meaningful inside the
+//! The names are deliberately distinct from
+//! [`praxis_runtime::TypeId`](::praxis_runtime::descriptor::TypeId) (the
+//! *runtime* descriptor id) — this is the *static* type system's id, and the two
+//! must never be confused. The static `Type` ids are only meaningful inside the
 //! [`TypeDb`](crate::TypeDb) that minted them.
 
 /// An interned static type. Copyable; resolve it through [`TypeDb`](crate::TypeDb).
@@ -17,14 +18,14 @@
 /// type variable is equal only to itself until it is linked. Structural comparison
 /// goes through unification, not `==`.
 ///
-/// # Sealed (F5)
+/// # Sealed
 ///
 /// The field is private and there is **no public constructor**. A `Type` is an
 /// index into the arena that minted it, so a hand-written `Type(0)` is a forged
-/// handle that names whatever happens to sit in slot zero — which is exactly
-/// what P0-02 was. The only producers are [`TypeDb`](crate::TypeDb)'s own
-/// constructors; a caller holding a raw `u32` from outside (the debugger
-/// rehydrating a stored `type_id`) must come back in through the checked
+/// handle that names whatever happens to sit in slot zero. The only producers
+/// are [`TypeDb`](crate::TypeDb)'s own constructors; a caller holding a raw
+/// `u32` from outside (the debugger rehydrating a stored `type_id`) must come
+/// back in through the checked
 /// [`TypeDb::type_from_raw`](crate::TypeDb::type_from_raw).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Type(u32);

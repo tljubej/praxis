@@ -69,8 +69,7 @@ impl ScopeTree {
     /// Introduce `name → symbol` into `scope`. If `name` already exists in this
     /// exact scope, the new binding shadows it (the map entry is overwritten);
     /// the previous binding remains reachable through its parent chain if it was
-    /// in an outer scope. Returns the displaced symbol, if any (rare; only when
-    /// rebinding within the same scope).
+    /// in an outer scope.
     pub fn bind(&mut self, scope: ScopeId, name: impl Into<String>, symbol: SymbolId) {
         self.scopes[scope.0 as usize]
             .bindings
@@ -82,7 +81,7 @@ impl ScopeTree {
     ///
     /// [`ScopeTree::lookup`] cannot answer this: a top-level `fn` declared twice
     /// and a `var` shadowing a prelude name both find a symbol, and only the
-    /// first is a mistake (TY-24).
+    /// first is a mistake.
     #[must_use]
     pub fn is_bound_here(&self, scope: ScopeId, name: &str) -> bool {
         self.scopes[scope.0 as usize].bindings.contains_key(name)
@@ -100,8 +99,8 @@ impl ScopeTree {
     ///
     /// The scope is what answers "did this name cross a boundary": a `fn` body
     /// is a child of the scope around it, so the lookup walks straight out to the
-    /// file's top level and a `fn` reading a top-level `var` resolved silently
-    /// (REP-22). Only the caller knows which boundaries matter, so this reports
+    /// file's top level and a `fn` reading a top-level `var` resolves like any
+    /// other name. Only the caller knows which boundaries matter, so this reports
     /// the fact and decides nothing.
     #[must_use]
     pub fn lookup_binding(&self, scope: ScopeId, name: &str) -> Option<(SymbolId, ScopeId)> {

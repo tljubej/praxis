@@ -59,9 +59,8 @@ const DEBUG_FRAMES_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, debug_fra
 ///
 /// Asserted equal to `SHADOW_SLOT_BYTES` because one [`slot_displacement`] serves
 /// both stacks and [`emit_zero_slots`] writes one `GC`-typed word per slot on
-/// either. **Not** because the two stacks share an index — they did until
-/// ADR-128 decision 3, and the old wording of this assertion said so; the index
-/// spaces are now separate and only the stride is common.
+/// either. **Not** because the two stacks share an index: the index spaces are
+/// separate and only the stride is common (ADR-128 decision 3).
 const DEBUG_VALUE_SLOT_BYTES: i64 = core::mem::size_of::<Option<praxis_runtime::GcRef>>() as i64;
 const _: () = assert!(
     DEBUG_VALUE_SLOT_BYTES == SHADOW_SLOT_BYTES,
@@ -85,18 +84,8 @@ const SHADOW_SLOT_BYTES: i64 = core::mem::size_of::<*mut praxis_runtime::GcHeade
 /// Zero more than this many slots with an inline loop rather than a run of
 /// stores. **This is a code-size budget, and nothing else** (ADR-128 decision 1).
 ///
-/// It was 32, and that number was never measured: it appears in one commit
-/// (`488330f`, ADR-101's handover) and in no ADR and no handover. Its doc comment
-/// claimed a run of stores becomes *slower* than a call somewhere around 32
-/// slots, which has nothing behind it — a 264-byte `memset` is a call (argument
-/// setup, a branch to a stub, libc's own size dispatch) against 33 straight
-/// stores with no branch at all, and ADR-101's own figure priced the old
-/// prologue memset at ~32 ns per call.
-///
-/// So the threshold answers the one question that *is* real, and the measurements
-/// say which question that is. **Below it, a straight run beats both
-/// alternatives; above the widths any *hot* function reaches, nothing else can
-/// be measured at all.**
+/// **Below it, a straight run beats both alternatives; above the widths any
+/// *hot* function reaches, nothing else can be measured at all.**
 ///
 /// Three shapes were A/B'd at `is_prime`'s 33-slot debug claim, colouring held
 /// constant, `benchmarks/ab.py`:
@@ -134,17 +123,16 @@ const SHADOW_SLOT_BYTES: i64 = core::mem::size_of::<*mut praxis_runtime::GcHeade
 /// | 340 (`adr127_pipeline_over_every_iterable`'s `main`) | — | *loops* |
 /// | 4096 (`MAX_DEBUG_VALUE_SLOTS`) | 8192 | 32 KB if it did not |
 ///
-/// The last row is why "always unroll, no threshold" is not the answer. 256 was
-/// the first value tried and is a **4× larger** code-size budget for no measured
-/// gain: 256 against 64 over the whole suite is `1.001×`, every one of eight rows
+/// The last row is why "always unroll, no threshold" is not the answer. Raising
+/// it to 256 is a **4× larger** code-size budget for no measured gain: 256
+/// against 64 over the whole suite is `1.001×`, every one of eight rows
 /// unresolved, because nothing hot crosses either line.
 ///
 /// Deliberately not `FunctionBuilder::emit_small_memset`, whose threshold is 4:
 /// that would put a libc call in the prologue of any function with five `Gc`
 /// locals, which is most of them, and the point of ADR-101 is that the common
-/// prologue makes no calls at all. Since ADR-128 that sentence is true rather
-/// than aspirational — see [`emit_zero_slots`], which no longer has a call in it
-/// at any width.
+/// prologue makes no calls at all — see [`emit_zero_slots`], which has no call
+/// in it at any width.
 ///
 /// Under `adr128-d1-arm-a` this is 32 again and [`emit_zero_slots`] calls
 /// `%Memset` above it — the measurement arm, and the whole of that toggle.
@@ -188,10 +176,9 @@ const UNIT_REF_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, unit_ref) as 
 
 /// The byte offset of `small_ints` within a `RuntimeContext`: the base of the
 /// interned small-`Int` table (`praxis_runtime::small_int`). `Inst::ConstGc`
-/// loads it and then loads the element at a compile-time offset — two loads,
-/// where an in-range `Int` literal used to be a call to `praxis_alloc_int`
-/// preceded by a shadow-frame spill (docs/handovers/21-where-the-time-goes.md
-/// §3.5). Computed from the `#[repr(C)]` layout, like `SLOTS_OFFSET`.
+/// loads it and then loads the element at a compile-time offset, so an in-range
+/// `Int` literal is two loads and no call. Computed from the `#[repr(C)]`
+/// layout, like `SHADOW_OFFSET`.
 const SMALL_INTS_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, small_ints) as i64;
 
 /// The literal's table and the *runtime* value's table are the same table.
@@ -214,7 +201,7 @@ const _: () = assert!(
 /// `Inst::ConstGc { GcConst::Char }` loads it and then loads the element at a
 /// compile-time offset, exactly as [`SMALL_INTS_OFFSET`] does — ADR-100's "a
 /// literal is a load", applied to its second scalar (ADR-141). Computed from
-/// the `#[repr(C)]` layout, like `SLOTS_OFFSET`.
+/// the `#[repr(C)]` layout, like `SHADOW_OFFSET`.
 ///
 /// There is deliberately **no** `const _: () = assert!(…)` twin of the one
 /// below: that assertion exists because an `Int` has a *second* reader of the
@@ -230,11 +217,10 @@ const TRUE_REF_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, true_ref) as 
 const FALSE_REF_OFFSET: i64 = core::mem::offset_of!(RuntimeContext, false_ref) as i64;
 
 /// The byte offset of `tag` within an `EnumPayload`. `match` reads it directly
-/// rather than through a wrapper call, so it is baked into emitted code — and
-/// it was baked in as a literal `0` until the payload gained a leading schema
-/// pointer (RT-13) and moved the tag to offset 8. Computed from the `#[repr(C)]`
-/// layout, like `SHADOW_OFFSET`, so the next reorder is a compile-time-derived
-/// constant rather than a silent miscompile of every enum in the language.
+/// rather than through a wrapper call, so it is baked into emitted code.
+/// Computed from the `#[repr(C)]` layout, like `SHADOW_OFFSET`, so a reorder of
+/// the payload moves a compile-time-derived constant rather than silently
+/// miscompiling every enum in the language.
 const ENUM_TAG_OFFSET: i32 = core::mem::offset_of!(praxis_runtime::enums::EnumPayload, tag) as i32;
 
 /// The byte offset of the descriptor pointer within a `GcHeader`.
@@ -250,13 +236,11 @@ const GC_DESCRIPTOR_OFFSET: i32 = praxis_runtime::GcHeader::DESCRIPTOR_OFFSET as
 /// The displacement of `id`'s slot in `RuntimeContext.descriptors`, as a
 /// Cranelift memory offset (ADR-116).
 ///
-/// **This is the whole of what the backend knows about a descriptor now.** It
-/// names a [`BuiltinTypeId`] — an enum discriminant, the same one
-/// `BUILTINS[i]`'s registry is indexed by — and the address it proves against
-/// is whatever the runtime wrote into that slot. Where the compiler used to
-/// carry `&scalars::INT` across the ABI as an immediate, there is no descriptor
-/// address in emitted code at all, so a compiler and a runtime cannot disagree
-/// about one.
+/// **This is the whole of what the backend knows about a descriptor.** It names
+/// a [`BuiltinTypeId`] — an enum discriminant, the same one `BUILTINS[i]`'s
+/// registry is indexed by — and the address it proves against is whatever the
+/// runtime wrote into that slot. No descriptor address appears in emitted code
+/// at all, so a compiler and a runtime cannot disagree about one.
 ///
 /// `RuntimeContext::descriptor_offset` is the authority for the arithmetic,
 /// including the stride: computing `offset_of!(…, descriptors) + i * 8` here
@@ -283,7 +267,7 @@ const _: () = assert!(
 
 /// The byte offset of `pending_fault` within a `RuntimeContext`, and of `kind`
 /// within the `Fault` it points at. `Inst::CheckFault` is a load through each
-/// and a branch, where it used to be a call to `praxis_check_fault` (ADR-102).
+/// and a branch, with no call (ADR-102).
 const PENDING_FAULT_OFFSET: i32 = core::mem::offset_of!(RuntimeContext, pending_fault) as i32;
 const FAULT_KIND_OFFSET: i32 = praxis_runtime::Fault::KIND_OFFSET as i32;
 
@@ -332,8 +316,8 @@ fn lower_function_capturing<M: Module>(
     // The ISA's pointer width and default call convention, needed by `finalize`
     // at the end and taken here because that point holds a borrow excluding
     // `module`. The prologue's slot zeroing still takes it, but only
-    // `adr128-d1-arm-a` reads it: the `call_memset` ADR-128 decision 1 removed is
-    // the one thing in this backend that ever needed a call convention.
+    // `adr128-d1-arm-a` reads it: its `%Memset` call is the one thing in this
+    // backend that needs a call convention.
     let frontend_config = module.isa().frontend_config();
     // Use the module's own Context (the 0.134 idiom): build into `ctx.func`,
     // then `define_function(id, &mut ctx)`.
@@ -479,22 +463,16 @@ fn lower_function_capturing<M: Module>(
 
     // Native-stack budget guard (§9.2, §17.4, ADR-105), and it comes *first*.
     //
-    // It used to sit after the shadow-frame push, because the push helper was
-    // what bumped the counter and the guard read the result back. With the bump
-    // inline there is no reason to push before deciding, and two reasons not to:
-    // the over-limit path then pushes nothing, so it pops nothing (the third
-    // `emit_pop_shadow_frame` call site is gone rather than rewritten), and
-    // "every prologue guards before it pushes" is the premise that lets
-    // `SHADOW_STACK_SLOTS` be sized so shadow-stack exhaustion is
-    // unrepresentable.
-    //
-    // Two things about it are new (ADR-105).
+    // Guarding before the shadow-frame push has two consequences: the over-limit
+    // path pushes nothing, so it pops nothing, and "every prologue guards before
+    // it pushes" is the premise that lets `SHADOW_STACK_SLOTS` be sized so
+    // shadow-stack exhaustion is unrepresentable.
     //
     // It spends this frame's *cost* — `FRAME_BYTES_BASE + 2 * slots` — and not a
     // flat 1. A call count is calibrated for one frame width, and the native
     // frames of real functions differ by a factor of three; counted as calls,
-    // the widest legal frame aborted the host at a depth the narrowest one
-    // survived, which is exactly the failure this guard exists to prevent.
+    // the widest legal frame aborts the host at a depth the narrowest one
+    // survives, which is exactly the failure this guard exists to prevent.
     // The width is known here, so the cost folds to one immediate.
     //
     // **The width it spends is the dense count of `Gc` locals, not the colored
@@ -506,7 +484,7 @@ fn lower_function_capturing<M: Module>(
     // what ADR-105 was written to remove. Two more reasons: the dense count is
     // also the debug value stack's width, and *that* stack's reservation is
     // bounded by exactly this charge; and at `opt_level = "speed"` the native
-    // frame already tracks live ranges, so charging the dense count is now
+    // frame already tracks live ranges, so charging the dense count is
     // conservative. Erring high here is free; erring low is a crash.
     //
     // And it counts *down*, against a budget the context arrived carrying. The
@@ -560,8 +538,8 @@ fn lower_function_capturing<M: Module>(
     // by an epilogue, and it is exactly the one path that skipped the prologue.
     //
     // The snapshot taken here reflects the caller's chain — at whatever depth
-    // exhausted the budget — rather than the overflowing frame's: one frame
-    // shallower than before, same fault, same kind.
+    // exhausted the budget — rather than the overflowing frame's, which was
+    // never pushed.
     {
         builder.switch_to_block(over_limit);
         call_symbol(
@@ -572,7 +550,7 @@ fn lower_function_capturing<M: Module>(
             module,
             &mut import_cache,
         )?;
-        // Snapshot the (deep) debug-frame chain before unwinding (M10-WS3).
+        // Snapshot the (deep) debug-frame chain before unwinding.
         emit_snapshot_debug_chain(&mut builder, ctx_val, module, &mut import_cache)?;
         let unit = load_unit_sentinel(&mut builder, ctx_val);
         builder.ins().return_(&[unit]);
@@ -609,10 +587,10 @@ fn lower_function_capturing<M: Module>(
     // nothing (a `Scalar` local in the set — see the `continue` there), so a
     // `root_count == 0` special case would leave `frame_var` undefined on a path
     // that reads it and panic Cranelift. One code path is worth two wasted
-    // instructions in a case that essentially does not occur — and since ADR-128
-    // decision 2 that case is *common* rather than hypothetical: a function whose
-    // locals are never live across a safepoint claims no root slots at all, which
-    // is `is_prime`, `bfs`'s `open_cell` and every closure in `pipeline`.
+    // instructions, and the empty case is common rather than hypothetical: with
+    // colored root slots (ADR-128 decision 2) a function whose locals are never
+    // live across a safepoint claims none at all, which is `is_prime`, `bfs`'s
+    // `open_cell` and every closure in `pipeline`.
     let frame_var = builder.declare_var(GC);
     {
         let base = emit_slot_stack_push(
@@ -627,9 +605,8 @@ fn lower_function_capturing<M: Module>(
     }
 
     // Prologue (cont.): claim this call's debug frame (§9.3, ADR-021, ADR-104).
-    // This is what the crash debugger reads for `bt`/`locals`, and it is now two
-    // more claims on two more slot stacks rather than two extern calls and two
-    // to three mallocs:
+    // This is what the crash debugger reads for `bt`/`locals`, and it is two
+    // more claims on two more slot stacks — no calls, no allocation:
     //
     //  - `debug_values_var` holds the base of this call's run of one word per
     //    `Gc` local, in the same order as `debug_slot` — which is
@@ -640,21 +617,16 @@ fn lower_function_capturing<M: Module>(
     //    one whose box ADR-120's forwarding elided; the `DebugLocalMeta` beside
     //    the slot is what says which, so nothing here has to know.
     //
-    //    **This claim is a different width from the shadow one above** since
-    //    ADR-128 decision 3. ADR-104 built the two index-parallel "for free",
-    //    because a local's shadow slot index doubled as its debug-local index;
-    //    colouring the root slots by live range ends that, and the two spaces now
-    //    answer different questions. What ADR-104 built is otherwise kept whole,
-    //    `FunctionDebugMeta`'s layout included.
+    //    **This claim is a different width from the shadow one above**
+    //    (ADR-128 decision 3): the root slots are coloured by live range, so a
+    //    local's shadow slot index is not its debug-local index and the two
+    //    spaces answer different questions.
     //  - `debug_frame_var` holds this call's one `DebugFrameEntry`, which pairs
     //    the function's *static* `FunctionDebugMeta` with that base. Claimed
     //    without zeroing: both words are written immediately below, in
     //    straight-line code with nothing between, so the only reader — a fault
     //    epilogue's `praxis_snapshot_debug_chain`, far downstream — can never
     //    observe the gap.
-    //
-    // The whole of what used to be `praxis_push_debug_frame`'s four arguments
-    // and `praxis_set_frame_source_span`'s two is the one immediate below.
     let debug_values_var = builder.declare_var(GC);
     let debug_frame_var = builder.declare_var(GC);
     {
@@ -669,15 +641,13 @@ fn lower_function_capturing<M: Module>(
         builder.def_var(debug_values_var, values_base);
 
         let meta_ptr = build_function_debug_meta(mir, db, generation);
-        // The one equality the runtime reads this claim under, and the reason
-        // decision 3 is safe: `crash_snapshot::copy_stack` and
+        // The one equality the runtime reads this claim under:
+        // `crash_snapshot::copy_stack` and
         // `DebugFrameStackHeader::clear_reclaimed` both walk
         // `0..meta.local_count` over *this* run of slots. A `local_count` larger
         // than the claim reads — and, in `clear_reclaimed`, writes — past it into
         // the next frame's slots. The two are built by two walks of `mir.locals`
-        // with the same filter, so they agree; this is what says so out loud, and
-        // it is the assertion decision 5 has to keep true when it starts denying
-        // locals a slot.
+        // with the same filter, so they agree; this is what says so out loud.
         //
         // SAFETY: `build_function_debug_meta` just returned this pointer out of
         // the generation arena, which outlives the compilation.
@@ -790,8 +760,8 @@ fn lower_function_capturing<M: Module>(
             // past an unfused `Inst::CheckFault`'s (ADR-135). A faulting
             // instruction's destination is therefore not written on the path
             // where the fault happened: the value was never produced, so
-            // `<uninit>` is the honest rendering, and "the wrapper's Unit
-            // sentinel" was the least honest one available.
+            // `<uninit>` is the honest rendering and "the wrapper's Unit
+            // sentinel" is the least honest one available.
             for inst in step.insts {
                 spill.store_debug_defs(&mut builder, inst, &vars);
             }
@@ -829,10 +799,8 @@ fn lower_function_capturing<M: Module>(
     // `ctx.func` on the way through *is* optimization: at `opt_level = "speed"`
     // (module::CRANELIFT_FLAGS) `Context::optimize` runs unreachable-block
     // elimination, constant-block-parameter removal, alias resolution **and the
-    // egraph mid-end**. This comment said the mid-end was gated off, which was
-    // true until the fifth measurement in `module.rs` moved the flag; ADR-128's
-    // aside is what caught it. See `dump::emit` for the whole of it, and for why
-    // a package quoting an instruction count off this text has to care.
+    // egraph mid-end**. See `dump::emit` for the whole of it, and for why a
+    // package quoting an instruction count off this text has to care.
     dump::emit(&mir.name, &ctx);
     if let Some(out) = captured {
         *out = ctx.func.clone();
@@ -848,8 +816,8 @@ fn lower_function_capturing<M: Module>(
 /// bisecting the abort depth of recursive programs under `ulimit -s` and rounded
 /// up. Measurements go stale: a Cranelift upgrade, a new target, or a lowering
 /// that spills more can widen the real frame past what the guard charged for it,
-/// and the symptom would be the SIGABRT this whole change exists to remove —
-/// appearing years later, in a build nobody connected to a codegen bump.
+/// and the symptom would be the SIGABRT the guard exists to prevent, in a build
+/// nobody connected to a codegen bump.
 ///
 /// So the model is not trusted, it is audited. Cranelift knows the exact frame
 /// size once it has compiled the function, and this compares the two on every
@@ -878,7 +846,7 @@ fn audit_frame_cost(ctx: &codegen::Context, name: &str, charged: u32) {
     else {
         // No layout means no claim to check. Not an error: a target or a
         // Cranelift version that does not publish one leaves the model
-        // unaudited, which is where it started.
+        // unaudited.
         return;
     };
     let actual = layout.frame_to_fp_offset.saturating_add(SETUP_AREA_BYTES);
@@ -976,27 +944,17 @@ fn emit_slot_stack_claim(
 /// it started from.
 ///
 /// Restoring the saved absolute rather than subtracting the frame's width is
-/// deliberate: it cannot underflow (the extern pop this replaced needed a
-/// `saturating_sub` for exactly that reason) and it is self-healing — an
-/// imbalance introduced by anything that ran inside this frame is corrected
-/// here rather than propagated to the caller.
+/// deliberate: it cannot underflow, and it is self-healing — an imbalance
+/// introduced by anything that ran inside this frame is corrected here rather
+/// than propagated to the caller.
 ///
-/// The header is re-read from the context rather than carried from the push.
-/// Carrying it would keep a second value live across the whole body, which at
-/// `opt_level = "none"` — the level this was decided at — meant a native stack
-/// slot in every frame, and the native frame is the budget deep recursion
-/// actually runs out of.
-///
-/// **That premise is stale and the conclusion is kept on a different one**
-/// (ADR-128's aside). The tree has been at `"speed"` since the fifth measurement
-/// in `module.rs`, where the register allocator assigns stack slots by live range
-/// and would not necessarily spend one on this. What justifies the reload now is
-/// the second half of the old sentence, which never depended on the level: it is
-/// an L1 hit off a pointer that is live regardless, against a value that would
-/// otherwise be live across every call in the body. Re-measuring it means
-/// comparing the `sub sp, sp, #N` immediate in a `PRAXIS_DUMP_VCODE` prologue
-/// with and without the threading — no benchmark and no clock — and it is not
-/// this record's to spend.
+/// The header is re-read from the context rather than carried from the push: the
+/// reload is an L1 hit off a pointer that is live regardless, against a value
+/// that would otherwise be live across every call in the body — which is a
+/// native stack slot in every frame, and the native frame is the budget deep
+/// recursion runs out of (ADR-105). Re-measuring the trade means comparing the
+/// `sub sp, sp, #N` immediate in a `PRAXIS_DUMP_VCODE` prologue with and without
+/// the threading — no benchmark and no clock.
 fn emit_slot_stack_pop(
     builder: &mut FunctionBuilder,
     ctx_val: Value,
@@ -1018,16 +976,15 @@ fn emit_slot_stack_pop(
 /// collector scans every slot below `top`, and a slot the function has not
 /// spilled into yet would otherwise hold whatever a previous, deeper call left
 /// there — a pointer to an object that may since have been swept and its
-/// storage reused (RT-01). Only the claimed run is zeroed, which is the whole
-/// of finding §3.3: ADR-019 zeroed all `MAX_SHADOW_SLOTS` on every call. The
+/// storage reused. Only the claimed run is zeroed, not the whole stack. The
 /// crash debugger's value slots (ADR-104) are zeroed for the neighbouring
 /// reason: an unwritten slot must read `None` so `locals` renders `<uninit>`
 /// rather than a value from a deeper call that has since returned.
 ///
 /// # This run is never a `memset`, and cannot be one
 ///
-/// It used to call one above [`SLOT_ZERO_UNROLL_MAX`], and that was the wrong
-/// shape rather than a wrong threshold (ADR-128 decision 1). `memset`'s cost is
+/// Calling one above [`SLOT_ZERO_UNROLL_MAX`] would be the wrong shape rather
+/// than a wrong threshold (ADR-128 decision 1). `memset`'s cost is
 /// mostly *generality*: dispatch on a byte count that may be anything, fix-ups
 /// for a ragged head and tail, size-class branches. Every one of those cases is
 /// unreachable here. This run is always a whole number of slots, contiguous, and
@@ -1089,11 +1046,10 @@ fn emit_zero_slots(
     }
 
     if ZERO_SLOTS_WITH_MEMSET {
-        // ADR-128 decision 1 arm A: the `%Memset` call this decision removed,
-        // restored for the measurement and for nothing else. The zero constant
-        // is minted inside each arm rather than hoisted above them, so this path
-        // emits exactly what the pre-ADR-128 tree emitted and the arm is a
-        // measurement of the call rather than of the call plus a dead `iconst`.
+        // ADR-128 decision 1 arm A: a `%Memset` call, for the measurement and
+        // for nothing else. The zero constant is minted inside each arm rather
+        // than hoisted above them, so this path emits the call alone and the arm
+        // measures the call rather than the call plus a dead `iconst`.
         let ch = builder.ins().iconst(types::I8, 0);
         let size = builder
             .ins()
@@ -1150,10 +1106,11 @@ fn emit_zero_slots(
 /// Everything a call pays scales with the width it *declares*: the prologue
 /// zeroes it, `frame_cost` charges for it, and `push_roots` walks it at every
 /// collection, since the scan is one linear pass over `[base, top)` and a null
-/// slot is skipped but still read. Before this, the width was the count of `Gc`
-/// locals — 33 in `primes`'s `is_prime`, whose largest co-live root set is
-/// **one**. Over all 71 functions of `tests/aoc-corpus` the widest frame was 110
-/// and the largest co-live root set is 11, which is `REFERENCE_FRAME_SLOTS`.
+/// slot is skipped but still read. A width taken from the count of `Gc` locals
+/// wildly over-states that: `primes`'s `is_prime` has 33, and its largest
+/// co-live root set is **one**. Over all 71 functions of `tests/aoc-corpus` the
+/// widest such count is 110, while the largest co-live root set anywhere is 11,
+/// which is `REFERENCE_FRAME_SLOTS`.
 ///
 /// # Why it is sound
 ///
@@ -1167,8 +1124,7 @@ fn emit_zero_slots(
 ///
 /// The same observation, one layer down: at `opt_level = "speed"` Cranelift's
 /// register allocator already assigns *native* stack slots by live range, on
-/// these same locals. The shadow stack was the last array in the pipeline handed
-/// out by name.
+/// these same locals.
 ///
 /// **The second premise, which is Cranelift's and not ours: there is no
 /// dead-store elimination.** Sharing a slot creates store→store pairs to one
@@ -1217,9 +1173,9 @@ impl RootSlotMap {
         use std::collections::{BTreeMap, BTreeSet};
 
         if POSITIONAL_ROOT_SLOTS {
-            // ADR-128 decision 2 arm A: the positional map this replaced — one
-            // slot per `Gc` local, the local's position among them, which is
-            // also the debugger's index space. That the two then coincide is the
+            // ADR-128 decision 2 arm A: ADR-019's positional map — one slot per
+            // `Gc` local, the local's position among them, which is also the
+            // debugger's index space. That the two then coincide is the
             // whole of what the arm reverts; decisions 3 and 4 still hold,
             // because holding them constant is what makes this a measurement of
             // the colouring and of nothing else.
@@ -1238,11 +1194,10 @@ impl RootSlotMap {
         }
 
         // Only `Gc` locals get a slot, and this filter is the map's own rather
-        // than another crate's. The positional map this replaces filtered
-        // `mir.locals` by `LocalKind::Gc` and so could not answer for a `Scalar`
-        // local at all; a map built from the *root sets* could, because
-        // `RootSlots::live` is a list of locals and nothing in its type says
-        // they are `Gc`. That they are is `VerifyError::RootIsNotGc`'s job, in
+        // than another crate's. Colouring is driven by the *root sets*, and
+        // those cannot answer the question on their own: `RootSlots::live` is a
+        // list of locals and nothing in its type says they are `Gc`. That they
+        // are is `VerifyError::RootIsNotGc`'s job, in
         // `praxis-mir` — and a backend that stored a raw scalar payload into the
         // collector's scan region because a verifier in another crate stopped
         // running is not a backend that is safe on its own terms.
@@ -1390,11 +1345,9 @@ fn slot_census(mir: &MirFunction, roots: &RootSlotMap, dense: u32) -> dump::Slot
 /// The spill context handed to every instruction/terminator lowering: the
 /// Variables the prologue defined, and the two Gc-local → slot-index maps.
 ///
-/// **Two writers, not one** (MIR-16). There used to be a single `emit_spill`
-/// writing one root list into both frames, which is why the two frames could
-/// not disagree — and why making the GC root set exact would have silently
-/// emptied the debugger's view. [`SpillCtx::spill_roots`] serves the collector
-/// and takes the exact [`RootSlots`] at each safepoint;
+/// **Two writers, not one**, because the two frames answer different questions.
+/// [`SpillCtx::spill_roots`] serves the collector and takes the exact
+/// [`RootSlots`] at each safepoint;
 /// [`SpillCtx::store_debug_defs`] serves the crash debugger and runs at every
 /// *definition*, which is where the over-approximate [`DebugSlots`] contract is
 /// actually realized (ADR-104).
@@ -1422,18 +1375,15 @@ struct SpillCtx<'a> {
     /// feeding [`SpillCtx::store_debug_local`], [`SpillCtx::store_debug_defs`],
     /// `elided_box_slots` and the debug value claim. Every `Gc` local is in it.
     ///
-    /// **Two maps, not one, and no consumer needs to know there was ever one.**
-    /// Mixing them is the mistake that would put a local's value in another
-    /// local's display, or root the wrong slot; each store site below names the
-    /// one it means.
+    /// **Two maps, not one.** Mixing them is the mistake that would put a
+    /// local's value in another local's display, or root the wrong slot; each
+    /// store site below names the one it means.
     debug_slot_of: &'a HashMap<LocalId, u32>,
-    /// The debug slots each `Scalar` local must write because the box that
-    /// used to write them is gone (ADR-120 part 2). Empty for every function
-    /// the forwarding pass did not touch, which is what makes this cost nothing
-    /// where it buys nothing.
-    /// Per `Scalar` local that stands in for an elided or promoted box: the
-    /// store bias its payload width takes (ADR-121 decision 2) and the debug
-    /// slots its definitions must write.
+    /// Per `Scalar` local that stands in for an elided or promoted box
+    /// (ADR-120 part 2): the store bias its payload width takes (ADR-121
+    /// decision 2) and the debug slots its definitions must write. Empty for
+    /// every function the forwarding pass did not touch, which is what makes
+    /// this cost nothing where it buys nothing.
     elided_box_slots: &'a HashMap<LocalId, (i64, Vec<u32>)>,
 }
 
@@ -1442,26 +1392,22 @@ impl SpillCtx<'_> {
     /// each live root's current value into `frame_base + slot_index*8`, and
     /// write **null** into every slot the liveness pass marked dead.
     ///
-    /// One store per slot, with the index as the store's own displacement.
-    /// Under ADR-019's frame objects this was an `iadd_imm_s` plus a store,
-    /// because the slot array sat at a fixed offset *inside* the frame and the
-    /// two displacements had to be summed at runtime — and at `opt_level =
-    /// "none"` Cranelift does not fold that add into the store, so every
-    /// spilled root cost an extra address computation. A frame's base is now the
-    /// address of slot 0, so there is nothing to add.
+    /// One store per slot, with the index as the store's own displacement: a
+    /// frame's base is the address of slot 0 (ADR-101), so there is no address
+    /// computation to fold.
     ///
-    /// The null stores are MIR-01. A slot written at one safepoint and not live
-    /// at the next used to keep its old value forever: the collector reads the
-    /// whole frame, so a dead slot kept its object reachable for the rest of the
-    /// call — and, once RT-01 made swept storage reusable, a slot could name a
-    /// live object of an entirely different type.
+    /// The null stores are why a slot written at one safepoint and dead at the
+    /// next does not keep its value: the collector reads the whole frame, so a
+    /// stale slot would keep its object reachable for the rest of the call —
+    /// and, since swept storage is reused, a stale slot could name a live object
+    /// of an entirely different type.
     ///
     /// ### The one subtlety colouring introduces
     ///
-    /// [`RootSlots::dead`] is a set of **locals** whose slots may be stale
-    /// (MIR-01). Translated naively to slots it is wrong: under ADR-128 decision
-    /// 2 a dead local may share a slot with a live one, and nulling it would null
-    /// the live one's value — a root the collector then does not see, which is a
+    /// [`RootSlots::dead`] is a set of **locals** whose slots may be stale.
+    /// Translated naively to slots it is wrong: under ADR-128 decision 2 a dead
+    /// local may share a slot with a live one, and nulling it would null the
+    /// live one's value — a root the collector then does not see, which is a
     /// use-after-free the type system cannot catch and no test of a *dead* local
     /// would notice.
     ///
@@ -1544,19 +1490,18 @@ impl SpillCtx<'_> {
         }
     }
 
-    /// The debugger's write (§9.3, M10-WS2, ADR-104): store every `Gc` local
-    /// `inst` defines into `debug_frame.locals[slot].value`, at the definition.
+    /// The debugger's write (§9.3, ADR-104): store every `Gc` local `inst`
+    /// defines into its debug value slot, at the definition.
     ///
     /// # Why one store per definition is the same view as a store per safepoint
     ///
-    /// This replaces a `spill_debug` that ran at every GC safepoint *and* at
-    /// every `Inst::CheckFault`, writing the whole `DebugSlots::visible()` set
-    /// each time — `Σ_points |visible|` stores, against `Σ 1 per definition`
-    /// here. The two produce identical slot contents everywhere a snapshot can
-    /// be taken, and the argument is short:
+    /// Writing the whole `DebugSlots::visible()` set at every safepoint and
+    /// every `Inst::CheckFault` would be `Σ_points |visible|` stores against
+    /// `Σ 1 per definition` here, and the two leave identical slot contents
+    /// everywhere a snapshot can be taken:
     ///
     /// A debug slot is never cleared, so its content is *the value the most
-    /// recently executed store to it wrote*. The old spill wrote
+    /// recently executed store to it wrote*. A spill would write
     /// `builder.use_var(vars[L])`, which is by definition the value of the most
     /// recently executed `def_var` of `L` — or Cranelift's zero for a path
     /// where none executed (`cranelift-frontend`'s SSA builder zero-initializes
@@ -1566,15 +1511,14 @@ impl SpillCtx<'_> {
     /// redefinitions are covered by the same sentence: "most recently executed"
     /// is a property of the run, not of the CFG.
     ///
-    /// So the change cannot lose a value. It *gains* a few: a local defined at
-    /// the end of a block and dead at the top of the next was in no debug
-    /// point's `visible()` and so was never written at all, and now shows the
-    /// value it was given. That is MIR-16's contract — "a value that has been
-    /// produced stays renderable" — being met more completely, not less.
+    /// It also renders strictly more: a local defined at the end of a block and
+    /// dead at the top of the next is in no debug point's `visible()`, and still
+    /// shows the value it was given — "a value that has been produced stays
+    /// renderable".
     ///
-    /// `DebugSlots` is unchanged and stays exactly what ADR-044 defines. It
-    /// stops being the *emission driver* and remains the *contract*: whatever a
-    /// point's `visible()` names, this has already stored.
+    /// `DebugSlots` stays exactly what ADR-044 defines. It is not the *emission
+    /// driver* but the *contract*: whatever a point's `visible()` names, this
+    /// has already stored.
     fn store_debug_defs(&self, builder: &mut FunctionBuilder, inst: &Inst, vars: &[Variable]) {
         // `praxis_mir::defs` rather than a match here. ADR-044's Consequences
         // fix the count of exhaustive matches over `Inst` at five, and the
@@ -1603,22 +1547,20 @@ impl SpillCtx<'_> {
     /// scalar channel carries — and a `Scalar(Bool)` holds the zero-extended
     /// byte. `DebugSlotKind` decodes each on the way out.
     ///
-    /// ### Why this is not on the raising path, which is ADR-117's doing
+    /// ### Why this is not on the raising path (ADR-117)
     ///
     /// A definition of `s` in `s = a + b` can *fault*, and the box this store
-    /// stands in for was the instruction after the `Inst::CheckFault`: a program
-    /// that overflowed never reached it, so the temp rendered `<uninit>` and
-    /// that is the honest answer for a value that was never produced. The store
-    /// below keeps that answer, because the caller emits it after the whole
-    /// **step** rather than after the instruction, and ADR-117 folds a checked
-    /// `IntBinOp` and its check into one step whose raise block leaves for the
-    /// fault epilogue. So the overflowing path diverts before reaching this
-    /// store, exactly as it diverted before reaching the box.
+    /// stands in for sits after the `Inst::CheckFault`: a program that overflows
+    /// never reaches it, so the temp renders `<uninit>`, the honest answer for a
+    /// value that was never produced. The store below keeps that answer, because
+    /// the caller emits it after the whole **step** rather than after the
+    /// instruction, and ADR-117 folds a checked `IntBinOp` and its check into one
+    /// step whose raise block leaves for the fault epilogue. So the overflowing
+    /// path diverts before reaching this store, exactly as it diverts before
+    /// reaching the box.
     ///
-    /// The call-site comment in `lower_fn`'s block loop predicted this — "if it
-    /// ever did, folding would move that store off the raising path" — one wave
-    /// before there was a store to move. At `RaiseExit::Observed`, where the
-    /// raise converges instead, this would store the wrapped value;
+    /// At `RaiseExit::Observed`, where the raise converges instead, this would
+    /// store the wrapped value;
     /// `an_overflowing_temp_is_not_given_the_wrapped_value_it_never_produced`
     /// is the test that says which of the two shapes is in the tree.
     fn store_elided_boxes_of(
@@ -1660,14 +1602,12 @@ impl SpillCtx<'_> {
     ///
     /// Non-`Gc` locals (a scalar payload) have no slot and are skipped. Every
     /// `Gc` local has one, which is where this differs from
-    /// [`SpillCtx::spill_roots`] since ADR-128 decision 3: the root map may have
+    /// [`SpillCtx::spill_roots`] (ADR-128 decision 3): the root map may have
     /// nothing for a local that is live at no safepoint, and the debugger must
     /// still be able to render it.
     ///
     /// One store, with the slot index as the store's own displacement, exactly
-    /// like [`SpillCtx::spill_roots`]. Under ADR-021's heap frame this was a
-    /// load of `frame.locals`, an `iadd_imm_s` over a 48-byte `DebugLocal`
-    /// stride, and a store at zero.
+    /// like [`SpillCtx::spill_roots`].
     fn store_debug_local(&self, builder: &mut FunctionBuilder, local: LocalId, vars: &[Variable]) {
         let Some(&slot) = self.debug_slot_of.get(&local) else {
             return;
@@ -1770,9 +1710,8 @@ enum StepKind {
 /// ADR-088 decision 1 makes locally decidable: the check is in the same block
 /// and at the next index, or `verify::check_fault_observed` rejects the
 /// function. Nothing here depends on the verifier having run, though — an
-/// unfused checked `IntBinOp` lowers to the converging diamond it always did,
-/// so a hypothetical caller that skipped `verify` gets slower code and not
-/// wrong code.
+/// unfused checked `IntBinOp` lowers to the converging diamond, so a caller
+/// that skipped `verify` gets slower code and not wrong code.
 ///
 /// Checked `Int` arithmetic is the only candidate there can be. It is the one
 /// instruction in the language whose fault path the *lowering* emits (a cold
@@ -1785,9 +1724,9 @@ fn steps(insts: &[Inst]) -> Vec<Step<'_>> {
     let mut i = 0;
     while i < insts.len() {
         // ADR-117's single toggle, and the only reader of the feature. Off, the
-        // pair below is one step; on, every instruction is its own and the
-        // backend emits exactly what it emitted before ADR-117 — which is what
-        // makes the A/B two builds of one branch rather than two branches.
+        // pair below is one step; on, every instruction is its own step and the
+        // backend emits the converging diamond — which is what makes the A/B two
+        // builds of one branch rather than two branches.
         let fused = if cfg!(feature = "unfolded-check-fault") {
             None
         } else {
@@ -1814,11 +1753,9 @@ fn steps(insts: &[Inst]) -> Vec<Step<'_>> {
         // An unfused faultable instruction and its check are still **one step**,
         // and the reason is the debugger rather than the code (ADR-135). A
         // wrapper that faults sets `pending_fault` and returns the Unit
-        // sentinel; the caller's `def_var` then stores that sentinel, and the
-        // debug store right behind it recorded it — so the destination of the
-        // instruction that faulted rendered `= Unit` while its own consumer, one
-        // line below, rendered `<uninit>`. Both were never produced, and only
-        // one of them said so.
+        // sentinel, which the caller's `def_var` then stores; a debug store
+        // emitted right behind it would record that sentinel and render a
+        // destination that was never produced as `= Unit`.
         //
         // Covering the check keeps the store *after* the branch, which puts it
         // in the fall-through block: the path on which the definition happened.
@@ -1884,16 +1821,16 @@ fn lower_inst<M: Module>(
             dst,
             alloc,
             roots,
-            // The debugger's view is written at definitions now, not here
+            // The debugger's view is written at definitions, not here
             // (ADR-104). The field stays in the pattern so the set this arm
-            // carries is still visible at the point that used to consume it.
+            // carries stays visible here.
             debug: _,
         } => {
             // Spill live Gc roots into the shadow frame *before* the allocating
             // call: the wrapper may trigger a collection (§12.4), and the
             // collector walks the frame (ADR-019).
             spill.spill_roots(builder, roots, vars);
-            // **One authority for the instruction→symbol mapping** (MIR-10).
+            // **One authority for the instruction→symbol mapping.**
             // Which wrapper creates the object, and which fills one slot of a
             // composite, is `AllocKind`'s answer — and it is the same answer
             // `Inst::can_fault` reads to decide whether the MIR verifier
@@ -1922,8 +1859,8 @@ fn lower_inst<M: Module>(
             match alloc {
                 AllocKind::Bool { value } => {
                     // Two loads and a `select`, not a call (ADR-110). See
-                    // `emit_inline_bool`: `praxis_alloc_bool` has not allocated
-                    // since ADR-040 Decision 4 and its row is `Effect::Pure`.
+                    // `emit_inline_bool`: `praxis_alloc_bool` does not allocate
+                    // (ADR-040 decision 4) and its row is `Effect::Pure`.
                     let arg = builder.use_var(vars[value.0 as usize]);
                     let result = emit_inline_bool(builder, ctx_val, arg);
                     builder.def_var(vars[dst.0 as usize], result);
@@ -1983,10 +1920,8 @@ fn lower_inst<M: Module>(
                     // block layout admits — but `AllocChar`'s manifest row is
                     // `AllocatesAndFaults`, so an inline path must also let an
                     // invalid code point reach the wrapper that raises
-                    // `InvalidChar`, and handover 23's P-4a may move the
-                    // validation into the table's bounds anyway. It is its own
-                    // item, not a rider on this one — ADR-113 said so and
-                    // ADR-119 does not change it.
+                    // `InvalidChar`. That is its own item, not a rider on
+                    // ADR-113's or ADR-119's.
                     let arg = builder.use_var(vars[value.0 as usize]);
                     let result = call_symbol(builder, ctx_val, &[arg], ctor_sym, module, imports)?;
                     builder.def_var(vars[dst.0 as usize], result);
@@ -2022,7 +1957,7 @@ fn lower_inst<M: Module>(
                         call_symbol(builder, ctx_val, &[schema_imm], ctor_sym, module, imports)?;
                     // Fill in each field in declaration order. The field locals
                     // are already spilled into the shadow frame by
-                    // `emit_spill` above; here we pass them as call args.
+                    // `spill_roots` above; here we pass them as call args.
                     emit_fill_slots(
                         builder,
                         ctx_val,
@@ -2077,11 +2012,9 @@ fn lower_inst<M: Module>(
                     // praxis_alloc_tuple(ctx, schema_ptr). Then fill in each
                     // element via praxis_tuple_set.
                     // The arity comes from the *elements* when the type does not
-                    // give one (REP-23). A zero-arity schema sizes the payload
-                    // to zero, so both `praxis_tuple_set` calls below wrote into
-                    // nothing and `[10, 20].enumerate()` answered `[(), ()]` —
-                    // back when a fused `enumerate`/`zip` pair carried
-                    // `MirType::Opaque` (MIR-05 gave it the catalog's type).
+                    // give one: a zero-arity schema sizes the payload to zero,
+                    // and the `praxis_tuple_set` calls below would then write
+                    // into nothing.
                     let schema_ptr = tuple_schema_for(db, *ty, elements.len(), generation)?;
                     let schema_imm = builder.ins().iconst(GC, schema_ptr as i64);
                     // praxis_alloc_tuple(ctx, schema_ptr) -> GcRef.
@@ -2101,7 +2034,7 @@ fn lower_inst<M: Module>(
                     builder.def_var(vars[dst.0 as usize], tuple_ref);
                 }
                 AllocKind::Closure { fn_name, captures } => {
-                    // M7, §4.10. Take the synthetic function's address (the
+                    // §4.10. Take the synthetic function's address (the
                     // symbol is declared in `Jit::compile`'s first pass since the
                     // synthetic fn is appended to the function list), then
                     // allocate the closure via `praxis_alloc_closure(ctx, fn_ptr,
@@ -2131,7 +2064,7 @@ fn lower_inst<M: Module>(
                     builder.def_var(vars[dst.0 as usize], closure_ref);
                 }
                 AllocKind::Collection { ctor, args, init } => {
-                    // M8 WS1: `Vec[T]()`, `Grid[T]()`, etc. `ctor_sym` is the
+                    // `Vec[T]()`, `Grid[T]()`, etc. `ctor_sym` is the
                     // wrapper `alloc.constructor()` named, which is the filled
                     // one for a sized construction (ADR-146) and the
                     // `praxis_<kind>_new` one otherwise; what differs per ctor
@@ -2203,18 +2136,16 @@ fn lower_inst<M: Module>(
         }
         Inst::ExtractScalar { dst, src, scalar } => {
             // Which wrapper reads this payload width is `ScalarKind`'s answer,
-            // stated once in `praxis_mir::ir` (MIR-10). It used to be written
-            // here and nowhere else, which meant the MIR verifier's "can this
-            // instruction fault" would have had to restate it — two statements
-            // of one fact, and the next edit to this match would have made the
-            // verifier lie.
+            // stated once in `praxis_mir::ir` rather than here, so the
+            // MIR verifier's "can this instruction fault" and the backend read
+            // one fact instead of two.
             //
-            // Since ADR-102 that wrapper is the *cold path* rather than the
-            // whole lowering: `emit_scalar_load` proves the descriptor inline
-            // and loads the payload inline, and branches to the wrapper when
-            // the proof fails. `load_symbol()` is still the one authority for
-            // which wrapper that is, so `Inst::fault_reason` still reads the
-            // same function the backend does.
+            // That wrapper is the *cold path* rather than the whole lowering
+            // (ADR-102): `emit_scalar_load` proves the descriptor inline and
+            // loads the payload inline, and branches to the wrapper when the
+            // proof fails. `load_symbol()` is the one authority for which
+            // wrapper that is, so `Inst::fault_reason` reads the same function
+            // the backend does.
             let src_val = builder.use_var(vars[src.0 as usize]);
             emit_scalar_load(
                 builder,
@@ -2231,15 +2162,15 @@ fn lower_inst<M: Module>(
             src,
             scalar,
             roots,
-            // The debugger's view is written at definitions now, not here
+            // The debugger's view is written at definitions, not here
             // (ADR-104). The field stays in the pattern so the set this arm
-            // carries is still visible at the point that used to consume it.
+            // carries stays visible here.
             debug: _,
         } => {
             // Materialize re-boxes a scalar → it allocates → safepoint.
             //
-            // The spill stays ahead of every arm below, including the two that
-            // no longer call anything. `Inst::Materialize` is an unconditional
+            // The spill stays ahead of every arm below, including the arms that
+            // emit no call. `Inst::Materialize` is an unconditional
             // safepoint in MIR, which is a MIR-level property about which
             // instructions the collector may run at — not a backend arm's to
             // narrow from what it happens to emit (ADR-110). It is also what
@@ -2250,8 +2181,8 @@ fn lower_inst<M: Module>(
             match scalar {
                 ScalarKind::Bool => {
                     // Two loads and a `select`, no branch (ADR-110).
-                    // `praxis_alloc_bool`'s row is `Effect::Pure` and it has not
-                    // allocated since ADR-040 decision 4.
+                    // `praxis_alloc_bool`'s row is `Effect::Pure` and it does
+                    // not allocate (ADR-040 decision 4).
                     let result = emit_inline_bool(builder, ctx_val, src_val);
                     builder.def_var(vars[dst.0 as usize], result);
                 }
@@ -2277,8 +2208,8 @@ fn lower_inst<M: Module>(
                 ScalarKind::Float if INLINE_SCALAR_CLAIM => {
                     // The pacing test and the inline claim (ADR-119).
                     // `mandelbrot` is the only benchmark that reaches here, and
-                    // W8-S0 already took eight of its ten float boxes — which is
-                    // exactly why ADR-119's headline is not measured on it.
+                    // eight of its ten float boxes are elided before it does —
+                    // which is why ADR-119's headline is not measured on it.
                     emit_inline_claim_box(
                         builder,
                         ctx_val,
@@ -2310,7 +2241,7 @@ fn lower_inst<M: Module>(
             }
         }
         Inst::StoreScalar { .. } => {
-            // M4 scalars are immutable objects; StoreScalar is a no-op placeholder
+            // Scalars are immutable objects; StoreScalar is a no-op placeholder
             // for the future mutable-Int optimization.
         }
         Inst::IntBinOp {
@@ -2375,9 +2306,8 @@ fn lower_inst<M: Module>(
         Inst::FloatNeg { dst, src } => {
             // IEEE-754 `negate`: flip the sign bit, change nothing else. A
             // negation is not a subtraction from zero — `0.0 - x` answers
-            // `+0.0` at `x = +0.0`, which is what lost the `-0.0` literal
-            // (REP-50) — so the sign flip is the instruction and Cranelift's
-            // `fneg` is it.
+            // `+0.0` at `x = +0.0`, losing the `-0.0` literal — so the sign
+            // flip is the instruction and Cranelift's `fneg` is it.
             let s_i = builder.use_var(vars[src.0 as usize]);
             let s = i64_to_f64(builder, s_i);
             let negated = builder.ins().fneg(s);
@@ -2410,12 +2340,12 @@ fn lower_inst<M: Module>(
             callee,
             args,
             roots,
-            // The debugger's view is written at definitions now, not here
+            // The debugger's view is written at definitions, not here
             // (ADR-104). The field stays in the pattern so the set this arm
-            // carries is still visible at the point that used to consume it.
+            // carries stays visible here.
             debug: _,
         } => {
-            // A call may allocate (and M4 user functions allocate freely) →
+            // A call may allocate (user functions allocate freely) →
             // safepoint. Spill the live Gc roots before the call.
             spill.spill_roots(builder, roots, vars);
             let arg_vals: Vec<Value> = args
@@ -2462,12 +2392,12 @@ fn lower_inst<M: Module>(
             callee,
             args,
             roots,
-            // The debugger's view is written at definitions now, not here
+            // The debugger's view is written at definitions, not here
             // (ADR-104). The field stays in the pattern so the set this arm
-            // carries is still visible at the point that used to consume it.
+            // carries stays visible here.
             debug: _,
         } => {
-            // M7, §4.10 (Approach B). An indirect call through a closure value.
+            // §4.10 (Approach B). An indirect call through a closure value.
             // Spill live Gc roots (safepoint — the call may allocate/GC), read
             // the closure's `fn_ptr` via `praxis_closure_fn_ptr`, then emit a
             // Cranelift `call_indirect` with the signature
@@ -2510,9 +2440,9 @@ fn lower_inst<M: Module>(
             lhs,
             rhs,
             roots,
-            // The debugger's view is written at definitions now, not here
+            // The debugger's view is written at definitions, not here
             // (ADR-104). The field stays in the pattern so the set this arm
-            // carries is still visible at the point that used to consume it.
+            // carries stays visible here.
             debug: _,
         } => {
             // Structural equality via praxis_struct_eq(ctx, a, b) -> i64 (0/1).
@@ -2569,9 +2499,9 @@ fn lower_inst<M: Module>(
         Inst::CheckFault {
             on_fault,
             // The debug set stays on the instruction — it is the contract for
-            // what a snapshot taken on this fault path must be able to render
-            // (MIR-16), and the verifier still checks it is annotated. It is no
-            // longer an emission driver: see below.
+            // what a snapshot taken on this fault path must be able to render,
+            // and the verifier checks it is annotated. It is not an emission
+            // driver: see below.
             debug: _,
         } => {
             // Divert to the fault block when a fault is pending (§10.4). The
@@ -2592,13 +2522,10 @@ fn lower_inst<M: Module>(
             // reading the slot is the only way generated code can learn it — so
             // for those this arm is still the whole mechanism.
             //
-            // The test is two loads and a branch (ADR-102), where it was a call
-            // to `praxis_check_fault` — a guarded call, two null tests, an
-            // `is_pending()` and a `Result` discriminant, to read one word. It
-            // runs once per faultable instruction, which after ADR-088 is once
-            // per checked arithmetic op, per user call and per faulting wrapper
-            // call, so it was among the most-executed instructions in the
-            // language.
+            // The test is two loads and a branch (ADR-102), and no call. It runs
+            // once per faultable instruction — once per checked arithmetic op,
+            // per user call and per faulting wrapper call (ADR-088) — which puts
+            // it among the most-executed instructions in the language.
             //
             // Neither load tests for null, and neither needs to. ADR-017's
             // Consequences state the invariant: "`pending_fault` is always
@@ -2620,19 +2547,16 @@ fn lower_inst<M: Module>(
             // feed it to an arithmetic wrapper before the host can observe the
             // fault). Branching here keeps every operand on the fault path valid.
             //
-            // **Nothing is spilled here any more** (ADR-104). This used to
-            // write the whole `DebugSlots::visible()` set before the fault
-            // test, because a snapshot taken on the fault path would otherwise
-            // show `<uninit>` for operands computed since the last GC safepoint
-            // — the `0` divisor in `x / 0` being the case that motivated it.
+            // **Nothing is spilled here** (ADR-104). A snapshot taken on the
+            // fault path must still render the operands computed since the last
+            // GC safepoint — the `0` divisor in `x / 0` is the motivating case.
             // Those operands are `Gc` locals produced by an `Alloc`, a
             // `Materialize` or a `ConstGc` *earlier in this block*, and
             // `SpillCtx::store_debug_defs` has already written each of them at
             // its own definition, so the fault path sees them without a spill
-            // here. The faulting op's own result is still genuinely never
-            // produced — the fault happened during it — so it still reads
-            // `<uninit>` for the arithmetic case, and still reads the wrapper's
-            // fault-path return for a call, exactly as before.
+            // here. The faulting op's own result is genuinely never produced —
+            // the fault happened during it — so it reads `<uninit>` for the
+            // arithmetic case and the wrapper's fault-path return for a call.
             //
             // Plain `trusted()` — `notrap + aligned`, and deliberately *not*
             // `readonly` or `can_move`. Cranelift's alias analysis treats a call
@@ -2762,8 +2686,7 @@ fn lower_inst<M: Module>(
             // the runtime's single object-layout authority, not a header size
             // this file re-derives. The tag sits at `ENUM_TAG_OFFSET` within
             // the payload — derived from the `#[repr(C)]` struct, not written
-            // out as a literal, because it moved when the payload gained its
-            // schema pointer (RT-13).
+            // out as a literal.
             let enum_ref = builder.use_var(vars[src.0 as usize]);
             let payload_offset =
                 praxis_runtime::gc::GcHeader::payload_offset_for(core::mem::align_of::<
@@ -2839,7 +2762,7 @@ fn lower_terminator<M: Module>(
         }
         Terminator::Fault => {
             // Epilogue (fault path): snapshot the debug frames BEFORE popping,
-            // so the host can inspect them after the unwind (§9.3, M10-WS3).
+            // so the host can inspect them after the unwind (§9.3).
             // Idempotent: only the innermost frame's epilogue (which runs first)
             // captures; outer frames unwinding later skip.
             emit_snapshot_debug_chain(builder, ctx_val, module, imports)?;
@@ -2848,10 +2771,10 @@ fn lower_terminator<M: Module>(
             emit_pop_debug_frame(builder, ctx_val, spill);
             // Unwind to the host: return the Unit sentinel (the caller checks
             // pending_fault). The fault block has no value of its own — but it
-            // still returns a `GcRef`, so it must return a *valid* one. It used
-            // to return `iconst 0`, a null reference across an ABI whose return
-            // type is non-null: every caller that inspected the result before
-            // checking the fault dereferenced null.
+            // still returns a `GcRef`, so it must return a *valid* one. A null
+            // here would cross an ABI whose return type is non-null, and any
+            // caller that inspects the result before checking the fault would
+            // dereference it.
             let unit = load_unit_sentinel(builder, ctx_val);
             builder.ins().return_(&[unit]);
         }
@@ -2863,10 +2786,8 @@ fn lower_terminator<M: Module>(
 /// back and restore the stack budget. Two stores, no call.
 ///
 /// Both restore an absolute the prologue saved rather than undoing an
-/// increment. The extern helper this replaced decremented the counter with a
-/// `saturating_sub` precisely because a fault path could otherwise underflow
-/// it; there is nothing to saturate when the value being written is the one
-/// this call found on entry, and an imbalance introduced below this frame
+/// increment. There is nothing to underflow when the value being written is the
+/// one this call found on entry, and an imbalance introduced below this frame
 /// cannot leak upward past it. That is also why ADR-105's variable-width charge
 /// costs the epilogue nothing: restoring an absolute does not need to know what
 /// was added.
@@ -2883,8 +2804,7 @@ fn emit_pop_shadow_frame(builder: &mut FunctionBuilder, ctx_val: Value, spill: &
 }
 
 /// Emit the crash debugger's epilogue (§9.3, ADR-104): give this call's frame
-/// entry and value slots back. Two stores, no call — where
-/// `praxis_pop_debug_frame` was a guarded extern call that freed two boxes.
+/// entry and value slots back. Two stores, no call.
 ///
 /// Mirrors [`emit_pop_shadow_frame`], and restores saved absolutes for the same
 /// reasons: no subtraction to underflow, and an imbalance introduced below this
@@ -2896,8 +2816,8 @@ fn emit_pop_debug_frame(builder: &mut FunctionBuilder, ctx_val: Value, spill: &S
     emit_slot_stack_pop(builder, ctx_val, DEBUG_FRAMES_OFFSET, entry);
 }
 
-/// Emit the `praxis_snapshot_debug_chain(ctx)` fault-epilogue call (§9.3,
-/// M10-WS3). Must run BEFORE the debug-frame pop, while the chain is intact.
+/// Emit the `praxis_snapshot_debug_chain(ctx)` fault-epilogue call (§9.3).
+/// Must run BEFORE the debug-frame pop, while the chain is intact.
 /// Idempotent at runtime: only the first (innermost) call captures.
 fn emit_snapshot_debug_chain<M: Module>(
     builder: &mut FunctionBuilder,
@@ -2921,7 +2841,7 @@ fn emit_snapshot_debug_chain<M: Module>(
 /// The Cranelift type one ABI parameter kind is passed as.
 ///
 /// `RawU32` is the reason this function exists: it is the one kind narrower
-/// than a machine word, and the arity-derived signature this replaces passed an
+/// than a machine word, so a signature derived from arity alone would pass an
 /// `i64` there.
 fn abi_type(kind: AbiKind, pointer: types::Type) -> types::Type {
     match kind {
@@ -2946,7 +2866,7 @@ fn signature_for<M: Module>(sym: RuntimeSymbol, module: &M) -> Signature {
     match abi.ret {
         // `GcUnit` is a `GcRef` like any other at the machine level — the
         // distinction it draws is about what the *value* means, not how it
-        // travels (RT-14).
+        // travels.
         AbiRet::Gc | AbiRet::GcUnit | AbiRet::Ptr => sig.returns.push(AbiParam::new(pointer)),
         AbiRet::RawI64 => sig.returns.push(AbiParam::new(types::I64)),
         AbiRet::Void => {}
@@ -2979,9 +2899,9 @@ fn import<M: Module>(
 
 /// Load the immortal Unit singleton out of the context (`ctx.unit_ref`).
 ///
-/// This is the value every fault path returns. The runtime wrappers already do
-/// the same thing (`unit_sentinel`), so a faulted call and a faulted function
-/// now hand back the same object rather than one of them handing back null.
+/// This is the value every fault path returns. The runtime wrappers do the same
+/// thing (`unit_sentinel`), so a faulted call and a faulted function hand back
+/// the same object.
 fn load_unit_sentinel(builder: &mut FunctionBuilder, ctx: Value) -> Value {
     builder
         .ins()
@@ -2990,11 +2910,10 @@ fn load_unit_sentinel(builder: &mut FunctionBuilder, ctx: Value) -> Value {
 
 /// Materialize a `Bool` from a scalar payload word, inline (ADR-110).
 ///
-/// `praxis_alloc_bool`'s whole body is `ctx.true_ref` / `ctx.false_ref` — it has
-/// not allocated since ADR-040 Decision 4 stopped twenty-four wrappers minting a
-/// fresh immortal per call, and its manifest row has said `Effect::Pure` ever
-/// since. So the call around it was buying a `bl`, a `catch_unwind` landing pad
-/// and a return, in front of two loads and a `select`.
+/// `praxis_alloc_bool`'s whole body is `ctx.true_ref` / `ctx.false_ref` — it
+/// does not allocate (ADR-040 decision 4) and its manifest row is
+/// `Effect::Pure`. A call to it buys a `bl`, a `catch_unwind` landing pad and a
+/// return, in front of two loads and a `select`.
 ///
 /// No branch and no cold block: unlike the interned-`Int` probe there is no
 /// range to test, because there are exactly two `Bool`s and both are always in
@@ -3021,18 +2940,15 @@ fn emit_inline_bool(builder: &mut FunctionBuilder, ctx: Value, value: Value) -> 
 /// The address of `id`'s descriptor, as ADR-116 says to obtain it: one load
 /// from `RuntimeContext.descriptors` at a folded displacement.
 ///
-/// **One function rather than the two lines it used to be inside
-/// `emit_scalar_load`**, because ADR-118 part 2 added three more proof sites
-/// and a second spelling of "where a descriptor address comes from" is exactly
-/// what ADR-116 removed. The `adr116-arm-a` toggle is still those two lines and
-/// still reverts every proof site in the tree, which is what its `Cargo.toml`
-/// comment claims.
+/// **One function rather than two lines at each proof site**: there are several
+/// proof sites (ADR-118 part 2), and a second spelling of "where a descriptor
+/// address comes from" is exactly what ADR-116 removed. The `adr116-arm-a`
+/// toggle is those two lines, and it reverts every proof site in the tree.
 ///
-/// The `iconst` arm is what this replaced: on aarch64 a `static` in this binary
+/// The `iconst` arm is the alternative: on aarch64 a `static` in this binary
 /// lives above 2³², so its address is `movz`+`movk`+`movk` — three instructions
 /// per proof site, re-materialized rather than kept live because that is what
-/// the register allocator does with constants (handover 25 §3's `opt_level`
-/// measurement).
+/// the register allocator does with constants.
 fn descriptor_address(builder: &mut FunctionBuilder, ctx_val: Value, id: BuiltinTypeId) -> Value {
     #[cfg(not(feature = "adr116-arm-a"))]
     {
@@ -3075,8 +2991,8 @@ fn prove_descriptor(
 /// with the payload in hand.
 ///
 /// The payload is read **after** its descriptor is proved and never before: an
-/// eight-byte load off an object that is not an `Int` is REP-56 exactly — a
-/// zero-width `Unit` read as a word.
+/// eight-byte load off an object that is not an `Int` reads past the object —
+/// a zero-width `Unit` read as a word.
 fn emit_prove_int_payload(
     builder: &mut FunctionBuilder,
     ctx_val: Value,
@@ -3183,8 +3099,8 @@ const INLINE_COLLECTION_PRIMITIVES: bool = false;
 /// A receiver whose descriptor is not `BitSet`, or a member that is not an
 /// `Int`. Both are compiler bugs by the time they reach here (§4.3's uniform
 /// model plus inference), and the cold arm calls the same wrapper, which reads
-/// the payload through the same `read_scalar` refusal it always did — so the
-/// diagnosis of a compiler bug is bit-for-bit what it was (ADR-102).
+/// the payload through `read_scalar`'s refusal — so the diagnosis of a compiler
+/// bug is the same on either path (ADR-102).
 #[allow(clippy::too_many_arguments)] // The lowering context, as `lower_inst` carries it.
 fn emit_bitset_contains<M: Module>(
     builder: &mut FunctionBuilder,
@@ -3314,9 +3230,9 @@ fn emit_inline_collection_read<M: Module>(
         // obligation by **delegating** rather than by reading a `usize` and
         // pretending: `emit_inline_intern` tests `Heap::collection_is_due`
         // first and hands the wrapper the value when it holds, exactly as
-        // `int_ref` inside `praxis_vec_len` would have. So the collection
-        // schedule is unchanged, which is the only thing ADR-113's decision 1
-        // asks of a second caller.
+        // `int_ref` inside `praxis_vec_len` does. So the collection schedule is
+        // unchanged, which is the only thing ADR-113's decision 1 asks of a
+        // second caller.
         (RuntimeSymbol::VecLen, &[vec]) => {
             let fast = builder.create_block();
             let slow = builder.create_block();
@@ -3358,9 +3274,8 @@ fn emit_inline_collection_read<M: Module>(
         //
         // The row is `Effect::Faults` (`IndexOutOfBounds`) and **the fast arm
         // cannot fault**: an index the bounds test rejects goes to the wrapper,
-        // which raises exactly as it always did. The `Inst::CheckFault` MIR
-        // emits after the call is unchanged and reads a flag the fast arm never
-        // writes.
+        // which raises. The `Inst::CheckFault` MIR emits after the call reads a
+        // flag the fast arm never writes.
         //
         // `idx < 0 || idx as usize >= len` is one *unsigned* compare, for
         // `emit_inline_intern`'s reason: a negative index reinterpreted as a
@@ -3706,8 +3621,8 @@ fn emit_inline_claim(
 }
 
 /// Box a scalar by probing the runtime's intern table inline, with the
-/// allocating wrapper on a cold path (ADR-113), and — since ADR-119 — an inline
-/// bitmap claim on the out-of-range edge.
+/// allocating wrapper on a cold path (ADR-113) and an inline bitmap claim on the
+/// out-of-range edge (ADR-119).
 ///
 /// ```text
 /// hot:   heap  = emit_pacing_test(site.pacing())        ; three loads, icmp uge
@@ -3719,19 +3634,19 @@ fn emit_inline_claim(
 ///        base  = load.i64  [ctx + site.table_offset()]
 ///        r     = load.i64  [base + off]
 /// claim: (ADR-119) the bitmap claim, bailing to slow
-/// slow:  (cold) r = call praxis_alloc_int(ctx, value)  ; unchanged
+/// slow:  (cold) r = call praxis_alloc_int(ctx, value)
 /// ```
 ///
-/// # What this replaces, and why it was the largest site left
+/// # Why this is the largest site there is
 ///
 /// `Inst::Materialize` is the hot allocating instruction in the language: every
-/// loop counter, every accumulator, every fused-pipeline sink. For `Int` it was
-/// a `bl` to `praxis_alloc_int`, an `abi_guard!` `catch_unwind` landing pad, a
-/// `RuntimeRoots::from_context` (five raw pointers read out of the context and
-/// four branches), a `Heap::pace` and a `Heap::maybe_collect` — and then, for the
-/// overwhelmingly common case, `int_ref` answered from a two-load table read
-/// having allocated nothing at all. Everything in front of that read is what
-/// this deletes; the read itself is the same read.
+/// loop counter, every accumulator, every fused-pipeline sink. The alternative
+/// for `Int` is a `bl` to `praxis_alloc_int`, an `abi_guard!` `catch_unwind`
+/// landing pad, a `RuntimeRoots::from_context` (five raw pointers read out of
+/// the context and four branches), a `Heap::pace` and a `Heap::maybe_collect` —
+/// and then, for the overwhelmingly common case, `int_ref` answering from a
+/// two-load table read having allocated nothing at all. Everything in front of
+/// that read is what the inline form deletes; the read itself is the same read.
 ///
 /// # The pacing test is first, and it is the whole ADR-040 argument
 ///
@@ -3745,9 +3660,9 @@ fn emit_inline_claim(
 /// then a program whose pressure came from elsewhere would have its collection
 /// silently deferred at every one of these sites. Hence the first branch: when
 /// `Heap::collection_is_due` holds, this goes to the wrapper, which paces
-/// through `Heap::pace` exactly as it always did. On the branch it keeps,
-/// `maybe_collect` would have returned `false` — `collect_inner` would not have
-/// run, `RuntimeRoots::from_context` has no effects, and `int_ref`'s interned
+/// through `Heap::pace`. On the branch it keeps, `maybe_collect` would have
+/// returned `false` — `collect_inner` would not have run,
+/// `RuntimeRoots::from_context` has no effects, and `int_ref`'s interned
 /// arm charges nothing against `bytes_since_collect`. So the two paths are
 /// equal, instruction for instruction of *observable effect*, and ADR-100
 /// decision 3 ("`int_ref` still paces, even when it answers from the table") is
@@ -3795,12 +3710,9 @@ fn emit_inline_intern<M: Module>(
     let slow = builder.create_block();
     let merge = builder.create_block();
     // Cold-block placement runs in the machine-independent lowering
-    // (`BlockLoweringOrder` reads `Layout::is_cold`), so it applied at
-    // `opt_level = "none"` — the level this was measured at — and applies at the
-    // `"speed"` the tree runs now, the mechanism being the same either way. What
-    // the level does change is the block *set*: `module.rs` records `collatz`
-    // going 38 cold blocks to 34. Both edges into this one are "unlikely", and
-    // neither is on the path a loop counter takes.
+    // (`BlockLoweringOrder` reads `Layout::is_cold`), so it applies at any
+    // `opt_level`; the level changes only the block *set*. Both edges into this
+    // one are "unlikely", and neither is on the path a loop counter takes.
     builder.set_cold_block(slow);
 
     // (1) The pacing predicate, ahead of everything. `Heap::collection_is_due`
@@ -3819,11 +3731,10 @@ fn emit_inline_intern<M: Module>(
         builder
             .ins()
             .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, index, site.span() as i64);
-    // The out-of-range edge. Before ADR-119 it went straight to `slow`; it now
-    // goes to a claim sequence that bails to `slow`, so the wrapper is reached
-    // on three conditions instead of two and on none of them has anything been
-    // written. `tree` and `pipeline` are the two benchmarks whose `Materialize`s
-    // mostly land here, and this edge is the +2.0%/+1.4% ADR-113 recorded owing.
+    // The out-of-range edge goes to a claim sequence that bails to `slow`, so
+    // the wrapper is reached on three conditions and on none of them has
+    // anything been written. `tree` and `pipeline` are the two benchmarks whose
+    // `Materialize`s mostly land here.
     let out_of_range = if INLINE_SCALAR_CLAIM {
         builder.create_block()
     } else {
@@ -3869,11 +3780,10 @@ fn emit_inline_intern<M: Module>(
         );
     }
 
-    // (4) The wrapper, unchanged: same `#[no_mangle]`, same `abi_guard!`, same
-    // manifest row, same address arm. It is what paces when a collection is due
-    // and what allocates when the value is out of range, and keeping it as the
-    // callee is what makes "the answer is what it always was" a property of the
-    // code rather than of this comment.
+    // (4) The wrapper. It is what paces when a collection is due and what
+    // allocates when the value is out of range; keeping it as the callee is
+    // what makes the cold path's answer identical to the wrapper's by
+    // construction rather than by this comment.
     builder.switch_to_block(slow);
     {
         let result = call_symbol(builder, ctx_val, &[value], sym, module, imports)?;
@@ -3899,17 +3809,15 @@ fn emit_inline_intern<M: Module>(
 /// slow:  (cold) r = call praxis_alloc_float(ctx, value)
 /// ```
 ///
-/// **`Float` had no pacing test at all before this** — the arm was an
-/// unconditional `call_symbol`, and the wrapper paced. So unlike
-/// [`emit_inline_intern`], where the compare was already emitted and this only
-/// re-points one edge, here the compare is new; it is the whole of ADR-040's
-/// obligation and it is emitted first for the same reason.
+/// The pacing compare is the whole of ADR-040's obligation for a path that
+/// claims storage without calling the wrapper, so it is emitted first, exactly
+/// as in [`emit_inline_intern`].
 ///
 /// `Char` deliberately does not come here. Its manifest row is
 /// `AllocatesAndFaults`: an invalid code point must reach the wrapper that
-/// raises `InvalidChar` with `CheckFault`'s diversion (RT-18), so an inline arm
-/// would have to reproduce a *fault*, not just a claim. ADR-113 left it out for
-/// the same reason and the reason has not changed.
+/// raises `InvalidChar` with `CheckFault`'s diversion, so an inline arm would
+/// have to reproduce a *fault*, not just a claim. ADR-113 leaves it out for the
+/// same reason.
 #[allow(clippy::too_many_arguments)] // The lowering context, as `lower_inst` carries it.
 fn emit_inline_claim_box<M: Module>(
     builder: &mut FunctionBuilder,
@@ -4012,9 +3920,10 @@ fn load_gc_const(builder: &mut FunctionBuilder, ctx: Value, konst: GcConst) -> V
 /// How a scalar payload is read once its descriptor has been proved.
 ///
 /// One variant per payload *width*, not per `ScalarKind`, because that is what
-/// the load instruction depends on — and because REP-37 was exactly a `Bool`
-/// read at an `Int`'s width. The kinds that share a width still get their own
-/// row in [`inline_scalar_load_of`]; they differ in which descriptor is proved.
+/// the load instruction depends on — and because a `Bool` read at an `Int`'s
+/// width is a silent wrong answer. The kinds that share a width still get their
+/// own row in [`inline_scalar_load_of`]; they differ in which descriptor is
+/// proved.
 enum ScalarLoad {
     /// Eight bytes, straight into the uniform `i64` channel. `Int`'s payload,
     /// and `Float`'s — a float rides the channel as `f64::to_bits()`, which is
@@ -4036,18 +3945,17 @@ enum ScalarLoad {
 ///
 /// A new [`praxis_mir::ScalarKind`] variant fails to compile here, which is the
 /// point: this is the second statement of a mapping whose first is
-/// `ScalarKind::load_symbol` (MIR-10), and the two must not drift. They cannot
+/// `ScalarKind::load_symbol`, and the two must not drift. They cannot
 /// disagree about *which* type is being read, because the cold path below calls
 /// `load_symbol()` — this only adds which descriptor proves it and how wide the
 /// read is.
 ///
-/// **The first column is an id and not an address, as of ADR-116**, and that is
-/// the change: the proof compares against
-/// `[ctx + RuntimeContext::descriptor_offset(id)]`, so the slot the load names
-/// and the descriptor it proves are one value and cannot be given separately.
-/// Before, this answered `&scalars::INT` and the backend baked the address in
-/// as an `iconst` — three `movz`/`movk` on aarch64, where the load is one
-/// instruction from a line the prologue has already touched.
+/// **The first column is an id and not an address** (ADR-116): the proof
+/// compares against `[ctx + RuntimeContext::descriptor_offset(id)]`, so the slot
+/// the load names and the descriptor it proves are one value and cannot be given
+/// separately. An address would instead be baked in as an `iconst` — three
+/// `movz`/`movk` on aarch64, where the load is one instruction from a line the
+/// prologue has already touched.
 fn inline_scalar_load_of(
     scalar: praxis_mir::ScalarKind,
 ) -> Option<(praxis_runtime::descriptor::BuiltinTypeId, usize, ScalarLoad)> {
@@ -4075,15 +3983,12 @@ fn inline_scalar_load_of(
             core::mem::align_of::<scalars::FloatPayload>(),
             ScalarLoad::Word,
         ),
-        // `Byte` is reserved and unwired, and it has no wrapper to inline: since
-        // ADR-108's companion change its `load_symbol()` and `alloc_symbol()`
-        // both refuse rather than answering `IntLoad`/`AllocInt`. They used to
-        // answer the `Int` ones "defensively" while nothing emitted them, which
-        // was an eight-byte read of a one-byte payload waiting for the day
-        // `Byte` was wired. Returning `None` here is the same refusal one layer
-        // up, and it is what keeps this arm from ever reaching the panic: an
-        // inline form would be REP-37 by construction anyway, because the
-        // descriptor check would prove `INT` of a value that is not one.
+        // `Byte` is reserved and unwired, and it has no wrapper to inline: its
+        // `load_symbol()` and `alloc_symbol()` both refuse rather than answering
+        // `IntLoad`/`AllocInt`, which would be an eight-byte read of a one-byte
+        // payload. Returning `None` here is the same refusal one layer up, and
+        // an inline form could not be right anyway: the descriptor check would
+        // prove `INT` of a value that is not one.
         ScalarKind::Byte => return None,
     })
 }
@@ -4096,21 +4001,18 @@ fn inline_scalar_load_of(
 /// This does **not** trust the MIR local's type, and there is no version of this
 /// that could. `Scalar` locals are `MirType::Opaque` by construction, the `src`
 /// here is frequently a `Gc` local lowering allocated as `Opaque`, and — the
-/// part that settles it — where a type *is* known it has been wrong. REP-56 is a
-/// program that passes `praxis check` and emits `ExtractScalar { scalar: Int }`
-/// against a value whose descriptor is `Unit`, zero bytes wide; a release build
-/// answered an ASLR-varying number off an eight-byte out-of-bounds read. REP-49
-/// and REP-37 are the same defect from two other directions.
+/// part that settles it — where a type *is* known it can still be wrong: a
+/// program can pass `praxis check` and emit `ExtractScalar { scalar: Int }`
+/// against a value whose descriptor is `Unit`, zero bytes wide, which without
+/// the check is an eight-byte out-of-bounds read answering an ASLR-varying
+/// number.
 ///
-/// So the check survives inlining, and it survives it in the form
-/// `int_payload`'s doc insists on: **unconditional, in every profile**. What
-/// moves is only where the refusal lives — from a never-taken branch inside a
-/// `#[cold]` callee to a never-taken branch to a Cranelift cold block. The
-/// refusal itself is bit-for-bit what it was, because the cold block *calls the
+/// So the check is what `int_payload`'s doc insists on: **unconditional, in
+/// every profile**. The refusal lives in a never-taken branch to a Cranelift
+/// cold block, and it is bit-for-bit the wrapper's because that block *calls the
 /// same wrapper*: `praxis_int_load` re-runs `read_scalar`, fails, panics,
 /// `abi_guard!` catches it, and — its manifest row being `Effect::Pure`, so the
-/// panic fault is not observable — it prints that message and aborts. Same
-/// message, same exit, no new wrapper, no manifest change.
+/// panic fault is not observable — it prints that message and aborts.
 ///
 /// # What else the check buys
 ///
@@ -4121,14 +4023,15 @@ fn inline_scalar_load_of(
 /// offset the offset the allocator actually used. And ADR-039 decision 3's
 /// poisoning falls out for free: a swept header has a null descriptor, which
 /// fails the comparison and routes to the wrapper, whose `GcHeader::descriptor()`
-/// panics "descriptor read from a poisoned (swept) GcHeader" — again the same
-/// refusal as before.
+/// panics "descriptor read from a poisoned (swept) GcHeader" — again the
+/// wrapper's own refusal.
 ///
 /// `Inst::EnumTag` inlines a payload read with no check at all. It is a weaker
 /// precedent than it looks: what licenses it is ADR-091 (a variant pattern's
 /// enum is the scrutinee's, so the static type reaches the read), and that is
-/// the same class of argument REP-56 falsified here. Whether the tag read should
-/// acquire this check too is a real question, and not one this answers.
+/// the same class of argument this check refuses to rely on. Whether the tag
+/// read should acquire this check too is a real question, and not one this
+/// answers.
 #[allow(clippy::too_many_arguments)] // The lowering context, as `lower_inst` carries it.
 fn emit_scalar_load<M: Module>(
     builder: &mut FunctionBuilder,
@@ -4225,28 +4128,21 @@ fn lower_int_binop<M: Module>(
     // scalar channel, so the operation is one Cranelift instruction plus an
     // inline overflow predicate.
     //
-    // This replaces boxing both operands with `praxis_alloc_int`, calling the
-    // wrapper, and `praxis_int_load`ing the result: two allocations and three
-    // calls per arithmetic op. That shape also carried a live memory bug — on
-    // fault the wrapper returns the Unit sentinel, and the `int_load` ran
-    // *before* the fault check, reading eight bytes past a size-0 Unit payload.
-    //
     // Overflow is reported by branching to a cold block that calls a
     // non-allocating raise wrapper — see `raise_on_cold_path`, which carries the
-    // argument for why a branch beats the unconditional call this used to emit.
-    // The site is still not a GC safepoint and still spills no roots. What
-    // *diverts* to the fault epilogue is `report`'s business: at
-    // `RaiseExit::Observed` it is the `Inst::CheckFault` MIR emits next, reached
-    // through the block both arms of the diamond converge on; at
-    // `RaiseExit::Folded` it is the cold block itself, and that check emits
-    // nothing (ADR-117).
+    // argument for why a branch beats an unconditional call. The site is not a
+    // GC safepoint and spills no roots. What *diverts* to the fault epilogue is
+    // `report`'s business: at `RaiseExit::Observed` it is the
+    // `Inst::CheckFault` MIR emits next, reached through the block both arms of
+    // the diamond converge on; at `RaiseExit::Folded` it is the cold block
+    // itself, and that check emits nothing (ADR-117).
     let l = builder.use_var(vars[lhs.0 as usize]);
     let r = builder.use_var(vars[rhs.0 as usize]);
     let exit = match report {
         // `Overflow::Bounded` sites — a `for` index bump, a `count` accumulator
         // — skip the test entirely: their operands are bounded by a collection's
-        // length, so the predicate is provably false and computing it cost two
-        // instructions and a call per iteration.
+        // length, so the predicate is provably false and computing it would
+        // cost the overflow test and a never-taken branch per iteration.
         OverflowReport::Bare => {
             let bare = match op {
                 IntBinOp::Add => builder.ins().iadd(l, r),
@@ -4345,12 +4241,11 @@ fn lower_int_binop<M: Module>(
 
             // Two diamonds in sequence, in this order. The conditions
             // are mutually exclusive (`r == 0` versus `r == -1`), so
-            // neither kind can overwrite the other — as when both
-            // raises were straight-line calls. Mutual exclusion is also
-            // why `RaiseExit::Folded` may be given to *both*: at most
-            // one cold block runs, so the fault epilogue is entered with
-            // the kind the raise that ran set, exactly as the single
-            // `CheckFault` downstream would have seen it.
+            // neither kind can overwrite the other. Mutual exclusion is
+            // also why `RaiseExit::Folded` may be given to *both*: at
+            // most one cold block runs, so the fault epilogue is entered
+            // with the kind the raise that ran set, exactly as the
+            // single `CheckFault` downstream would see it.
             raise_on_cold_path(
                 builder,
                 ctx_val,
@@ -4377,15 +4272,12 @@ fn lower_int_binop<M: Module>(
     // `Inst::CheckFault` below diverts before anything reads `dst`. So the value
     // stored here is a value the program is entitled to, and on the fault path
     // `dst` is simply never defined — which is what the debugger renders as
-    // `<uninit>` for the operation that faulted, as it did before ADR-117.
+    // `<uninit>` for the operation that faulted.
     builder.def_var(vars[dst.0 as usize], result);
-    // No fault check here. There used to be a bare `praxis_check_fault` call at
-    // this point whose result was discarded and which no branch followed — a
-    // leftover from before MIR carried `Inst::CheckFault`, costing one call per
-    // checked arithmetic op and diverting nothing. What observes the raise is
-    // the `Inst::CheckFault` the builder emits next, which the MIR verifier
-    // requires to be there (MIR-10) — either as emitted code, or, at
-    // `RaiseExit::Folded`, as the branch this function already made (ADR-117).
+    // No fault check here. What observes the raise is the `Inst::CheckFault` the
+    // builder emits next, which the MIR verifier requires to be there — either
+    // as emitted code, or, at `RaiseExit::Folded`, as the branch this function
+    // already made (ADR-117).
     Ok(())
 }
 
@@ -4415,8 +4307,8 @@ enum RaiseExit {
     /// Back to the join, which is where the `Inst::CheckFault` that ADR-088 puts
     /// after this instruction lowers. Both arms of the diamond converge before
     /// it, so the check runs on the raising path and the non-raising path alike.
-    /// ADR-102's shape, and still the one a checked site takes when its check
-    /// was not fused into a [`Step`].
+    /// ADR-102's shape, and the one a checked site takes when its check was not
+    /// fused into a [`Step`].
     Observed,
     /// Straight to the function's fault epilogue, because the `Inst::CheckFault`
     /// was folded into this branch and emits nothing (ADR-117). Reachable only
@@ -4428,9 +4320,8 @@ enum RaiseExit {
 /// Report a fault when `predicate` is negative — the sign-bit form the
 /// add/sub overflow tests produce.
 ///
-/// The sign test is the branch's own condition, not a value: this used to
-/// `ushr_imm_u(predicate, 63)` to shape an `i64` argument for the call, and
-/// with the call gone there is nothing to shape it for.
+/// The sign test is the branch's own condition, not a value: there is no
+/// unconditional call to shape an `i64` argument for.
 fn raise_if_negative<M: Module>(
     builder: &mut FunctionBuilder,
     ctx: Value,
@@ -4449,25 +4340,18 @@ fn raise_if_negative<M: Module>(
 /// Report a fault when `cond` is non-zero, by branching to a cold block that
 /// calls `sym` — not by calling `sym` unconditionally and letting it decide.
 ///
-/// # Why this is a branch now, and what the old comment had right
+/// # Why a branch rather than an unconditional call
 ///
-/// It read: *"The call is unconditional and the wrapper decides: an arithmetic
-/// site stays one basic block, and the wrapper allocates nothing, so the site is
-/// not a GC safepoint and needs no root spill."* Both clauses are true and the
-/// second survives untouched — the cold block calls the same `Effect::Faults`
-/// wrapper, which still allocates nothing, so this is still not a safepoint and
-/// still spills no roots.
-///
-/// The first clause is the one that was mispriced. What a single basic block
-/// buys is not having to keep values live across a CFG edge — but **a branch
-/// does not clobber registers and a call does**. Cranelift must treat every
-/// caller-saved register as dead across `bl praxis_raise_int_overflow_if`, so at
-/// `opt_level=none` a loop doing one checked add per iteration spilled and
-/// reloaded its counter, its accumulator and `ctx` around a call that a
-/// non-faulting program never needs. A not-taken `cbz` is one instruction and
-/// essentially always predicted; the hot path also gets *shorter*, because the
-/// `ushr_imm_u` and the `uextend`s that existed only to shape an `i64` argument
-/// are gone with the argument.
+/// The cold block calls the same `Effect::Faults` wrapper, which allocates
+/// nothing, so the site is not a GC safepoint and spills no roots either way.
+/// What a single basic block would buy is not having to keep values live across
+/// a CFG edge — but **a branch does not clobber registers and a call does**.
+/// Cranelift must treat every caller-saved register as dead across
+/// `bl praxis_raise_int_overflow_if`, so a loop doing one checked add per
+/// iteration would spill and reload its counter, its accumulator and `ctx`
+/// around a call a non-faulting program never needs. A not-taken `cbz` is one
+/// instruction and essentially always predicted; the hot path is also *shorter*,
+/// because with no argument to shape there is no `ushr_imm_u` and no `uextend`.
 ///
 /// # Why the wrapper still takes a condition
 ///
@@ -4478,23 +4362,22 @@ fn raise_if_negative<M: Module>(
 /// `praxis_raise_stack_overflow` would be tidier and costs two manifest rows,
 /// two address-table arms and a doc rewrite; it is not worth that here.
 ///
-/// # ADR-088 is untouched, and `exit` is where its rule is now discharged
+/// # Where ADR-088's rule is discharged
 ///
 /// The rule that a faulting instruction is observed by the next one is a
 /// property of *MIR* (`verify::check_fault_observed`), and this emits no MIR.
-/// What changed under ADR-117 is *which emitted branch* discharges it.
+/// Which emitted branch discharges it is `exit`'s business (ADR-117).
 ///
 /// At [`RaiseExit::Observed`] both arms of the diamond converge at `cont` before
 /// the `Inst::CheckFault` that MIR requires next lowers, so the check runs on
-/// the raising path and the non-raising path alike — as it did when the raise
-/// was straight-line. **That sentence is ADR-102's Consequences, and it is no
-/// longer the whole of it.** At [`RaiseExit::Folded`] the arms do not converge:
-/// the cold block jumps to the function's fault epilogue and the `CheckFault`
-/// emits nothing at all. The invariant that survives both is the weaker and true
-/// one — *on the raising path, control reaches the fault epilogue before any
-/// instruction after the raise runs* — and at `Folded` it holds because this is
-/// the only branch on the way there, where at `Observed` it holds because the
-/// check re-reads what this cold block wrote.
+/// the raising path and the non-raising path alike — ADR-102's Consequences. At
+/// [`RaiseExit::Folded`] the arms do not converge: the cold block jumps to the
+/// function's fault epilogue and the `CheckFault` emits nothing at all. The
+/// invariant that holds under both is the weaker one — *on the raising path,
+/// control reaches the fault epilogue before any instruction after the raise
+/// runs* — and at `Folded` it holds because this is the only branch on the way
+/// there, where at `Observed` it holds because the check re-reads what this cold
+/// block wrote.
 ///
 /// The fold is sound because a `CheckFault` immediately after checked `Int`
 /// arithmetic can observe *nothing else*: every earlier faulting instruction in
@@ -4514,8 +4397,7 @@ fn raise_on_cold_path<M: Module>(
     let cont = builder.create_block();
     // Cold-block placement runs in the machine-independent lowering
     // (`BlockLoweringOrder` reads `Layout::is_cold`), not in the mid-end, so it
-    // applies at `opt_level=none` too — which is the level this change was
-    // measured at.
+    // applies at every `opt_level`.
     builder.set_cold_block(cold);
     builder.ins().brif(cond, cold, &[], cont, &[]);
 
@@ -4545,8 +4427,8 @@ fn raise_on_cold_path<M: Module>(
 ///
 /// Every value in the lowering is carried as an `I64`; a parameter declared
 /// `RawU32` therefore needs an explicit `ireduce`. Doing it here, from the
-/// manifest, means no call site can forget — the arity-only path this replaces
-/// fed the full 64-bit value into `praxis_record_field`'s `u32` index.
+/// manifest, means no call site can forget — a site guessing from arity alone
+/// would feed the full 64-bit value into `praxis_record_field`'s `u32` index.
 fn call_symbol<M: Module>(
     builder: &mut FunctionBuilder,
     ctx: Value,
@@ -4653,15 +4535,14 @@ fn user_funcref<M: Module>(
 /// **The cache belongs to the generation, and its key carries the generation
 /// id.** A `RecordDefId` is a *per-`TypeDb` positional index*: the debugger
 /// mints a fresh `TypeDb` per `p EXPR` and per `reload`, so `RecordDefId(0)` in
-/// one program names a different struct than in the next. The process-global
-/// map this replaces was keyed on the bare `u32` and handed the second program
-/// the first program's schema — whose field descriptors then read a `Text`
-/// header as an `i64` (MIR-12, DBG-06).
+/// one program names a different struct than in the next. A process-global map
+/// keyed on the bare `u32` would hand the second program the first program's
+/// schema, whose field descriptors would then read a `Text` header as an `i64`.
 ///
 /// Every field descriptor is resolved through the F11 bridge and every one must
 /// resolve: the schema is what `equals`/`hash`/`format` dispatch through, so a
-/// field mislabelled `Int` reads an `f64` or a `Text` header as an `i64`
-/// (P0-11). A field whose type has no runtime object fails the compile.
+/// field mislabelled `Int` reads an `f64` or a `Text` header as an `i64`. A
+/// field whose type has no runtime object fails the compile.
 fn record_schema_for(
     db: &praxis_types::TypeDb,
     id: u32,
@@ -4681,9 +4562,9 @@ fn record_schema_for(
             def.name.as_deref().unwrap_or("<anonymous>")
         );
     }
-    // A declared record is its name; a structural one (§5.6) is its shape
-    // (RT-12). The name is copied into the generation so the schema outlives
-    // this `TypeDb` — the debugger's does not survive the command.
+    // A declared record is its name; a structural one (§5.6) is its shape. The
+    // name is copied into the generation so the schema outlives this `TypeDb` —
+    // the debugger's does not survive the command.
     let identity = match &def.name {
         Some(name) => SchemaIdentity::Nominal(generation.alloc_str(name)),
         None => SchemaIdentity::Anonymous,
@@ -4706,9 +4587,9 @@ fn record_schema_for(
 /// `ty` in this JIT generation, returning its address as a raw pointer the JIT
 /// embeds as an immediate.
 ///
-/// The schema is what gives a runtime enum value its nominal identity (RT-13):
-/// without one, `Colour::Red` and `Light::Red` were the same value and no enum
-/// could render its variant name.
+/// The schema is what gives a runtime enum value its nominal identity: without
+/// one, `Colour::Red` and `Light::Red` would be the same value and no enum could
+/// render its variant name.
 ///
 /// **`record_schema_for`'s refusal of a generic def is deliberately not copied
 /// here.** A record def with parameters cannot arrive at codegen — there is no
@@ -4721,10 +4602,9 @@ fn record_schema_for(
 /// A payload slot whose type is still an inference *variable* — or a whole
 /// instantiation the lowering had no type for — resolves to a **null**
 /// descriptor rather than failing the compile. That is
-/// [`nullable_descriptor_for_type`]'s policy (HIR-01/MONO-01), which the tuple
-/// and collection sites resolve their slots through too. The value's own
-/// descriptor answers for it, and it is read off the object's header, so it is
-/// never the wrong one.
+/// [`nullable_descriptor_for_type`]'s policy, which the tuple and collection
+/// sites resolve their slots through too. The value's own descriptor answers for
+/// it, and it is read off the object's header, so it is never the wrong one.
 fn enum_schema_for(
     db: &mut praxis_types::TypeDb,
     id: u32,
@@ -4796,17 +4676,14 @@ fn tuple_schema_for(
     // Resolve the element types. `Opaque` means the lowering had no tuple type;
     // a non-tuple type is a misuse (the HIR only lowers `TypedExpr::Tuple`
     // here). Both degrade to a schema of `arity` **unknown** slots rather than
-    // panicking in the JIT — but only the second is a surprise now, because the
-    // first says so in the MIR. Since MIR-05 every tuple-building site supplies
-    // a type, including the fused `enumerate`/`zip` pairs that were the standing
-    // exception; what an `Opaque` reaches here through today is a builder with
-    // genuinely nothing to say.
+    // panicking in the JIT — but only the second is a surprise, because the
+    // first says so in the MIR. Every tuple-building site supplies a type, so an
+    // `Opaque` reaching here is a builder with genuinely nothing to say.
     //
-    // Unknown, and not *absent* (REP-23): the arity sizes the payload, so a
-    // zero-slot schema for a two-element tuple made `praxis_tuple_set` drop both
+    // Unknown, and not *absent*: the arity sizes the payload, so a zero-slot
+    // schema for a two-element tuple would make `praxis_tuple_set` drop both
     // values and `[10, 20].enumerate()` answer `[(), ()]`. The values' own
-    // descriptors answer for the slots, which is ADR-066's decision 5 — the type
-    // gap stays MIR-05's, and the silent dropping stops being anyone's.
+    // descriptors answer for the slots (ADR-066 decision 5).
     let element_types: Vec<Option<praxis_types::Type>> =
         match ty.known().map(|t| db.data(db.follow(t))) {
             Some(TypeData::Tuple(els)) => els.iter().copied().map(Some).collect(),
@@ -4814,15 +4691,15 @@ fn tuple_schema_for(
         };
     // Every slot that has a type must resolve to *that* type's descriptor. The
     // schema is what tuple equality, hashing and formatting dispatch through, so
-    // a `Unit` or `Enum` element mislabelled `Int` reads its payload as an `i64`
-    // (P0-11).
+    // a `Unit` or `Enum` element mislabelled `Int` reads its payload as an
+    // `i64`.
     //
     // A slot that is still an inference *variable* is the one exception, and it
     // is `nullable_descriptor_for_type`'s — the same one the enum-payload and
-    // collection-element sites make, for the same reason (HIR-01/MONO-01,
-    // hazard H10): `var m = Map()` generalizes at the `var`, so a `for kv in m`
-    // whose body never looks inside the pair leaves K and V unresolved, and
-    // failing the compile there rejects a working program. The null slot says
+    // collection-element sites make, for the same reason (hazard H10):
+    // `var m = Map()` generalizes at the `var`, so a `for kv in m` whose body
+    // never looks inside the pair leaves K and V unresolved, and failing the
+    // compile there rejects a working program. The null slot says
     // "no static type" and the runtime reads the value's own descriptor off its
     // header — which is never the wrong one.
     let descriptors: Vec<*const praxis_runtime::descriptor::TypeDescriptor> = element_types
@@ -4847,38 +4724,30 @@ fn tuple_schema_for(
 /// that one are the same walk — `mir.locals` filtered to `LocalKind::Gc`, in
 /// order — so entry `i` describes the word `store_debug_local` writes at
 /// displacement `i`. That equality is the premise the runtime reads this array
-/// under, and `lower_fn` asserts the count half of it against `debug_count`
-/// immediately after this returns.
-///
-/// It used to say "so a local's shadow-slot index doubles as its debug-local
-/// index". That stopped being true at ADR-128 decision 2, where a shadow slot
-/// became a colour; the debug space is the one that stayed dense, and this
-/// function is unchanged precisely because it was always describing *that* one.
+/// under, and `lower_function_capturing` asserts the count half of it against
+/// `debug_count` immediately after this returns. This is the *dense* index
+/// space, not the shadow stack's colouring (ADR-128 decision 2).
 ///
 /// Each entry carries the source name (interned in the same arena, empty for
-/// temps — and since ADR-139 a name a pattern introduces is a binding with a
-/// real name here, where it used to arrive nameless or classified as a temp), a
-/// per-local symbol-id placeholder, the static type descriptor resolved from the
-/// MIR local's `Type` (§9.3, M10-WS2), the user-vs-temp classification, and the
-/// source span.
+/// temps; a name a pattern introduces is a binding with a real name here,
+/// ADR-139), a per-local symbol-id placeholder, the static type descriptor
+/// resolved from the MIR local's `Type` (§9.3), the user-vs-temp
+/// classification, and the source span.
 ///
 /// The span is `mir.span`, threaded AST → HIR `TypedFn` → MIR `Function.span`
-/// → here (ADR-035 decision 3). Its last hop used to be
-/// `praxis_set_frame_source_span(ctx, start, end)` — a runtime call, in every
-/// prologue, to record a compile-time constant. Only where it is written
-/// changed; the crash debugger's `source` command reads the same two numbers out
-/// of the same `SnapshotFrame` field.
+/// → here (ADR-035 decision 3), and the crash debugger's `source` command reads
+/// it back out of the `SnapshotFrame` field.
 ///
 /// Everything is deduplicated by content: a function lowered twice into one
 /// generation — which is what a debugger session does on every `p EXPR` —
-/// yields the same metadata and pays for it once (DBG-05, MIR-13).
+/// yields the same metadata and pays for it once.
 ///
-/// The symbol id is a best-effort placeholder: MIR locals do not yet carry the
-/// HIR `SymbolId`, so we use the local's position. This is sufficient for the
-/// crash debugger to *display* locals; full shadow-disambiguation by real
-/// symbol id is an M10b refinement once MIR threads the id.
+/// The symbol id is a best-effort placeholder: MIR locals do not carry the HIR
+/// `SymbolId`, so this uses the local's position. That is sufficient for the
+/// crash debugger to *display* locals; shadow-disambiguation by real symbol id
+/// needs MIR to thread the id first.
 ///
-/// Temps no longer get the old `"<tmp>"` name placeholder: the debugger now
+/// Temps carry an empty name rather than a `"<tmp>"` placeholder: the debugger
 /// classifies them structurally via `kind` and renders them as
 /// `<tmp#N: Type> @ "expr"` using the symbol id and span threaded here.
 fn build_function_debug_meta(
@@ -4903,12 +4772,11 @@ fn build_function_debug_meta(
         // points at a fully-concrete type (e.g. Vec[Int], not Vec[?T]). The
         // element/param vars of a composite are left untouched by `follow`
         // (top-level only); `deep_resolve` recurses and interns a resolved
-        // copy. Idempotent on already-resolved types. (M10b-WS4)
+        // copy. Idempotent on already-resolved types.
         // `Opaque` locals (a pipeline accumulator, a scalar's slot) have no
         // static type to thread: emit a null descriptor and `NO_STATIC_TYPE`
         // rather than the descriptor and id of whichever type the arena
-        // interned first, which is what the old `Type(0)` placeholder produced.
-        // The debugger renders these without a type column (P0-02).
+        // interned first. The debugger renders these without a type column.
         let resolved_ty = local.ty.known().map(|t| db.deep_resolve(t));
         // Thread the user-vs-temp classification and source span from the MIR.
         let kind = match mir.debug_kind(local.id) {
@@ -4923,11 +4791,11 @@ fn build_function_debug_meta(
         // come out as `Reference` — which is the one answer that would put a
         // payload into the collector's post-sweep scan.
         //
-        // Note what this does *not* change: `type_id` and `descriptor` are
-        // still the box's own, so `render_local_line`'s type column still says
-        // `Int`. `ir.rs`'s doctrine that a `Scalar` local is always
-        // `MirType::Opaque` is untouched, because the local that owns this
-        // metadata is the `Gc` one — the scalar never enters this loop.
+        // `type_id` and `descriptor` remain the box's own, so
+        // `render_local_line`'s type column says `Int`. `ir.rs`'s doctrine that
+        // a `Scalar` local is always `MirType::Opaque` is unaffected, because
+        // the local that owns this metadata is the `Gc` one — the scalar never
+        // enters this loop.
         let slot_kind = match mir.debug_scalar_source(local.id) {
             None => DebugSlotKind::Reference,
             Some((_, kind)) => debug_slot_kind_of(kind),
@@ -4939,9 +4807,9 @@ fn build_function_debug_meta(
             descriptor: resolved_ty
                 .map(|t| debug_descriptor_for_type(db, t))
                 .unwrap_or(std::ptr::null()),
-            // The full static `Type` id (M10-WS1b): `Type(u32)`. Lets the
-            // debugger reconstruct the exact local type (incl. collection
-            // element types / record shapes) the runtime `descriptor` loses.
+            // The full static `Type` id: `Type(u32)`. Lets the debugger
+            // reconstruct the exact local type (incl. collection element types
+            // / record shapes) the runtime `descriptor` loses.
             type_id: resolved_ty.map_or(praxis_runtime::debug::NO_STATIC_TYPE, |t| t.to_u32()),
             kind,
             span_start,
@@ -4960,10 +4828,9 @@ fn build_function_debug_meta(
 /// **One statement of the map, and it has two readers** (ADR-121 decision 2):
 /// `build_function_debug_meta`, which records the kind in each local's
 /// `DebugLocalMeta`, and the `elided_box_slots` map, which derives the store
-/// bias from it. Written inline at the first of those until the second existed;
-/// two copies would let the kind a slot is *tagged* with disagree with the bias
-/// its stores are *encoded* with, which decodes every value in that slot wrong
-/// by a constant — a wrong answer in a crash snapshot, silently.
+/// bias from it. Two copies would let the kind a slot is *tagged* with disagree
+/// with the bias its stores are *encoded* with, which decodes every value in
+/// that slot wrong by a constant — a wrong answer in a crash snapshot, silently.
 ///
 /// Exhaustive, so a new [`ScalarKind`] is a build error rather than a slot
 /// tagged `Reference`, which is the one unsound answer (see [`DebugSlotKind`]).
@@ -4984,13 +4851,13 @@ const fn debug_slot_kind_of(kind: ScalarKind) -> DebugSlotKind {
 /// [`NoRuntimeRepr`](praxis_repr::NoRuntimeRepr) into the `anyhow` error the
 /// lowering already propagates, with the offending type rendered.
 ///
-/// **Failing the compile is the decision** (D9). The predecessor had three
-/// `_ => INT` arms, so `Float`, `Unit`, `Record`, `Enum`, a closure, a `Range`
-/// and an unresolved variable all became the `Int` descriptor — and a record
-/// schema built from them dispatched `Int`'s equality callback against an `f64`
-/// payload (P0-11). Reaching a type with no runtime object at a
-/// descriptor-producing site is an upstream compiler bug; refusing to emit is
-/// how it stays visible instead of becoming a wrong payload read.
+/// **Failing the compile is the decision** (D9). A catch-all `_ => INT` arm
+/// would make `Float`, `Unit`, `Record`, `Enum`, a closure, a `Range` and an
+/// unresolved variable all the `Int` descriptor, and a record schema built from
+/// them would dispatch `Int`'s equality callback against an `f64` payload.
+/// Reaching a type with no runtime object at a descriptor-producing site is an
+/// upstream compiler bug; refusing to emit is how it stays visible instead of
+/// becoming a wrong payload read.
 fn descriptor_for_type(
     db: &praxis_types::TypeDb,
     ty: praxis_types::Type,
@@ -5011,7 +4878,7 @@ fn descriptor_for_type(
 ///
 /// Only for debug metadata, where absence is already representable and already
 /// rendered: `MirType::Opaque` locals emit a null descriptor plus
-/// `NO_STATIC_TYPE`, and the debugger omits the type column for both (P0-02).
+/// `NO_STATIC_TYPE`, and the debugger omits the type column for both.
 /// A `Never`-typed local — the result of a `return` or a `panic()` — is the
 /// common case, and refusing to compile a working program because its debug
 /// info is incomplete is not what D9 decided.
@@ -5034,11 +4901,11 @@ fn debug_descriptor_for_type(
 /// `format_args!` describing it, e.g. `format_args!("tuple element {i}")`.
 ///
 /// **The unresolved-variable exception is one policy, and this is where it is
-/// written** (HIR-01/MONO-01, hazard H10). Its three readers — enum payload
-/// slots, tuple element slots, collection element arguments — each spelled this
-/// match out themselves, so `is_unresolved` ceasing to be the right
-/// discriminator meant three edits and nothing forced the third. The reason is
-/// the same at all three: `var xs = Vec()` and `var m = Map()` generalize at the
+/// written** (hazard H10). Its three readers — enum payload slots, tuple
+/// element slots, collection element arguments — all come through here rather
+/// than spelling the match out, so `is_unresolved` ceasing to be the right
+/// discriminator is one edit. The reason is the same at all three:
+/// `var xs = Vec()` and `var m = Map()` generalize at the
 /// `var`, so the construction site's own element type is never resolved and a
 /// `for kv in m` whose body never looks inside the pair leaves K and V
 /// unresolved. Failing the compile there rejects a working program. The null
@@ -5047,7 +4914,7 @@ fn debug_descriptor_for_type(
 ///
 /// A `Known` type that *cannot* have a runtime object — `Vec[Seq[Int]]`,
 /// `Vec[Never]` — is still a compile error, for the reason
-/// [`descriptor_for_type`] gives (P0-11, D9). That distinction is exactly what
+/// [`descriptor_for_type`] gives (D9). That distinction is exactly what
 /// [`praxis_repr::NoReprCause`] records.
 fn nullable_descriptor_for_type(
     db: &praxis_types::TypeDb,
@@ -5077,19 +4944,20 @@ fn nullable_descriptor_for_type(
 ///
 /// A *null* descriptor is the honest encoding of "this lowering has no static
 /// element type", and every `praxis_*_new` wrapper reads it that way. Two
-/// situations produce it, and neither is P0-11's fallback:
+/// situations produce it, and neither is a fallback for a resolvable type:
 ///
-/// - `MirType::Opaque` — a fused pipeline's result Vec, which genuinely has no
-///   type until MIR-05 (S21), or a construction whose result type did not match
-///   its ctor.
+/// - `MirType::Opaque` — a fused pipeline's result Vec, or a construction whose
+///   result type did not match its ctor.
 /// - a `Known` type that is still an inference *variable* — `var xs = Vec()`
 ///   generalizes at the `var`, so the construction site's own element type is
-///   never resolved. That is HIR-01/MONO-01 (S15), and failing the compile on it
-///   would reject working programs, which hazard H10 exists to prevent.
+///   never resolved. Failing the compile on it would reject working programs,
+///   which hazard H10 exists to prevent.
 ///
-/// A `Known` type that *cannot* have a runtime object — `Vec[Range]`,
+/// A `Known` type that *cannot* have a runtime object — `Vec[Seq[Int]]`,
 /// `Vec[Never]` — is still a compile error. That distinction is what
-/// [`praxis_repr::NoReprCause`] records.
+/// [`praxis_repr::NoReprCause`] records. `Range` is *not* such a type: it has
+/// its own runtime object (ADR-059), which
+/// `a_range_element_has_the_range_descriptor` pins.
 fn collection_element_descriptor_for(
     db: &praxis_types::TypeDb,
     args: &[MirType],
@@ -5110,9 +4978,7 @@ fn collection_element_descriptor_for(
 ///
 /// The bytes live exactly as long as the JIT generation that compiled the
 /// literal, and are interned — a literal repeated across functions, or a
-/// program recompiled into the same generation, costs one copy. This used to be
-/// a `Box::leak` with a comment promising a `JitGeneration` arena "M-later";
-/// that arena is [`Generation`] and this is its call site (MIR-13).
+/// program recompiled into the same generation, costs one copy.
 fn embed_text(
     builder: &mut FunctionBuilder,
     generation: &Generation,
@@ -5154,15 +5020,14 @@ mod tests {
     /// A `JITModule` configured exactly as `Jit::in_generation` configures its
     /// own — `crate::module::CRANELIFT_FLAGS`, not Cranelift's defaults.
     ///
-    /// **The two no longer agree**, and that is what makes sharing the constant
-    /// load-bearing rather than tidy. `CRANELIFT_FLAGS` is
-    /// `opt_level = "speed"`; Cranelift's default is `"none"`. A test that built
+    /// **The two differ**, which is what makes sharing the constant load-bearing
+    /// rather than tidy. `CRANELIFT_FLAGS` is `opt_level = "speed"`;
+    /// Cranelift's default is `"none"`. A test that built
     /// its own `JITBuilder` from the defaults would run the mid-end not at all
     /// where the real compile path runs it, so it would assert on code no
     /// `praxis run` ever emits. A test that asserts on the emitted shape, and a
     /// `PRAXIS_DUMP_CLIF` run of the same program, must be looking at the same
-    /// code. (This comment said the opposite until ADR-128, from back when the
-    /// two did agree.)
+    /// code.
     fn test_module() -> JITModule {
         let builder = JITBuilder::with_flags(
             crate::module::CRANELIFT_FLAGS,
@@ -5172,10 +5037,10 @@ mod tests {
         JITModule::new(builder)
     }
 
-    /// P0-13: the signature comes from the manifest row, not from the argument
-    /// count. The arity-derived path this replaces gave every parameter the
-    /// pointer type, so `praxis_record_field`'s `u32` index received a full
-    /// 64-bit value across a C ABI that declares 32 bits.
+    /// The signature comes from the manifest row, not from the argument count:
+    /// giving every parameter the pointer type would hand
+    /// `praxis_record_field`'s `u32` index a full 64-bit value across a C ABI
+    /// that declares 32 bits.
     #[test]
     fn narrow_parameters_are_declared_narrow() {
         let module = test_module();
@@ -5189,13 +5054,11 @@ mod tests {
         assert_eq!(sig.returns.len(), 1);
     }
 
-    /// A wrapper that returns nothing must declare no results. The arity-only
-    /// synthesis gave every symbol an `i64` return, so a call to a `Void`
-    /// wrapper read a result register the callee never wrote. (The two debug
-    /// wrappers this used to name — `praxis_pop_debug_frame` and
-    /// `praxis_set_frame_source_span` — are gone with ADR-104; the property is
-    /// not about them, and `every_symbol_has_a_derivable_signature` checks it
-    /// over the whole manifest.)
+    /// A wrapper that returns nothing must declare no results: giving every
+    /// symbol an `i64` return would make a call to a `Void` wrapper read a
+    /// result register the callee never wrote.
+    /// `every_symbol_has_a_derivable_signature` checks the same property over
+    /// the whole manifest.
     #[test]
     fn void_wrappers_declare_no_result() {
         let module = test_module();
@@ -5235,10 +5098,10 @@ mod tests {
         }
     }
 
-    /// P0-02: an `Opaque` MIR local produces *no* static type in the debug
-    /// metadata. The old `Type(0)` placeholder was a valid arena index, so the
-    /// crash debugger rendered every untyped temp as whichever type the program
-    /// happened to intern first — usually `Int`.
+    /// An `Opaque` MIR local produces *no* static type in the debug metadata. A
+    /// `Type(0)` placeholder would be a valid arena index, so the crash debugger
+    /// would render every untyped temp as whichever type the program happened to
+    /// intern first — usually `Int`.
     #[test]
     fn an_opaque_local_carries_neither_a_descriptor_nor_a_type_id() {
         use praxis_mir::{ir::LocalDebugKind, Function as MirFn};
@@ -5299,11 +5162,11 @@ mod tests {
         );
     }
 
-    /// H9's resolution in the backend: `Opaque` emits no descriptor. The
-    /// wrappers read a null element descriptor as "unknown element type" and
-    /// adopt the first inserted value's, which is what a fused pipeline's
-    /// result Vec needs; a missing argument (a construction whose result type
-    /// did not match its ctor) takes the same path instead of panicking.
+    /// `Opaque` emits no descriptor. The wrappers read a null element descriptor
+    /// as "unknown element type" and adopt the first inserted value's, which is
+    /// what a fused pipeline's result Vec needs; a missing argument (a
+    /// construction whose result type did not match its ctor) takes the same
+    /// path instead of panicking.
     #[test]
     fn an_opaque_element_type_resolves_to_no_descriptor() {
         let mut db = praxis_types::TypeDb::new();
@@ -5322,18 +5185,14 @@ mod tests {
         ));
     }
 
-    /// P0-11's other half at this boundary: an element type with no runtime
-    /// object is a compile error, not a null descriptor. `Opaque` means "no
-    /// static type here"; `Vec[Seq[Int]]` means "a type that cannot exist", and
-    /// conflating the two is how the wrappers ended up adopting whatever was
-    /// pushed first.
+    /// The other half at this boundary: an element type with no runtime object
+    /// is a compile error, not a null descriptor. `Opaque` means "no static type
+    /// here"; `Vec[Seq[Int]]` means "a type that cannot exist", and conflating
+    /// the two makes the wrappers adopt whatever was pushed first.
     ///
-    /// **Rewritten** for TY-34: the offending element used to be `Range`, which
-    /// had no runtime object at all. It has one now (ADR-059), so the type that
-    /// cannot exist is `Seq` — the compiler's lazy pipeline source, which is
-    /// fused away before codegen and never materializes (§6.3). The property is
-    /// unchanged; only the witness moved, and `Seq` is now the *last* ctor with
-    /// no runtime object, which is what makes it the right witness.
+    /// The witness is `Seq` — the compiler's lazy pipeline source, which is
+    /// fused away before codegen and never materializes (§6.3). It is the *last*
+    /// ctor with no runtime object, which is what makes it the right witness.
     #[test]
     fn a_known_element_type_with_no_descriptor_fails_the_compile() {
         let mut db = praxis_types::TypeDb::new();
@@ -5347,9 +5206,8 @@ mod tests {
         );
     }
 
-    /// …and the type that used to be that witness now *has* a descriptor, which
-    /// is the half of TY-34 this boundary can see: a `Vec[Range]` compiles, and
-    /// its element descriptor is the one `Range` object.
+    /// …and `Range` *does* have a runtime object (ADR-059): a `Vec[Range]`
+    /// compiles, and its element descriptor is the one `Range` object.
     #[test]
     fn a_range_element_has_the_range_descriptor() {
         let mut db = praxis_types::TypeDb::new();
@@ -5365,16 +5223,13 @@ mod tests {
     }
 
     /// A tuple allocation with no static type keeps its **arity** and leaves
-    /// every slot unknown (REP-23, ADR-066 decision 5).
+    /// every slot unknown (ADR-066 decision 5).
     ///
-    /// This test asserted the opposite — an *empty* schema — and that assertion
-    /// was the defect written down. `praxis_alloc_tuple` sizes the payload from
-    /// the schema, so a zero-slot schema for a two-element tuple made both
-    /// `praxis_tuple_set` calls write into nothing: `[10, 20].enumerate()`
-    /// answered `[(), ()]`, with both halves of every pair dropped. The type gap
-    /// is still MIR-05's (S21 supplies the real fused-pipeline tuple types); what
-    /// changed is that "no static type" is now a slot the runtime answers from
-    /// the value's own header rather than a slot that does not exist.
+    /// `praxis_alloc_tuple` sizes the payload from the schema, so an *empty*
+    /// schema for a two-element tuple would make both `praxis_tuple_set` calls
+    /// write into nothing and `[10, 20].enumerate()` answer `[(), ()]`. "No
+    /// static type" has to be a slot the runtime answers from the value's own
+    /// header, not a slot that does not exist.
     #[test]
     fn an_opaque_tuple_type_keeps_its_arity_with_unknown_slots() {
         let db = praxis_types::TypeDb::new();
@@ -5396,10 +5251,10 @@ mod tests {
     // These read the emitted Cranelift IR, and they have to. "The instruction
     // is the fact": a behavioural test cannot tell an inline load from a call
     // to a wrapper that does the same load, so nothing that runs a program can
-    // see the difference this change makes — or see it being undone. The one
-    // that matters most is the descriptor check: it is the thing a later "the
-    // type is known, drop the check" edit would remove, and REP-56 is what
-    // that costs.
+    // see the inline form being undone. The one that matters most is the
+    // descriptor check: it is the thing a later "the type is known, drop the
+    // check" edit would remove, and an eight-byte read off a zero-byte payload
+    // is what that costs.
     // -----------------------------------------------------------------------
 
     /// A scratch function with one `i64` parameter (standing in for `ctx`) and
@@ -5482,27 +5337,24 @@ mod tests {
 
     /// The one instruction in `ir` that reads at the payload displacement.
     ///
-    /// The *width* of this line is the whole of REP-37, and it has to be picked
-    /// out by displacement rather than by opcode: the descriptor check reads a
-    /// pointer, so "the IR contains a `load.i64`" is true of every kind and
-    /// says nothing. The payload sits at `payload_offset_for(align)`, which is
-    /// 16 for all four scalars — the same number `Inst::EnumTag` folds — and
-    /// Cranelift prints the displacement as `+16`. (It was 24 until ADR-109
-    /// deleted `GcHeader::size`; this helper derives the number from
-    /// `payload_offset_for` rather than spelling it, so only this sentence
-    /// needed the edit, which is ADR-039 Decision 1 doing its job.)
+    /// The *width* of this line is what the payload tests are about, and it has
+    /// to be picked out by displacement rather than by opcode: the descriptor
+    /// check reads a pointer, so "the IR contains a `load.i64`" is true of every
+    /// kind and says nothing. The payload sits at `payload_offset_for(align)`,
+    /// which is 16 for all four scalars — the same number `Inst::EnumTag` folds
+    /// — and Cranelift prints the displacement as `+16`. Derived from
+    /// `payload_offset_for` rather than spelled out, which is ADR-039 decision 1
+    /// doing its job.
     ///
     /// **The displacement is matched as a whole address token, not as a
     /// substring, and that is not fastidiousness.** Cranelift prints an address
-    /// as `vN+DISP`, and `"v0+168".contains("+16")` is true. ADR-116 put the
+    /// as `vN+DISP`, and `"v0+168".contains("+16")` is true. ADR-116 puts the
     /// built-in descriptor table in the `RuntimeContext` at an offset that puts
-    /// `Char`'s slot at exactly +168, so a substring match found the *context*
-    /// load as well as the payload load and this helper's own
-    /// "more than one instruction reads at +16" assertion fired — in a test
-    /// about payload widths, for one of three scalars, with `Int` (+152) and
-    /// `Float` (+176) passing beside it. Splitting on whitespace and asking
-    /// which token *ends* with `+16` is exact: the `+` is the token's only one,
-    /// so nothing longer can end with it.
+    /// `Char`'s slot at exactly +168, so a substring match would find the
+    /// *context* load as well as the payload load and trip this helper's own
+    /// "more than one instruction reads at +16" assertion. Splitting on
+    /// whitespace and asking which token *ends* with `+16` is exact: the `+` is
+    /// the token's only one, so nothing longer can end with it.
     fn payload_load(ir: &str, align: usize) -> String {
         let displacement = format!("+{}", praxis_runtime::GcHeader::payload_offset_for(align));
         let reads_there = |l: &str| {
@@ -5527,11 +5379,10 @@ mod tests {
     /// An `Int` extract loads the payload inline — and proves the descriptor
     /// first, in the same block, before the load can happen.
     ///
-    /// The `icmp` is the assertion that matters. Dropping it would leave a
-    /// green suite and a faster benchmark and REP-56 back: a `praxis check`-
-    /// clean program extracting an `Int` from a zero-byte `Unit` payload, which
-    /// in a release build read eight bytes past the object and answered a
-    /// different number every run.
+    /// The `icmp` is the assertion that matters. Dropping it would leave a green
+    /// suite, a faster benchmark, and a `praxis check`-clean program extracting
+    /// an `Int` from a zero-byte `Unit` payload — eight bytes read past the
+    /// object, answering a different number every run.
     #[test]
     fn an_int_extract_loads_the_payload_and_proves_its_descriptor() {
         let (all, entry) = emitted_ir(|b, ctx, dst, m| {
@@ -5576,8 +5427,8 @@ mod tests {
         );
     }
 
-    /// REP-49 and REP-37, moved to the inline path: a `Bool` payload is one
-    /// byte and a `Char`'s is four, and neither is read as eight.
+    /// On the inline path too: a `Bool` payload is one byte and a `Char`'s is
+    /// four, and neither is read as eight.
     ///
     /// The `Bool` shape is three instructions rather than one on purpose — the
     /// byte is compared against zero rather than materialized as a Rust `bool`,
@@ -5731,13 +5582,12 @@ mod tests {
     /// is the one behind `scalars::…_PAYLOAD`. If those two descriptors were
     /// ever different, the site would have two contradictory notions of what
     /// this value is: the fast path could accept a value the wrapper refuses
-    /// (an out-of-bounds read at the wrong width, REP-37) or refuse one it
-    /// accepts (an abort on a correct program). Asserting the identity is what
-    /// makes "the refusal is byte-for-byte what it was" a checked claim rather
-    /// than a comment.
+    /// (an out-of-bounds read at the wrong width) or refuse one it accepts (an
+    /// abort on a correct program). Asserting the identity is what makes "the
+    /// two paths refuse the same values" a checked claim rather than a comment.
     ///
-    /// Since ADR-116 the inline side names a [`BuiltinTypeId`] rather than an
-    /// address, so this reads the descriptor back out of the registry that id
+    /// The inline side names a [`BuiltinTypeId`] rather than an address
+    /// (ADR-116), so this reads the descriptor back out of the registry that id
     /// indexes — which is the same registry `Runtime::context` fills the
     /// context's table from, so proving the identity here proves it of the
     /// address generated code will load.
@@ -5816,7 +5666,7 @@ mod tests {
     /// This is the test that fails if someone "simplifies" the sequence by
     /// probing the table first and testing the counter only on the miss. That
     /// version is faster and it is the defect ADR-113 exists to forbid: a
-    /// program whose pressure came from `Text` or `Vec` would have every
+    /// program whose pressure comes from `Text` or `Vec` would have every
     /// collection deferred at every loop counter in between.
     #[test]
     fn an_inline_int_box_tests_the_pacing_counter_before_it_reads_the_table() {
@@ -6265,12 +6115,9 @@ mod tests {
     /// The stride and the block geometry reach the backend as immediates, not as
     /// loads off the page header.
     ///
-    /// Handover 27 §9 registered this as unverified: `BlockLayout::of` and
-    /// `SizeClass::of` are const-shaped, but nobody had checked that
-    /// const-evaluation reaches the emitted CLIF as a usable constant rather
-    /// than needing a new accessor. It does — both are `iconst` — and the reason
-    /// is that they are const-evaluated in `praxis-runtime`, in
-    /// `InlineClaimSite::of`, and arrive here as numbers.
+    /// `BlockLayout::of` and `SizeClass::of` are const-evaluated in
+    /// `praxis-runtime`, inside `InlineClaimSite::of`, so the geometry arrives
+    /// here as plain numbers and is emitted as `iconst`.
     #[cfg(not(feature = "adr119-arm-a"))]
     #[test]
     fn the_block_geometry_is_folded_rather_than_read_off_the_page() {
@@ -6358,12 +6205,12 @@ mod tests {
 
     /// At `RaiseExit::Observed` the cold block rejoins the hot path, where the
     /// `Inst::CheckFault` that MIR emits next reads the slot the wrapper wrote.
-    /// This is ADR-102's shape and it is still what an unfused site gets.
+    /// This is ADR-102's shape, and what an unfused site gets.
     #[test]
     fn an_observed_raise_rejoins_the_hot_path() {
         let (all, entry_text, cold) = raise_ir(|_| RaiseExit::Observed);
         // The join is the `brif`'s second target, which is also where the cold
-        // block goes: three mentions of one label, exactly as ADR-102 left it.
+        // block goes: three mentions of one label.
         let join = entry_text
             .split_once("brif")
             .and_then(|(_, rest)| rest.rsplit_once(", "))
@@ -6436,10 +6283,10 @@ mod tests {
     /// `bs.contains(x)` reaches the wrapper from exactly one block, and that
     /// block is cold.
     ///
-    /// This is the package's headline stated as a shape: what the inlining
-    /// removes is a `call` from the path a loop takes, and no instruction count
-    /// can say that on its own — an inline sequence is *bigger* than the `bl`
-    /// it replaces, because the wrapper's body was never in the count.
+    /// What the inlining removes is a `call` from the path a loop takes, and no
+    /// instruction count can say that on its own — an inline sequence is
+    /// *bigger* than the `bl` it replaces, because the wrapper's body is not in
+    /// the count.
     #[cfg(not(feature = "adr118-arm-a"))]
     #[test]
     fn a_membership_test_calls_the_wrapper_only_from_its_cold_block() {
@@ -6485,7 +6332,7 @@ mod tests {
     ///
     /// Stated as dominance over the emitted CFG rather than as "the load is in
     /// a later block", because the second is a claim about block numbering and
-    /// the first is the claim REP-56 is about: an eight-byte read off an object
+    /// the first is the claim that matters: an eight-byte read off an object
     /// that is not an `Int` is an out-of-bounds read of a zero-width `Unit`.
     #[cfg(not(feature = "adr118-arm-a"))]
     #[test]
@@ -6505,8 +6352,8 @@ mod tests {
         let site = praxis_runtime::bitset::INLINE_BITSET_SITE;
 
         // The block that reads the `Int` payload, found by its displacement as
-        // a whole address token (handover 26 §7 trap 3: `"+168"` contains
-        // `"+16"`).
+        // a whole address token — a substring match would let `"+168"` satisfy
+        // `"+16"`.
         let int_align = inline_scalar_load_of(praxis_mir::ScalarKind::Int)
             .expect("`Int` has an inline payload form")
             .1;
@@ -6534,7 +6381,7 @@ mod tests {
         // itself holds the receiver's. Every payload read must come after both,
         // and "after" is dominance over the emitted CFG rather than block
         // numbering — the second is a claim about the builder, the first is the
-        // claim REP-56 is about.
+        // claim that matters.
         let member_proof = func
             .layout
             .blocks()
@@ -6564,9 +6411,9 @@ mod tests {
     /// The evidence is the pacing predicate: both `Heap` words are loaded and
     /// compared on the path that answers inline, so a collection that was due
     /// still reaches `praxis_alloc_int`, which paces exactly as the `int_ref`
-    /// inside `praxis_vec_len` would have. Without that, every `v.len()` in a
-    /// loop would defer the collector indefinitely — ADR-113 decision 1's
-    /// rejected alternative, arrived at from a different direction.
+    /// inside `praxis_vec_len` does. Without that, every `v.len()` in a loop
+    /// would defer the collector indefinitely — ADR-113 decision 1's rejected
+    /// alternative, arrived at from a different direction.
     #[cfg(not(feature = "adr118-arm-a"))]
     #[test]
     fn an_inline_vec_length_paces_before_it_answers_from_the_intern_table() {
@@ -6928,9 +6775,9 @@ mod tests {
     // `emitted_ir` above wraps one emit closure, which is the right shape for
     // "what does `emit_scalar_load` emit" and the wrong one for "does this
     // loop's hot path contain a call" — that is a claim about a whole
-    // `lower_function`, and the only way to make it today was to hand-build
-    // MIR. These run the real pipeline instead: parse → HIR → MIR →
-    // `lower_function`, the same passes `praxis run` runs.
+    // `lower_function`, and the alternative is hand-built MIR. These run the
+    // real pipeline instead: parse → HIR → MIR → `lower_function`, the same
+    // passes `praxis run` runs.
     //
     // What comes back is the `Function` and not its text, because the text is
     // the weaker of the two: `assert_dominates` needs the CFG, and
@@ -7072,8 +6919,8 @@ mod tests {
         );
     }
 
-    /// Handover 25 §3's loop, which is the program every instruction count in
-    /// the plan is quoted against.
+    /// The loop the instruction counts in this module's tests are quoted
+    /// against.
     const SAMPLE_LOOP: &str = concat!(
         "var i = 0\n",
         "var acc = 0\n",
@@ -7166,11 +7013,12 @@ mod tests {
     /// **No prologue makes a call, at any width the caps allow** (ADR-128
     /// decision 1).
     ///
-    /// ADR-101 said the common prologue makes no calls; above
-    /// `SLOT_ZERO_UNROLL_MAX` it made two, one per slot stack. The statement is
-    /// only worth making if it cannot rot, so this asks it at every width class
-    /// there is — including one past `MAX_DEBUG_VALUE_SLOTS`, which no function
-    /// can reach, so that raising a cap cannot quietly reintroduce the call.
+    /// ADR-101 claims the common prologue makes no calls; a `memset` above
+    /// `SLOT_ZERO_UNROLL_MAX` would make two, one per slot stack. The statement
+    /// is only worth making if it cannot rot, so this asks it at every width
+    /// class there is — including one past `MAX_DEBUG_VALUE_SLOTS`, which no
+    /// function can reach, so that raising a cap cannot quietly reintroduce the
+    /// call.
     #[test]
     fn no_width_of_slot_zeroing_emits_a_call() {
         for n in [
@@ -7466,8 +7314,6 @@ mod tests {
     /// **The operand is matched as a whole token.** `"v0+8".contains("v0+8")`
     /// is also true of `v0+80` — the shadow-stack header's fifth slot — and a
     /// substring match here would report the frame's stores as fault checks.
-    /// This is the trap handover 26 §7 records W6 walking into from the other
-    /// direction, in the same file.
     fn emitted_fault_checks(func: &codegen::ir::Function) -> usize {
         let entry = func
             .layout
@@ -7486,12 +7332,12 @@ mod tests {
             .count()
     }
 
-    /// Every fault check in handover 25 §3's loop is folded into the raise that
-    /// is the only thing that could have set the flag (ADR-117).
+    /// Every fault check in the sample loop is folded into the raise that is the
+    /// only thing that could have set the flag (ADR-117).
     ///
-    /// **This is the package's headline as a test.** MIR emits three
-    /// `Inst::CheckFault`s per iteration — the census below is the count, not an
-    /// estimate — and the lowered function reads `ctx.pending_fault` zero times.
+    /// MIR emits three `Inst::CheckFault`s per iteration — the census below is
+    /// the count, not an estimate — and the lowered function reads
+    /// `ctx.pending_fault` zero times.
     #[test]
     fn every_fault_check_in_the_sample_loop_is_folded_into_its_raise() {
         use praxis_mir::test_support::{lower_src_to_mir, Census, InstKind};
@@ -7513,29 +7359,18 @@ mod tests {
         );
     }
 
-    /// **No runtime type proofs per iteration of that loop — W6's denominator,
-    /// and it has now moved three times, to zero.** Every `Inst::ExtractScalar`
-    /// is one `emit_scalar_load`, which is one descriptor proof (ADR-102), so
-    /// this census is the site count.
+    /// **No runtime type proofs per iteration of that loop.** Every
+    /// `Inst::ExtractScalar` is one `emit_scalar_load`, which is one descriptor
+    /// proof (ADR-102), so this census is the site count.
     ///
-    /// Handover 25 §3 said seven, by hand. This test said **nine** when W6 wrote
-    /// it, and nine was right: eight `Int` reloads and the condition's `Bool`
-    /// are what `build.rs` emits. ADR-120's block-local forwarding then deleted
-    /// four — three interior nodes of the two expression trees, and the whole
-    /// `Materialize{Bool}`/`ExtractScalar{Bool}` round trip of the `while`
-    /// condition. **ADR-121 deleted the last five by promoting the slots they
-    /// read from**, so there is no longer an object here whose descriptor could
-    /// be proved.
-    ///
-    /// **W6 is worth nothing per iteration of this loop, because this loop no
-    /// longer contains what W6 makes cheaper.** That is not W6 being wrong — a
-    /// proof site survives at every value the runtime minted, which is most of a
-    /// program that touches a collection — but a figure quoted as "W6 per
-    /// iteration of the sample loop" is now a figure about an absence. Handover
-    /// 28 §2 is this repo's record of misreading two such numbers.
+    /// The count is zero because ADR-120's block-local forwarding and ADR-121's
+    /// slot promotion between them leave no object in this loop whose descriptor
+    /// could be proved. That does not make the inline proof worthless in general
+    /// — a proof site survives at every value the runtime minted, which is most
+    /// of a program that touches a collection — but a figure quoted as "proofs
+    /// per iteration of the sample loop" is a figure about an absence.
     /// `mir_shape.rs`'s `the_sample_loop_proves_no_scalars_descriptor_at_all`
-    /// carries the same count from outside this crate, with the table of all
-    /// four answers.
+    /// carries the same count from outside this crate.
     #[test]
     fn the_sample_loop_proves_no_descriptors_per_iteration_where_nine_were_written() {
         use praxis_mir::test_support::{lower_src_to_mir, Census, InstKind};
@@ -7692,9 +7527,8 @@ mod tests {
     // compilation. So the parent re-executes the test binary with the variables
     // set and reads the child's streams — which is also the only way to check
     // the half that matters most, that the dump is on **stderr**. The A/B
-    // protocol voids a measurement whose stdout differs between arms (handover
-    // 26 §6), so a dump on stdout would invalidate exactly the runs it exists
-    // to explain.
+    // protocol voids a measurement whose stdout differs between arms, so a dump
+    // on stdout would invalidate exactly the runs it exists to explain.
     // -----------------------------------------------------------------------
 
     /// The one function the dump child asks for by name.

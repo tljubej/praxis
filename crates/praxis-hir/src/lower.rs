@@ -1,20 +1,20 @@
 //! The typed tree: lower `Analysis` + the lossless AST into a tree that carries
-//! an inferred [`Type`](praxis_types::Type) on every node (Milestone 4, ADR-014).
+//! an inferred [`Type`](praxis_types::Type) on every node (ADR-014).
 //!
-//! Why this exists: M2's [`Analysis`](crate::Analysis) attaches types only to
-//! *name-reference* ranges (`ref_types`), not to every subexpression. The JIT
-//! backend needs the type of every node — literals, binops, calls, … — inline,
-//! without re-running unification. This pass re-walks the AST in "read mode"
-//! against the finalized [`TypeDb`]: it *derives* each node's type by recursing
-//! (mirroring the inference rules in `infer`) and looking up symbol schemes,
-//! never by unifying. It also rejects constructs the M4 backend cannot yet
-//! lower (generic functions, reserved-but-unimplemented scalars) with `Y1xx`
-//! diagnostics so the CLI never feeds malformed input to the JIT.
+//! Why this exists: [`Analysis`](crate::Analysis) records its types in side
+//! tables keyed by range and node. The JIT backend needs the type of every node
+//! — literals, binops, calls, … — inline, without re-running unification. This
+//! pass re-walks the AST in "read mode" against the finalized [`TypeDb`]: each
+//! node's type is **read** from what inference recorded (`expr_types`,
+//! `ref_types`, `method_refs`), never re-derived and never unified for. A
+//! construct it cannot lower becomes a `Y0xx`/`Y1xx` diagnostic in the returned
+//! module so the CLI never feeds malformed input to the JIT.
 //!
-//! `analyze` is unchanged — this is a pure consumer of its output.
+//! `analyze` is a pure input here — lowering only consumes its output (and grows
+//! the type arena).
 
-#![allow(dead_code)] // Consumed by the M4 lowering (praxis-mir); not all variants
-                     // are matched until M5/M6 features land.
+#![allow(dead_code)] // The typed tree is consumed by praxis-mir; not every
+                     // variant is matched inside this crate.
 
 use std::collections::HashMap;
 
@@ -39,15 +39,18 @@ use crate::{Analysis, ResolvedRef, ScopeTree, SymbolId};
 /// A whole lowered file: its top-level items and any lowering diagnostics.
 #[derive(Debug)]
 pub struct TypedModule {
-    /// The top-level function declarations, in source order.
+    /// The top-level function declarations in source order, followed by the
+    /// synthetic [`ENTRY_NAME`] function when the file has top-level statements.
     pub items: Vec<TypedItem>,
-    /// `Y1xx` diagnostics emitted during lowering (generic-fn rejection,
-    /// unsupported construct, …). Empty for a fully lowerable module.
+    /// The diagnostics lowering itself emits — a node inference recorded no type
+    /// for (`Y099`), a field read on a concrete type that has none (`Y112`), and
+    /// the reports the parser-expression lowering and `pattern::PatternBuilder`
+    /// push through it. Empty for a fully lowerable module.
     pub diagnostics: Vec<Diagnostic>,
     /// The reassigned symbols captured by some closure in the module (escape
-    /// analysis, M7-WS7b). The MIR builder boxes these into a `VarCell` at
-    /// their binding site and routes reads/writes through the cell, so a
-    /// mutation in one frame is visible to every closure sharing the cell.
+    /// analysis). The MIR builder boxes these into a `VarCell` at their binding
+    /// site and routes reads/writes through the cell, so a mutation in one frame
+    /// is visible to every closure sharing the cell.
     ///
     /// A subset of [`reassigned_vars`](Self::reassigned_vars): a capture that is
     /// never written needs no shared cell, only a copy.
@@ -85,10 +88,10 @@ pub struct TypedFn {
     pub body: TypedBlock,
     /// The whole function's type `(P0, …) -> R`.
     pub fn_type: Type,
-    /// The function's source span `[start, end)` as byte offsets (§9.3,
-    /// M10-WS1). Threaded through to MIR `Function` so the crash debugger's
-    /// `source` command can render the faulting function's extent. `(0, 0)`
-    /// only when the AST node has no usable span.
+    /// The function's source span `[start, end)` as byte offsets (§9.3).
+    /// Threaded through to MIR `Function` so the crash debugger's `source`
+    /// command can render the faulting function's extent. `(0, 0)` only when the
+    /// AST node has no usable span.
     pub span: (u32, u32),
 }
 
@@ -97,15 +100,14 @@ pub struct TypedFn {
 pub struct TypedParam {
     pub symbol: SymbolId,
     /// The name the programmer wrote, or `None` for a **destructuring**
-    /// parameter (`|(a, b)| …`, REP-29), whose slot holds the whole argument
-    /// and which the programmer never named — the names in `(a, b)` are the
-    /// components', bound in the body by `destructure_pattern_params`.
+    /// parameter (`|(a, b)| …`), whose slot holds the whole argument and which
+    /// the programmer never named — the names in `(a, b)` are the components',
+    /// bound in the body by `destructure_pattern_params`.
     ///
-    /// `None` rather than the pattern's source text, which is what this used to
-    /// hold: MIR classifies a named parameter as a user binding and an unnamed
-    /// one as a compiler temp, so the pattern text made the crash snapshot list
-    /// a binding literally called `(a, b)` beside the `a` and `b` the source
-    /// does have (ADR-139).
+    /// `None` rather than the pattern's source text: MIR classifies a named
+    /// parameter as a user binding and an unnamed one as a compiler temp, so
+    /// pattern text would make the crash snapshot list a binding literally
+    /// called `(a, b)` beside the `a` and `b` the source does have (ADR-139).
     pub name: Option<String>,
     pub ty: Type,
 }
@@ -141,8 +143,7 @@ pub enum TypedStmt {
         value: TypedExpr,
         span: (u32, u32),
     },
-    /// `m[key] = v` / `counts[key] += 1` — a store through a subscript (REP-16,
-    /// §6.2).
+    /// `m[key] = v` / `counts[key] += 1` — a store through a subscript (§6.2).
     ///
     /// Its own statement rather than a desugaring into `m[key] = m[key] + v`: the
     /// desugared form names the receiver and every index **twice**, and MIR lowers
@@ -205,7 +206,8 @@ pub enum AssignOp {
 /// A typed expression. Every variant carries its inferred `ty`.
 #[derive(Clone, Debug)]
 pub enum TypedExpr {
-    /// An integer / text / bool literal.
+    /// A literal value — see [`Lit`] for the kinds, which include the
+    /// synthesized `Unit`.
     Lit {
         value: Lit,
         ty: Type,
@@ -241,13 +243,12 @@ pub enum TypedExpr {
         ty: Type,
         span: (u32, u32),
     },
-    /// A top-level `fn` name used in **value** position (REP-01, ADR-061):
-    /// `var f = double`, or `double` passed where a `Func` is expected.
+    /// A top-level `fn` name used in **value** position (ADR-061): `var f =
+    /// double`, or `double` passed where a `Func` is expected.
     ///
     /// Distinct from [`Path`](Self::Path) because a `fn` is not a binding: it has
-    /// no local slot, so a `Path` to one lowered to `Unit` and `Inst::CallIndirect`
-    /// then read that Unit's payload as a function pointer — a SIGBUS from a
-    /// program that passed `praxis check`. It lowers to a closure over the
+    /// no local slot, so there is no value for a `Path` to read and an indirect
+    /// call through one has no function pointer. It lowers to a closure over the
     /// function with an empty environment (a top-level `fn` captures nothing).
     ///
     /// `callee_name` is here for the reason `Call`'s is: the MIR builder names
@@ -311,13 +312,14 @@ pub enum TypedExpr {
         ty: Type,
         span: (u32, u32),
     },
-    /// `for binding in iter { body }` (M8, §4.11). `binding` is the loop
+    /// `for binding in iter { body }` (§4.11). `binding` is the loop
     /// variable's **pattern** — a `Bind` for the ordinary `for x in …` and a
-    /// composite for `for (k, v) in …` (REP-25) — and `item_ty` is the
-    /// iterator's element type. Yields Unit.
+    /// composite for `for (k, v) in …` — and `item_ty` is the iterator's
+    /// element type. Yields Unit.
     ///
-    /// The pattern is irrefutable: lowering reports one that can fail, because a
-    /// `for` has no second arm for an item to fall through to.
+    /// The pattern is irrefutable: a `for` has no second arm for an item to fall
+    /// through to, and one that can fail is `Y125`, reported by
+    /// `pattern::check_binding_patterns` at the end of analysis.
     For {
         binding: TypedPattern,
         iter: Box<TypedExpr>,
@@ -326,23 +328,23 @@ pub enum TypedExpr {
         ty: Type,
         span: (u32, u32),
     },
-    /// `loop { body }` (M8, §4.11). An infinite loop terminated by `break`;
+    /// `loop { body }` (§4.11). An infinite loop terminated by `break`;
     /// its type is the break-value type (Unit if no break carries a value).
     Loop {
         body: Box<TypedBlock>,
         ty: Type,
         span: (u32, u32),
     },
-    /// `break [expr]` (M8, §4.11). Diverges from the enclosing loop. `value` is
+    /// `break [expr]` (§4.11). Diverges from the enclosing loop. `value` is
     /// the optional break value; `ty` is `Never`.
     Break {
         value: Option<Box<TypedExpr>>,
         ty: Type,
         span: (u32, u32),
     },
-    /// `continue` (M8, §4.11). Diverges; `ty` is `Never`.
+    /// `continue` (§4.11). Diverges; `ty` is `Never`.
     Continue { ty: Type, span: (u32, u32) },
-    /// `return [expr]` (M8, §4.11). Diverges from the enclosing function.
+    /// `return [expr]` (§4.11). Diverges from the enclosing function.
     Return {
         value: Option<Box<TypedExpr>>,
         ty: Type,
@@ -354,9 +356,9 @@ pub enum TypedExpr {
         /// [`SymbolId::UNRESOLVED`] when it resolves to none — which is also
         /// the case for every `callee_expr` call, since those have no callee
         /// *name* to resolve. A consumer must check `callee_expr` first rather
-        /// than dispatching on this: emitting a direct call for an unresolved
-        /// callee is what made `fs.get(0)(100)` call through nothing and
-        /// SIGSEGV.
+        /// than dispatching on this: an unresolved callee that carries a
+        /// `callee_expr` is an indirect call, and a direct call emitted for it
+        /// (`fs.get(0)(100)`) would call through nothing.
         callee: SymbolId,
         /// The callee's source name, resolved during HIR lowering so the MIR
         /// builder (and the JIT) can name the target without a NameTable.
@@ -364,12 +366,12 @@ pub enum TypedExpr {
         /// merely failed to resolve still records its text.
         callee_name: String,
         args: Vec<TypedExpr>,
-        /// The concrete argument types at this call site (WS8, §13.6). The mono
-        /// pass uses these to instantiate a polymorphic callee; the MIR builder
+        /// The concrete argument types at this call site (§13.6). The mono pass
+        /// uses these to instantiate a polymorphic callee; the MIR builder
         /// ignores them (calls are by name). For a closure-value callee, empty.
         arg_types: Vec<Type>,
-        /// For a postfix call on an arbitrary expression (`expr(args)`, M8
-        /// §4.10) — e.g. calling a closure retrieved from a collection
+        /// For a postfix call on an arbitrary expression (`expr(args)`, §4.10)
+        /// — e.g. calling a closure retrieved from a collection
         /// (`fs.get(0)(100)`) or the result of another call (`f(1)(2)`) — the
         /// lowered callee expression. `None` for an ordinary named call (the
         /// callee is `callee`/`callee_name`); `Some` for a closure-value callee
@@ -378,13 +380,12 @@ pub enum TypedExpr {
         ty: Type,
         span: (u32, u32),
     },
-    /// `receiver.method(args)` (M5, §16.2). `lowering_symbol` is the runtime
-    /// wrapper the catalog resolved (e.g. `RuntimeSymbol::VecPush`), so the MIR
-    /// builder emits a direct call without re-resolving the catalog; `None`
-    /// means the method is an intrinsic and MIR lowers it itself. `purity`
-    /// (M10b-WS4) is the catalog's purity tag, so the crash debugger's read-only
-    /// `p EXPR` evaluator can reject impure calls (§9.5, §19.10 "no command can
-    /// mutate").
+    /// `receiver.method(args)` (§16.2). `lowering_symbol` is the runtime wrapper
+    /// the catalog resolved (e.g. `RuntimeSymbol::VecPush`), so the MIR builder
+    /// emits a direct call without re-resolving the catalog; `None` means the
+    /// method is an intrinsic and MIR lowers it itself. `purity` is the
+    /// catalog's purity tag, so the crash debugger's read-only `p EXPR`
+    /// evaluator can reject impure calls (§9.5, §19.10 "no command can mutate").
     MethodCall {
         receiver: Box<TypedExpr>,
         name: String,
@@ -395,10 +396,10 @@ pub enum TypedExpr {
         ///
         /// Only a row that is *also* a `lowering_symbol` reads it, and what it
         /// says is: the wrapper needs a real `Vec` and the receiver may be any
-        /// of ten things, so MIR materializes it first. The alternative was a
-        /// list of barrier symbols in the MIR builder, which is a second
-        /// statement of a fact the catalog already holds — and the kind that
-        /// goes stale the day an eleventh row is added.
+        /// of ten things, so MIR materializes it first. Carried here rather than
+        /// kept as a list of barrier symbols in the MIR builder, which would be a
+        /// second statement of a fact the catalog already holds — and the kind
+        /// that goes stale the day an eleventh row is added.
         receiver_is_iterable: bool,
         args: Vec<TypedExpr>,
         purity: praxis_stdlib::Purity,
@@ -427,7 +428,7 @@ pub enum TypedExpr {
         ty: Type,
         span: (u32, u32),
     },
-    /// `read parser_expression` (§7.1, M6). `plan` identifies the compiled
+    /// `read parser_expression` (§7.1). `plan` identifies the compiled
     /// [`ParserPlan`] in the process-wide arena; the runtime interpreter looks
     /// it up.
     Read {
@@ -435,7 +436,7 @@ pub enum TypedExpr {
         ty: Type,
         span: (u32, u32),
     },
-    /// `parse(text, parser_expression)` (§7.1, M6). The `text` arg is lowered as
+    /// `parse(text, parser_expression)` (§7.1). The `text` arg is lowered as
     /// an ordinary expression; `plan` identifies the parser plan.
     Parse {
         text: Box<TypedExpr>,
@@ -443,7 +444,7 @@ pub enum TypedExpr {
         ty: Type,
         span: (u32, u32),
     },
-    /// `Name { field: expr, … }` record literal (M7, §4.5). `record_def_id`
+    /// `Name { field: expr, … }` record literal (§4.5). `record_def_id`
     /// identifies the struct type (index into `TypeDb::record_defs`); `fields`
     /// are the lowered initializers in declaration order, each paired with its
     /// field index.
@@ -453,9 +454,7 @@ pub enum TypedExpr {
         ty: Type,
         span: (u32, u32),
     },
-    /// `receiver.field` field access (M7, §4.5). `field_idx` is the field's
-    /// index in the record's `RecordDef`.
-    /// `receiver.0` — a tuple element, selected by position (REP-08, §4.4).
+    /// `receiver.0` — a tuple element, selected by position (§4.4).
     ///
     /// Its own variant rather than a `FieldGet` with a positional index: a record
     /// field and a tuple element lower to two different runtime symbols
@@ -470,13 +469,15 @@ pub enum TypedExpr {
         ty: Type,
         span: (u32, u32),
     },
+    /// `receiver.field` — a record field access (§4.5). `field_idx` is the
+    /// field's index in the record's `RecordDef`.
     FieldGet {
         receiver: Box<TypedExpr>,
         field_idx: u32,
         ty: Type,
         span: (u32, u32),
     },
-    /// An enum variant construction (M7, §4.6): `Number(5)` or bare `Empty`.
+    /// An enum variant construction (§4.6): `Number(5)` or bare `Empty`.
     /// `enum_def_id` identifies the enum, `variant_idx` the variant, and `args`
     /// are the payload values (empty for a payload-less variant).
     EnumVariant {
@@ -486,14 +487,14 @@ pub enum TypedExpr {
         ty: Type,
         span: (u32, u32),
     },
-    /// `match scrutinee { pattern => body, … }` (M7, §4.6).
+    /// `match scrutinee { pattern => body, … }` (§4.6).
     Match {
         scrutinee: Box<TypedExpr>,
         arms: Vec<TypedMatchArm>,
         ty: Type,
         span: (u32, u32),
     },
-    /// `|params| body` closure (M7, §4.10). `fn_name` is a synthesized unique
+    /// `|params| body` closure (§4.10). `fn_name` is a synthesized unique
     /// name for the closure's synthetic MIR function; `fn_type` is the inferred
     /// `Func` type; `captures` is the ordered capture list (env slot order).
     Closure {
@@ -507,27 +508,24 @@ pub enum TypedExpr {
     },
 }
 
-/// A recursive pattern, the M7-Part-2 replacement for the flat
-/// `(variant_idx, bindings)` representation. Models the full pattern grammar:
-/// wildcard, literal, variable bind, and enum variant with nested sub-patterns
+/// A recursive pattern. Models the full pattern grammar: wildcard, literal,
+/// variable bind, enum variant with nested sub-patterns, tuple and record
 /// (§4.6). The exhaustiveness checker and the MIR decision-tree lowering both
 /// recurse over this.
 #[derive(Clone, Debug)]
 pub enum TypedPattern {
     /// `_` — matches anything, binds nothing.
     Wildcard,
-    /// A literal `Int`/`Bool`/`Text` value to test against (§4.6). The MIR emits
-    /// an equality compare against the scrutinee for these.
+    /// A literal scalar value to test against (§4.6). The MIR emits an equality
+    /// compare against the scrutinee for these.
     Lit { value: Lit, ty: Type },
     /// `x` — binds the whole scrutinee to `symbol` (always matches).
     ///
     /// `name` and `span` are the same pair [`TypedStmt::Var`] carries, and for
     /// the same reason: ADR-125 says a name a pattern introduces is a binding
     /// in exactly the sense a `var` is, so the crash debugger has to be able to
-    /// print it as `name: Type = value` and `p` has to be able to bind it. They
-    /// used to stop at the AST, which is why a `for` variable rendered `? = 3`
-    /// and a `match` arm's payload rendered as an anonymous compiler temp
-    /// (ADR-139).
+    /// print it as `name: Type = value` and `p` has to be able to bind it
+    /// (ADR-139). They therefore have to reach MIR, not stop at the AST.
     Bind {
         symbol: SymbolId,
         name: String,
@@ -544,15 +542,15 @@ pub enum TypedPattern {
         subpatterns: Vec<TypedPattern>,
         ty: Type,
     },
-    /// `(a, b)` — matches each element against its sub-pattern (REP-10, §4.4).
-    /// Always matches the shape: a tuple has one constructor, so the test is the
+    /// `(a, b)` — matches each element against its sub-pattern (§4.4). Always
+    /// matches the shape: a tuple has one constructor, so the test is the
     /// elements' and never the tuple's.
     Tuple {
         subpatterns: Vec<TypedPattern>,
         ty: Type,
     },
-    /// `P { x, y: p }` — matches each field against its sub-pattern (REP-10,
-    /// §4.5). Like [`EnumVariant`](Self::EnumVariant)'s payload, `subpatterns` is
+    /// `P { x, y: p }` — matches each field against its sub-pattern (§4.5).
+    /// Like [`EnumVariant`](Self::EnumVariant)'s payload, `subpatterns` is
     /// **positional** over the record's declared fields and padded to their
     /// count, so a field the pattern does not name is a `Wildcard` and MIR reads
     /// slot *i* for sub-pattern *i*.
@@ -564,7 +562,7 @@ pub enum TypedPattern {
 }
 
 /// Why `pat` can fail to match, or `None` when it matches every value of its
-/// type (REP-25).
+/// type.
 ///
 /// A binding position has no second arm, so only the shapes that always match
 /// may appear in one: a wildcard, a name, and a composite whose components are
@@ -591,10 +589,10 @@ impl TypedPattern {
     /// it tests — a variant's payload, a tuple's elements, a record's fields —
     /// and an empty slice for a pattern with no components.
     ///
-    /// Written once because three walks want it: the usefulness matrix asks it
-    /// twice and MIR's decision tree once, and each of them used to name
-    /// `EnumVariant` by hand, which is how a new composite pattern silently
-    /// becomes a catch-all in all three (HIR-06's failure mode).
+    /// Written once because three walks want it — the usefulness matrix asks it
+    /// twice and MIR's decision tree once — and naming the composite variants by
+    /// hand in each is how a newly added one silently becomes a catch-all in all
+    /// three.
     #[must_use]
     pub fn sub_patterns(&self) -> &[TypedPattern] {
         match self {
@@ -606,19 +604,19 @@ impl TypedPattern {
     }
 }
 
-/// Every variant's children, written **once** (F20).
+/// Every variant's children, written **once**.
 ///
-/// Each row is `Variant => exprs: [...], blocks: [...]`, and the macro expands
-/// it into the four accessors below. Adding a variant is a compile error here
-/// (the match is exhaustive) rather than a silent omission in a walk somewhere
-/// else — which is the failure mode this replaces: three hand-written ~29-arm
-/// walks over one enum, each independently forgettable. One of them *had*
-/// forgotten `Call.callee_expr`, and a mutable capture went unboxed for it
-/// (HIR-08).
+/// Each row is `Variant { field, field: shape, … }` — that variant's child
+/// fields — and the macro expands the rows into the four accessors below. Adding
+/// a variant is a compile error here (the match is exhaustive) rather than a
+/// silent omission in a walk somewhere else — the failure mode of hand-writing a
+/// ~29-arm walk per consumer, where a forgotten field (`Call.callee_expr`, say)
+/// leaves that consumer quietly skipping a whole subtree.
 ///
-/// `exprs`/`blocks` name fields by shape: a plain field is one child, `opt` is
-/// an `Option`, `each` is a sequence, and `field_each`/`arm_each` are the two
-/// sequences whose elements are not bare expressions.
+/// The `shape` suffix says how to reach the children: a bare field is one
+/// expression, `opt` is an `Option`, `each` is a sequence, `field_each`/`arm_each`
+/// are the two sequences whose elements are not bare expressions, and
+/// `block`/`block_opt` are sub-*blocks* rather than sub-expressions.
 macro_rules! typed_expr_children {
     (
         $( $variant:ident { $( $field:ident $(: $shape:ident)? ),* $(,)? } ),* $(,)?
@@ -713,7 +711,6 @@ typed_expr_children! {
     Loop { body: block },
     Break { value: opt },
     Return { value: opt },
-    // `callee_expr` is the field the escape walk forgot (HIR-08).
     Call { args: each, callee_expr: opt },
     MethodCall { receiver, args: each },
     Tuple { elements: each },
@@ -728,7 +725,7 @@ typed_expr_children! {
     Closure { body: block },
 }
 
-/// One arm of a lowered `match` expression (M7, §4.6). The pattern is recursive
+/// One arm of a lowered `match` expression (§4.6). The pattern is recursive
 /// (see [`TypedPattern`]); the MIR lowering emits a decision tree over it.
 #[derive(Clone, Debug)]
 pub struct TypedMatchArm {
@@ -738,9 +735,9 @@ pub struct TypedMatchArm {
     pub body: TypedExpr,
 }
 
-/// A literal value. (M4 lowers Int/Bool/Unit; Text materializes via the runtime
-/// text descriptor. M6 adds Char for the input parser's `char`/`grid(char)`.
-/// Float literals land here too, §4.12.)
+/// A literal value. `Int`/`Bool`/`Unit` lower directly; `Text` materializes via
+/// the runtime text descriptor; `Float` is §4.12's, and `Char` is both the input
+/// parser's `char`/`grid(char)` element and the `'#'` literal's.
 #[derive(Clone, Debug)]
 pub enum Lit {
     Int(i64),
@@ -751,10 +748,8 @@ pub enum Lit {
     /// A Unicode scalar value (the payload of a `Char` object).
     ///
     /// Built from a `'#'` character literal, in an expression and in a pattern
-    /// alike (ADR-141). It predates that syntax by four milestones — the input
-    /// parser's `char`/`grid(char)` gave the language the *type* long before it
-    /// gave it a way to write one down — which is why the arms that consume it
-    /// were already in place the day the literal landed.
+    /// alike (ADR-141), and from the input parser's `char`/`grid(char)`
+    /// elements.
     Char(u32),
     /// The `Unit` value — the sole inhabitant of the `Unit` type (§4.3). This is
     /// never produced by the parser (there is no `Unit` literal syntax); it is
@@ -803,7 +798,7 @@ pub enum UnaryOp {
 // ---------------------------------------------------------------------------
 
 /// The name of the synthetic function holding a file's top-level statements
-/// (REP-19, ADR-067).
+/// (ADR-067).
 ///
 /// **Not an identifier**, and deliberately: the parser cannot produce this name,
 /// so no program can declare a second function with it and no program can call
@@ -837,7 +832,7 @@ pub fn entry_point<'n>(defines: impl Fn(&str) -> bool) -> Option<&'n str> {
 /// The three declaration kinds are the exceptions and they are named positively:
 /// a `fn` is lowered as its own item, and `struct`/`enum` are type-only and
 /// produce no runtime item at all. Anything else at the top level is a
-/// `var`/assignment/expression, which is a statement (REP-19).
+/// `var`/assignment/expression, which is a statement.
 fn is_top_level_stmt(node: &SyntaxNode) -> bool {
     FnItem::cast(node.clone()).is_none()
         && StructItem::cast(node.clone()).is_none()
@@ -847,12 +842,14 @@ fn is_top_level_stmt(node: &SyntaxNode) -> bool {
 /// Lower a fully analyzed file into a typed tree.
 ///
 /// `analysis` must be the result of [`analyze`](crate::analyze) on `root`; pass
-/// the same `file` id so diagnostics carry correct spans. Never panics —
-/// unsupported constructs become `Y1xx` diagnostics in the returned module.
+/// the same `file` id so diagnostics carry correct spans. Never panics on a
+/// program's account — a construct it cannot lower becomes a `Y0xx`/`Y1xx`
+/// diagnostic in the returned module.
 ///
-/// Takes `analysis` mutably because instantiating schemes (to read concrete
-/// shapes) allocates fresh type slots in [`TypeDb`]. The analysis's prior
-/// results are preserved — only the arena grows.
+/// Takes `analysis` mutably because the [`TypeDb`] is still written to: the
+/// cached scalar/unit handles, the entry point's `Func` type, `deep_resolve`'s
+/// rewrites, and the parser-expression plans all mint or intern. No prior
+/// result of the analysis changes — only the arena grows.
 #[must_use]
 pub fn lower(
     file: praxis_source::FileId,
@@ -882,11 +879,11 @@ pub fn lower(
     let bool_ = db.bool();
     let text = db.text();
     let unit = db.unit();
-    // A file's top-level statements are its program (REP-19). They need a
-    // function to live in, and that function needs a symbol — minted here,
-    // before the lowerer borrows the name table, and only when there is
-    // something to put in it. A `Fn` symbol with no `decl` span: it is a real
-    // declaration, written by the compiler rather than by the file.
+    // A file's top-level statements are its program. They need a function to
+    // live in, and that function needs a symbol — minted here, before the lowerer
+    // borrows the name table, and only when there is something to put in it. A
+    // `Fn` symbol with no `decl` span: it is a real declaration, written by the
+    // compiler rather than by the file.
     let entry_symbol = root.stmts().any(|node| is_top_level_stmt(&node)).then(|| {
         names.insert(crate::Symbol {
             id: crate::SymbolId(0), // overwritten by `insert`
@@ -931,20 +928,17 @@ pub fn lower(
                 items.push(TypedItem::Fn(tfn));
             }
         }
-        // Struct declarations (M7, §4.5) are type-only: they register a record
+        // Struct declarations (§4.5) are type-only: they register a record
         // type during inference but produce no runtime item. Skip them here.
         if StructItem::cast(node.clone()).is_some() {
             // No codegen for the declaration itself.
         }
-        // Enum declarations (M7, §4.6) are likewise type-only.
+        // Enum declarations (§4.6) are likewise type-only.
         if EnumItem::cast(node.clone()).is_some() {
             // No codegen for the declaration itself.
         }
-        // A top-level `var`/`expr`/`assign` **executes** (REP-19): it goes
-        // into the entry point, in the order it is written. It used to be
-        // analyzed and then dropped, so `out(1)` at top level passed
-        // `praxis check` and printed nothing — which silenced §3.3 and §4.2,
-        // the design doc's own programs.
+        // A top-level `var`/`expr`/`assign` **executes**: it goes into the entry
+        // point, in the order it is written.
         if is_top_level_stmt(&node) {
             if let Some(stmt) = l.lower_stmt(&node) {
                 entry_stmts.push(stmt);
@@ -966,11 +960,10 @@ pub fn lower(
             // the tail is Unit. `out(overlaps(segments, false))` is a statement
             // here, not a result — which is why nothing is printed twice.
             //
-            // Spanless for `lower_block`'s reason, and this is the site that
-            // made the point: the file's own range here gave the entry point's
-            // return temp a span covering **the whole program**, and the
-            // debugger rendered it as one whitespace-collapsed line of every
-            // statement in the file.
+            // The tail is **spanless** for `lower_block`'s reason: the file's own
+            // range would give the entry point's return temp a span covering the
+            // whole program, and the debugger renders a temp's span as its
+            // `@ "expr"` provenance.
             body: TypedBlock {
                 stmts: entry_stmts,
                 tail: TypedExpr::Lit {
@@ -997,25 +990,22 @@ pub fn lower(
     TypedModule {
         items,
         diagnostics: l.diagnostics,
-        // Escape analysis (M7-WS7b): every reassigned binding captured by cell,
-        // recorded as each closure was lowered rather than re-derived by a walk
-        // afterwards (HIR-08). These are boxed into a `VarCell` at their binding
-        // site so the closure shares the cell.
+        // Escape analysis: every reassigned binding captured by cell, recorded
+        // as each closure was lowered rather than re-derived by a walk
+        // afterwards. These are boxed into a `VarCell` at their binding site so
+        // the closure shares the cell.
         escaping_vars: l.escaping_vars,
         reassigned_vars,
     }
 }
 
-// The escape-analysis set (M7-WS7b) is accumulated by the lowerer itself, in
+// The escape-analysis set is accumulated by the lowerer itself, in
 // `Lowerer::lower_closure`, where every closure's capture list is already in
-// hand — see `Lowerer::escaping_vars`.
-//
-// It used to be a *fourth* walk over the typed tree, run after lowering, and it
-// omitted `TypedExpr::Call.callee_expr`: an immediately invoked closure
-// (`(|n| { count = count + n })(1)`) was never visited, so its `ByCell` capture
-// never reached the set and the mutation was written to a copy (HIR-08).
-// `CaptureKind::ByCell` and membership in `escaping_vars` are two
-// representations of one fact; only one of them is computed now.
+// hand — see `Lowerer::escaping_vars`. `CaptureKind::ByCell` and membership in
+// `escaping_vars` are two representations of one fact, and only one of them is
+// computed: a separate walk over the typed tree would silently under-approximate
+// wherever it forgot an expression position (an immediately invoked closure,
+// `(|n| { count = count + n })(1)`, hides one in `Call.callee_expr`).
 
 struct Lowerer<'a> {
     file: praxis_source::FileId,
@@ -1028,18 +1018,18 @@ struct Lowerer<'a> {
     /// The inferred type for each name reference's range (filled by inference).
     /// Used to read a captured binding's type off the reference site.
     ref_types: &'a HashMap<TextRange, Type>,
-    /// Each call site's monomorphization witness (WS8, §13.6), keyed by the
-    /// callee name token's range. Read in `lower_call` to attach concrete arg
-    /// types to each `TypedExpr::Call`.
+    /// Each call site's monomorphization witness (§13.6), keyed by the callee
+    /// name token's range. Read in `lower_call` to attach concrete arg types to
+    /// each `TypedExpr::Call`.
     call_sites: &'a HashMap<TextRange, crate::CallSite>,
-    /// Every inferred expression's type, keyed by its node (F15). **This is
-    /// where a lowered node's type comes from.** Lowering used to derive one of
-    /// its own — instantiating schemes a second time, re-resolving methods, and
-    /// falling back to a fresh variable nineteen times over — which is why
-    /// `id(1.5)` could lower as `?a` and `values.get(0)` as `?T`. It reads now.
+    /// Every inferred expression's type, keyed by its node. **This is where a
+    /// lowered node's type comes from.** Lowering derives none of its own: a
+    /// second instantiation of a scheme, or a fresh variable for a node it
+    /// cannot place, agrees with whatever the next use wants and surfaces as a
+    /// missing descriptor passes later.
     expr_types: &'a HashMap<crate::NodeKey, Type>,
     /// Each method call's resolved catalog entry and inferred result, keyed by
-    /// the method-name token's range (F15). Lowering reads the entry rather than
+    /// the method-name token's range. Lowering reads the entry rather than
     /// repeating the catalog lookup against a receiver type of its own.
     method_refs: &'a HashMap<TextRange, crate::MethodRef>,
     /// Memo for [`Lowerer::deep`]: a recorded type, fully resolved to its
@@ -1047,8 +1037,10 @@ struct Lowerer<'a> {
     /// later `push` pinned would reach codegen with no element descriptor.
     resolved: HashMap<Type, Type>,
     diagnostics: Vec<Diagnostic>,
-    /// The built-in method catalog (§16.2), used to resolve `receiver.method()`
-    /// calls to their runtime lowering symbol. Immutable; built once.
+    /// The built-in method catalog (§16.2). A resolved method call reads its row
+    /// from `method_refs`; this is here for the one row lowering has to look up
+    /// itself — the subscript *read* a compound `m[k] += v` needs, which no
+    /// source token names. Immutable; built once.
     catalog: &'static praxis_stdlib::MethodCatalog,
     /// Cached handles for the common scalar/unit types, so the lowering does not
     /// allocate a fresh slot on every literal/binop (which would need `&mut db`
@@ -1062,12 +1054,12 @@ struct Lowerer<'a> {
     /// function names (e.g. `__closure_0`). Each closure literal in the module
     /// gets a distinct name.
     closure_counter: u32,
-    /// Every `var` symbol some closure captures **by cell** (M7-WS7b, HIR-08).
-    /// Recorded in `lower_closure`, where the capture list is in hand, so the
-    /// set cannot disagree with the `CaptureKind::ByCell` decisions that produce
-    /// it. The MIR builder boxes each of these into a `VarCell` at its binding
-    /// site; a `var` missing here is one whose mutation a closure would write to
-    /// a copy.
+    /// Every binding some closure captures **by cell**. Recorded in
+    /// `lower_closure`, where the capture list is in hand, so the set cannot
+    /// disagree with the `CaptureKind::ByCell` decisions that produce it. The MIR
+    /// builder boxes each of these into a `VarCell` at its binding site; a
+    /// binding missing here is one whose mutation a closure would write to a
+    /// copy.
     escaping_vars: std::collections::HashSet<SymbolId>,
 }
 
@@ -1083,9 +1075,9 @@ impl<'a> Lowerer<'a> {
         FileSpan::new(self.file, range_to_span(range))
     }
 
-    /// The byte span `[start, end)` of a rowen syntax node, as a `(u32, u32)`
+    /// The byte span `[start, end)` of a rowan syntax node, as a `(u32, u32)`
     /// pair threaded onto the typed tree for debugger provenance (per-temp
-    /// `@ "expr"` rendering) and future diagnostics. Used at every `TypedExpr`/
+    /// `@ "expr"` rendering) and diagnostics. Used at every `TypedExpr`/
     /// `TypedStmt` construction site.
     fn node_span(&self, node: &praxis_ast::SyntaxNode) -> (u32, u32) {
         let r = node.text_range();
@@ -1101,16 +1093,15 @@ impl<'a> Lowerer<'a> {
         ));
     }
 
-    // --- reading what inference decided (F15) --------------------------------
+    // --- reading what inference decided --------------------------------------
 
     /// The type inference recorded for `node`.
     ///
     /// A miss is `Y099`, never a fresh variable: inference visits every
-    /// expression through one recording entry point, so a node it lowered and
-    /// inference did not see is a compiler bug, and a fresh variable is exactly
-    /// the silent lie this whole repair is tracking — it agrees with whatever
-    /// the next use wants and the mistake surfaces as a missing descriptor
-    /// three passes later.
+    /// expression through one recording entry point, so a node lowering reaches
+    /// and inference did not see is a compiler bug. A fresh variable would hide
+    /// it — it agrees with whatever the next use wants, and the mistake surfaces
+    /// as a missing descriptor three passes later.
     fn node_ty(&mut self, node: &SyntaxNode) -> Type {
         match self.expr_types.get(&crate::NodeKey::of(node)).copied() {
             Some(t) => self.deep(t),
@@ -1154,13 +1145,12 @@ impl<'a> Lowerer<'a> {
         let symbol = self.resolve_decl_at(name_range)?;
 
         // The function's type is its scheme's **body** — the type inference
-        // arrived at, binders and all. It used to be a fresh *instantiation* of
-        // that scheme, which is a set of variables nothing else in this tree
-        // mentions: the params below read their own monotypes and the body read
-        // the inferred ones, so a generic fn's `fn_type` disagreed with its own
-        // parameters, and `mono::specialize` — which unified against yet a third
-        // instantiation and then followed the original — pinned variables that
-        // appeared nowhere in the clone it was specializing (MONO-01).
+        // arrived at, binders and all — and never a fresh *instantiation* of the
+        // scheme, whose variables nothing else in this tree mentions. The params
+        // below read their own monotypes and the body reads the inferred ones,
+        // so an instantiation here would give a generic fn a `fn_type` that
+        // disagrees with its own parameters, and `mono::specialize` substitutes
+        // against exactly those variables.
         let scheme = self.names.get(symbol).and_then(|s| s.scheme.clone());
         let fn_type = match &scheme {
             Some(s) => {
@@ -1168,15 +1158,15 @@ impl<'a> Lowerer<'a> {
                 self.deep(body)
             }
             None => {
-                // No scheme inferred (errored in M2); skip — don't cascade.
+                // No scheme inferred (the fn errored in analysis); skip rather
+                // than cascade.
                 return None;
             }
         };
 
-        // Body scope: a child of the current scope. We don't track scopes
-        // explicitly during lowering (the analysis already did); instead we
-        // resolve every name reference by its range through `self.refs`, which
-        // is scope-independent and unambiguous.
+        // Lowering does not track scopes at all (the analysis already did):
+        // every name reference is resolved by its range through `self.refs`,
+        // which is scope-independent and unambiguous.
         let _scope = self.scopes.root();
 
         let params = self.lower_params(item.param_list().as_ref());
@@ -1194,7 +1184,7 @@ impl<'a> Lowerer<'a> {
             return_type,
             body,
             fn_type,
-            // The whole `fn ... { ... }` declaration's byte span (§9.3, M10-WS1).
+            // The whole `fn ... { ... }` declaration's byte span (§9.3).
             // Threaded to MIR `Function` → backend → debug frame so the `source`
             // REPL command can render the faulting function's extent.
             span: {
@@ -1225,17 +1215,15 @@ impl<'a> Lowerer<'a> {
     /// One lowered parameter — **or `None`**, and the `None` is load-bearing:
     /// `lower_params` and `lower_closure` both `filter_map` this, so answering
     /// `None` for a parameter that exists shortens the slot list and every
-    /// parameter after it takes the wrong argument. That is REP-32: a `_` had no
-    /// declaration to find, so `|_, b| b` returned the first argument and
-    /// `fn g(_, b)` lowered to a body whose arity disagreed with its signature.
-    /// `None` is now reserved for a parameter the *tree* does not have.
+    /// parameter after it takes the wrong argument (`|_, b| b` would return the
+    /// first). `None` is reserved for a parameter the *tree* does not have.
     fn lower_param(&mut self, p: &Param) -> Option<TypedParam> {
-        // A **destructuring** closure parameter (REP-29) has no name of its own;
-        // its slot symbol was declared at the pattern's range, and the pattern is
-        // taken apart in the body by `destructure_pattern_params`.
+        // A **destructuring** closure parameter has no name of its own; its slot
+        // symbol was declared at the pattern's range, and the pattern is taken
+        // apart in the body by `destructure_pattern_params`.
         let Some(name_tok) = p.name() else {
-            // A **wildcard** parameter (REP-32): an anonymous slot, at the `_`'s
-            // own range, holding an argument nothing in the body can name.
+            // A **wildcard** parameter: an anonymous slot, at the `_`'s own
+            // range, holding an argument nothing in the body can name.
             if let Some(tok) = p.wildcard() {
                 let symbol = self.resolve_decl_at(tok.text_range())?;
                 let ty = self.symbol_type(symbol);
@@ -1262,9 +1250,8 @@ impl<'a> Lowerer<'a> {
         let symbol = self.resolve_decl_at(range)?;
         // A parameter is not an expression, so it has no entry in `expr_types`;
         // its type is the monotype inference attached to its symbol. That is a
-        // read, not a re-derivation — `infer_param` writes `Scheme::monotype`,
-        // which has no binders, so the `instantiate` this used to do was a
-        // no-op with a fresh-variable fallback hiding behind it.
+        // read, not a re-derivation: `infer_param` writes `Scheme::monotype`,
+        // which has no binders to instantiate.
         let ty = self.symbol_type(symbol);
         Some(TypedParam { symbol, name, ty })
     }
@@ -1301,13 +1288,13 @@ impl<'a> Lowerer<'a> {
         }
         // A block whose last child is a statement has no value of its own, so
         // one is synthesized. It is **spanless**: no source text materializes
-        // it, and the block's own range — which this used to carry — is a lie
-        // that reaches the user. A MIR local's span is what the crash debugger
-        // renders as `@ "expr"` provenance and what `fault_span` reads to pick
-        // the line a frame faulted on, and on both counts a temp claiming the
-        // whole block is worse than a temp claiming nothing: the first prints
-        // the entire block on one line, the second offers the widest possible
-        // span as a candidate for the narrowest question there is.
+        // it, and the block's own range would be a lie that reaches the user. A
+        // MIR local's span is what the crash debugger renders as `@ "expr"`
+        // provenance and what `fault_span` reads to pick the line a frame
+        // faulted on, and on both counts a temp claiming the whole block is
+        // worse than a temp claiming nothing: the first prints the entire block
+        // on one line, the second offers the widest possible span as a candidate
+        // for the narrowest question there is.
         //
         // `error_expr`'s `(0, 0)` is the spelling for "synthetic, no source",
         // which is what this is. The debugger's own dead-scratch rule then
@@ -1336,11 +1323,10 @@ impl<'a> Lowerer<'a> {
         None
     }
 
-    /// A binding with no name — `var _ = f()` (D7) — still runs its
+    /// A binding with no name — `var _ = f()` (ADR-049 D7) — still runs its
     /// initializer; it just keeps nothing. Lowering it to a statement
     /// expression is what makes the discard idiom a *discard* rather than a
-    /// deletion: dropping the whole statement (which is what returning `None`
-    /// here does) silently removed the call.
+    /// deletion: dropping the statement instead would silently remove the call.
     fn lower_discarding_binding(&mut self, init: Option<Expr>) -> Option<TypedStmt> {
         let init = init?;
         Some(TypedStmt::Expr(self.lower_expr(&init)))
@@ -1396,7 +1382,7 @@ impl<'a> Lowerer<'a> {
     }
 
     /// `m[key] = v`, `counts[key] += 1`, `p.x = 5` — a store through a place
-    /// (REP-16, §4.5/§6.2).
+    /// (§4.5/§6.2).
     ///
     /// For a subscript, inference resolved the store row and recorded it at the
     /// target's node range (as it records a method at its name token), so this
@@ -1408,7 +1394,7 @@ impl<'a> Lowerer<'a> {
         // `min=`/`max=` write **without reading** — that is what §6.2's "an
         // absent entry accepts the first value" means, and the comparison is the
         // wrapper's. So they lower as a plain store whose row is a different one,
-        // which inference already resolved (REP-21, ADR-064).
+        // which inference already resolved (ADR-064).
         let place_op = stmt.op();
         let op = match place_op {
             praxis_ast::PlaceAssignOp::Set
@@ -1457,9 +1443,9 @@ impl<'a> Lowerer<'a> {
         let indices: Vec<TypedExpr> = idx.indices().iter().map(|e| self.lower_expr(e)).collect();
         let value = self.lower_expr(&stmt.value()?);
         // A compound operator reads before it writes. The read symbol comes from
-        // the *same* receiver type inference resolved the store against — not from
-        // one lowering derived itself, which is the HIR-02 mistake — so the pair
-        // always describes one collection.
+        // the *same* receiver type inference resolved the store against, never
+        // from one lowering derives itself, so the pair always describes one
+        // collection.
         let get = if op == AssignOp::Assign {
             None
         } else {
@@ -1531,10 +1517,6 @@ impl<'a> Lowerer<'a> {
             Expr::TupleIndex(t) => self.lower_tuple_index(t),
             Expr::Index(i) => self.lower_index(i),
             Expr::Match(m) => self.lower_match(m),
-            // M7-WS7: closure parsing, resolution, and inference are complete;
-            // the runtime lowering (synthetic MIR function, capture environment,
-            // indirect call) is the remaining WS7 work. For now the lowerer
-            // produces a placeholder so type-checking works end-to-end.
             Expr::Closure(c) => self.lower_closure(c),
             // An error node has no shape of its own; inference recorded a
             // variable for it and the program is already reported.
@@ -1546,22 +1528,17 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Lower a closure expression (M7-WS7, §4.10). Runs capture analysis to find
-    /// the free variables (each becomes one env slot), lowers the params and body,
-    /// and produces a [`TypedExpr::Closure`] carrying a synthesized unique MIR
+    /// Lower a closure expression (§4.10). Runs capture analysis to find the free
+    /// variables (each becomes one env slot), lowers the params and body, and
+    /// produces a [`TypedExpr::Closure`] carrying a synthesized unique MIR
     /// function name. The closure's *type* (`fn_type`) is the inferred `Func`.
     ///
     /// The capture environment is a runtime concern (§4.10): the type system does
-    /// not model it. Immutable (`var`/`param`) captures copy the value into the
-    /// env; mutable (`var`) captures share a `VarCell` (WS7b) — the env holds the
-    /// cell, and the binding site boxes the `var` so writes are visible across
-    /// frames.
+    /// not model it. A capture nothing reassigns copies the value into the env; a
+    /// reassigned one shares a `VarCell` — the env holds the cell, and the
+    /// binding site boxes the binding so writes are visible across frames.
     fn lower_closure(&mut self, c: &praxis_ast::ClosureExpr) -> TypedExpr {
         let span = self.node_span(c.syntax());
-        // The closure's inferred Func type comes from inference: re-derive it by
-        // reading the body's type and the param types. Inference already pinned
-        // these; we read them off the lowered params/body rather than re-querying
-        // (the lowerer is a pure consumer of the finalized TypeDb).
         let params: Vec<TypedParam> = c.params().filter_map(|p| self.lower_param(&p)).collect();
         // The body is an expression. If it is a block, lower it as one; otherwise
         // wrap the single expression as a block whose tail is that expression.
@@ -1580,9 +1557,9 @@ impl<'a> Lowerer<'a> {
             }
             None => self.unit_block(span),
         };
-        // A destructuring parameter takes its argument apart around the body
-        // (REP-29). Done here rather than in MIR because the language already has
-        // the construct that does it: a one-arm `match` on the parameter's slot.
+        // A destructuring parameter takes its argument apart around the body.
+        // Done here rather than in MIR because the language already has the
+        // construct that does it: a one-arm `match` on the parameter's slot.
         let body = self.destructure_pattern_params(c, body, span);
         // The closure's `Func` type is inference's, not one rebuilt from the
         // lowered params and body: a closure whose body diverges has a `Never`
@@ -1629,12 +1606,11 @@ impl<'a> Lowerer<'a> {
                 // The type at the reference that discovered the capture, when
                 // there is one. There is not always: inference records a type
                 // for a name it *reads*, and a capture first seen on an
-                // assignment target is a write — `|n| { total = n }` found
-                // `total` at a range with no recorded type and invented a fresh
-                // variable for it, losing the binding's type entirely (HIR-09).
-                // The binding's own scheme is the answer in that case; a
-                // polymorphic one is skipped, because a capture of a generic
-                // binding needs the *use site*'s instantiation, not the scheme.
+                // assignment target is a write — `|n| { total = n }` finds
+                // `total` at a range with no recorded type. The binding's own
+                // scheme is the answer in that case; a polymorphic one is
+                // skipped, because a capture of a generic binding needs the *use
+                // site*'s instantiation, not the scheme.
                 let recorded = match self.ref_types.get(&fv.ref_range).copied() {
                     Some(t) => t,
                     None => self
@@ -1646,12 +1622,12 @@ impl<'a> Lowerer<'a> {
                 };
                 let ty = self.deep(recorded);
                 // A cell is what makes a *write* visible on both sides of the
-                // capture, so only a binding something writes needs one
-                // (ADR-125). This used to ask whether the binding was a `var`,
-                // which over-approximated in one direction — a `var` nothing
-                // reassigns paid for a cell and two runtime calls per access —
-                // and under-approximated in the other, because a parameter or a
-                // `for` variable could not be a `var` and is now assignable.
+                // capture, so only a binding something writes needs one — the
+                // question is `reassigned`, not what syntax introduced the
+                // binding. Every binding is assignable (ADR-125), so a parameter
+                // or a `for` variable needs a cell on the same terms as a `var`,
+                // and a `var` nothing reassigns would pay for a cell and two
+                // runtime calls per access for nothing.
                 let kind = if self.names.get(fv.symbol).is_some_and(|s| s.reassigned) {
                     crate::capture::CaptureKind::ByCell
                 } else {
@@ -1665,10 +1641,10 @@ impl<'a> Lowerer<'a> {
                 }
             })
             .collect();
-        // A `var` captured by cell escapes its frame, and this is where that is
-        // decided — so this is where it is recorded (HIR-08). Deriving the set
-        // from a later walk over the tree meant any expression position the walk
-        // forgot silently produced an unboxed capture.
+        // A binding captured by cell escapes its frame, and this is where that is
+        // decided — so this is where it is recorded. Deriving the set from a
+        // later walk over the tree means any expression position the walk forgets
+        // silently produces an unboxed capture.
         self.escaping_vars.extend(
             captures
                 .iter()
@@ -1689,7 +1665,7 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Wrap `body` in one `match` per **destructuring** closure parameter, so each
-    /// pattern takes its own argument apart before the body runs (REP-29).
+    /// pattern takes its own argument apart before the body runs.
     ///
     /// A closure still takes one value per parameter — MIR gives each a slot and
     /// binds it to the parameter's symbol — so a pattern parameter needs a slot for
@@ -1700,9 +1676,9 @@ impl<'a> Lowerer<'a> {
     /// arm to fall through to — the same instructions a hand-written destructuring
     /// would need, and no new MIR.
     ///
-    /// **A parameter has no second arm**, so a pattern that can fail is `Y125`,
-    /// which is REP-25's rule for the `for` binding at the third binding position:
-    /// `|Some(n)| n` would have no answer for a `None` argument. That report is
+    /// **A parameter has no second arm**, so a pattern that can fail is `Y125` —
+    /// the same rule a `for` binding lives under: `|Some(n)| n` would have no
+    /// answer for a `None` argument. That report is
     /// [`crate::pattern::check_binding_patterns`]'s (ADR-133) — lowering is the
     /// pass `praxis check` and the editor do not run — and here the pattern is
     /// only built.
@@ -1805,7 +1781,8 @@ impl<'a> Lowerer<'a> {
         let span = self.node_span(lit.syntax());
         // The *value* is read off the token; the *type* is what inference gave
         // this node. They agree for every well-formed literal — the point of
-        // reading is the malformed ones, which used to become a fresh variable.
+        // reading is the malformed ones, where inference has an answer and a
+        // token-derived guess would not.
         let ty = self.node_ty(lit.syntax());
         let Some(tok) = lit.token() else {
             return TypedExpr::Lit {
@@ -1817,11 +1794,9 @@ impl<'a> Lowerer<'a> {
         match tok.kind() {
             SyntaxKind::IntLit => {
                 // An `Int` is signed 64-bit (§4.3), so a literal outside that
-                // range names a value the language cannot represent — it used to
-                // become `i64::MAX` silently, on the theory that "the backend
-                // will fault on the actual arithmetic anyway". It does not: the
-                // saturated value is a perfectly good `Int` and the program runs
-                // with a number nobody wrote (TY-28).
+                // range names a value the language cannot represent. Saturating
+                // it is not an option: the saturated value is a perfectly good
+                // `Int`, so the program would run with a number nobody wrote.
                 //
                 // **Inference reports it** (ADR-133), and `run` renders analysis
                 // before it lowers, so this is not silence — it is the same
@@ -1841,8 +1816,7 @@ impl<'a> Lowerer<'a> {
                 // lexer guarantees a valid float syntax, so parse failure is a
                 // defensive fallback (substitute 0.0) rather than a panic — and
                 // the separators have to come out first, because `3.141_592`
-                // does not parse and 0.0 is not the number anybody wrote
-                // (REP-11).
+                // does not parse and 0.0 is not the number anybody wrote.
                 let value = praxis_syntax::numeric::strip_digit_separators(text)
                     .parse::<f64>()
                     .unwrap_or(0.0);
@@ -1862,10 +1836,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
             SyntaxKind::CharLit => {
-                // The **first** construction site of a `Lit::Char` from source
-                // (ADR-141). Everything downstream of here — the exhaustiveness
-                // key, the pattern test, the interned constant — was written for
-                // a value nothing produced.
+                // A `'#'` character literal in expression position (ADR-141).
                 //
                 // A malformed literal substitutes U+0000 for the `IntLit` arm's
                 // reason: the lexer reported `''`/`'ab'`/an unclosed quote and
@@ -1879,14 +1850,13 @@ impl<'a> Lowerer<'a> {
                     span,
                 }
             }
-            // A template in value position is `Y023` (REP-47), reported in
-            // inference, so a well-formed program never reaches this arm — and
-            // an ill-formed one is not lowered at all. It answers `Unit` rather
-            // than the old `Lit::Text` of the raw interior, which is what made
-            // `` `n = {int}` `` *print itself*: a Text literal is a plausible
-            // value, and a plausible value is what turned a mistake into an
-            // answer. Lowering after a reported error is a compiler bug, and
-            // this is the value that is hardest to mistake for a program's.
+            // A template in value position is `Y023`, reported in inference, so
+            // a well-formed program never reaches this arm — and an ill-formed
+            // one is not lowered at all. It answers `Unit` rather than a
+            // `Lit::Text` of the raw interior, which would be a plausible value:
+            // `` `n = {int}` `` would *print itself* instead of failing. Lowering
+            // after a reported error is a compiler bug, and this is the value
+            // hardest to mistake for a program's.
             SyntaxKind::BacktickTemplate => TypedExpr::Lit {
                 value: Lit::Unit,
                 ty,
@@ -1912,13 +1882,13 @@ impl<'a> Lowerer<'a> {
 
     fn lower_path(&mut self, p: &PathExpr) -> TypedExpr {
         let span = self.node_span(p.syntax());
-        // The type is the one inference instantiated *at this reference*. Every
-        // other answer this used to compute — re-instantiating the symbol's
-        // scheme, or the enum def's own type below — is a second instantiation
-        // whose variables nothing else pinned.
+        // The type is the one inference instantiated *at this reference*. Any
+        // other answer — re-instantiating the symbol's scheme, or the enum def's
+        // own type below — is a second instantiation whose variables nothing else
+        // pinned.
         let ty = self.node_ty(p.syntax());
-        // M7-WS4: a zero-payload enum variant used as a bare path (`Empty`) —
-        // decided by the symbol this name resolves to, not by its text.
+        // A zero-payload enum variant used as a bare path (`Empty`) — decided by
+        // the symbol this name resolves to, not by its text.
         if let Some(symbol) = p
             .name()
             .and_then(|tok| self.resolve_symbol_at(tok.text_range()))
@@ -1943,10 +1913,9 @@ impl<'a> Lowerer<'a> {
             .and_then(|t| self.resolve_symbol_at(t.text_range()))
             .unwrap_or(SymbolId::UNRESOLVED);
         // A top-level `fn` in value position is a function value, not a binding
-        // reference (REP-01, ADR-061). It reaches here only in value position —
+        // reference (ADR-061). A `fn` reaches here only in value position —
         // `lower_call` resolves a named callee itself and never comes through
-        // `lower_path` — so this is exactly the `var f = double` case, which used
-        // to lower to `Unit` and take the host down when the value was called.
+        // `lower_path` — so this is exactly the `var f = double` case.
         if self.symbol_kind(symbol) == Some(crate::SymbolKind::Fn) {
             return TypedExpr::FnValue {
                 callee: symbol,
@@ -1996,9 +1965,9 @@ impl<'a> Lowerer<'a> {
         let (lhs, rhs) = b.operands();
         let lhs = lhs.map(|e| Box::new(self.lower_expr(&e)));
         let rhs = rhs.map(|e| Box::new(self.lower_expr(&e)));
-        // The *operator* is read off the token; the *type* is inference's. The
-        // Int-or-Float heuristic this replaces re-decided a question inference
-        // had already answered, from a strictly narrower view of the operands.
+        // The *operator* is read off the token; the *type* is inference's. An
+        // Int-or-Float decision made here would re-answer a question inference
+        // has already settled, from a strictly narrower view of the operands.
         let ty = self.node_ty(b.syntax());
         let op_tok = b.op().map(|t| t.kind());
         let op = match op_tok {
@@ -2069,10 +2038,9 @@ impl<'a> Lowerer<'a> {
             .and_then(|b| self.lower_block(&b))
             .map(Box::new);
         let else_block = i.else_branch().and_then(|e| self.lower_else(&e));
-        // The `if`'s type is inference's join of its branches (TY-19), read
-        // rather than recomputed. Repeating the join here was a third pass
-        // computing one answer; reading the then-block alone, which is what it
-        // replaced, made `if flag { panic("x") } else { 1 }` a `Never`.
+        // The `if`'s type is inference's join of its branches, read rather than
+        // recomputed — and in particular never the then-block's alone, which
+        // would make `if flag { panic("x") } else { 1 }` a `Never`.
         let ty = self.node_ty(i.syntax());
         TypedExpr::If {
             cond: cond.unwrap_or_else(|| Box::new(self.error_expr())),
@@ -2113,7 +2081,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// `for binding in iter { body }` (M8, §4.11).
+    /// `for binding in iter { body }` (§4.11).
     fn lower_for(&mut self, f: &ForExpr) -> TypedExpr {
         let span = self.node_span(f.syntax());
         let iter = f
@@ -2134,7 +2102,7 @@ impl<'a> Lowerer<'a> {
             .and_then(|p| self.ref_types.get(&p.syntax().text_range()).copied())
             .map(|t| self.deep(t))
             .unwrap_or(self.unit);
-        // The binding is a pattern (REP-25). It has to match **every** item — a
+        // The binding is a pattern, and it has to match **every** item — a
         // `for` has no second arm to go to, so a pattern that can fail would
         // silently skip the steps it does not match — and that `Y125` is
         // `pattern::check_binding_patterns`'s, at the end of analysis (ADR-133),
@@ -2155,11 +2123,10 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// `loop { body }` (M8, §4.11). The type is what its `break`s carry (TY-21)
-    /// — `Never` when no `break` leaves the loop, `Unit` when they leave it with
-    /// nothing. Inference computed that join; lowering reads it. Keeping a
-    /// second stack of loop frames here to recompute it was the third pass over
-    /// one answer, and F15 is what retires it.
+    /// `loop { body }` (§4.11). The type is what its `break`s carry — `Never`
+    /// when no `break` leaves the loop, `Unit` when they leave it with nothing.
+    /// Inference computed that join; lowering reads it rather than keeping a
+    /// second stack of loop frames to recompute it.
     fn lower_loop(&mut self, l: &LoopExpr) -> TypedExpr {
         let span = self.node_span(l.syntax());
         let body = l
@@ -2171,7 +2138,7 @@ impl<'a> Lowerer<'a> {
         TypedExpr::Loop { body, ty, span }
     }
 
-    /// `break [expr]` (M8, §4.11). Diverges; the expression's type is `Never`.
+    /// `break [expr]` (§4.11). Diverges; the expression's type is `Never`.
     /// The *value* it carries reaches the loop through inference's join, which
     /// [`lower_loop`](Self::lower_loop) reads.
     fn lower_break(&mut self, b: &BreakExpr) -> TypedExpr {
@@ -2181,7 +2148,7 @@ impl<'a> Lowerer<'a> {
         TypedExpr::Break { value, ty, span }
     }
 
-    /// `continue` (M8, §4.11). Diverges; type `Never`.
+    /// `continue` (§4.11). Diverges; type `Never`.
     fn lower_continue(&mut self, c: &ContinueExpr) -> TypedExpr {
         let ty = self.node_ty(c.syntax());
         TypedExpr::Continue {
@@ -2190,7 +2157,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// `return [expr]` (M8, §4.11). Diverges; type `Never`.
+    /// `return [expr]` (§4.11). Diverges; type `Never`.
     fn lower_return(&mut self, r: &ReturnExpr) -> TypedExpr {
         let span = self.node_span(r.syntax());
         let value = r.value().map(|v| Box::new(self.lower_expr(&v)));
@@ -2201,7 +2168,7 @@ impl<'a> Lowerer<'a> {
     fn lower_call(&mut self, c: &CallExpr) -> TypedExpr {
         let span = self.node_span(c.syntax());
         let callee_tok = c.callee().and_then(|p| p.name());
-        // Postfix call on an arbitrary expression (`expr(args)`, M8 §4.10):
+        // Postfix call on an arbitrary expression (`expr(args)`, §4.10):
         // when there is no named (PathExpr) callee, the callee is an expression
         // (e.g. `fs.get(0)` in `fs.get(0)(100)`). Lower it; the MIR builder
         // emits an indirect call through its closure fn_ptr.
@@ -2222,15 +2189,14 @@ impl<'a> Lowerer<'a> {
             .arg_list()
             .map(|a| self.lower_args(&a))
             .unwrap_or_default();
-        // The call's result type is the one inference gave **this call site**
-        // (MONO-01). It used to be a fresh instantiation of the callee's scheme,
-        // so `id(1.5)` lowered as an unbound variable and `var v: Vec[Float] =
-        // Vec()` reached codegen with no element type — the annotation had
-        // arrived, at the call site inference recorded and lowering ignored.
+        // The call's result type is the one inference gave **this call site**,
+        // never a fresh instantiation of the callee's scheme: the annotation in
+        // `var v: Vec[Float] = Vec()` reaches the call site inference recorded,
+        // and an instantiation here would answer an unbound variable instead.
         let ty = self.node_ty(c.syntax());
-        // M7-WS4: enum variant construction — `Number(5)`. Decided by the symbol
-        // the callee name resolves to, so a local shadowing a constructor is a
-        // call of that local (HIR-03).
+        // Enum variant construction — `Number(5)`. Decided by the symbol the
+        // callee name resolves to, so a local shadowing a constructor is a call
+        // of that local.
         if let Some((enum_def_id, variant_idx)) = self.enum_variant_of(callee) {
             return TypedExpr::EnumVariant {
                 enum_def_id,
@@ -2240,7 +2206,7 @@ impl<'a> Lowerer<'a> {
                 span,
             };
         }
-        // The concrete arg types at this call site (WS8, §13.6). Recorded by
+        // The concrete arg types at this call site (§13.6). Recorded by
         // inference in `analysis.call_sites`, keyed by the callee name token's
         // range. The mono pass reads these off the typed tree to instantiate a
         // polymorphic callee. Empty if the call site wasn't recorded (e.g. an
@@ -2265,32 +2231,32 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// What kind of declaration `symbol` is, or `None` for the unresolved
+    /// sentinel. The *kind* is what distinguishes a `fn` from a binding that
+    /// holds a function value — a scheme cannot, since both are `Func`s, which is
+    /// the same reason `SymbolKind::EnumVariant` is load-bearing in
+    /// [`enum_variant_of`](Self::enum_variant_of).
+    fn symbol_kind(&self, symbol: SymbolId) -> Option<crate::SymbolKind> {
+        self.names.get(symbol).map(|s| s.kind)
+    }
+
     /// The enum variant a **symbol** constructs: its def-id and variant index,
-    /// or `None` when the symbol is not a variant constructor (HIR-03).
+    /// or `None` when the symbol is not a variant constructor.
     ///
-    /// It used to look the *text* up in the root scope, before consulting the
-    /// symbol resolution had already bound the name to — so `enum E { A }`
-    /// followed by `var A = 7` lowered the local `A` as the constructor, and
-    /// the binding's value was discarded. Resolution answers which `A` a
-    /// reference means; this asks it.
+    /// Asked of the symbol resolution bound the name to, never of the name's
+    /// *text* in the root scope: `enum E { A }` followed by `var A = 7` must
+    /// lower the local `A` as a binding, and resolution is what answers which
+    /// `A` a reference means.
     ///
     /// The kind check is load-bearing on its own: the scheme cannot distinguish
     /// a constructor from a binding that *holds* one, because `var A = Empty`
     /// has the enum type too.
     ///
     /// Unlike inference's counterpart this does **not** instantiate: lowering
-    /// takes the use-site type from `expr_types` (F15) and needs only the
-    /// variant's identity from here. It does not hand back the payload either —
-    /// a generic def's payload is written in terms of its *parameters* (F12),
-    /// so reading it off the def would answer `T` rather than the element type.
-    /// What kind of declaration `symbol` is, or `None` for the unresolved
-    /// sentinel. The *kind* is what distinguishes a `fn` from a binding that
-    /// holds a function value — a scheme cannot, since both are `Func`s, which is
-    /// the same reason `SymbolKind::EnumVariant` is load-bearing (HIR-03).
-    fn symbol_kind(&self, symbol: SymbolId) -> Option<crate::SymbolKind> {
-        self.names.get(symbol).map(|s| s.kind)
-    }
-
+    /// takes the use-site type from `expr_types` and needs only the variant's
+    /// identity from here. It does not hand back the payload either — a generic
+    /// def's payload is written in terms of its *parameters*, so reading it off
+    /// the def would answer `T` rather than the element type.
     fn enum_variant_of(&self, symbol: SymbolId) -> Option<(praxis_types::EnumDefId, usize)> {
         let sym = self.names.get(symbol)?;
         if sym.kind != crate::SymbolKind::EnumVariant {
@@ -2316,9 +2282,9 @@ impl<'a> Lowerer<'a> {
         args.args().map(|a| self.lower_expr(&a)).collect()
     }
 
-    /// Lower `receiver.method(args)` (M5, §16.2). Resolves the method against
-    /// the built-in catalog via the [`crate::catalog`] bridge, recording the
-    /// runtime lowering symbol so the MIR builder emits a direct call.
+    /// Lower `receiver.method(args)` (§16.2). Reads the catalog row inference
+    /// resolved for this call site and records its runtime lowering symbol, so
+    /// the MIR builder emits a direct call.
     fn lower_method_call(&mut self, m: &MethodCallExpr) -> TypedExpr {
         let span = self.node_span(m.syntax());
         // Lower the receiver (or fall back to a Unit-typed literal if the tree
@@ -2341,11 +2307,11 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_default();
 
         // The catalog entry and the result type are what **inference** resolved
-        // at this call site (HIR-02/F15). Repeating the lookup here re-derived
-        // the entry from a receiver type of lowering's own and then read the
-        // result off the entry's *pattern* — a fresh `?T` for every `Var("T")`
-        // in it — so `values.get(0)` on a `Vec[Float]` lowered as `?T` however
-        // firmly inference had pinned it to `Float`.
+        // at this call site. Repeating the lookup here would re-derive the entry
+        // from a receiver type of lowering's own and read the result off the
+        // entry's *pattern* — a fresh `?T` for every `Var("T")` in it — so
+        // `values.get(0)` on a `Vec[Float]` would lower as `?T` however firmly
+        // inference had pinned it to `Float`.
         let resolved = m
             .method_name()
             .and_then(|t| self.method_refs.get(&t.text_range()).copied());
@@ -2354,12 +2320,10 @@ impl<'a> Lowerer<'a> {
             // it** — ADR-093: a method call that cannot resolve is reported
             // there, either because the receiver is known and has no such row or
             // because no receiver in the catalog has that name at that arity.
-            // Lowering reports nothing. It used to own this `Y110` on the
-            // argument that it has the method-name span, but so does inference,
-            // and lowering is the pass `praxis check` never runs — so every
-            // missing method was a silent `check` followed by a failing `run`.
-            // Two emitters for one code is what ADR-057 Decision 5 got wrong and
-            // REP-28 corrected at the field door; this is the same correction.
+            // Lowering reports nothing: it is the pass `praxis check` and the
+            // editor never run, so a `Y110` owned here would be a silent `check`
+            // followed by a failing `run`, and one diagnostic code has one
+            // emitter.
             //
             // Two things can still land here, and neither wants a diagnostic.
             // A receiver **no call site pinned** — the body of a function
@@ -2377,8 +2341,8 @@ impl<'a> Lowerer<'a> {
             // compiler bug report.
             //
             // The receiver and arguments are kept either way: they are
-            // well-formed trees in their own right, and discarding them lost
-            // every closure and capture inside them.
+            // well-formed trees in their own right, and discarding them would
+            // lose every closure and capture inside them.
             let ty = self.node_ty(m.syntax());
             return TypedExpr::MethodCall {
                 receiver: Box::new(receiver),
@@ -2411,7 +2375,7 @@ impl<'a> Lowerer<'a> {
             praxis_stdlib::MethodLowering::RuntimeSymbol(sym)
             | praxis_stdlib::MethodLowering::ScalarPrimitive(sym) => Some(*sym),
             // An intrinsic has no runtime symbol: the MIR builder lowers it
-            // (the M8 pipeline combinators) rather than emitting a call.
+            // (the pipeline combinators) rather than emitting a call.
             praxis_stdlib::MethodLowering::Intrinsic(_) => None,
         };
         TypedExpr::MethodCall {
@@ -2446,9 +2410,10 @@ impl<'a> Lowerer<'a> {
         TypedExpr::ListLit { elements, ty, span }
     }
 
-    /// Lower a `read parser_expression` (§7.1, M6). Analyzes the parser expr
-    /// (validate + synthesize type + lower to plan), then produces a `TypedExpr`
-    /// carrying the plan index and synthesized result type.
+    /// Lower a `read parser_expression` (§7.1). Analyzes the parser expr
+    /// (validate + synthesize type + lower to plan) and produces a `TypedExpr`
+    /// carrying the plan index; the node's *type* is inference's, as everywhere
+    /// else here.
     fn lower_read(&mut self, r: &praxis_ast::ReadExpr) -> TypedExpr {
         let span = self.node_span(r.syntax());
         let Some(parser_expr) = r.parser_expr() else {
@@ -2476,7 +2441,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Lower a `parse(text, parser_expression)` call (§7.1, M6).
+    /// Lower a `parse(text, parser_expression)` call (§7.1).
     fn lower_parse(&mut self, p: &praxis_ast::ParseExpr) -> TypedExpr {
         let span = self.node_span(p.syntax());
         let text_expr = p
@@ -2501,12 +2466,10 @@ impl<'a> Lowerer<'a> {
                             span,
                         }
                     }
-                    // Analysis failed and has already pushed a diagnostic. This
-                    // used to emit `plan_index: 0`, which is a perfectly valid
-                    // index — the first plan any program registers — so a
-                    // broken `parse(...)` ran somebody else's parser. There is
-                    // no longer a `PlanId` that means "none"; an error
-                    // expression is the honest lowering (IP-12).
+                    // Analysis failed and has already pushed a diagnostic. No
+                    // `PlanId` means "none" — every value of it is a plan some
+                    // program registered — so there is no plan to name here and
+                    // an error expression is the honest lowering.
                     None => self.error_expr(),
                 }
             }
@@ -2518,9 +2481,8 @@ impl<'a> Lowerer<'a> {
 
     /// A typed expression representing a lowering error (Unit-typed literal),
     /// and equally the placeholder a malformed subtree lowers to — a missing
-    /// operand, condition, or iterator. Those were two names for one value
-    /// (this and a free `unit_lit(db)`), which is why half the call sites
-    /// reached for each; there is now one.
+    /// operand, condition, or iterator. One value for both, so no call site has
+    /// to choose between two spellings of the same thing.
     ///
     /// No source span is available (this is a synthetic fallback), and `(0, 0)`
     /// is the spelling for that — see [`Lowerer::lower_block`] on why a
@@ -2554,9 +2516,9 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Lower a `Name { field: expr, … }` record literal (M7, §4.5). Looks up the
-    /// struct type from the symbol table, pairs each initializer with its field
-    /// index, and produces a `TypedExpr::RecordLit`.
+    /// Lower a `Name { field: expr, … }` record literal (§4.5). Takes the record
+    /// type from the type inference recorded for the node, pairs each
+    /// initializer with its field index, and produces a `TypedExpr::RecordLit`.
     fn lower_record_lit(&mut self, r: &RecordLitExpr) -> TypedExpr {
         let span = self.node_span(r.syntax());
         let struct_ty = self.node_ty(r.syntax());
@@ -2604,11 +2566,9 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Lower a `receiver.field` field access (M7, §4.5). Looks up the field's
-    /// index and type from the receiver's record type.
-    /// `p.0` — a tuple element (REP-08). Inference has already reported a
-    /// receiver that is not a tuple, or an index past its arity, so this reads
-    /// the index and the recorded type and does no checking of its own.
+    /// `p.0` — a tuple element (§4.4). Inference has already reported a receiver
+    /// that is not a tuple, or an index past its arity, so this reads the index
+    /// and the recorded type and does no checking of its own.
     fn lower_tuple_index(&mut self, t: &praxis_ast::TupleIndexExpr) -> TypedExpr {
         let span = self.node_span(t.syntax());
         let receiver = match t.receiver() {
@@ -2627,7 +2587,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// `m[key]`, `grid[x, y]` — a subscript read (REP-16).
+    /// `m[key]`, `grid[x, y]` — a subscript read (§6.2).
     ///
     /// Lowers to a [`TypedExpr::MethodCall`] rather than a variant of its own,
     /// because that is what it *is* once the row is resolved: a runtime call with
@@ -2635,10 +2595,9 @@ impl<'a> Lowerer<'a> {
     /// exactly. `name` carries the catalog spelling (`[]`), so a MIR dump reads as
     /// the source did.
     ///
-    /// An unresolved subscript was reported in inference (`Y020`), so there is
-    /// no report here — and since ADR-093 that is no longer the exception it
-    /// once was: a method call's `Y110` is reported in inference too, so
-    /// lowering emits nothing for either.
+    /// An unresolved subscript is reported in inference (`Y020`), so there is no
+    /// report here — as with a method call's `Y110` (ADR-093), lowering emits
+    /// nothing for either.
     fn lower_index(&mut self, i: &praxis_ast::IndexExpr) -> TypedExpr {
         let span = self.node_span(i.syntax());
         let receiver = match i.receiver() {
@@ -2684,11 +2643,11 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// `r.field` — a record field read (M7, §4.5).
+    /// `r.field` — a record field read (§4.5).
     ///
-    /// A receiver whose type is **still a variable here** is not an error, and
-    /// that is REP-28's other half. It means no call site ever said what the
-    /// receiver is, which is the state §4.9's own fence is in:
+    /// A receiver whose type is **still a variable here** is not an error. It
+    /// means no call site ever said what the receiver is, which is the state
+    /// §4.9's own fence is in:
     ///
     /// ```praxis
     /// fn manhattan(a, b) {
@@ -2696,15 +2655,13 @@ impl<'a> Lowerer<'a> {
     /// }
     /// ```
     ///
-    /// Nothing calls `manhattan`, so nothing pins `a`. Rejecting that read used to
-    /// make the design document's own example pass `praxis check` and then fail
-    /// under `praxis run` with four `Y112`s — a `check`/`run` divergence of exactly
-    /// the shape REP-12 and REP-01 closed elsewhere, and the reason this arm is now
-    /// silent. The same tolerance is what an uncalled `fn f(a) { a + 1 }` has always
-    /// had; a field read was singled out only because it needed a record definition
-    /// to produce an index.
+    /// Nothing calls `manhattan`, so nothing pins `a`. Rejecting that read would
+    /// make the program pass `praxis check` and then fail under `praxis run` with
+    /// four `Y112`s — the `check`/`run` divergence this arm's silence exists to
+    /// avoid — and it is the same tolerance an uncalled `fn f(a) { a + 1 }` has;
+    /// a field read differs only in needing a record definition for an index.
     ///
-    /// Silence here is affordable because it is no longer silence anywhere else:
+    /// Silence here is affordable because it is not silence anywhere else:
     /// `Inferer::infer_field_get` requires `HasField` of *every* receiver, so a
     /// concrete one is rejected at the read and a deferred one is rejected when a
     /// call site resolves it — both at `praxis check`. What is left for lowering is
@@ -2768,10 +2725,10 @@ impl<'a> Lowerer<'a> {
         Some((receiver, field_idx as u32))
     }
 
-    /// Lower a `match scrutinee { pattern => body, … }` expression (M7, §4.6).
-    /// Each arm is converted to a [`TypedMatchArm`] with the variant index (or
-    /// `None` for wildcard) and payload bindings. The MIR builder lowers this to
-    /// a tag-compare branch chain.
+    /// Lower a `match scrutinee { pattern => body, … }` expression (§4.6).
+    /// Each arm becomes a [`TypedMatchArm`] carrying a recursive
+    /// [`TypedPattern`] and its body; the MIR builder lowers the arms to a
+    /// decision tree.
     fn lower_match(&mut self, m: &praxis_ast::MatchExpr) -> TypedExpr {
         let span = self.node_span(m.syntax());
         let scrutinee = match m.scrutinee() {
@@ -2797,6 +2754,7 @@ impl<'a> Lowerer<'a> {
         // `praxis check` and the editor never see. Lowering is reached only for
         // a program analysis accepted, so a match that reaches this point has
         // already been found exhaustive.
+        //
         // The match's type is inference's join of its arms — not the first
         // arm's, which is `Never` whenever that arm happens to diverge.
         let ty = self.node_ty(m.syntax());
@@ -2860,9 +2818,8 @@ impl<'a> Lowerer<'a> {
 
 /// The source span `[start, end)` (byte offsets) carried by a typed expression.
 /// Public so the MIR builder can thread each expression's provenance into the
-/// debug-frame locals without re-matching the whole enum. `TypedExpr::Block`
-/// has no top-level span field (it carries the inner block's tail span); this
-/// returns `(0, 0)` for it.
+/// debug-frame locals without re-matching the whole enum. `TypedExpr::Block` has
+/// no span field of its own; it answers with its tail's.
 pub fn expr_span(e: &TypedExpr) -> (u32, u32) {
     match e {
         TypedExpr::Lit { span, .. }
@@ -2898,11 +2855,11 @@ pub fn expr_span(e: &TypedExpr) -> (u32, u32) {
 
 /// A statement's immediate sub-expressions, in evaluation order.
 ///
-/// Written once for the same reason [`TypedExpr::children`] is (F20): three walks
-/// over `TypedStmt` — MIR's closure collection, MIR's function-value collection,
-/// and the debugger's purity check — each named the fields by hand, so a
-/// statement with more than one expression had three places to be forgotten.
-/// `IndexAssign` is the first with three.
+/// Written once for the same reason [`TypedExpr::children`] is: three walks over
+/// `TypedStmt` — MIR's closure collection, MIR's function-value collection, and
+/// the debugger's purity check — would otherwise name the fields by hand, giving
+/// a statement with more than one expression (`IndexAssign` has three) three
+/// places to be forgotten in.
 pub fn stmt_exprs(s: &TypedStmt) -> impl Iterator<Item = &TypedExpr> {
     let mut out: Vec<&TypedExpr> = Vec::new();
     match s {
@@ -2929,9 +2886,8 @@ pub fn stmt_exprs(s: &TypedStmt) -> impl Iterator<Item = &TypedExpr> {
     out.into_iter()
 }
 
-/// [`stmt_exprs`], mutably — the two statement rewrites monomorphization runs
-/// (call retargeting and type specialization) had this same match hand-written
-/// each, which is the duplication `stmt_exprs` exists to remove.
+/// [`stmt_exprs`], mutably — for the two statement rewrites monomorphization
+/// runs (call retargeting and type specialization).
 pub fn stmt_exprs_mut(s: &mut TypedStmt) -> impl Iterator<Item = &mut TypedExpr> {
     let mut out: Vec<&mut TypedExpr> = Vec::new();
     match s {
@@ -2970,9 +2926,9 @@ pub fn stmt_span(s: &TypedStmt) -> (u32, u32) {
     }
 }
 
-/// The type carried by a typed expression. Public so the crash debugger (M10b)
-/// and the LSP can read an expression's inferred type without re-matching the
-/// whole enum.
+/// The type carried by a typed expression. Public so the crash debugger and the
+/// LSP can read an expression's inferred type without re-matching the whole
+/// enum.
 pub fn expr_ty(e: &TypedExpr) -> Type {
     match e {
         TypedExpr::Lit { ty, .. } => *ty,
@@ -3007,8 +2963,8 @@ pub fn expr_ty(e: &TypedExpr) -> Type {
 }
 
 /// The public door onto [`pattern_to_type`] for the inference pass
-/// (bidirectional method-call inference, M8 §3): instantiate a row's
-/// param/result patterns before unification.
+/// (bidirectional method-call inference): instantiate a row's param/result
+/// patterns before unification.
 ///
 /// `names` carries the per-instantiation variable sharing — pass a *fresh* map
 /// for each call site, or two unrelated uses of the same row would be forced to
@@ -3079,10 +3035,11 @@ fn pattern_to_type(db: &mut TypeDb, p: &TypePattern, names: &mut HashMap<String,
             let tys: Vec<Type> = els.iter().map(|e| pattern_to_type(db, e, names)).collect();
             tuple_or_degenerate(db, tys)
         }
-        // The prelude's *one* `Option` def (F12), instantiated at the inner
-        // pattern. Registering a fresh def per row is what TY-06 was. The inner
-        // pattern shares this instantiation's variables too: `Map[K, V].get(K)
-        // -> Option[V]` names `V` twice and both must be the one variable.
+        // The prelude's *one* `Option` def, instantiated at the inner pattern —
+        // never a fresh def per row, or two rows' `Option`s would be unrelated
+        // types. The inner pattern shares this instantiation's variables too:
+        // `Map[K, V].get(K) -> Option[V]` names `V` twice and both must be the
+        // one variable.
         TypePattern::Option(inner) => {
             let elem = pattern_to_type(db, inner, names);
             db.option_of(elem)
@@ -3095,10 +3052,8 @@ fn pattern_to_type(db: &mut TypeDb, p: &TypePattern, names: &mut HashMap<String,
 /// compiler-authored data rather than user input.
 ///
 /// A row whose argument count disagrees with `ctor.arity()` is a bug in the
-/// method catalog, not a program error, and F5 is the first thing that would
-/// notice one — so it fails loudly here rather than interning a type nothing
-/// can unify with. The standing sweep over the catalog's invariants is S18's
-/// (RT-14/RT-15).
+/// method catalog, not a program error, so it fails loudly here rather than
+/// interning a type nothing can unify with (ADR-046).
 fn collection_from_pattern(
     db: &mut TypeDb,
     ctor: praxis_types::CollectionCtor,
@@ -3110,7 +3065,7 @@ fn collection_from_pattern(
         .unwrap_or_else(|e| panic!("method catalog row: {e}"))
 }
 
-/// A tuple type, honouring F5's arity invariant: `()` is `Unit` and a lone
+/// A tuple type, honouring ADR-046's arity invariant: `()` is `Unit` and a lone
 /// element is that element, because neither is a tuple.
 fn tuple_or_degenerate(db: &mut TypeDb, mut els: Vec<Type>) -> Type {
     match els.len() {
@@ -3126,10 +3081,9 @@ fn tuple_or_degenerate(db: &mut TypeDb, mut els: Vec<Type>) -> Type {
 /// Strip surrounding quotes and unescape simple escapes from a `"…"` literal.
 ///
 /// **This is not a decoder** — it is the local name for the workspace's one
-/// decoder, `praxis_syntax::literal::unquote_text`. There used to be a second
-/// copy in `parser_lower` that never unescaped anything and stripped *every*
-/// quote at each end (IP-08); the rule now lives in `praxis-syntax`, which the
-/// input-parser's capture-body parser can also reach, so there is exactly one.
+/// decoder, `praxis_syntax::literal::unquote_text`. The rule lives in
+/// `praxis-syntax` because the input parser's capture-body parser needs it too,
+/// and a second copy would be free to unescape differently.
 fn unquote_text(raw: &str) -> String {
     praxis_syntax::literal::unquote_text(raw)
 }

@@ -1,9 +1,9 @@
-//! The Praxis formatter skeleton (Milestone 1).
+//! The Praxis formatter skeleton.
 //!
 //! Lives in `praxis-parser` per ADR-005. It drives off the lossless syntax tree
-//! (ADR-003) and emits a canonical layout — it never re-lexes raw text. The M1
+//! (ADR-003) and emits a canonical layout — it never re-lexes raw text. The
 //! acceptance criterion is **idempotency**: `format(format(src)) == format(src)`
-//! on the milestone syntax (§19).
+//! (§19).
 //!
 //! Design: the tree already records every token's spelling and structure. The
 //! formatter walks it and re-emits tokens with normalized trivia — a single
@@ -80,8 +80,8 @@ enum Item {
 }
 
 /// The child nodes of `node` interleaved with its comment tokens, in source
-/// order. `node.children()` skips tokens entirely, which is how every comment
-/// at statement granularity used to be dropped.
+/// order. `node.children()` skips tokens entirely, so a comment at statement
+/// granularity is only reachable through `children_with_tokens`.
 fn items_of(node: &SyntaxNode) -> Vec<Item> {
     node.children_with_tokens()
         .filter_map(|element| match element {
@@ -241,17 +241,13 @@ fn fmt_token_stream(node: &SyntaxNode, ctx: &mut FmtContext, out: &mut String) {
                 out.push(' ');
             }
         }
-        // Recurse: a nested block inside an expression statement is emitted by
-        // walking into it via fmt_node for proper layout.
         out.push_str(token.text().trim_end());
         prev = Some(kind);
         break_line = kind == SyntaxKind::LineComment;
     }
-    // After collecting tokens, re-walk to render nested blocks with layout.
-    // (The token-stream approach above flattens blocks; for M1 idempotency we
-    // additionally emit nested blocks through fmt_node. To keep it simple and
-    // idempotent, the block layout is applied at the BLOCK_EXPR match arm, and
-    // expressions only ever contain inline tokens.)
+    // This flattens whatever it walks. Block layout is applied at the
+    // `BLOCK_EXPR` arm instead, so an expression that reaches here contains only
+    // inline tokens.
 }
 
 /// Whether a space should separate `prev` from `next`. Conservative: insert a
@@ -469,7 +465,7 @@ mod tests {
         assert_eq!(format(&once), once, "not idempotent:\n{once}");
     }
 
-    // --- M2: type annotations + tuples --------------------------------------
+    // --- type annotations + tuples ------------------------------------------
 
     #[test]
     fn format_is_idempotent_on_tuple() {
@@ -498,16 +494,12 @@ mod tests {
         assert_eq!(once, twice, "\n--once--\n{once}\n--twice--\n{twice}");
     }
 
-    /// **REP-57, ADR-091.** The headless record pattern round-trips, in each of
-    /// the three positions a pattern appears.
+    /// **ADR-091.** The headless record pattern round-trips, in each of the
+    /// three positions a pattern appears.
     ///
     /// ADR-005 asks for this whenever the grammar grows: the formatter walks the
     /// tree, so a new production that produces a shape it cannot lay out is a
     /// source file the tool rewrites into a different program.
-    ///
-    /// **Observed red with the parser's `L_BRACE` pattern arm removed**: none of
-    /// these sources parses, `assert_clean` fails on the first with "expected a
-    /// pattern", and there is no tree for the formatter to be idempotent over.
     #[test]
     fn format_is_idempotent_on_a_headless_record_pattern() {
         for src in [
@@ -515,7 +507,7 @@ mod tests {
             "for {x,y} in ps{out(x)}",
             "var f=|{x,y}|x+y",
             // Nested in a variant's payload — the shape a `choice(...)` payload
-            // record needs, and the one the row was filed for.
+            // record needs.
             "var r=match m{Mul({a,b})=>a*b,Do(_)=>0}",
             // The head is optional, not gone.
             "var r=match p{P{x,y}=>x+y}",

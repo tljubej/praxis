@@ -1,4 +1,4 @@
-//! The Praxis parser (Milestone 1 subset).
+//! The Praxis parser.
 //!
 //! Recursive descent over statements and structure, with a Pratt (precedence
 //! climbing) loop for arithmetic and the other binary operators (ADR-004). It
@@ -8,9 +8,10 @@
 //! token in a [`SyntaxKind::PARSE_ERROR`] node, advances to a synchronization
 //! point, and keeps going — that is the LSP-grade recovery required by §15.2.
 //!
-//! The M1 grammar (§19) covers: literals, `var` bindings, blocks, calls
-//! (including `out(...)`), `fn` items, arithmetic, `if`/`else`, and `while`.
-//! Other constructs are not parsed; they recover with a diagnostic.
+//! The grammar is §19: `fn`/`struct`/`enum` items, `var` bindings and
+//! assignment, blocks, `if`/`while`/`for`/`loop`/`match`, and expressions —
+//! literals, calls, closures, ranges, record and collection literals, patterns,
+//! and `read`'s parser expressions (§7.1).
 
 use praxis_source::diagnostic::sort_by_position;
 use praxis_source::{BytePos, Span};
@@ -64,8 +65,8 @@ pub fn parse(file: FileId, text: &str) -> ParseOutput {
 
 /// Binary operator binding power. Higher binds tighter. Left-associative
 /// operators parse by calling `expr(min_bp + 1)` on the right; right-associative
-/// ones would call `expr(min_bp)` (none exist in the M1 set, but the table is
-/// shaped to allow it).
+/// ones would call `expr(min_bp)` (none exist, but the table is shaped to allow
+/// it).
 #[derive(Clone, Copy)]
 struct BindingPower {
     left: u8,
@@ -81,15 +82,12 @@ fn infix_binding_power(op: SyntaxKind) -> Option<BindingPower> {
         // `0..n - 1` is `0..(n - 1)` — the bound is an arithmetic expression,
         // which is how every range in the corpus is written.
         SyntaxKind::DOT2 | SyntaxKind::DOT2EQ => bp(3, 4),
-        // Logical and (REP-07): **below comparison and above `..`**, which is the
-        // position the repair plan specifies and the one that moves the fewest
-        // numbers — `||` and `..` keep theirs, so ADR-059's stated `bp(3, 4)`
-        // stays true. The two rules that matter are both preserved: `&&` binds
-        // tighter than `||` (`a || b && c` is `a || (b && c)`) and looser than
-        // comparison (`a == b && c == d` is `(a == b) && (c == d)`), which is
-        // §3.3's own shape. Where `&&` sits relative to `..` is arbitrary — a
-        // range of `Bool`s and a range bound that is a `&&` are both nonsense —
-        // so it is settled by churn, not by meaning.
+        // Logical and: **below comparison and above `..`**. The two rules that
+        // matter are that `&&` binds tighter than `||` (`a || b && c` is
+        // `a || (b && c)`) and looser than comparison (`a == b && c == d` is
+        // `(a == b) && (c == d)`), which is §3.3's own shape. Where `&&` sits
+        // relative to `..` is arbitrary — a range of `Bool`s and a range bound
+        // that is a `&&` are both nonsense.
         SyntaxKind::AMP2 => bp(5, 6),
         // Comparison (non-associative in spirit; we parse left-assoc).
         SyntaxKind::EQ2
@@ -131,8 +129,7 @@ fn prefix_binding_power(op: SyntaxKind) -> Option<u8> {
 }
 
 /// The compiler-owned type constructors, the only names that take an explicit
-/// type-argument list in expression position (REP-09, §3.3's
-/// `Counter[(Int, Int)]()`).
+/// type-argument list in expression position (§3.3's `Counter[(Int, Int)]()`).
 ///
 /// The parser has to know these **by name**, because nothing else can tell
 /// `Counter[(Int, Int)]()` from `m[key]`: the brackets are the same and the
@@ -163,27 +160,22 @@ fn is_assignment_op(op: SyntaxKind) -> bool {
     )
 }
 
-/// Whether `kind` can start a match pattern (M7, §4.6). Used to decide whether
+/// Whether `kind` can start a match pattern (§4.6). Used to decide whether
 /// to continue parsing arms after a newline (arms are comma-OR-newline separated).
+///
+/// This set must stay the set [`Parser::parse_pattern`] consumes: a pattern this
+/// admits is one that parses, and one it rejects silently ends the arm list.
 fn is_pattern_start(kind: SyntaxKind) -> bool {
     // The literal half is `SyntaxKind::is_pattern_literal` — the same set
-    // `parse_pattern` consumes and `praxis_ast::Pattern` reads back, so a
-    // pattern this admits is one that parses. The character literal's ADR-141
-    // membership was REP-10's regression class here in particular: without it
-    // the arm list stopped after `'#' => …` and every arm below it left the
-    // tree with no diagnostic at all.
+    // `parse_pattern` consumes and `praxis_ast::Pattern` reads back.
     kind.is_pattern_literal()
         || matches!(
             kind,
             SyntaxKind::UNDERSCORE
                 | SyntaxKind::Ident
-                // A tuple pattern (REP-10). Without it a `match` arm after
-                // `(a, b) => …` stopped the arm list, so the second arm and every
-                // arm after it vanished from the tree.
+                // A tuple pattern.
                 | SyntaxKind::L_PAREN
-                // A headless record pattern (ADR-091). Same regression as REP-10's,
-                // one brace over: without it the arm list stopped *before*
-                // `{a, b} => …` and it, with every arm after it, left the tree.
+                // A headless record pattern (ADR-091).
                 | SyntaxKind::L_BRACE
         )
 }
@@ -193,11 +185,10 @@ const fn bp(left: u8, right: u8) -> BindingPower {
 }
 
 // ---------------------------------------------------------------------------
-// Statement separation (F8 / FE-04; D8, ADR-049).
+// Statement separation (D8, ADR-049).
 // ---------------------------------------------------------------------------
 
-/// Whether a bare `Name { … }` in expression position is a record literal
-/// (FE-06).
+/// Whether a bare `Name { … }` in expression position is a record literal.
 ///
 /// `if p { … }` is genuinely ambiguous: `p { … }` could be a record literal, or
 /// `p` could be the condition and `{ … }` the then-block. The four keyword heads
@@ -207,10 +198,10 @@ const fn bp(left: u8, right: u8) -> BindingPower {
 ///
 /// It stops at the first bracket. Inside `(…)`, `[…]`, an argument list or a
 /// block, the `{` cannot be the body the keyword is looking for, so there is
-/// nothing left to disambiguate — which is why this is a parameter rather than
-/// the parser-wide flag it used to be. A flag leaked into every parenthesized
-/// subexpression and every match-arm body, making valid record literals
-/// unwritable there.
+/// nothing left to disambiguate — which is why suppression is a parameter
+/// threaded through the expression grammar rather than parser-wide state. State
+/// would leak into every parenthesized subexpression and every match-arm body,
+/// making valid record literals unwritable there.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum StructLit {
     Allowed,
@@ -235,7 +226,7 @@ enum StmtSeparator {
 }
 
 /// What `(1,)` and `(Int,)` are told, in one place because they are one rule
-/// (§4.4, F5). The expression and the type position both reach it through
+/// (§4.4). The expression and the type position both reach it through
 /// [`Parser::parse_parenthesized`]; a second copy of the sentence is a second
 /// thing to forget to change.
 const ONE_ELEMENT_TUPLE_MSG: &str = "a tuple has two elements or more, so this comma names nothing";
@@ -281,7 +272,7 @@ impl<'t> Parser<'t> {
             let before = self.meaningful_index();
             if self.parse_stmt() {
                 // A statement is separated from the next by `;`, a newline, or
-                // the end of the file — and by nothing else (FE-04).
+                // the end of the file — and by nothing else.
                 self.expect_stmt_separator();
             } else {
                 // Recovery: skip to the next statement boundary.
@@ -338,9 +329,9 @@ impl<'t> Parser<'t> {
     }
 
     /// [`Parser::newline_before`] about the meaningful token `n` positions ahead
-    /// (0 = current), which is the lookahead half of REP-27's rule: the
-    /// field-vs-method decision looks one token past the name, and `p.x\n(a, b)`
-    /// must not be a method call for the same reason `10\n(a, b)` must not be one.
+    /// (0 = current). The field-vs-method decision looks one token past the name,
+    /// and `p.x\n(a, b)` must not be a method call for the same reason
+    /// `10\n(a, b)` must not be one.
     fn newline_before_nth(&self, n: usize) -> bool {
         self.tokens[self.cursor..]
             .iter()
@@ -350,36 +341,29 @@ impl<'t> Parser<'t> {
     }
 
     /// True iff the `(` here opens an **argument list** for the expression that
-    /// precedes it, rather than beginning something new (REP-27).
+    /// precedes it, rather than beginning something new.
     ///
-    /// A `(` begins three things: a parenthesized expression, a tuple, and — since
-    /// REP-10 and REP-25 — a **tuple pattern**, in a match arm and in a `for`
-    /// binding. So a line-leading `(` is ambiguous in exactly the way ADR-049's
-    /// rule is written to settle:
+    /// A `(` begins three things: a parenthesized expression, a tuple, and a
+    /// **tuple pattern**, in a match arm and in a `for` binding. So a line-leading
+    /// `(` is ambiguous in exactly the way ADR-049's rule is written to settle:
     ///
     /// ```text
     /// match p {
     ///     (0, 0) => 10
-    ///     (a, b) => a + b     // ← was read as `10(a, b)`
+    ///     (a, b) => a + b     // a second arm, not `10(a, b)`
     /// }
     /// ```
     ///
-    /// and the whole arm list stopped there, silently: the second arm and every arm
-    /// after it left the tree. ADR-049 saw the shape (`var x = 1\n(a, b)` parsing as
-    /// a call) and left it open because the workaround was to bind the tuple to a
-    /// name. A match arm has no such workaround — a tuple pattern *is* how the arm
-    /// is written — so this is the revisit that consequence invited.
-    ///
-    /// This is the **third** place a newline is consulted, and it is D8's own rule:
-    /// a newline ends a statement. It is not consulted anywhere in the Pratt
-    /// operator loop, so `1 +\n2` and a `.method()` chain across lines are
-    /// unchanged, and a `(` that opens an expression is unaffected — only a `(`
-    /// asked to *continue* one is.
+    /// A match arm has no workaround for the ambiguity — a tuple pattern *is* how
+    /// the arm is written — so the tie is broken by D8's own rule: a newline ends
+    /// a statement. It is not consulted anywhere in the Pratt operator loop, so
+    /// `1 +\n2` and a `.method()` chain across lines are unaffected, and a `(`
+    /// that opens an expression is unaffected — only a `(` asked to *continue* one
+    /// is.
     ///
     /// The cost is stated rather than hidden: a call whose callee ends a line and
-    /// whose argument list begins the next (`f\n(1)`) is two expressions now. No
-    /// program in the corpus, the suite or the design doc is written that way, and
-    /// the fix is to move the `(` up.
+    /// whose argument list begins the next (`f\n(1)`) is two expressions, and the
+    /// fix is to move the `(` up.
     fn at_argument_list(&mut self) -> bool {
         self.at(SyntaxKind::L_PAREN) && !self.newline_before()
     }
@@ -387,24 +371,22 @@ impl<'t> Parser<'t> {
     /// True iff the `[` here opens a **subscript** on the expression that
     /// precedes it, rather than beginning a list literal.
     ///
-    /// [`at_argument_list`](Self::at_argument_list)'s rule at the second bracket,
-    /// and it used to be unnecessary for a reason that a list literal removes:
-    /// nothing in the grammar began with `[`, so a `[` could only ever *continue*
-    /// the expression before it. Now it begins one, and the two spellings are the
-    /// same two characters:
+    /// [`at_argument_list`](Self::at_argument_list)'s rule at the second bracket.
+    /// A `[` both begins a list literal and continues the expression before it,
+    /// and the two spellings are the same two characters:
     ///
     /// ```text
     /// var n = total
-    /// [1, 2, 3]           // ← would be read as `total[1, 2, 3]`
+    /// [1, 2, 3]           // a list literal, not `total[1, 2, 3]`
     /// ```
     ///
     /// So the tie is broken by position, exactly as it is for `(`: a `[` on the
     /// same line as what precedes it subscripts that expression, and a
     /// line-leading `[` starts a new one. `m[k]`, `grid[x, y]` and `m[k][j]` are
-    /// unaffected — every one of them is written on one line — and the stated
-    /// cost is the mirror of REP-27's: a subscript whose receiver ends a line and
-    /// whose bracket begins the next is two expressions, and the fix is to move
-    /// the `[` up.
+    /// unaffected — every one of them is written on one line — and the cost is
+    /// the mirror of the argument-list rule's: a subscript whose receiver ends a
+    /// line and whose bracket begins the next is two expressions, and the fix is
+    /// to move the `[` up.
     fn at_subscript(&mut self) -> bool {
         self.at(SyntaxKind::L_BRACK) && !self.newline_before()
     }
@@ -415,15 +397,13 @@ impl<'t> Parser<'t> {
     /// to begin an expression at all (a `;`, `}`, `)`, `,`, `else` or `in`
     /// cannot), and it has to be on *this* line — `return\n1` is a value-less
     /// return followed by a separate statement, which is the second half of
-    /// D8's rule and the only place outside a statement loop that consults a
-    /// newline.
+    /// D8's rule.
     fn starts_expr(&mut self) -> bool {
         if self.newline_before() {
             return false;
         }
         // Consume trivia so the cursor lands on the meaningful token, then check
-        // whether that token can begin an expression. `eat_trivia` returns ();
-        // we only need its side effect of advancing past trivia.
+        // whether that token can begin an expression.
         self.eat_trivia();
         let k = self
             .tokens
@@ -481,7 +461,7 @@ impl<'t> Parser<'t> {
     }
 
     /// `true` if an updating store's operator starts here: an `Ident` spelling
-    /// `min` or `max`, **immediately** followed by `=` (REP-21, §6.2).
+    /// `min` or `max`, **immediately** followed by `=` (§6.2).
     ///
     /// Adjacency is the rule, exactly as it is for `+=`: `min=` is one operator
     /// spelled in two tokens because `min` is an identifier, and `min = x` with a
@@ -602,17 +582,13 @@ impl<'t> Parser<'t> {
     // --- green-tree helpers ---
 
     /// Open a node **on its first meaningful token** — the trivia in front of it
-    /// is emitted first, so it lands in the enclosing node instead (REP-63).
+    /// is emitted first, so it lands in the enclosing node instead.
     ///
     /// This is the whole of the rule "a node never begins with trivia", and it
-    /// belongs here rather than at 54 call sites. Before it, only the
-    /// `IntLit`/`FloatLit`/`TextLit`/`CharLit`/`BacktickTemplate` arm of
-    /// [`parse_atom`](Self::parse_atom) ate trivia first — it had a comment
-    /// saying why — and everything else opened the node and then let
-    /// [`bump`](Self::bump)'s own sweep pull the whitespace *inside* it. So a
-    /// `PATH_EXPR` for `a` in `var c = a + b` spanned `" a"`, and the caret in
-    /// every diagnostic that underlines an expression started one column early
-    /// and ran one column wide — reading as if it pointed at the `=`.
+    /// belongs here rather than at every call site. It is what makes a node's
+    /// span the node's own text: the `PATH_EXPR` for `a` in `var c = a + b`
+    /// spans `"a"` and not `" a"`, so the caret in a diagnostic that underlines
+    /// an expression starts at the expression.
     ///
     /// The root is the one node this cannot open ([`start_root_node`](Self::start_root_node)):
     /// there is nothing to emit trivia into before it exists.
@@ -680,8 +656,7 @@ impl<'t> Parser<'t> {
         self.start_node(SyntaxKind::VAR_STMT);
         self.bump(); // `var`
         self.expect_binder("binding name");
-        // Optional type annotation `: Type` (M2: real type grammar — scalar,
-        // tuple, or function type).
+        // Optional type annotation `: Type`.
         if self.eat(SyntaxKind::COLON) {
             self.parse_type();
         }
@@ -692,8 +667,9 @@ impl<'t> Parser<'t> {
     }
 
     /// `name = expr` or `name += expr` (etc.) — reassignment to an existing
-    /// binding (§4.2). The lhs is a single name for M1; richer lvalues (fields,
-    /// indexing) come with their constructs in later milestones.
+    /// binding (§4.2). The lhs is a bare name; a field or subscript target
+    /// builds a `PLACE_ASSIGN_STMT` in
+    /// [`parse_expr_stmt`](Self::parse_expr_stmt) instead.
     fn parse_assign_stmt(&mut self) -> bool {
         self.start_node(SyntaxKind::ASSIGN_STMT);
         self.bump(); // name
@@ -725,7 +701,7 @@ impl<'t> Parser<'t> {
                     if !self.eat(SyntaxKind::COMMA) {
                         break;
                     }
-                    // A trailing comma closes the list (REP-17).
+                    // A trailing comma closes the list.
                     if self.at(SyntaxKind::R_PAREN) {
                         break;
                     }
@@ -751,7 +727,7 @@ impl<'t> Parser<'t> {
         true
     }
 
-    /// `struct Name { field: Type, … }` (M7, §4.5). The field list is a
+    /// `struct Name { field: Type, … }` (§4.5). The field list is a
     /// `FIELD_LIST` of `FIELD` children, each `name: Type`.
     fn parse_struct_item(&mut self) -> bool {
         self.start_node(SyntaxKind::STRUCT_ITEM);
@@ -767,9 +743,9 @@ impl<'t> Parser<'t> {
                 self.expect(SyntaxKind::COLON, "`:` before field type");
                 self.parse_type();
                 self.finish_node();
-                // A comma **or** a line break separates fields (REP-24) — §4.5's
-                // own `struct Point { x: Int\n y: Int }` writes the second, and a
-                // trailing comma closes the list either way (REP-17).
+                // A comma **or** a line break separates fields — §4.5's own
+                // `struct Point { x: Int\n y: Int }` writes the second, and a
+                // trailing comma closes the list either way.
                 if !self.member_separator("struct fields") {
                     break;
                 }
@@ -783,11 +759,11 @@ impl<'t> Parser<'t> {
     }
 
     /// Whether another member of a brace-delimited declaration follows, having
-    /// consumed the separator between them (REP-24).
+    /// consumed the separator between them.
     ///
     /// A member is followed by a comma **or** a line break, which is the rule
-    /// match arms have had since FE-04 (D8, ADR-049) and the one §4.5's and
-    /// §4.6's own declarations are written with:
+    /// match arms use (D8, ADR-049) and the one §4.5's and §4.6's own
+    /// declarations are written with:
     ///
     /// ```praxis
     /// struct Point {
@@ -797,8 +773,8 @@ impl<'t> Parser<'t> {
     /// ```
     ///
     /// The two separators are interchangeable and a trailing comma still closes
-    /// the list (REP-17), so the answer is `false` at the closing brace whichever
-    /// one preceded it. A member that follows with *neither* is reported at the
+    /// the list, so the answer is `false` at the closing brace whichever one
+    /// preceded it. A member that follows with *neither* is reported at the
     /// same code a run-together statement is — and then parsed anyway, because
     /// the mistake is the separator and not the member.
     fn member_separator(&mut self, what: &str) -> bool {
@@ -820,7 +796,7 @@ impl<'t> Parser<'t> {
         true
     }
 
-    /// `enum Name { Variant, Variant(Type, …), … }` (M7, §4.6). Each variant is
+    /// `enum Name { Variant, Variant(Type, …), … }` (§4.6). Each variant is
     /// an `ENUM_VARIANT` node: a name optionally followed by `( type_list )`.
     fn parse_enum_item(&mut self) -> bool {
         self.start_node(SyntaxKind::ENUM_ITEM);
@@ -841,7 +817,7 @@ impl<'t> Parser<'t> {
                             if !self.eat(SyntaxKind::COMMA) {
                                 break;
                             }
-                            // A trailing comma closes the list (REP-17).
+                            // A trailing comma closes the list.
                             if self.at(SyntaxKind::R_PAREN) {
                                 break;
                             }
@@ -851,8 +827,9 @@ impl<'t> Parser<'t> {
                     self.expect(SyntaxKind::R_PAREN, "`)` to close variant payload");
                 }
                 self.finish_node(); // ENUM_VARIANT
-                                    // A comma **or** a line break, as §4.6's own `enum Tile { Empty\n
-                                    // Wall\n … }` writes it (REP-24).
+                                    // A comma **or** a line break, as §4.6's
+                                    // own `enum Tile { Empty\n Wall\n … }`
+                                    // writes it.
                 if !self.member_separator("enum variants") {
                     break;
                 }
@@ -876,7 +853,7 @@ impl<'t> Parser<'t> {
         // The expression is parsed before the statement node is opened, because
         // what it turns out to be decides the kind: an assignment operator after
         // it makes the whole thing a `PLACE_ASSIGN_STMT` whose first child is the
-        // target (REP-16, `counts[point] += 1`), and anything else an `EXPR_STMT`.
+        // target (`counts[point] += 1`), and anything else an `EXPR_STMT`.
         //
         // A bare `name` target never reaches here — `parse_stmt` sends
         // `name = …` to `parse_assign_stmt` on the token after the name — so the
@@ -895,9 +872,9 @@ impl<'t> Parser<'t> {
             self.finish_node(); // PLACE_ASSIGN_STMT
             return true;
         }
-        // `distance[key] min= candidate` (REP-21, §6.2). The operator is two
-        // tokens, so the parser decides it here rather than the lexer: `min` is
-        // an identifier everywhere else, and a lexer rule would take it away from
+        // `distance[key] min= candidate` (§6.2). The operator is two tokens, so
+        // the parser decides it here rather than the lexer: `min` is an
+        // identifier everywhere else, and a lexer rule would take it away from
         // every program that names the prelude helper.
         if self.at_update_op() {
             self.start_node_at(cp, SyntaxKind::PLACE_ASSIGN_STMT);
@@ -915,8 +892,7 @@ impl<'t> Parser<'t> {
     }
 
     /// `{ stmt; stmt; expr }` — a block. The last expression is the block's
-    /// value (§4.11). For M1 we treat every item as either a statement or a
-    /// trailing expression.
+    /// value (§4.11). Every item is either a statement or a trailing expression.
     fn parse_block(&mut self) {
         self.start_node(SyntaxKind::BLOCK_EXPR);
         self.bump(); // `{`
@@ -931,7 +907,7 @@ impl<'t> Parser<'t> {
             // dispatch in parse_stmt covers all of these.
             self.parse_stmt();
             // A `;` is optional only because a newline separates just as well;
-            // one of the two (or the closing `}`) has to be there (FE-04).
+            // one of the two (or the closing `}`) has to be there.
             self.expect_stmt_separator();
             // Guarantee termination on any input.
             self.ensure_progress(before);
@@ -952,7 +928,7 @@ impl<'t> Parser<'t> {
     }
 
     /// Entry into an expression that a `{` will terminate: an `if`/`while`
-    /// condition, a `for` iterator, a `match` scrutinee (FE-06).
+    /// condition, a `for` iterator, a `match` scrutinee.
     fn parse_expr_no_struct_lit(&mut self) {
         self.parse_expr_bp(0, StructLit::Suppressed);
     }
@@ -991,7 +967,7 @@ impl<'t> Parser<'t> {
 
     /// Prefix expression: unary operators, `read`, then an atom or a
     /// parenthesized expression. Followed by any postfix `expr(args)` calls
-    /// (M8, §4.10) — calling a closure retrieved from a collection
+    /// (§4.10) — calling a closure retrieved from a collection
     /// (`fs.get(0)(100)`), the result of another call (`f(1)(2)`), a paren
     /// (`(|x| x*3)(14)`), etc.
     fn parse_prefix(&mut self, lit: StructLit) {
@@ -1008,21 +984,17 @@ impl<'t> Parser<'t> {
             self.parse_parser_expr();
             self.finish_node();
         } else if op == SyntaxKind::PIPE || op == SyntaxKind::PIPE2 {
-            // `|params| expr` closure (M7, §4.10) — and `|| expr`, the
-            // zero-parameter one (REP-30, §4.2).
+            // `|params| expr` closure (§4.10) — and `|| expr`, the
+            // zero-parameter one (§4.2).
             //
-            // The comment that used to sit here said the lexer's max-munch keeps
-            // `||` as logical-or "so the two never conflict". It is the max-munch
-            // that *creates* the conflict: REP-07 made `||` one token (`PIPE2`),
-            // and §4.2's own shadowing example — `var show_old = || out(a)` — was
-            // `P001: expected an expression` at it.
-            //
-            // The tie is broken by **position**, which is the rule REP-21 used for
-            // `min=` and REP-09 for `[`: this function is only ever called where an
-            // expression must *begin*, and a binary operator has no left operand
-            // there. So a `||` here is the empty parameter list and nothing else,
-            // and a `||` between two operands is still logical-or — the infix loop
-            // reads it, and it never comes through here.
+            // The lexer's max-munch makes `||` one token (`PIPE2`), so the empty
+            // parameter list and logical-or are spelled identically. The tie is
+            // broken by **position**, the same rule `min=` and `[` use: this
+            // function is only ever called where an expression must *begin*, and
+            // a binary operator has no left operand there. So a `||` here is the
+            // empty parameter list and nothing else, and a `||` between two
+            // operands is still logical-or — the infix loop reads it, and it
+            // never comes through here.
             self.parse_closure(lit);
         } else if let Some(bp) = prefix_binding_power(op) {
             self.start_node(SyntaxKind::UNARY_EXPR);
@@ -1052,21 +1024,20 @@ impl<'t> Parser<'t> {
     fn parse_postfix(&mut self, cp: rowan::Checkpoint) {
         loop {
             match self.peek() {
-                // An argument list, and **only on the same line** (REP-27). See
-                // [`Parser::at_argument_list`] for why the two brackets differ.
+                // An argument list, and **only on the same line**. See
+                // [`Parser::at_argument_list`] for why.
                 SyntaxKind::L_PAREN if self.at_argument_list() => {
                     self.start_node_at(cp, SyntaxKind::CALL_EXPR);
                     self.bump(); // `(`
                     self.parse_arg_list();
                     self.finish_node(); // CALL_EXPR
                 }
-                // `m[key]`, `grid[x, y]` — a subscript (REP-16). A postfix form
-                // like the other two, so `grid[x, y].len()` and `m[k][j]` chain
-                // without a second loop.
+                // `m[key]`, `grid[x, y]` — a subscript. A postfix form like the
+                // other two, so `grid[x, y].len()` and `m[k][j]` chain without a
+                // second loop.
                 //
                 // And **only on the same line**, for the reason the `(` above is:
-                // a `[` also begins a list literal now. See
-                // [`Parser::at_subscript`].
+                // a `[` also begins a list literal. See [`Parser::at_subscript`].
                 SyntaxKind::L_BRACK if self.at_subscript() => {
                     self.start_node_at(cp, SyntaxKind::INDEX_EXPR);
                     self.bump(); // `[`
@@ -1082,7 +1053,7 @@ impl<'t> Parser<'t> {
                 }
                 SyntaxKind::DOT => {
                     self.bump(); // `.`
-                                 // `p.0` — a tuple element, selected by position (REP-08).
+                                 // `p.0` — a tuple element, selected by position.
                                  // The lexer guarantees the literal is an integer here: a
                                  // digit run immediately after a `.` takes no fraction, so
                                  // `t.0.1` is two indices and not an index and a float.
@@ -1099,10 +1070,10 @@ impl<'t> Parser<'t> {
                     }
                     // Disambiguate field access (`p.x`) from method call
                     // (`p.x()`): an IDENT followed by `(` **on the same line** is
-                    // a method call (REP-27). The line break matters here for the
-                    // same reason it does at the top of this loop — `p.x\n(a, b)`
-                    // as a match arm body followed by a tuple pattern was read as
-                    // `p.x(a, b)`, and the arm list stopped there.
+                    // a method call. The line break matters here for the same
+                    // reason it does at the top of this loop — `p.x\n(a, b)` is a
+                    // match arm body followed by a tuple pattern, not
+                    // `p.x(a, b)`.
                     if self.nth_kind(1) == SyntaxKind::L_PAREN && !self.newline_before_nth(1) {
                         self.bump(); // method name
                         self.start_node_at(cp, SyntaxKind::METHOD_CALL_EXPR);
@@ -1130,9 +1101,8 @@ impl<'t> Parser<'t> {
     /// already consumed. Emits the `ARG_LIST` node and consumes `closer`.
     ///
     /// One function for both brackets: `grid[x, y]` (§6.4) is a comma-separated
-    /// expression list with the same trailing-comma rule a call's has, and REP-17
-    /// is the reminder that a second copy of a list loop is a second place for the
-    /// rule to be missing.
+    /// expression list with the same trailing-comma rule a call's has, and a
+    /// second copy of a list loop is a second place for that rule to be missing.
     fn parse_arg_list_until(&mut self, closer: SyntaxKind, closer_msg: &str) {
         self.start_node(SyntaxKind::ARG_LIST);
         if !self.at(closer) {
@@ -1142,11 +1112,9 @@ impl<'t> Parser<'t> {
                 if !self.eat(SyntaxKind::COMMA) {
                     break;
                 }
-                // A trailing comma closes the list (REP-17). Without this the
-                // comma opened another argument, which parsed as nothing and
-                // made the call's arity one too high — §3.3's own `max(\n
-                // abs(dx),\n abs(dy),\n)` reported `expected (Int, Int) -> Int,
-                // found (Int, Int, ?T) -> ?U`.
+                // A trailing comma closes the list rather than opening another
+                // argument — §3.3's own `max(\n abs(dx),\n abs(dy),\n)` writes
+                // one, and counting it would make the call's arity one too high.
                 if self.at(closer) {
                     break;
                 }
@@ -1158,8 +1126,8 @@ impl<'t> Parser<'t> {
         self.finish_node(); // ARG_LIST
     }
 
-    /// The `[Type, …]` type-argument list of a constructor call (REP-09), with the
-    /// name already emitted and the `[` still current.
+    /// The `[Type, …]` type-argument list of a constructor call, with the name
+    /// already emitted and the `[` still current.
     ///
     /// A type-argument list exists only on a constructor *call*, so the `(` after
     /// it is required: `Counter[Int]` alone names a type in value position, which
@@ -1177,7 +1145,7 @@ impl<'t> Parser<'t> {
                 if !self.eat(SyntaxKind::COMMA) {
                     break;
                 }
-                // A trailing comma closes the list (REP-17).
+                // A trailing comma closes the list.
                 if self.at(SyntaxKind::R_BRACK) {
                     break;
                 }
@@ -1187,8 +1155,9 @@ impl<'t> Parser<'t> {
         }
         self.expect(SyntaxKind::R_BRACK, "`]`");
         self.finish_node(); // TYPE_ARG_LIST
-                            // The `(` is required and it is on **this** line (REP-27), so the report
-                            // and what `parse_name_or_call` goes on to build cannot disagree.
+                            // The `(` is required and it is on **this** line,
+                            // so the report and what `parse_name_or_call` goes
+                            // on to build cannot disagree.
         if !self.at_argument_list() {
             let span = self.current_span();
             self.error(
@@ -1198,18 +1167,15 @@ impl<'t> Parser<'t> {
         }
     }
 
-    /// `|params| expr` — a closure expression (M7, §4.10). Each parameter is a
+    /// `|params| expr` — a closure expression (§4.10). Each parameter is a
     /// **pattern**, optionally annotated `: Type`, separated by commas, between two
     /// `|`. The body is a single expression (which may be a `{ block }`). Closures
     /// capture outer variables automatically (§4.10); the capture analysis is in
     /// HIR.
     ///
-    /// A parameter used to be a bare binder token, so Appendix D's "first public
-    /// demo" program — which destructures a pair in a `map` closure — did not
-    /// parse (REP-29). REP-25 did exactly this job for the `for` binding and gave
-    /// the reason: destructuring in binding position **is** a pattern, and there is
-    /// no reason for two grammars. This is the same grammar at the third and last
-    /// binding position, and it needed no new syntax either.
+    /// A parameter is a pattern for the reason a `for` binding is one:
+    /// destructuring in binding position **is** a pattern, so `|(a, b)| a + b`
+    /// needs no grammar of its own.
     ///
     /// Nothing here can be confused with the body: a parameter is followed by `,`,
     /// `:` or `|`, never by an expression, so a record pattern's brace has nothing
@@ -1220,10 +1186,10 @@ impl<'t> Parser<'t> {
     /// directly as an `if` condition has the same ambiguity a name does.
     fn parse_closure(&mut self, lit: StructLit) {
         self.start_node(SyntaxKind::CLOSURE_EXPR);
-        // `|| expr` — the zero-parameter closure (REP-30). One `PIPE2` token is
-        // *both* pipes: there is no parameter list between them to parse and no
-        // closing `|` to demand. The token stays whole rather than being split into
-        // two, because the tree's job is to round-trip the source and `||` is what
+        // `|| expr` — the zero-parameter closure. One `PIPE2` token is *both*
+        // pipes: there is no parameter list between them to parse and no closing
+        // `|` to demand. The token stays whole rather than being split into two,
+        // because the tree's job is to round-trip the source and `||` is what
         // the source says; the node kind is what carries the meaning.
         if self.eat(SyntaxKind::PIPE2) {
             self.parse_expr_bp(0, lit);
@@ -1244,7 +1210,7 @@ impl<'t> Parser<'t> {
                 if !self.eat(SyntaxKind::COMMA) {
                     break;
                 }
-                // A trailing comma closes the list (REP-17).
+                // A trailing comma closes the list.
                 if self.at(SyntaxKind::PIPE) {
                     break;
                 }
@@ -1257,18 +1223,17 @@ impl<'t> Parser<'t> {
         self.finish_node();
     }
 
-    /// Smallest expression: literals, names, calls, parenthesized expressions,
-    /// blocks, `if`, `while`.
+    /// Smallest expression: literals (including interpolated ones), names,
+    /// calls, parenthesized expressions, list literals, blocks, and the
+    /// keyword-headed expressions (`if`, `while`, `for`, `loop`, `match`,
+    /// `break`, `continue`, `return`).
     fn parse_atom(&mut self, lit: StructLit) {
         let kind = self.peek();
         match kind {
-            // The `LITERAL` set is `SyntaxKind::is_literal_token`, because this
-            // is the site that *builds* the node and `praxis_ast::Literal::token`
-            // is the one that reads it back — the two had drifted over the
-            // unterminated template. `true`/`false` are literals too, and used to
-            // be a separate arm *because* it was the one that did not eat leading
-            // trivia first — so `true` spanned `" true"` where `1` spanned `"1"`.
-            // `start_node` owns that rule now (REP-63), so there is one arm.
+            // The `LITERAL` set is `SyntaxKind::is_literal_token`: this is the
+            // site that *builds* the node and `praxis_ast::Literal::token` is the
+            // one that reads it back, so both must ask the same predicate.
+            // `true`/`false` are literals too — one arm covers every literal.
             k if k.is_literal_token() => {
                 self.start_node(SyntaxKind::LITERAL);
                 self.bump();
@@ -1347,8 +1312,7 @@ impl<'t> Parser<'t> {
     /// closes the hole, so `"a{{}}b"` is a well-typed program printing `aUnitb`,
     /// and `"a{{x}}b"` reports `N001` about a name the author thought they had
     /// escaped. A reader arriving from Rust, C# or Python writes `{{` first and
-    /// gets no sign they were wrong. That is the silent-wrong-answer class
-    /// handover 31 exists to close, so the mistaken escape is refused where it
+    /// gets no sign they were wrong, so the mistaken escape is refused where it
     /// is written and the message names the spelling that works.
     ///
     /// It costs a block as a hole's whole expression, which nothing wants: a
@@ -1391,8 +1355,8 @@ impl<'t> Parser<'t> {
     /// opened *retroactively* at `cp`. Both `(` and `)` end up inside the single
     /// resulting node (no double nesting).
     ///
-    /// Expressions and types were two copies of this, which is how the §4.4/F5
-    /// arity rule below came to be written twice.
+    /// One function for both positions so the §4.4 arity rule below is written
+    /// once.
     fn parse_parenthesized(
         &mut self,
         cp: rowan::Checkpoint,
@@ -1434,19 +1398,12 @@ impl<'t> Parser<'t> {
                 self.ensure_progress(before);
             }
         }
-        // **A tuple has two elements or more** (§4.4, F5). `(1,)` is the one
-        // spelling that reaches here with fewer, and the language has nothing
-        // for it to mean: `TupleElems` refuses to represent a one-element tuple,
-        // so `tuple_or_degenerate` typed it as its element — `Int` — while
-        // lowering, reading the node kind, still built a tuple object. The two
-        // disagreeing is what MIR verification caught, and it caught it as an
-        // abort, three passes past the comma that caused it (REP-69).
-        //
-        // `(Int,)` is the type-position spelling of the same mistake, refused
-        // for the same reason: the annotation names a type the language does not
-        // have. It resolved to `Int` and accepted quietly, which meant
-        // `var t: (Int,) = 1` was a program whose annotation and whose value
-        // agreed by accident.
+        // **A tuple has two elements or more** (§4.4). `(1,)` is the one spelling
+        // that reaches here with fewer, and the language has nothing for it to
+        // mean: `TupleElems` refuses to represent a one-element tuple, so typing
+        // and lowering would have to disagree about what the node is. `(Int,)` is
+        // the type-position spelling of the same mistake — an annotation naming a
+        // type the language does not have.
         //
         // So the comma is refused here, and the node recovers as the grouping
         // the author most likely meant. `(1, 2,)` is untouched — a trailing
@@ -1472,8 +1429,8 @@ impl<'t> Parser<'t> {
     /// collection built from its elements, so nothing about it changes at two
     /// the way a paren becomes a tuple at two. The element list is an `ARG_LIST`
     /// for the reason a subscript's is — the comma rules, the trailing comma and
-    /// the recovery are one loop (REP-17), and a second copy is a second place
-    /// for a rule to be missing.
+    /// the recovery are one loop, and a second copy is a second place for a rule
+    /// to be missing.
     fn parse_list(&mut self) {
         self.start_node(SyntaxKind::LIST_EXPR);
         self.bump(); // `[`
@@ -1511,15 +1468,15 @@ impl<'t> Parser<'t> {
         self.finish_node();
     }
 
-    /// `for name in iter { body }` (M8, §4.11). The binding name and `in`
-    /// keyword separate the iterator expression from the loop body.
+    /// `for pattern in iter { body }` (§4.11). The binding and the `in` keyword
+    /// separate the iterator expression from the loop body.
     fn parse_for(&mut self) {
         self.start_node(SyntaxKind::FOR_EXPR);
         self.bump(); // `for`
-                     // The binding is a **pattern** (REP-25): `for (k, v) in m`
-                     // takes the pair apart, and a bare name is the pattern that
-                     // binds the whole item. Nothing here can be confused with the
-                     // loop body — the pattern is followed by `in`, never by `{`.
+                     // The binding is a **pattern**: `for (k, v) in m` takes the
+                     // pair apart, and a bare name is the pattern that binds the
+                     // whole item. Nothing here can be confused with the loop
+                     // body — the pattern is followed by `in`, never by `{`.
         self.parse_pattern();
         self.expect(SyntaxKind::KW_IN, "`in` after the for-loop binding");
         self.parse_expr_no_struct_lit(); // iterator
@@ -1527,7 +1484,7 @@ impl<'t> Parser<'t> {
         self.finish_node();
     }
 
-    /// `loop { body }` (M8, §4.11) — an explicit infinite loop, terminated by
+    /// `loop { body }` (§4.11) — an explicit infinite loop, terminated by
     /// `break` (optionally with a value).
     fn parse_loop(&mut self) {
         self.start_node(SyntaxKind::LOOP_EXPR);
@@ -1536,7 +1493,7 @@ impl<'t> Parser<'t> {
         self.finish_node();
     }
 
-    /// `break [expr]` (M8, §4.11). The optional value is an expression; absent
+    /// `break [expr]` (§4.11). The optional value is an expression; absent
     /// means the loop yields Unit.
     fn parse_break(&mut self) {
         self.start_node(SyntaxKind::BREAK_EXPR);
@@ -1548,14 +1505,14 @@ impl<'t> Parser<'t> {
         self.finish_node();
     }
 
-    /// `continue` (M8, §4.11).
+    /// `continue` (§4.11).
     fn parse_continue(&mut self) {
         self.start_node(SyntaxKind::CONTINUE_EXPR);
         self.bump(); // `continue`
         self.finish_node();
     }
 
-    /// `return [expr]` (M8, §4.11).
+    /// `return [expr]` (§4.11).
     fn parse_return(&mut self) {
         self.start_node(SyntaxKind::RETURN_EXPR);
         self.bump(); // `return`
@@ -1565,7 +1522,7 @@ impl<'t> Parser<'t> {
         self.finish_node();
     }
 
-    /// `match scrutinee { pattern => expr, … }` (M7, §4.6/§4.11).
+    /// `match scrutinee { pattern => expr, … }` (§4.6, §4.11).
     fn parse_match(&mut self) {
         self.start_node(SyntaxKind::MATCH_EXPR);
         self.bump(); // `match`
@@ -1579,15 +1536,13 @@ impl<'t> Parser<'t> {
                 self.start_node(SyntaxKind::MATCH_ARM);
                 self.parse_pattern();
                 self.expect(SyntaxKind::FAT_ARROW, "`=>` in match arm");
-                // Arm body: a record literal is legal here (FE-06). The `{` that
-                // could be confused with a block belongs to the *match*, and it
-                // was consumed above — inside the arm list there is nothing left
-                // for a `Name { … }` to be mistaken for.
+                // Arm body: a record literal is legal here. The `{` that could be
+                // confused with a block belongs to the *match*, and it was
+                // consumed above — inside the arm list there is nothing left for
+                // a `Name { … }` to be mistaken for.
                 self.parse_expr();
                 self.finish_node(); // MATCH_ARM
-                                    // Arms really are comma-OR-newline separated (§4.6) — the
-                                    // newline half used to be a comment over a check that only
-                                    // asked whether a pattern could start here (FE-04).
+                                    // Arms are comma-OR-newline separated (§4.6).
                 let comma = self.eat(SyntaxKind::COMMA);
                 // Stop if we hit `}` or something that can't start a pattern.
                 if self.at(SyntaxKind::R_BRACE) || !is_pattern_start(self.peek()) {
@@ -1608,7 +1563,7 @@ impl<'t> Parser<'t> {
         self.finish_node(); // MATCH_EXPR
     }
 
-    /// Parse a pattern (M7, §4.6; REP-10). Grammar:
+    /// Parse a pattern (§4.6). Grammar:
     ///
     /// ```text
     /// pattern := "_"                                  // wildcard
@@ -1621,12 +1576,12 @@ impl<'t> Parser<'t> {
     /// pattern_field := Ident [":" pattern]
     /// ```
     ///
-    /// A record pattern's `{` is unambiguous where a record *literal*'s is not
-    /// (FE-06): a pattern is followed by `=>` or `in`, never by a block, so
-    /// nothing else can be waiting for that brace. That is also what makes the
-    /// **head optional** (ADR-091 Decision 2): a leading `{` in pattern position
-    /// can only ever open fields, so a headless record pattern needs no new token
-    /// to tell it apart, and it pins its record from the scrutinee exactly as a
+    /// A record pattern's `{` is unambiguous where a record *literal*'s is not:
+    /// a pattern is followed by `=>` or `in`, never by a block, so nothing else
+    /// can be waiting for that brace. That is also what makes the **head
+    /// optional** (ADR-091 Decision 2): a leading `{` in pattern position can
+    /// only ever open fields, so a headless record pattern needs no new token to
+    /// tell it apart, and it pins its record from the scrutinee exactly as a
     /// tuple pattern does. It is the form a `choice(...)` payload record wants,
     /// because an anonymous record has no name a head could write.
     ///
@@ -1655,8 +1610,7 @@ impl<'t> Parser<'t> {
             // `match s { "{x}" => … }` would otherwise leave a `PATTERN` whose
             // only direct `Ident` is the hole's `x`, and `Pattern::kind` would
             // read that as a **variable bind** — an irrefutable arm that swallows
-            // every value, which is the silent-answer class ADR-091 and REP-66
-            // are both about.
+            // every value.
             SyntaxKind::InterpOpen => {
                 let span = self.current_span();
                 self.error(
@@ -1670,7 +1624,7 @@ impl<'t> Parser<'t> {
             SyntaxKind::Ident => {
                 self.bump(); // variant name, record name, or variable bind
                 if self.at(SyntaxKind::L_BRACE) {
-                    // Record pattern: `Name { field, field: pat, … }` (REP-10).
+                    // Record pattern: `Name { field, field: pat, … }`.
                     self.parse_record_pattern_fields();
                 } else if self.eat(SyntaxKind::L_PAREN) {
                     // Enum variant with payload: `Name(pat, pat, …)`.
@@ -1693,7 +1647,7 @@ impl<'t> Parser<'t> {
             }
             SyntaxKind::L_PAREN => {
                 // Tuple pattern `(a, b)` — or a grouping `(p)`, which the list
-                // leaves as the one child it parsed (REP-10).
+                // leaves as the one child it parsed.
                 self.bump(); // `(`
                 if self.at(SyntaxKind::R_PAREN) {
                     // `()` has no type to match: `Unit` is not a tuple.
@@ -1716,7 +1670,7 @@ impl<'t> Parser<'t> {
     }
 
     /// A comma-separated list of patterns, up to but not including `closer`.
-    /// A trailing comma closes the list rather than opening an element (REP-17).
+    /// A trailing comma closes the list rather than opening an element.
     fn parse_pattern_list(&mut self, closer: SyntaxKind) {
         loop {
             let before = self.meaningful_index();
@@ -1731,7 +1685,7 @@ impl<'t> Parser<'t> {
         }
     }
 
-    /// The `{ field, field: pat, … }` body of a record pattern (REP-10, §4.5).
+    /// The `{ field, field: pat, … }` body of a record pattern (§4.5).
     /// A punned field binds the field's own name; an explicit one matches the
     /// sub-pattern against that field.
     fn parse_record_pattern_fields(&mut self) {
@@ -1748,7 +1702,7 @@ impl<'t> Parser<'t> {
                 if !self.eat(SyntaxKind::COMMA) {
                     break;
                 }
-                // A trailing comma closes the list (REP-17).
+                // A trailing comma closes the list.
                 if self.at(SyntaxKind::R_BRACE) {
                     break;
                 }
@@ -1758,7 +1712,7 @@ impl<'t> Parser<'t> {
         self.expect(SyntaxKind::R_BRACE, "`}` to close record pattern");
     }
 
-    // --- types (M2) ---------------------------------------------------------
+    // --- types --------------------------------------------------------------
 
     /// Parse a type annotation. Grammar:
     ///
@@ -1792,7 +1746,7 @@ impl<'t> Parser<'t> {
     /// Parse one atomic type (no `->`). Emits exactly one node onto the builder:
     /// [`TYPE_REF`] for a scalar or grouped type, [`TUPLE_TYPE`] for two or more
     /// comma-separated elements. A scalar name followed by `[T]` or `[K, V]` is
-    /// a collection type (M5, §4.4) — also emitted as `TYPE_REF` with the bracketed
+    /// a collection type (§4.4) — also emitted as `TYPE_REF` with the bracketed
     /// args as children.
     fn parse_atom_type(&mut self) {
         if self.at(SyntaxKind::Ident) {
@@ -1808,7 +1762,7 @@ impl<'t> Parser<'t> {
                 // The first type arg.
                 self.parse_type();
                 while self.eat(SyntaxKind::COMMA) {
-                    // A trailing comma closes the list (REP-17).
+                    // A trailing comma closes the list.
                     if self.at(SyntaxKind::R_BRACK) {
                         break;
                     }
@@ -1856,12 +1810,10 @@ impl<'t> Parser<'t> {
         let name_text = self.peek_text();
         // `parse(text, parser_expression)` (§7.1) is *syntax*, not a call of a
         // binding named `parse` — so the keyword must not become a `PATH_EXPR`.
-        // It used to, and two things followed from it: name resolution reported
-        // `` `parse` is not defined `` on every use, and `ParseExpr::text_expr`
-        // — "the first `Expr` child" — answered with the keyword's own path
-        // instead of the argument, so the type of the text argument was never
-        // looked at (TY-25). Decided before the node is opened, which needs one
-        // token of lookahead.
+        // Name resolution would report `` `parse` is not defined `` on every
+        // use, and `ParseExpr::text_expr` — "the first `Expr` child" — would
+        // answer with the keyword's own path instead of the text argument.
+        // Decided before the node is opened, which needs one token of lookahead.
         if name_text == Some("parse") && self.nth_kind(1) == SyntaxKind::L_PAREN {
             self.start_node_at(cp, SyntaxKind::PARSE_EXPR);
             self.bump(); // `parse`
@@ -1875,9 +1827,9 @@ impl<'t> Parser<'t> {
             return;
         }
         // `Counter[(Int, Int)]()` — explicit type arguments on a constructor call
-        // (REP-09, §3.3). Decided from the *name* before the brackets are reached,
-        // because the brackets themselves are a subscript's (REP-16) and their
-        // contents cannot break the tie: `Int` parses as an expression too.
+        // (§3.3). Decided from the *name* before the brackets are reached,
+        // because the brackets themselves are a subscript's and their contents
+        // cannot break the tie: `Int` parses as an expression too.
         //
         // Consequence, stated rather than hidden: a binding that shadows a type
         // constructor's name cannot be subscripted — `Counter[0]` reads as a type
@@ -1901,8 +1853,8 @@ impl<'t> Parser<'t> {
         } else if self.at(SyntaxKind::L_BRACE) && lit == StructLit::Allowed {
             // Record literal: `Name { field: expr, … }` or `Name { x, y }` (§4.5
             // punning). In expression position, a bare name followed by `{` is a
-            // record construction (not a block — blocks only follow `if`/`while`
-            // keywords or appear as `({ … })`).
+            // record construction; the keyword heads suppress that reading (see
+            // [`StructLit`]) so their block is not taken as a record body.
             self.start_node_at(cp, SyntaxKind::RECORD_LIT_EXPR);
             self.bump(); // `{`
             self.start_node(SyntaxKind::FIELD_LIST);
@@ -1919,7 +1871,7 @@ impl<'t> Parser<'t> {
                     if !self.eat(SyntaxKind::COMMA) {
                         break;
                     }
-                    // A trailing comma closes the list (REP-17).
+                    // A trailing comma closes the list.
                     if self.at(SyntaxKind::R_BRACE) {
                         break;
                     }
@@ -1936,7 +1888,7 @@ impl<'t> Parser<'t> {
     }
 
     // -----------------------------------------------------------------------
-    // Input-parser expression grammar (§7, M6).
+    // Input-parser expression grammar (§7).
     //
     // `parser_expr := atom | template | call`
     // Whitespace and indentation outside backticks are insignificant (§7.1).
@@ -2016,7 +1968,7 @@ impl<'t> Parser<'t> {
     ///   owns the keyword question. A count written where no count belongs
     ///   earns an argument diagnostic naming the constructor, which says more
     ///   than "expected a parser expression" does;
-    /// - a named argument `name: parser_expr` (M9, §7.5), emitted as a
+    /// - a named argument `name: parser_expr` (§7.5), emitted as a
     ///   `PARSER_NAMED_ARG` node — used by heterogeneous `sections`
     ///   (`rules: lines(...)`), `chars`/`grid` keyword args (`skip: whitespace`,
     ///   `fill: value`), and the `repeated(...)` tail marker of `sections`.
@@ -2050,8 +2002,8 @@ impl<'t> Parser<'t> {
                     self.bump(); // the digits
                     self.finish_node();
                 } else if self.at(SyntaxKind::Ident) && self.nth_kind(1) == SyntaxKind::COLON {
-                    // A named argument `name: parser_expr` (M9). The name is a
-                    // bare ident followed by `:`. This does not conflict with a
+                    // A named argument `name: parser_expr`. The name is a bare
+                    // ident followed by `:`. This does not conflict with a
                     // constructor call (`lines(...)`) because that has `(` at
                     // position 1, not `:`.
                     self.start_node(SyntaxKind::PARSER_NAMED_ARG);
@@ -2092,14 +2044,6 @@ impl<'t> Parser<'t> {
     ///   later, by `Constructor::keyword_arg`, where that rule already lives.
     /// - anything else (`rules: lines(int)`, `skip: whitespace`) — a parser
     ///   expression.
-    ///
-    /// `fill: 0` used to take the second branch unconditionally, so §7.5's own
-    /// documented spelling of a ragged grid reported `P001 expected a parser
-    /// expression` and then lost its fill value entirely (the HIR bridge read
-    /// the value as the first `Ident` under the node, and a `PARSE_ERROR`
-    /// wrapping an `IntLit` has none). The capture-body front end, which reads
-    /// the keyword value as raw text, kept it — so the two front ends
-    /// disagreed on identical source.
     fn parse_parser_named_arg_value(&mut self) {
         if matches!(
             self.peek(),
@@ -2117,9 +2061,9 @@ impl<'t> Parser<'t> {
     // Error recovery.
     // -----------------------------------------------------------------------
 
-    /// Consume `kind`; if it is absent, emit a diagnostic at the current token.
     /// Expect a **binding position**: a name, or `_` for one the program is
-    /// deliberately not naming (D7, ADR-049).
+    /// deliberately not naming (D7, ADR-049). Reports at the current token if
+    /// neither is there.
     ///
     /// `var _ = f()`, `fn g(_)` and `|_| 0` are legal and introduce nothing —
     /// the AST's name accessors look for an `Ident`, so a wildcard binder is an
@@ -2193,7 +2137,7 @@ impl<'t> Parser<'t> {
     /// [`start_node`](Self::start_node)'s reason and by the same rule: a node
     /// retroactively opened here — a `BIN_EXPR`, a `RANGE_EXPR`, a `CALL_EXPR`,
     /// a parenthesized expression — would otherwise begin at a checkpoint taken
-    /// before the whitespace and swallow it (REP-63).
+    /// before the whitespace and swallow it.
     fn checkpoint_lhs(&mut self) -> rowan::Checkpoint {
         self.eat_trivia();
         self.builder.checkpoint()
@@ -2300,7 +2244,7 @@ mod tests {
     }
 
     /// A `'#'` in expression position is a `LITERAL` holding one `CharLit`, and
-    /// the node spans exactly the literal — no leading trivia (REP-63).
+    /// the node spans exactly the literal — no leading trivia.
     #[test]
     fn parses_char_literal() {
         let src = "var c = '#'";
@@ -2387,8 +2331,8 @@ mod tests {
     /// pedantry: without the arm that reports it, `match s { "{x}" => … }`
     /// leaves a `PATTERN` whose only direct `Ident` is the hole's `x`, which
     /// `Pattern::kind` reads as a variable bind — an irrefutable arm that
-    /// swallows every value with no diagnostic at all. That is REP-66's class,
-    /// and it is why this asserts the diagnostic rather than the tree shape.
+    /// swallows every value with no diagnostic at all. That is why this asserts
+    /// the diagnostic rather than the tree shape.
     #[test]
     fn an_interpolated_literal_is_not_a_pattern() {
         let out = parse_text("var r = match s {\n    \"{x}\" => 1\n    _ => 2\n}");
@@ -2406,10 +2350,9 @@ mod tests {
     }
 
     /// `{{` is the escape in Rust, C# and Python, so it is the first thing a
-    /// reader tries — and here it *parses*: `{` opens the hole, `{}` is an empty
-    /// block, `}` closes it. `"a{{}}b"` printed `aUnitb` with no diagnostic
-    /// until this refusal existed, which is the silent-wrong-answer class
-    /// handover 31 was written about.
+    /// reader tries — and here it would otherwise *parse*: `{` opens the hole,
+    /// `{}` is an empty block, `}` closes it, and `"a{{}}b"` prints `aUnitb`
+    /// with no diagnostic. The refusal is what keeps that from being silent.
     #[test]
     fn a_doubled_brace_is_refused_rather_than_meaning_a_block() {
         for src in [
@@ -2438,11 +2381,10 @@ mod tests {
         }
     }
 
-    /// **`is_pattern_start`'s half of ADR-141**, and the easiest thing in the
-    /// item to forget with the worst symptom. Leave `CharLit` out of it and the
-    /// arm list stops after `'#' => …`: the second and third arms leave the tree
-    /// with no diagnostic at all, and the literal still looks like it works.
-    /// REP-10 and ADR-091 are the same defect, one bracket apart.
+    /// **`is_pattern_start`'s half of ADR-141.** Leave `CharLit` out of it and
+    /// the arm list stops after `'#' => …`: the second and third arms leave the
+    /// tree with no diagnostic at all, and the literal still looks like it
+    /// works.
     #[test]
     fn a_char_arm_does_not_truncate_the_arm_list() {
         let src = "var r = match c {\n    '#' => 1\n    '.' => 2\n    _ => 3\n}";
@@ -2455,7 +2397,7 @@ mod tests {
         assert_eq!(arms, 3);
     }
 
-    // --- 2026-07 adversarial audit regressions -----------------------------
+    // --- statement separation and postfix chains ---------------------------
 
     #[test]
     fn regression_same_line_statements_require_a_semicolon() {
@@ -2515,7 +2457,7 @@ mod tests {
         );
     }
 
-    // --- FE-04: where a newline ends a statement, and where it does not -----
+    // --- where a newline ends a statement, and where it does not -----------
 
     /// D8's second half, stated for the operator it is most likely to break.
     /// A newline is consulted between statements and at `break`/`return`'s
@@ -2536,23 +2478,11 @@ mod tests {
         assert!(kinds.contains(&SyntaxKind::BIN_EXPR));
     }
 
-    /// TY-34's syntax as the *rule* (ADR-059): `..`/`..=` is an infix operator
-    /// that builds a `RANGE_EXPR`, and it binds **looser than arithmetic and
-    /// comparison**. That is the whole reason the precedence had to be inserted
-    /// rather than appended: every range in the corpus writes an arithmetic
-    /// bound, and `0..n - 1` has to be `0..(n - 1)`.
-    /// **REP-63.** A node never begins with trivia, so an expression's
-    /// `text_range` is the expression and a caret under it underlines only that.
-    ///
-    /// `start_node` opened the node and let `bump`'s own trivia sweep pull the
-    /// whitespace *inside* it. Only the numeric/text-literal arm of `parse_atom`
-    /// worked around it, so the defect was invisible in exactly the shape most
-    /// tests reach for: `1 + "y"` underlined `"y"` correctly while `a + b`
-    /// underlined `" a"` and `" b"` — one column early and one column wide,
-    /// reading as if the caret pointed at the `=` and the `+`.
+    /// **A node never begins with trivia**, so an expression's `text_range` is
+    /// the expression and a caret under it underlines only that.
     ///
     /// Asserted as an invariant over whole trees rather than as another
-    /// snapshot: there are 54 `start_node` call sites and a snapshot pins the
+    /// snapshot: `start_node` has dozens of call sites and a snapshot pins the
     /// handful a fixture happens to reach. The exception is the **root**, which
     /// is where a file's leading trivia has to go — there is no node before it.
     #[test]
@@ -2592,9 +2522,8 @@ mod tests {
         }
     }
 
-    /// The consequence REP-63 is about, stated directly: an operand's range is
-    /// the operand, so `lhs.syntax().text_range()` is what a diagnostic can
-    /// point at.
+    /// The same rule stated directly: an operand's range is the operand, so
+    /// `lhs.syntax().text_range()` is what a diagnostic can point at.
     #[test]
     fn an_operands_range_is_the_operand_and_not_the_space_before_it() {
         // `var c = a + b` — `a` at 8..9, `b` at 12..13.
@@ -2623,6 +2552,9 @@ mod tests {
         );
     }
 
+    /// `..`/`..=` is an infix operator that builds a `RANGE_EXPR` (ADR-059), and
+    /// it binds **looser than arithmetic and comparison**: every range in the
+    /// corpus writes an arithmetic bound, so `0..n - 1` has to be `0..(n - 1)`.
     #[test]
     fn a_range_binds_looser_than_the_arithmetic_in_its_bounds() {
         // The bound is the whole subtraction, so the RANGE_EXPR contains a
@@ -2681,8 +2613,8 @@ mod tests {
     }
 
     /// A range is an ordinary expression, so it appears wherever one may: a
-    /// `for` header (where the `{` must not be read as a record literal —
-    /// FE-06), a call argument, and a parenthesized bound.
+    /// `for` header (where the `{` must not be read as a record literal), a
+    /// call argument, and a parenthesized bound.
     #[test]
     fn a_range_is_legal_wherever_an_expression_is() {
         for src in [
@@ -2708,10 +2640,10 @@ mod tests {
         assert!(!construct_names(&out.tree).contains(&SyntaxKind::RANGE_EXPR));
     }
 
-    /// D8's rule, applied to the new operator: a newline after `..` continues the
-    /// expression, exactly as one after `+` does. The Pratt loop never consults
-    /// `newline_before`, and this is the test that says a range did not become the
-    /// exception (FE-04).
+    /// D8's rule, applied to `..`: a newline after it continues the expression,
+    /// exactly as one after `+` does. The Pratt loop never consults
+    /// `newline_before`, and this is the test that says a range is not the
+    /// exception.
     #[test]
     fn a_range_continues_across_a_line_break() {
         let out = parse_text("var r = 1 ..\n5");
@@ -2737,7 +2669,8 @@ mod tests {
         assert!(construct_names(&out.tree).contains(&SyntaxKind::METHOD_CALL_EXPR));
     }
 
-    /// `break`'s half of the optional-value rule; the exit test covers `return`.
+    /// `break`'s half of the optional-value rule;
+    /// `regression_newline_terminates_a_bare_return` covers `return`.
     #[test]
     fn a_newline_terminates_a_bare_break() {
         let out = parse_text("loop { break\n1 }");
@@ -2750,8 +2683,8 @@ mod tests {
         assert_eq!(break_expr.children().count(), 0);
     }
 
-    /// A `;` still separates statements *inside* a block, where it was already
-    /// consumed — the change is that it is no longer the only thing that can be.
+    /// A `;` separates statements *inside* a block — it is one of the two things
+    /// that can, the other being a line break.
     #[test]
     fn a_semicolon_separates_two_statements_on_one_line_in_a_block() {
         let out = parse_text("fn f() { var a = 1; var b = 2 }");
@@ -2803,8 +2736,7 @@ mod tests {
         );
     }
 
-    /// Match arms are comma-OR-newline separated, which until FE-04 was a
-    /// comment above a check that only asked whether a pattern could start.
+    /// Match arms are comma-OR-newline separated, and a run-on is reported.
     #[test]
     fn match_arms_on_one_line_need_a_comma() {
         let commas = parse_text("fn f() { match x { A => 1, B => 2 } }");
@@ -2848,11 +2780,11 @@ mod tests {
         );
     }
 
-    // --- FE-06: which brackets reset the suppression, and what it still buys --
+    // --- which brackets reset record-literal suppression --------------------
 
-    /// Every bracketed context resets it, not only the parentheses the exit test
-    /// names: an argument list, a tuple, and a block are all places where the
-    /// `{` cannot be the body a keyword is waiting for.
+    /// Every bracketed context resets it, not only parentheses: an argument
+    /// list, a tuple, and a block are all places where the `{` cannot be the
+    /// body a keyword is waiting for.
     #[test]
     fn every_bracket_restores_record_literals_inside_a_condition() {
         for src in [
@@ -2872,8 +2804,8 @@ mod tests {
         }
     }
 
-    /// A match arm body resets it at every depth, not just at the top — the
-    /// flag it replaces leaked into the arm's own blocks and closures too.
+    /// A match arm body resets it at every depth, not just at the top: the arm's
+    /// own blocks and closures allow record literals too.
     #[test]
     fn a_match_arm_allows_a_record_literal_at_any_depth() {
         for src in [
@@ -3006,7 +2938,7 @@ mod tests {
         assert!(out.diagnostics.is_empty());
     }
 
-    // --- M2: real type annotations + tuples ---------------------------------
+    // --- type annotations + tuples ------------------------------------------
 
     #[test]
     fn parses_let_with_tuple_type_annotation() {
@@ -3061,15 +2993,9 @@ mod tests {
         assert!(!pair.contains(&SyntaxKind::PAREN_EXPR));
     }
 
-    /// **REP-69.** A tuple has two elements or more (§4.4, F5), so `(1,)` is
-    /// refused *here*, at the comma.
-    ///
-    /// It used to parse as a one-element `TUPLE_EXPR`, which put two passes in
-    /// disagreement about the same node: `tuple_or_degenerate` typed it as its
-    /// element (`Int`) because `TupleElems` will not represent a one-element
-    /// tuple, and lowering — reading the node kind — built a tuple object. MIR
-    /// verification is what noticed, and it noticed as an abort with no source
-    /// span, three passes past the comma.
+    /// **A tuple has two elements or more** (§4.4), so `(1,)` is refused *here*,
+    /// at the comma — a one-element `TUPLE_EXPR` is a shape `TupleElems` cannot
+    /// represent, so typing and lowering would disagree about the node.
     ///
     /// The node recovers as `PAREN_EXPR`, the grouping the author most likely
     /// meant, so nothing downstream sees the shape that does not exist.
@@ -3100,7 +3026,7 @@ mod tests {
         );
         assert!(construct_names(&trailing.tree).contains(&SyntaxKind::TUPLE_EXPR));
 
-        // The same rule in type position, where it read as a quiet `Int`.
+        // The same rule in type position.
         let annotated = parse_text("var t: (Int,) = 1\n");
         assert_eq!(
             annotated.diagnostics.len(),
@@ -3144,7 +3070,7 @@ mod tests {
         assert_eq!(fn_type_count, 2);
     }
 
-    // --- M6: input-parser expression syntax (§7) ---
+    // --- input-parser expression syntax (§7) ---
 
     #[test]
     fn parses_read_atomic() {
@@ -3214,7 +3140,7 @@ mod tests {
         assert!(kinds.contains(&SyntaxKind::TextLit));
     }
 
-    // --- M9: named arguments in parser constructor calls (§7.5) ---------------
+    // --- named arguments in parser constructor calls (§7.5) ------------------
 
     #[test]
     fn parses_named_args_in_sections() {
@@ -3223,7 +3149,7 @@ mod tests {
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
         let kinds = construct_names(&out.tree);
         assert!(kinds.contains(&SyntaxKind::PARSER_NAMED_ARG));
-        // Two named args + one positional arg-less... actually two named args.
+        // Two named args.
         let named_count = kinds
             .iter()
             .filter(|k| **k == SyntaxKind::PARSER_NAMED_ARG)
@@ -3241,12 +3167,10 @@ mod tests {
         assert!(kinds.contains(&SyntaxKind::PARSER_NAMED_ARG));
     }
 
-    /// **A count is a positional literal, and the grammar has to have a shape
-    /// for it.** `repeated(P, N)` died at `P001 expected a parser expression`
-    /// on the `2`, because the only positional argument shapes were a text
-    /// literal and a parser expression — an integer in positional position had
-    /// no shape at all, and the keyword-value path (`fill: 0`) that already
-    /// accepts one is reachable only after a `name:`.
+    /// **A count is a positional literal, and the grammar has a shape for it.**
+    /// The `N` of `repeated(P, N)` is an integer in positional position; the
+    /// keyword-value path that also accepts one (`fill: 0`) is reachable only
+    /// after a `name:`, so the positional case needs its own arm.
     #[test]
     fn a_parser_call_takes_a_positional_count_literal() {
         let out = parse_text("var v = read sections(a: repeated(lines(int), 2), b: lines(int))");
@@ -3322,15 +3246,11 @@ mod tests {
         };
         assert_eq!(filt(&a), filt(&b));
     }
-    /// **REP-07.** `&&` is one token and one infix operator, and its precedence
-    /// is the two facts that matter: tighter than `||`, looser than comparison.
+    /// `&&` is one token and one infix operator, and its precedence is the two
+    /// facts that matter: tighter than `||`, looser than comparison.
     ///
-    /// `p.x == 2 && p.y == 2` was a `P001` at the first `&` — `praxis-syntax` had
-    /// only a bare `AMP` and no production for it. `||` was already lexed, bound,
-    /// typed and lowered, so this is `&&` alone plus the precedence row that had
-    /// nowhere to go: inserting it moved comparison, additive, multiplicative and
-    /// both prefix powers up by two, which is why the whole table is re-asserted
-    /// below rather than just the new row.
+    /// The whole precedence table is asserted below rather than just `&&`'s row,
+    /// because a binding power is only meaningful relative to the others.
     #[test]
     fn logical_and_binds_tighter_than_or_and_looser_than_comparison() {
         // One token, not two `AMP`s — max-munch, as for `||`.
@@ -3355,42 +3275,32 @@ mod tests {
             shape("var r = (a == b) && (c == d)")
         );
 
-        // `!x && y` is `(!x) && y`: prefix stays above every infix operator,
-        // which the renumbering had to preserve. §3.3 writes `!diagonals && …`.
+        // `!x && y` is `(!x) && y`: prefix stays above every infix operator.
+        // §3.3 writes `!diagonals && …`.
         assert_eq!(shape("var r = !x && y"), shape("var r = (!x) && y"));
         assert_ne!(shape("var r = !x && y"), shape("var r = !(x && y)"));
 
-        // The rest of the table, re-asserted because every number in it moved:
-        // arithmetic still binds tighter than comparison, `*` than `+`, and unary
-        // minus than `*`.
+        // The rest of the table: arithmetic binds tighter than comparison, `*`
+        // than `+`, and unary minus than `*`.
         assert_eq!(shape("var r = a + b < c"), shape("var r = (a + b) < c"));
         assert_eq!(shape("var r = a + b * c"), shape("var r = a + (b * c)"));
         assert_eq!(shape("var r = -a * b"), shape("var r = (-a) * b"));
-        // …and `..` still binds looser than the arithmetic in its bounds, which
-        // is ADR-059's rule and the one row that kept its number.
+        // …and `..` binds looser than the arithmetic in its bounds (ADR-059).
         assert_eq!(shape("var r = 0..n - 1"), shape("var r = 0..(n - 1)"));
         assert_ne!(shape("var r = 0..n - 1"), shape("var r = (0..n) - 1"));
     }
 
-    /// **REP-17.** A trailing comma closes a list; it does not open another
-    /// element.
+    /// **A trailing comma closes a list; it does not open another element.**
     ///
-    /// `parse_arg_list` looped on `eat(COMMA)` and never asked whether the closer
-    /// came next, so the comma opened an argument that parsed as nothing and the
-    /// call came out one argument too wide: **§3.3's representative program**
-    /// writes `max(\n  abs(dx),\n  abs(dy),\n)` and reported `expected (Int,
-    /// Int) -> Int, found (Int, Int, ?T) -> ?U`.
-    ///
-    /// Three of the twelve comma-separated lists already had the guard and nine
-    /// did not, which is why this asserts all of them rather than the one the
-    /// finding names — a list that accepts a trailing comma is a property of the
-    /// grammar, not of the argument list.
+    /// Asserted over every comma-separated list in the grammar rather than over
+    /// the argument list alone: accepting a trailing comma is a property of the
+    /// grammar, and each list loop is a separate place for it to be missing.
     #[test]
     fn a_trailing_comma_closes_a_list_rather_than_opening_an_element() {
         // The list, and the same list without the trailing comma: identical trees
         // once the comma token is out of the way, which is what "closes it" means.
         for (with, without) in [
-            // Call arguments — the finding's own case, in §3.3's own layout.
+            // Call arguments, in §3.3's own layout.
             (
                 "var d = max(\n  abs(a),\n  abs(b),\n)",
                 "var d = max(abs(a), abs(b))",
@@ -3425,7 +3335,7 @@ mod tests {
                 "var r = match n { 1 => 1, _ => 0, }",
                 "var r = match n { 1 => 1, _ => 0 }",
             ),
-            // Subscript indices (REP-16), which are the thirteenth list.
+            // Subscript indices.
             ("var c = grid[x, y,]", "var c = grid[x, y]"),
         ] {
             let out = parse_text(with);
@@ -3447,12 +3357,9 @@ mod tests {
         }
     }
 
-    /// **REP-16.** A subscript is a postfix form like a call, so it chains with
-    /// the other two in any order — and a statement whose target is one is an
+    /// **A subscript is a postfix form like a call**, so it chains with the
+    /// other two in any order — and a statement whose target is one is an
     /// assignment.
-    ///
-    /// `m[key]` was a `P001` at the `[` and `counts[key] += 1` a `P002`: the
-    /// postfix loop had arms for `(` and `.` and none for `[`.
     #[test]
     fn a_subscript_is_a_postfix_form_and_can_be_an_assignment_target() {
         // Reads, at both arities, and chained with the other postfix forms in
@@ -3505,8 +3412,8 @@ mod tests {
             );
         }
 
-        // A bare name target is still an `ASSIGN_STMT` — a different node with a
-        // *token* target — so the two paths have not merged.
+        // A bare name target is an `ASSIGN_STMT` — a different node, with a
+        // *token* target — so the two paths stay distinct.
         let out = parse_text("x += 1");
         let kinds = construct_names(&out.tree);
         assert!(kinds.contains(&SyntaxKind::ASSIGN_STMT), "{kinds:?}");
@@ -3530,11 +3437,9 @@ mod tests {
             );
         }
 
-        // A `[` after a line break no longer continues the expression before
-        // it: a list literal begins with one, so the tie is broken by position
-        // the way REP-27 broke `(`'s. This asserted the opposite until the
-        // literal existed, and the comment it carried gave the reason — "no
-        // statement can begin with `[`" — that stopped being true.
+        // A `[` after a line break does not continue the expression before it:
+        // a list literal begins with one, so the tie is broken by position the
+        // way it is for `(`.
         let out = parse_text(
             "var n = m
 [key]",
@@ -3558,13 +3463,13 @@ mod tests {
         }
     }
 
-    /// **REP-09.** A type constructor's name followed by `[` opens a
-    /// type-argument list; every other name followed by `[` is a subscript.
+    /// **A type constructor's name followed by `[` opens a type-argument list;
+    /// every other name followed by `[` is a subscript.**
     ///
-    /// `Counter[(Int, Int)]()` — which §3.3 writes — was a `P002` at the `[`. The
-    /// two forms are the same two characters, and their contents cannot break the
-    /// tie either (`Int` is a legal expression, `(Int, Int)` a legal tuple), so the
-    /// name in front is the whole rule and this is where it is pinned.
+    /// The two forms are the same two characters, and their contents cannot
+    /// break the tie either (`Int` is a legal expression, `(Int, Int)` a legal
+    /// tuple), so the name in front is the whole rule and this is where it is
+    /// pinned.
     #[test]
     fn a_type_constructors_brackets_are_type_arguments_and_every_other_names_are_a_subscript() {
         let count = |text: &str, kind: SyntaxKind| -> usize {
@@ -3582,7 +3487,7 @@ mod tests {
             "var v = Vec[Int]()",
             "var m = Map[Text, Int]()",
             "var g = Grid[Vec[Int]]()",
-            // A trailing comma closes this list too (REP-17).
+            // A trailing comma closes this list too.
             "var m = Map[Text, Int,]()",
         ] {
             assert_eq!(count(src, SyntaxKind::TYPE_ARG_LIST), 1, "{src}");
@@ -3620,10 +3525,10 @@ mod tests {
     /// A `[` that **begins** an expression opens a list literal; a `[` that
     /// continues one is still a subscript.
     ///
-    /// The two spellings are the same two characters, and — like REP-09's type
-    /// arguments and REP-27's `(` — their contents cannot break the tie: `[k]` is
-    /// a legal list and a legal subscript. Position is the whole rule, and this
-    /// is where it is pinned.
+    /// The two spellings are the same two characters, and — as with a
+    /// type-argument list and a `(` — their contents cannot break the tie: `[k]`
+    /// is a legal list and a legal subscript. Position is the whole rule, and
+    /// this is where it is pinned.
     #[test]
     fn a_bracket_that_begins_an_expression_is_a_list_and_one_that_continues_it_is_a_subscript() {
         let count = |src: &str, kind: SyntaxKind| -> usize {
@@ -3641,7 +3546,7 @@ mod tests {
             "var v = [1, 2, 3]",
             "var v = []",
             "var v = [1]",
-            // A trailing comma closes this list too (REP-17).
+            // A trailing comma closes this list too.
             "var v = [1, 2,]",
             "out([1, 2])",
             "for x in [1, 2] { out(x) }",
@@ -3662,8 +3567,8 @@ mod tests {
             assert_eq!(count(src, SyntaxKind::LIST_EXPR), want, "{src}");
         }
 
-        // …and a `[` that continues an expression is the subscript it has always
-        // been, including one that a list literal *indexes*.
+        // …and a `[` that continues an expression is a subscript, including one
+        // that indexes a list literal.
         for (src, want) in [
             ("var v = m[key]", 1),
             ("var v = grid[x, y]", 1),
@@ -3677,21 +3582,18 @@ mod tests {
         }
         assert_eq!(count("var v = [1, 2][0]", SyntaxKind::LIST_EXPR), 1);
 
-        // The empty subscript is still the error it was: a subscript selects
-        // *something*, where a list may hold nothing.
+        // An empty subscript is an error: a subscript selects *something*, where
+        // a list may hold nothing.
         for bad in ["var v = m[]", "var v = [1, 2", "var v = [1 2]"] {
             let out = parse_text(bad);
             assert!(!out.diagnostics.is_empty(), "{bad} must report");
         }
     }
 
-    /// **REP-25.** A `for` binding is a pattern, so `for (k, v) in m` takes the
-    /// pair apart where `for kv in m` could only name it.
-    ///
-    /// The header used to `expect(Ident)`, so the only binding a loop could have
-    /// was one name. ADR-066 decision 3 left this to REP-10 on the grounds that
-    /// destructuring in binding position *is* a pattern and there was no reason
-    /// for two grammars — this is that grammar, reused.
+    /// **A `for` binding is a pattern**, so `for (k, v) in m` takes the pair
+    /// apart where `for kv in m` could only name it. Destructuring in binding
+    /// position *is* a pattern, so the header reuses the pattern grammar rather
+    /// than having one of its own (ADR-066 decision 3).
     #[test]
     fn a_for_binding_is_a_pattern() {
         let count = |src: &str, kind: SyntaxKind| -> usize {
@@ -3718,8 +3620,8 @@ mod tests {
         }
 
         // The pattern is followed by `in`, never by `{`, so a record pattern's
-        // brace cannot be read as the loop body — and the iterator's own
-        // suppression (FE-06) is unchanged.
+        // brace cannot be read as the loop body — and the iterator keeps its own
+        // record-literal suppression.
         let out = parse_text("for P { x } in near(Origin { x: 0 }) { 0 }");
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
 
@@ -3730,14 +3632,13 @@ mod tests {
         }
     }
 
-    /// **REP-21.** `min=` and `max=` are operators exactly where an identifier
-    /// cannot be one, and `min` is still a name everywhere else.
+    /// **`min=` and `max=` are operators exactly where an identifier cannot be
+    /// one**, and `min` is a name everywhere else.
     ///
-    /// §6.2 writes `distance[key] min= candidate` and `best[key] max= score`, and
-    /// neither parsed: `min` is an `Ident`, so `min=` is two tokens and no
-    /// assignment operator matched. The rule is contextual by necessity — a lexer
-    /// rule that claimed `min=` would take `min` away from every program that
-    /// calls the prelude helper (ADR-058), which §3.3's own program does.
+    /// §6.2 writes `distance[key] min= candidate` and `best[key] max= score`.
+    /// `min` is an `Ident`, so `min=` is two tokens the parser joins by context:
+    /// a lexer rule that claimed `min=` would take `min` away from every program
+    /// that calls the prelude helper (ADR-058), which §3.3's own program does.
     #[test]
     fn an_updating_store_is_an_operator_only_where_a_name_cannot_be() {
         let count = |src: &str, kind: SyntaxKind| -> usize {
@@ -3797,8 +3698,8 @@ mod tests {
             "only `min` and `max` are operators"
         );
 
-        // A target that is not a place still *parses*, exactly as `f() = 1` does
-        // (REP-16): naming no storage is inference's report and not the parser's.
+        // A target that is not a place still *parses*, exactly as `f() = 1`
+        // does: naming no storage is inference's report and not the parser's.
         for src in ["x min= 1", "f() max= 1"] {
             let out = parse_text(src);
             assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
@@ -3810,15 +3711,10 @@ mod tests {
         assert!(!out.diagnostics.is_empty(), "a value is required");
     }
 
-    /// **REP-24.** A declaration's members are separated by a comma **or** a
-    /// line break — which is how §4.5 and §4.6 write their own.
-    ///
-    /// `struct Point {\n x: Int\n y: Int\n}` was `P001` "expected `}` to end
-    /// struct fields", and so was §4.6's `enum Tile`. Both lists looped on
-    /// `eat(COMMA)` alone, so the design doc's own declarations did not parse and
-    /// every declaration in the corpus is written on one line because of it. Match
-    /// arms have taken either separator since FE-04 (D8, ADR-049); these two are
-    /// the same rule at the same kind of brace.
+    /// **A declaration's members are separated by a comma or a line break** —
+    /// which is how §4.5 and §4.6 write their own. Match arms take either
+    /// separator (D8, ADR-049); struct fields and enum variants are the same
+    /// rule at the same kind of brace.
     #[test]
     fn a_declarations_members_take_a_comma_or_a_line_break() {
         // The design doc's own text, verbatim, and the comma form beside it: the
@@ -3840,8 +3736,7 @@ mod tests {
                 "struct P { x: Int, y: Int, z: Int }",
             ),
             ("enum E {\n    A, B\n    C\n}", "enum E { A, B, C }"),
-            // …and a trailing comma still closes the list, whichever preceded it
-            // (REP-17).
+            // …and a trailing comma still closes the list, whichever preceded it.
             (
                 "struct P {\n    x: Int\n    y: Int,\n}",
                 "struct P { x: Int, y: Int }",
@@ -3888,14 +3783,9 @@ mod tests {
         }
     }
 
-    /// **REP-10.** A record pattern and a tuple pattern are patterns wherever a
-    /// pattern is legal, and each carries its sub-patterns in a shape the rest of
-    /// the compiler can read.
-    ///
-    /// `match p { P { x, y } => x }` was `P001` "expected `=>` in match arm" and
-    /// `match t { (a, b) => a }` was "expected a pattern": the pattern grammar had
-    /// four forms and neither of these was one, which is why records and tuples
-    /// had an `Open` exhaustiveness signature — no pattern could name them.
+    /// **A record pattern and a tuple pattern are patterns wherever a pattern is
+    /// legal**, and each carries its sub-patterns in a shape the rest of the
+    /// compiler can read.
     ///
     /// The list of shapes matters more than any one of them. A record pattern's
     /// fields are `PATTERN_FIELD`s and a tuple's elements are bare `PATTERN`s, so
@@ -3914,14 +3804,14 @@ mod tests {
         };
 
         // A record pattern's fields, punned and explicit and mixed. The `{` is
-        // unambiguous here where a record *literal*'s is not (FE-06): a pattern
-        // is followed by `=>`, never by a block.
+        // unambiguous here where a record *literal*'s is not: a pattern is
+        // followed by `=>`, never by a block.
         for (src, fields) in [
             ("var a = match p { P { x } => x }", 1),
             ("var a = match p { P { x, y } => x }", 2),
             ("var a = match p { P { x: 1, y } => y }", 2),
             ("var a = match p { P { x: q, y: r } => q }", 2),
-            // A trailing comma closes this list too (REP-17).
+            // A trailing comma closes this list too.
             ("var a = match p { P { x, y, } => x }", 2),
         ] {
             assert_eq!(count(src, SyntaxKind::PATTERN_FIELD), fields, "{src}");
@@ -3934,7 +3824,7 @@ mod tests {
             ("var a = match t { (x, y, z) => x }", 4),
             ("var a = match t { (x, (y, z)) => x }", 5),
             ("var a = match t { (1, _) => 0, _ => 1 }", 4),
-            // …and a trailing comma, which is the fifteenth list (REP-17).
+            // …and a trailing comma.
             ("var a = match t { (x, y,) => x }", 3),
         ] {
             assert_eq!(count(src, SyntaxKind::PATTERN), patterns, "{src}");
@@ -3981,22 +3871,9 @@ mod tests {
         }
     }
 
-    /// **REP-57, ADR-091.** A record pattern's head is optional.
-    ///
-    /// `{ a, b }` was `P001 expected a pattern` at the `{`, and the arm list and
-    /// the enclosing function disintegrated from there — a two-line program
-    /// produced 23 diagnostics. The production is REP-10's own with the head made
-    /// optional, which is why it costs one arm and no new token.
-    ///
-    /// **Observed red with the `L_BRACE` arm removed from `parse_pattern`**:
-    /// `var a = match p { {x} => x }` reports six diagnostics — "expected a
-    /// pattern" at the `{`, then "expected `=>` in match arm, found unexpected
-    /// token", then four more as the statement list picks up the wreckage.
-    /// **Observed red with `L_BRACE` removed from `is_pattern_start` only**: the
-    /// two-arm case below reports "expected `}` to end match arms, found
-    /// unexpected token" at the `{` and cascades from there — the arm list ends
-    /// before the headless arm, so it and everything after it leave the tree.
-    /// That is REP-10's own regression, one brace over.
+    /// **A record pattern's head is optional** (ADR-091). It is the headed
+    /// production with the head made optional, so it costs one arm in
+    /// `parse_pattern`, one entry in `is_pattern_start`, and no new token.
     #[test]
     fn a_record_pattern_needs_no_head() {
         let count = |src: &str, kind: SyntaxKind| -> usize {
@@ -4009,7 +3886,7 @@ mod tests {
         };
 
         // The fields are the headed form's, unchanged — punned, explicit, mixed,
-        // and with REP-17's trailing comma.
+        // and with a trailing comma.
         for (src, fields) in [
             ("var a = match p { {x} => x }", 1),
             ("var a = match p { {x, y} => x }", 2),
@@ -4022,8 +3899,7 @@ mod tests {
 
         // One production, so it composes in every position a pattern appears:
         // nested in a variant's payload (the shape a `choice(...)` payload record
-        // needs), in a tuple, in a `for` header (REP-25), and as a closure
-        // parameter.
+        // needs), in a tuple, in a `for` header, and as a closure parameter.
         for src in [
             "var a = match m { Mul({x, y}) => x, Do(_) => 0 }",
             "var a = match t { ({x}, n) => x }",
@@ -4068,14 +3944,14 @@ mod tests {
         assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
     }
 
-    /// **REP-27.** A `(` that begins a line begins something new; a `(` on the
-    /// same line as the expression before it is that expression's argument list.
+    /// **A `(` that begins a line begins something new**; a `(` on the same line
+    /// as the expression before it is that expression's argument list.
     ///
-    /// `peek()` skips trivia and a newline **is** trivia, so the postfix loop and
-    /// `parse_name_or_call` both opened a `CALL_EXPR` on a line-leading `(`. In a
-    /// `match` that is silent data loss: the arm body swallowed the next arm's
-    /// tuple pattern as an argument list, the arm loop found no pattern start, and
-    /// every arm after the first left the tree.
+    /// `peek()` skips trivia and a newline **is** trivia, so without the rule the
+    /// postfix loop and `parse_name_or_call` would open a `CALL_EXPR` on a
+    /// line-leading `(`. In a `match` that is silent data loss: the arm body
+    /// swallows the next arm's tuple pattern as an argument list, the arm loop
+    /// finds no pattern start, and every arm after the first leaves the tree.
     #[test]
     fn a_line_leading_paren_begins_a_new_thing_and_a_same_line_one_is_a_call() {
         let count = |src: &str, kind: SyntaxKind| -> usize {
@@ -4087,8 +3963,8 @@ mod tests {
                 .count()
         };
 
-        // The reproduction: three arms, and all three are in the tree. A `10(a,
-        // b)` call would leave one arm and one `CALL_EXPR`.
+        // Three arms, and all three are in the tree. A `10(a, b)` call would
+        // leave one arm and one `CALL_EXPR`.
         let arms = "var r = match p {\n    (0, 0) => 10\n    (a, b) => a + b\n    _ => 0\n}";
         assert_eq!(count(arms, SyntaxKind::MATCH_ARM), 3);
         assert_eq!(count(arms, SyntaxKind::CALL_EXPR), 0);
@@ -4114,13 +3990,13 @@ mod tests {
             assert!(count(src, SyntaxKind::CALL_EXPR) >= 1, "{src}");
         }
 
-        // A `[` is subject to the same rule, and it was not until a list literal
-        // began with one. `m\n[k]` is a binding and a list now, not a subscript.
+        // A `[` is subject to the same rule, because a list literal begins with
+        // one: `m\n[k]` is a binding and a list, not a subscript.
         let sub = "var a = m\n[k]";
         assert_eq!(count(sub, SyntaxKind::INDEX_EXPR), 0);
         assert_eq!(count(sub, SyntaxKind::LIST_EXPR), 1);
         assert_eq!(count(sub, SyntaxKind::VAR_STMT), 1);
-        // On one line it is the subscript it has always been.
+        // On one line it is a subscript.
         assert_eq!(count("var a = m[k]", SyntaxKind::INDEX_EXPR), 1);
         assert_eq!(count("var a = m[k]", SyntaxKind::LIST_EXPR), 0);
 
@@ -4145,8 +4021,8 @@ mod tests {
         assert_eq!(count("var a = 1\n(b, c)", SyntaxKind::VAR_STMT), 1);
         assert_eq!(count("var a = 1\n(b + c) * 2", SyntaxKind::PAREN_EXPR), 1);
 
-        // …and a `for` binding is the second place REP-10's tuple pattern made a
-        // line-leading `(` reachable (REP-25).
+        // …and a `for` binding is the second place a tuple pattern makes a
+        // line-leading `(` reachable.
         assert_eq!(
             count("var a = 1\nfor (k, v) in m { }", SyntaxKind::FOR_EXPR),
             1
@@ -4160,12 +4036,10 @@ mod tests {
         assert_eq!(count(split, SyntaxKind::PAREN_EXPR), 1);
     }
 
-    /// **REP-30.** `||` is an empty parameter list where an expression must begin,
-    /// and logical-or everywhere else.
-    ///
-    /// §4.2's shadowing example is `var show_old = || out(a)`, and it was
-    /// `P001: expected an expression` at the `||` plus a cascading `P002`: REP-07
-    /// made `||` one token, and only a bare `PIPE` reached `parse_closure`.
+    /// **`||` is an empty parameter list where an expression must begin, and
+    /// logical-or everywhere else.** The lexer's max-munch makes it one token,
+    /// so position is the only thing that can tell the two apart — §4.2's
+    /// shadowing example is `var show_old = || out(a)`.
     #[test]
     fn a_double_pipe_is_a_closure_where_an_expression_begins_and_an_operator_between_two() {
         let count = |src: &str, kind: SyntaxKind| -> usize {
@@ -4198,9 +4072,8 @@ mod tests {
         // in how the lexer munched them.
         assert_eq!(count("var f = | | 5", SyntaxKind::CLOSURE_EXPR), 1);
 
-        // The other direction: between two operands `||` is still logical-or, and
-        // nothing about its precedence moved (REP-07 put it at the bottom, below
-        // `..` and `&&`).
+        // The other direction: between two operands `||` is logical-or, whose
+        // precedence is the lowest of all — below `..` and `&&`.
         assert_eq!(count("var a = p || q", SyntaxKind::BIN_EXPR), 1);
         assert_eq!(count("var a = p || q", SyntaxKind::CLOSURE_EXPR), 0);
         assert_eq!(
@@ -4219,17 +4092,14 @@ mod tests {
             "`||` is still left-associative"
         );
 
-        // A one-parameter closure is untouched, which is what says the new arm
-        // only fires on the two-pipe token.
+        // A one-parameter closure is untouched, which is what says the
+        // zero-parameter arm only fires on the two-pipe token.
         assert_eq!(count("var f = |x| x", SyntaxKind::PARAM), 1);
     }
 
-    /// **REP-29.** A closure parameter is a pattern, not a bare name.
-    ///
-    /// Appendix D's "first public demo" program is written with `|(a, b)| abs(a -
-    /// b)` and did not parse: the parameter loop could take only a binder token, so
-    /// the `(` was `expected closure parameter name`. REP-25 made the `for` binding
-    /// a pattern for the same reason; this is the third and last binding position.
+    /// **A closure parameter is a pattern, not a bare name** — Appendix D writes
+    /// `|(a, b)| abs(a - b)`. It is the same grammar the `for` binding uses, at
+    /// the third and last binding position.
     #[test]
     fn a_closure_parameter_is_a_pattern() {
         let count = |src: &str, kind: SyntaxKind| -> usize {
@@ -4276,9 +4146,9 @@ mod tests {
         );
         assert_eq!(count("var f = |x: Int| x", SyntaxKind::TYPE_REF), 1);
 
-        // A trailing comma still closes the list (REP-17), and a record pattern's
-        // brace is not read as anything else: a parameter is followed by `,`, `:`
-        // or `|`, never by an expression.
+        // A trailing comma still closes the list, and a record pattern's brace
+        // is not read as anything else: a parameter is followed by `,`, `:` or
+        // `|`, never by an expression.
         for src in ["var f = |(a, b),| a", "var f = |P { x }| P { x: x }"] {
             assert_eq!(count(src, SyntaxKind::CLOSURE_EXPR), 1, "{src}");
         }

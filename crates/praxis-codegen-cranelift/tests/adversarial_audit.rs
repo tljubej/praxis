@@ -1,8 +1,7 @@
-//! Focused MIR/Cranelift regressions found by the post-M10 adversarial audit.
+//! Focused MIR/Cranelift regressions.
 //!
-//! These tests intentionally state the language/runtime contract. Some expose
-//! known implementation defects and therefore fail until the corresponding
-//! handover item is fixed; they must not be weakened to assert current behavior.
+//! These tests intentionally state the language/runtime contract; they must not
+//! be weakened to assert current behavior.
 
 use std::fmt::Write as _;
 
@@ -48,7 +47,7 @@ fn compile(
     for func in &mut funcs {
         annotate(func);
         // Every host verifies after annotating; the tests are a host too, and
-        // are the only one that runs the whole corpus (MIR-10).
+        // are the only one that runs the whole corpus.
         if let Err(errs) = praxis_mir::verify(func) {
             panic!("{}", praxis_mir::verify::report(&errs));
         }
@@ -71,7 +70,6 @@ fn run_main_with_input(src: &str, input: &str) -> (Runtime, GcRef) {
     let mut context = runtime.context();
     context.input_source = runtime.alloc_text(input);
     // `main` has no source parameters: its generated ABI is exactly `(ctx)`.
-    // Do not repeat the legacy test helper's phantom GcRef argument.
     type ZeroArgMain = unsafe extern "C" fn(*mut RuntimeContext) -> GcRef;
     let entry: ZeroArgMain = unsafe { std::mem::transmute(jit.entry(main_id)) };
     let result = unsafe { entry(&mut context as *mut RuntimeContext) };
@@ -161,8 +159,8 @@ fn fault_epilogue_returns_the_valid_unit_sentinel() {
 
 #[test]
 fn enumerate_materializes_index_and_element_tuple_payloads() {
-    // The older enumerate test only counted results. Inspect the claimed
-    // `(index, element)` values themselves so an empty TupleSchema cannot pass.
+    // Inspect the claimed `(index, element)` values themselves, so an empty
+    // TupleSchema cannot pass.
     let (runtime, result) =
         run_main("fn main() {\n  var v = Vec()\n  v.push(10)\n  v.push(20)\n  v.enumerate()\n}\n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
@@ -176,15 +174,14 @@ fn enumerate_materializes_index_and_element_tuple_payloads() {
     assert_eq!((second[0].as_int(), second[1].as_int()), (1, 20));
 }
 
-/// **MIR-05.** The pair a fused `enumerate`/`zip` builds carries the type the
-/// method catalog already declares, so its schema slots name real descriptors.
+/// The pair a fused `enumerate`/`zip` builds carries the type the method
+/// catalog already declares, so its schema slots name real descriptors.
 ///
-/// This is the only assertion that separates MIR-05 from REP-23's fallback.
-/// REP-23 made a typeless pair keep its *arity*, so the values survive and
-/// `enumerate_materializes_index_and_element_tuple_payloads` passes either way;
-/// what it cannot see is that every slot said "no static type" and formatting,
-/// hashing and equality were dispatching through the values' own headers rather
-/// than through the compiler's answer.
+/// A typeless pair still keeps its *arity*, so the values survive and
+/// `enumerate_materializes_index_and_element_tuple_payloads` passes either way.
+/// What only this test can see is that every slot names a descriptor, so
+/// formatting, hashing and equality dispatch through the compiler's answer
+/// rather than through the values' own headers.
 #[test]
 fn a_fused_pairs_schema_names_its_element_types() {
     let int = praxis_runtime::scalars::INT.id();
@@ -279,9 +276,8 @@ fn zip_after_filter_uses_dense_filtered_positions() {
 #[test]
 fn position_after_filter_reports_the_filtered_sequence_index() {
     let (runtime, result) = run_main(
-        // The `match` is REP-39: `position` answers `Option[Int]` now, so the
-        // index this test is about arrives inside a `Some`. The measurement is
-        // unchanged.
+        // `position` answers `Option[Int]`, so the index this test is about
+        // arrives inside a `Some`.
         "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  match v.filter(|x| x % 2 == 0).position(|x| x == 4) { Some(i) => i, None => -1 }\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
@@ -313,7 +309,7 @@ fn take_after_flat_map_counts_the_global_flattened_stream() {
 #[test]
 fn position_after_flat_map_uses_the_global_flattened_index() {
     let (runtime, result) = run_main(
-        // As above: the index is inside a `Some` (REP-39).
+        // As above: the index is inside a `Some`.
         "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  match v.flat_map(|x| {\n    var inner = Vec()\n    inner.push(x)\n    inner\n  }).position(|x| x == 2) { Some(i) => i, None => -1 }\n}\n",
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
@@ -335,10 +331,10 @@ fn any_after_flat_map_short_circuits_the_whole_pipeline() {
 
 #[test]
 fn nested_record_inequality_dispatches_to_the_record_descriptor() {
-    // The pre-existing tuple-of-record test only covered equal records. If the
-    // tuple schema incorrectly records INT for a Record element, INT equality
-    // compares the RecordPayload's first machine word (the shared schema
-    // pointer) and declares every same-shaped record equal.
+    // Unequal records, which is where the schema matters: if the tuple schema
+    // incorrectly records INT for a Record element, INT equality compares the
+    // RecordPayload's first machine word (the shared schema pointer) and
+    // declares every same-shaped record equal.
     let (runtime, result) = run_main(
         "struct P { x: Int }\nfn main() -> Int {\n  var a = (P { x: 1 }, 0)\n  var b = (P { x: 2 }, 0)\n  if a == b { 1 } else { 0 }\n}\n",
     );
@@ -348,10 +344,10 @@ fn nested_record_inequality_dispatches_to_the_record_descriptor() {
 
 #[test]
 fn vec_float_push_adopts_float_descriptor_and_preserves_signed_zero_semantics() {
-    // This is a passing guard, not proof that codegen selected FLOAT:
-    // praxis_vec_push currently repairs the initial INT fallback by adopting
-    // the first pushed value's descriptor. Keep the signed-zero behavior
-    // covered while the direct empty-Vec regression below exposes codegen.
+    // This is a passing guard, not proof that codegen selected FLOAT: a `Vec`
+    // that was never told its element type adopts the first pushed value's
+    // descriptor. It keeps the signed-zero behavior covered; the empty-Vec
+    // test below is the one that exposes codegen.
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  var a = Vec()\n  a.push(0.0)\n  var b = Vec()\n  b.push(-0.0)\n  if a == b { 1 } else { 0 }\n}\n",
     );
@@ -417,16 +413,10 @@ fn record_schema_cache_is_scoped_by_type_database_not_bare_def_id() {
     );
 }
 
-/// **Rewritten**, not un-ignored (plan §8.2). It asserted that a `Vec` key
-/// stays retrievable after it is mutated, and named the two ways an
-/// implementation could deliver that: "reject that state or keep key hash
-/// identity stable". **D4 chose rejection**, so the program in the original
-/// body no longer compiles and the property it asserted has no subject.
-///
-/// What replaced it is stated where it now lives: the program is refused, with
-/// `Y014`, before it can run. `a_mutable_collection_is_not_a_key`
-/// (`infer_tests.rs`) is the rule; this is the end-to-end fact that a program
-/// which would have exposed Rust's mutated-key failure never reaches the JIT.
+/// A mutable collection is refused as a key, with `Y014`, before the program
+/// can run (ADR-057 D4). `a_mutable_collection_is_not_a_key` (`infer_tests.rs`)
+/// is the rule; this is the end-to-end fact that a program which would expose
+/// Rust's mutated-key failure never reaches the JIT.
 #[test]
 fn a_mutable_collection_key_is_refused_before_it_can_be_mutated() {
     let src = "fn main() -> Int {\n  var key = Vec()\n  key.push(1)\n  var m = Map()\n  m.insert(key, 42)\n  key.push(2)\n  if m.contains(key) { 1 } else { 0 }\n}\n";
@@ -467,14 +457,12 @@ fn heavy_jit_loop_proves_that_automatic_collection_actually_ran() {
     );
 }
 
-/// **IPR-14, and the one thing a result-only parser test cannot see.**
+/// **The one thing a result-only parser test cannot see.**
 ///
-/// The interpreter's `Vec<GcRef>` intermediates were invisible to every root
-/// set. What kept them alive was that the parser never paced: `parser.rs` was
-/// the last caller of `Heap::alloc_unpaced`, so no collection ever ran *inside*
-/// a parse. That made the intermediates a memory-growth bug and nothing worse —
-/// and it is exactly why adding a safepoint before rooting them would have
-/// converted it into a use-after-free (ADR-040 Decision 3, hazard H1).
+/// The interpreter's `Vec<GcRef>` intermediates are invisible to every root set
+/// unless the walker roots them explicitly, and the parser paces, so
+/// collections run *inside* a parse. An unrooted intermediate held across one
+/// of those safepoints is a use-after-free (ADR-040 Decision 3, hazard H1).
 ///
 /// This is the shape that puts collections in the middle of the assembly.
 /// `scan(choice(...))` retries every case at every position, and the `mul(1,x)`
@@ -490,15 +478,14 @@ fn heavy_jit_loop_proves_that_automatic_collection_actually_ran() {
 /// to be far below what was allocated, or nothing was reclaimed at all.
 ///
 /// **What this test does and does not gate.** Its subject is that pacing and
-/// rooting are *consistent*: in a tree with only the two `scope.root(…)` calls
-/// in `walk_scan` and `walk_choice` deleted it answers 574840 against 449400,
-/// which is the number this commit reports. It is not a differential against
-/// the pre-S20 base — it passes at `b2184c8`, where the parser is unpaced and
-/// unrooted, so both assertions hold with no collection inside the parse at
-/// all. The `live_count` guard cannot tell a sweep that ran while the parse was
-/// assembling from one the generated code paced during the `for` loop
-/// afterwards; measuring the parse itself would need a collection counter
-/// sampled across a program that only does `read`.
+/// rooting are *consistent*: with only the two `scope.root(…)` calls in
+/// `walk_scan` and `walk_choice` deleted it answers 574840 against 449400. It
+/// is not a differential against an unpaced parser — with no collection inside
+/// the parse at all, both assertions hold anyway. The `live_count` guard cannot
+/// tell a sweep that ran while the parse was assembling from one the generated
+/// code paced during the `for` loop afterwards; measuring the parse itself
+/// would need a collection counter sampled across a program that only does
+/// `read`.
 #[test]
 fn choice_backtracking_under_allocation_pressure_keeps_every_live_intermediate() {
     // 600 real matches; 15 allocate-then-fail attempts before each one.
@@ -612,20 +599,13 @@ fn template_text_capture_stops_before_the_following_literal() {
 
 /// **A `grid(char)` column is positional, so a space is a cell.**
 ///
-/// D11 made a grid's width a *cell count*, which is right; combined with
-/// `walk_atomic`'s unconditional leading-horizontal-whitespace trim it meant
-/// `char` skipped every space in a row and the space vanished as a cell. So
-/// `grid(char)` over `"ab\na b\n"` counted two cells in both rows and answered
-/// a clean 2x2 grid with `b` shifted left into the space's slot — a **wrong
-/// answer** where the byte-width predecessor gave a wrong shape. A silently
-/// misaligned grid is the worse of the two.
+/// A grid's width is a *cell count*, and `char` reads the scalar at the cursor
+/// without trimming leading horizontal whitespace. §7.4's "surrounding
+/// horizontal space handled by caller" is a rule for the numeric atomics; a
+/// character parser that skips spaces cannot represent one — the row would come
+/// out short and every later cell shifted left into the space's slot.
 ///
-/// `char` now reads the scalar at the cursor. §7.4's "surrounding horizontal
-/// space handled by caller" is a rule for the numeric atomics; a character
-/// parser that skips spaces cannot represent one.
-///
-/// Every input here ends with a newline, which is the case the stage got wrong
-/// everywhere else.
+/// Every input here ends with a newline.
 #[test]
 fn a_grid_of_char_is_positional_so_a_space_is_a_cell() {
     // A space occupies its own column.
@@ -649,8 +629,8 @@ fn a_grid_of_char_is_positional_so_a_space_is_a_cell() {
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 21);
 
-    // A genuinely ragged grid is rejected again, which is the point: §7.5 says
-    // every row has the same cell count, and this input does not.
+    // A genuinely ragged grid is still rejected: §7.5 says every row has the
+    // same cell count, and this input does not.
     let (runtime, _raw, _unit) = run_main_raw_with_input(
         "fn main() -> Int {\n  var g = read grid(char)\n  g.width()\n}\n",
         "ab\na b\n",
@@ -664,10 +644,9 @@ fn a_grid_of_char_is_positional_so_a_space_is_a_cell() {
 
 /// **A row's trailing horizontal whitespace is padding, not a cell.**
 ///
-/// `grid(int)` faulted on a row ending in a space while `matrix(int)` over the
-/// identical file succeeded — two whitespace-token constructors disagreeing
-/// about one ordinary input. §7.5 requires only that every row have the same
-/// cell count.
+/// §7.5 requires only that every row have the same cell count, so the two
+/// whitespace-token constructors — `grid` and `matrix` — read one ordinary
+/// file alike.
 #[test]
 fn a_grid_row_may_end_in_horizontal_whitespace() {
     let src =
@@ -676,8 +655,8 @@ fn a_grid_row_may_end_in_horizontal_whitespace() {
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 2 * 100 + 2 * 10 + 78);
 
-    // The same file through `matrix`, which never had the defect: the two
-    // constructors agree now, and that agreement is the assertion.
+    // The same file through `matrix`: the two constructors agree, and that
+    // agreement is the assertion.
     let src = "fn main() -> Int {\n  var g = read matrix(int)\n  g.width() * 100 + g.height() * 10 + g[1, 1]\n}\n";
     let (runtime, result) = run_main_with_input(src, "12 34 \n56 78 \n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
@@ -685,34 +664,19 @@ fn a_grid_row_may_end_in_horizontal_whitespace() {
 }
 
 /// **Whitespace is data when the parser offered it reads it — for every root
-/// parser and every file ending.** A matrix, not an example, because this class
-/// of defect has now been shipped three times and each time the fix was checked
-/// against one example.
-///
-/// Round one applied `walk_exact`'s "a bounded child must fill its bound" rule
-/// at a root region that ran to the end of the file, so `read ws(int)` over
-/// `"1 2 3\n"` asked `int` to eat the `\n`. Round two trimmed exactly one
-/// terminator off the buffer, and a file ending `"\n\n"` reproduced that
-/// verbatim — `read ws(P)`, `read sep(s, P)` and `read chars(P, skip:)` faulted
-/// with the identical messages, one byte later. Both treated a number of bytes
-/// rather than the rule.
+/// parser and every file ending.** A matrix, not an example: this class of
+/// defect is only visible when one rule is checked across every constructor and
+/// every ending at once.
 ///
 /// The rule is stated in `parser/cursor.rs`: **whitespace is data when the
 /// parser offered it reads it.** The deciding half is the one that can ask —
 /// `walk_exact`, `walk_characters` and `walk_grid_row` forgive a leftover run
 /// through one predicate, and `trailing_blank_run` lets `lines`, `grid` — both
 /// forms, uniform and ragged — and `matrix` drop a trailing blank *line* only
-/// when their parser makes nothing of it. The
-/// parser-independent half decides nothing any more: it drops a trailing run of
-/// **empty** lines, which have no bytes to offer anyone. Together they leave the
-/// terminator to nobody, so the root region is simply the whole buffer.
-///
-/// Round three had those two halves answering the same question differently:
-/// `split_lines` deleted a trailing line of *spaces* without asking, so
-/// `grid(char)` called `"ab\ncd \n"` ragged (a space is a cell) and silently
-/// answered a 2x2 grid for `"ab\ncd\n  \n"` (a line of spaces is not a line).
-/// The `grid(char)` block at the end of this test is the pair that disagreed,
-/// asserted together.
+/// when their parser makes nothing of it. The parser-independent half decides
+/// nothing: `split_lines` drops a trailing run of **empty** lines, which have no
+/// bytes to offer anyone. Together they leave the terminator to nobody, so the
+/// root region is simply the whole buffer.
 ///
 /// Every root constructor §7.5 names is crossed with every ending real input
 /// arrives with. Each cell asserts a **value** and not merely the absence of a
@@ -803,10 +767,9 @@ fn every_root_parser_reads_every_file_ending() {
         }
     }
 
-    // §7.5's own `chars(one_of("^v<>"), skip: whitespace)`, which is the
-    // spelling both earlier rounds broke. Its elements are `Char`s, so the
-    // measure is the count — enough here, because a terminator read as an
-    // element or a value dropped both change it.
+    // §7.5's own `chars(one_of("^v<>"), skip: whitespace)`. Its elements are
+    // `Char`s, so the measure is the count — enough here, because a terminator
+    // read as an element or a value dropped both change it.
     let src = "fn main() -> Int {\n  var v = read chars(one_of(\"^v<>\"), skip: whitespace)\n  v.len()\n}\n";
     for ending in ENDINGS {
         let input = format!("^v<>{ending}");
@@ -824,8 +787,7 @@ fn every_root_parser_reads_every_file_ending() {
     //
     // `rest` consumes the remainder of its region, and at the root the region
     // is the buffer. So it reads the terminator, which is what makes
-    // `parse(t, rest)` the identity on `t` — the property the round-two trim
-    // broke, and the reason the trim is gone rather than merely smaller.
+    // `parse(t, rest)` the identity on `t`.
     let src = "fn main() -> Int {\n  var t = read rest\n  t.len()\n}\n";
     for ending in ENDINGS {
         let input = format!("abc{ending}");
@@ -838,10 +800,8 @@ fn every_root_parser_reads_every_file_ending() {
         );
     }
 
-    // `grid(char)` is positional, so a space is a cell (ADR-079) — and this is
-    // the block where the two halves of the rule used to contradict each other,
-    // seventeen lines apart, one asserting each answer. They are asserted
-    // together now.
+    // `grid(char)` is positional, so a space is a cell (ADR-079). Both halves
+    // of that rule are asserted together here.
     //
     // An ending with no bytes for `char` to read is nobody's, so it is the same
     // 2x2 grid…
@@ -857,10 +817,8 @@ fn every_root_parser_reads_every_file_ending() {
         assert_eq!(result.as_int(), 22, "grid(char) over {input:?}");
     }
     // …a final line of two spaces is a **row of two cells**, because `char`
-    // reads a space. This is the cell round three asserted as 22 while
-    // asserting six lines below that one space on a data row is a cell: a line
-    // of spaces was deleted by `split_lines` before `char` was asked. One
-    // question, one answer — the child's.
+    // reads a space: `split_lines` does not delete a line of spaces before
+    // `char` is asked. One question, one answer — the child's.
     for ending in ["\n  \n", "\n  \n\n", "\n  "] {
         let input = format!("ab\ncd{ending}");
         let (runtime, result) = run_main_with_input(src, &input);
@@ -875,8 +833,7 @@ fn every_root_parser_reads_every_file_ending() {
             "grid(char) over {input:?} — two spaces `char` reads are a third row"
         );
     }
-    // A grid of nothing but spaces is that grid, not an empty one. Round three
-    // answered width 0, height 0 here — four cells silently deleted.
+    // A grid of nothing but spaces is that grid, not an empty one.
     let (runtime, result) = run_main_with_input(src, "  \n  \n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(
@@ -908,11 +865,7 @@ fn every_root_parser_reads_every_file_ending() {
     assert_eq!(result.as_int(), 32, "every row three cells wide");
     // A tab is a character exactly as a space is, so a final line of `" \t "`
     // is a **three-cell row** and the grid is ragged — where the two-space
-    // ending five lines above is a two-cell row that fits. The commit that
-    // moved this cell named it and nothing end-to-end held it: the ragged
-    // direction was pinned only for the all-spaces shape and the tab only at
-    // the substrate, so a regression that made a tab behave unlike a space
-    // would have been caught only indirectly.
+    // ending five lines above is a two-cell row that fits.
     let (runtime, _raw, _unit) = run_main_raw_with_input(src, "ab\ncd\n \t \n");
     assert_eq!(
         runtime.fault(),
@@ -920,24 +873,18 @@ fn every_root_parser_reads_every_file_ending() {
         "\" \\t \" is three cells against a two-cell grid"
     );
 
-    // `lines(rest)` is lossless, which is `rest`'s identity property one level
-    // up: round three's extent trim deleted the third line for every child,
-    // including the children that read it.
+    // `lines(rest)` is lossless: `rest`'s identity property, one level up.
     let src =
         "fn main() -> Int {\n  var v = read lines(rest)\n  v.len() * 10 + v.get(1).len()\n}\n";
     let (runtime, result) = run_main_with_input(src, "ab\ncd\n  \n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 32, "`rest` reads \"  \", so it is a line");
 
-    // **A capture answers from the rule too** — the last construct that did
-    // not. `skip_capture_ws` used to move the cursor before the child was ever
-    // offered the bytes, so the same child on the same file answered one way
-    // bare and another inside a template: silently for `char` (two elements,
-    // not three), as a hard fault for the interior blank line, and as lost
-    // bytes for `text`/`rest`. The only template row in the matrix above is
-    // `` `{n:int} x` ``, whose child cannot read whitespace, so the skip was
-    // invisible to the whole suite. Each pair is asserted together, so the two
-    // spellings cannot drift apart again.
+    // **A capture answers from the rule too**: one child on one file reads the
+    // same bytes bare and inside a template. The only template row in the
+    // matrix above is `` `{n:int} x` ``, whose child cannot read whitespace, so
+    // it cannot see this at all. Each pair is asserted together, so the two
+    // spellings cannot drift apart.
     let pairs: [(&str, &str, &str, i64); 4] = [
         // A trailing line of two spaces is one `char` cell, so it is an element.
         (
@@ -946,8 +893,7 @@ fn every_root_parser_reads_every_file_ending() {
             "read lines(`{a:char}`)",
             3,
         ),
-        // The same rule at an *interior* blank line, where the skip did not
-        // merely lose an element — it faulted where the bare spelling read.
+        // The same rule at an *interior* blank line.
         (
             "lines(char) / lines(`{a:char}`) over an interior blank line",
             "read lines(char)",
@@ -1024,12 +970,11 @@ fn every_root_parser_reads_every_file_ending() {
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 33, "an indented template still matches");
 
-    // **A csv field answers from the rule too.** `csv_tokens` used to
-    // `str::trim()` every field, which decided about whitespace without asking
-    // the field's parser — and `trim()` eats vertical whitespace, so `csv(rest)`
-    // lost the terminator `sep(",", rest)` keeps. §7.5's "ignore horizontal
-    // whitespace around each comma" now falls out of the rule instead: `int`
-    // skips it, `char` reads it, and neither is told which.
+    // **A csv field answers from the rule too.** `csv_tokens` does not trim a
+    // field: that would decide about whitespace without asking the field's
+    // parser. §7.5's "ignore horizontal whitespace around each comma" falls out
+    // of the rule instead — `int` skips it, `char` reads it, and neither is
+    // told which.
     for (label, child, input, tail, want) in [
         (
             "rest keeps the terminator",
@@ -1082,12 +1027,10 @@ fn every_root_parser_reads_every_file_ending() {
 /// **An interior blank line is structure, and no constructor gets to skip
 /// one.**
 ///
-/// `matrix` did: `walk_matrix` skipped every line that trimmed to nothing, so
-/// `matrix(int)` over `"1 2\n  \n3 4\n"` silently answered a 2x2 grid while
-/// `lines(int)` and `grid(digit)` faulted on the identical shape. Three
-/// constructs, three answers, for the one rule they are all supposed to inherit
-/// — and the skip is precisely the per-constructor whitespace special case
-/// ADR-078's corollary tells a later contributor not to write.
+/// `matrix`, `lines` and `grid` all inherit that one rule, and none of them
+/// skips a line that trims to nothing: a per-constructor whitespace special
+/// case is precisely what ADR-078's corollary tells a later contributor not to
+/// write.
 ///
 /// The trailing case is the other half of the pair and is *not* a special case:
 /// a trailing blank line is offered, and belongs to nobody when the parser makes
@@ -1164,21 +1107,15 @@ fn an_interior_blank_line_is_a_row_and_a_trailing_one_is_nobodys() {
 
 /// **One template, two constructs, one answer** (ADR-090).
 ///
-/// `` `items: {items:csv(int)}` `` read two ints as a `lines` element and
-/// swallowed the following line as a `block` item, faulting `at input offset
-/// 13..23: expected the rest of the field`. `lines` had narrowed to a line;
-/// `block` — the only sequencing construct that computed no window — had
-/// narrowed to nothing, and the unbounded-last-part rule did the rest. That is
-/// ADR-078's own defect class: two constructs in one stage disagreeing about
-/// one byte.
+/// `block` computes an item window (`block_item_window`) just as `lines`
+/// narrows to a line. Without one it narrows to nothing, and the
+/// unbounded-last-part rule then lets a `block` item swallow the following
+/// line — ADR-078's own defect class: two constructs in one stage disagreeing
+/// about one byte.
 ///
-/// **Asserted as a pair on purpose, against each other rather than a constant.**
-/// A gate that measured only one side is what let this survive: the `lines` half
-/// is 2 on both binaries.
-///
-/// **Observed red**: with `block_item_window` removed from `walk_block`'s two
-/// call sites, the `block` half faults `ParseFailed` at `13..23`; the `lines`
-/// half is unchanged.
+/// **Asserted as a pair on purpose, against each other rather than a
+/// constant**: the `lines` half reads 2 either way, so a gate that measured
+/// only one side would see nothing.
 #[test]
 fn the_same_template_reads_the_same_bytes_under_lines_and_under_block() {
     let lines = "fn main() -> Int {\n  var v = read lines(`items: {items:csv(int)}`)\n  \
@@ -1209,18 +1146,17 @@ fn the_same_template_reads_the_same_bytes_under_lines_and_under_block() {
 
 /// **A whitespace-only template part is a bound too.**
 ///
-/// The capture bound first looked only for a following literal with *non-empty*
-/// text, so a capture followed by a plain space run — the most ordinary
-/// template shape there is — was not bounded at all: `text` swallowed the rest
-/// of its region and the space run then had nothing left to match.
-/// `` lines(`{name:text} {v:int}`) `` over `"foo 3\n"` reported "expected
-/// whitespace" at the end of the line. §7.9 makes a run of whitespace a
-/// `Literal` whose text is empty and whose policy carries the requirement, and
-/// §7.4's "until the following template literal can match" does not exempt it.
+/// §7.9 makes a run of whitespace a `Literal` whose text is empty and whose
+/// policy carries the requirement, and §7.4's "until the following template
+/// literal can match" does not exempt it. A bound that looked only for a
+/// following literal with *non-empty* text would leave a capture followed by a
+/// plain space run — the most ordinary template shape there is — unbounded, so
+/// `text` would swallow the rest of its region and the run would have nothing
+/// left to match.
 ///
-/// All three spellings, and all three inputs end with a newline: this defect
-/// was found on a real file, and the same template inside `lines` is bounded
-/// per line while the bare one is bounded by the root region.
+/// All three spellings, and all three inputs end with a newline: the same
+/// template inside `lines` is bounded per line while the bare one is bounded by
+/// the root region.
 #[test]
 fn a_capture_is_bounded_by_a_whitespace_only_template_part() {
     // A plain space run. `text` is non-greedy, so the bound is the *earliest*
@@ -1254,9 +1190,7 @@ fn a_capture_is_bounded_by_a_whitespace_only_template_part() {
 
     // A literal the template wrote with **nothing** in front of it carries
     // `WsPolicy::None`, so it is not a run and it absorbs nothing. Both halves
-    // are pinned here because ADR-079 Decision 2 and `capture_bound`'s doc
-    // comment used to explain this case by crediting "the comma's `SpaceRun`"
-    // with eating the space, a mechanism two later decisions removed.
+    // are pinned here.
     let src = "fn main() -> Int {\n  var r = read `{a:int},{b:int}`\n  r.a * 100 + r.b\n}\n";
     // No space at all — which a one-or-more `SpaceRun` could not match.
     let (runtime, result) = run_main_with_input(src, "12,34\n");
@@ -1274,18 +1208,17 @@ fn a_capture_is_bounded_by_a_whitespace_only_template_part() {
 /// **`parse(t, rest)` is the identity on `t`.**
 ///
 /// `run_plan` is the single body behind both `read <parser>` and the host
-/// `parse(text, P)`, and a repair pass trimmed the input file's trailing
-/// terminator inside it. That is a file convention, and the second caller has no
-/// file: the `\n` a *program* wrote into its own literal was deleted, so
-/// `parse("abc\n", rest)` and `parse("abc", rest)` answered the same `Text` and
-/// nothing could recover the difference. §7.4 defines `rest` as "consumes the
-/// remainder of the current region", and at the root the region is the text the
-/// caller handed in.
+/// `parse(text, P)`, and it trims nothing off its input. Trimming a trailing
+/// terminator is a *file* convention and the second caller has no file: it
+/// would delete the `\n` a program wrote into its own literal, so
+/// `parse("abc\n", rest)` and `parse("abc", rest)` would answer the same `Text`
+/// and nothing could recover the difference. §7.4 defines `rest` as "consumes
+/// the remainder of the current region", and at the root the region is the text
+/// the caller handed in.
 ///
-/// The trim is gone rather than narrowed to the `read` path: nothing needed it
-/// once trailing whitespace was left to nobody by rule (ADR-078). This is the
-/// property that says so, and it is the one a re-introduced trim of *any* size
-/// would break.
+/// Nothing needs such a trim, because trailing whitespace is left to nobody by
+/// rule (ADR-078). This is the property that says so, and the one a trim of
+/// *any* size would break.
 #[test]
 fn a_parse_is_the_identity_on_the_text_it_was_given() {
     let src = "fn main() -> Int {\n  \
@@ -1312,30 +1245,27 @@ fn a_parse_is_the_identity_on_the_text_it_was_given() {
 
 /// **Two spellings of one whitespace policy bound a capture alike.**
 ///
-/// `` lines(`{a:text} bar`) `` read `"x y bar"` as `a = "x y"` while
-/// `` lines(`{a:text}\s+bar`) `` over the identical bytes faulted with
-/// `expected literal "bar"` at the interior space. §7.9 lowers `\s+` to its own
-/// empty-text part, and the bound was computed from the *first* following part
-/// that constrains anything — which for the escaped spelling is the space run
-/// alone, and a space run matches at the first space, where `bar` is not.
+/// §7.9 lowers `\s+` to its own empty-text part, so `` `{a:text}\s+bar` `` and
+/// `` `{a:text} bar` `` are one policy written two ways.
 ///
 /// §7.4 says `text` "minimally consumes text until the following template
 /// literal can match". What has to be able to match is the whole run of parts
-/// before the next capture, which is the only reading under which two spellings
-/// of one policy agree. Both directions are pinned: the case that was already
-/// right must stay right.
+/// before the next capture, which is the only reading under which the two
+/// spellings agree: a bound computed from the *first* following part that
+/// constrains anything would stop the escaped spelling at the first space,
+/// where `bar` is not. Both directions are pinned.
 #[test]
 fn two_spellings_of_one_whitespace_policy_bound_a_capture_alike() {
     let escaped = "fn main() -> Text {\n  var r = read lines(`{a:text}\\s+bar`)\n  r.get(0).a\n}\n";
     let plain = "fn main() -> Text {\n  var r = read lines(`{a:text} bar`)\n  r.get(0).a\n}\n";
 
-    // Past an interior space — the half that faulted.
+    // Past an interior space.
     for src in [escaped, plain] {
         let (runtime, result) = run_main_with_input(src, "x y bar\n");
         assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
         assert_eq!(result.as_text(), "x y");
     }
-    // No interior space — the half that already worked, and must keep working.
+    // No interior space.
     for src in [escaped, plain] {
         let (runtime, result) = run_main_with_input(src, "x bar\n");
         assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
@@ -1351,15 +1281,13 @@ fn two_spellings_of_one_whitespace_policy_bound_a_capture_alike() {
     assert_eq!(result.as_text(), "x");
 }
 
-/// **IPR-11 without growing `word`'s delimiter set.**
+/// **A capture's region bounds `word`, not `word`'s delimiter set.**
 ///
-/// `word` stops on space, tab, `,`, `\n` and `\r` and nothing else, so
-/// `{w:word}-to-{x:word}` let the first `word` swallow the `-to-`. The audit's
-/// reading was that the delimiter set is too small. It is not: growing it to
-/// "every template delimiter" breaks `sep(" -> ", word)` and any `word` that
-/// legitimately contains a `-`. What was missing is the *region* — a capture
-/// bounded by the literal that follows it stops there whatever its own
-/// delimiter rule says, so the set stays minimal and documented.
+/// `word` stops on space, tab, `,`, `\n` and `\r` and nothing else. Growing
+/// that set to "every template delimiter" would break `sep(" -> ", word)` and
+/// any `word` that legitimately contains a `-`; instead a capture bounded by
+/// the literal that follows it stops there whatever its own delimiter rule
+/// says, so the set stays minimal and documented.
 ///
 /// Both halves are pinned here: the bounded `word` stops at the literal, and a
 /// bare `ws(word)` still reads `a-b` as one word.
@@ -1393,17 +1321,13 @@ fn a_bounded_word_capture_stops_at_its_region_end() {
     );
 }
 
-/// **IPR-07 and D-S20-A.** A collection's element descriptor and the objects it
-/// holds must be the same type.
+/// A collection's element descriptor and the objects it holds must be the same
+/// type.
 ///
-/// AMENDED (S20). The declared return type was `Vec[Char]`, because
-/// `synthesize` hardcoded `chars(P, skip:) -> Vec[Char]` regardless of `P` —
-/// which is precisely the disagreement this test exists to catch, written into
-/// the test's own source. `chars(int, skip: none)` produces `Int` objects, so
-/// its type is `Vec[Int]`; the static type is derived from the child now, the
-/// runtime descriptor is derived from the same child, and the annotation says
-/// what the program actually returns. `chars(one_of("LR"))` is still
-/// `Vec[Char]`, because `one_of` synthesizes `Char`.
+/// `chars(P, skip:)` takes its element type from `P`, and both the static type
+/// and the runtime descriptor are derived from that same child:
+/// `chars(int, skip: none)` is `Vec[Int]`, and `chars(one_of("LR"))` is
+/// `Vec[Char]` because `one_of` synthesizes `Char`.
 #[test]
 fn chars_result_descriptor_matches_the_values_it_contains() {
     let src = "fn main() -> Vec[Int] {\n  read chars(int, skip: none)\n}\n";
@@ -1423,8 +1347,8 @@ fn chars_result_descriptor_matches_the_values_it_contains() {
 
 #[test]
 fn one_generic_function_is_instantiated_at_int_and_text_in_one_program() {
-    // The pre-existing test named "two clones" calls `id` twice at Int and
-    // therefore proves clone reuse, not distinct monomorphic instantiations.
+    // Two calls at the *same* type would only prove clone reuse; these are two
+    // distinct monomorphic instantiations in one program.
     let (runtime, result) = run_main(
         "fn id(x) { x }\nfn main() -> Int {\n  var word = id(\"four\")\n  id(38) + word.len()\n}\n",
     );
@@ -1432,17 +1356,9 @@ fn one_generic_function_is_instantiated_at_int_and_text_in_one_program() {
     assert_eq!(result.as_int(), 42);
 }
 
-// The tests below are ignored because the current implementation can dispatch
-// through a descriptor for the wrong payload shape (or return an invalid raw
-// GcRef). They are still executable, focused handover regressions; keeping them
-// out of the default process prevents a known bug from turning a test failure
-// into host-language undefined behavior.
-
 #[test]
 fn tuple_schema_uses_the_unit_descriptor_for_unit_elements() {
-    // `push` returns Unit, which is the shortest Unit-valued expression the
-    // grammar accepts today: a `{ ... }` block in statement position is read as
-    // a call of the following parenthesized expression until FE-04 lands (S12).
+    // `push` returns Unit, so `nothing` is a Unit-valued local.
     let (runtime, result) = run_main(
         "fn main() {\n  var xs = Vec()\n  var nothing = xs.push(1)\n  var pair = (nothing, 7)\n  pair\n}\n",
     );
@@ -1497,8 +1413,8 @@ fn grid_text_row_preserves_the_grid_cell_descriptor() {
     );
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     let payload = result.payload::<VecPayload>();
-    // SAFETY: result is a Vec. This avoids formatting the Text elements
-    // through the currently incorrect Int descriptor.
+    // SAFETY: result is a Vec. Inspecting the descriptor does not reinterpret
+    // any element payload.
     let descriptor = unsafe { &*(*payload).element_descriptor };
     assert_eq!(
         descriptor.id(),
@@ -1507,15 +1423,10 @@ fn grid_text_row_preserves_the_grid_cell_descriptor() {
     );
 }
 
-/// S18 exit criterion (RT-15). `Grid.find`'s static type is now
-/// `Option[(Int, Int)]`, so a miss is a `None` — a value of the type the
-/// program was promised — rather than the Unit sentinel wearing a tuple type.
-///
-/// The assertion was `== TUPLE.id()` while the test was ignored, which was the
-/// best a point-typed row could ask for: "whatever comes back, it must at least
-/// be the shape the signature claims". D1 changed the signature, so the test
-/// states the contract instead — the program matches on the answer, and both
-/// arms are reachable from source.
+/// `Grid.find`'s static type is `Option[(Int, Int)]`, so a miss is a `None` — a
+/// value of the type the program was promised — rather than the Unit sentinel
+/// wearing a tuple type. The program matches on the answer, and both arms are
+/// reachable from source.
 #[test]
 fn absent_grid_find_has_no_unit_under_a_tuple_type() {
     let src = "fn main() -> Int {\n\
@@ -1552,12 +1463,9 @@ fn absent_grid_find_has_no_unit_under_a_tuple_type() {
     );
 }
 
-/// S18 exit criterion (RT-14). The same for `Map.get`, whose result type is now
-/// `Option[V]` (§5.7 spelled that signature all along).
-///
-/// The assertion was `== INT.id()` while the test was ignored, for the same
-/// reason as its `Grid.find` sibling; it is a source-level unwrap now, so what
-/// it pins is the language rule rather than a descriptor id.
+/// The same for `Map.get`, whose result type is `Option[V]` (§5.7). It is a
+/// source-level unwrap, so what it pins is the language rule rather than a
+/// descriptor id.
 #[test]
 fn absent_map_get_has_no_unit_under_the_value_type() {
     let unwrap = "fn unwrap(o: Option[Int]) -> Int {\n  match o {\n    Some(v) => v,\n    None => 0 - 1,\n  }\n}\n";
@@ -1600,8 +1508,8 @@ fn empty_element_returning_sinks_fault_instead_of_returning_uninitialized_gc_ref
     ];
 
     for (name, source) in cases {
-        // Use the integer return channel so the current zero/uninitialized
-        // result is never materialized as Rust's NonNull-backed GcRef.
+        // Use the integer return channel so a zero result would never be
+        // materialized as Rust's NonNull-backed GcRef.
         let (runtime, raw_result, unit_addr) = run_main_raw_with_input(source, "");
         assert_eq!(
             runtime.fault(),
@@ -1622,11 +1530,11 @@ fn text_ordering_is_lexicographic_without_payload_reinterpretation() {
     assert!(result.as_bool());
 }
 
-/// P0-12's other half for `Text`: the eight-byte payload load compared the
-/// `TextPayload` *discriminant*, so every pair of owned strings was equal and
-/// every owned/slice pair was not. Equality has to move to the descriptor with
-/// ordering, or `"apple" < "banana"` and `"apple" == "banana"` disagree about
-/// what a `Text` is.
+/// `Text` equality dispatches through the descriptor, as ordering does. An
+/// eight-byte payload load would compare the `TextPayload` *discriminant* —
+/// every pair of owned strings equal, every owned/slice pair not — and then
+/// `"apple" < "banana"` and `"apple" == "banana"` would disagree about what a
+/// `Text` is.
 #[test]
 fn text_equality_compares_bytes_not_the_payload_discriminant() {
     let (runtime, result) = run_main("fn main() -> Bool {\n  \"apple\" == \"banana\"\n}\n");
@@ -1641,29 +1549,12 @@ fn text_equality_compares_bytes_not_the_payload_discriminant() {
     assert!(result.as_bool());
 }
 
-/// **Rewritten**, not merely un-ignored: its input changed from `aβ\n` to
-/// `ab\n`.
+/// Two `Char` cells are ordered by their four-byte payloads, not by eight bytes
+/// read from one. `ab` is enough input to reach that width.
 ///
-/// The non-ASCII cell was unparseable for a reason that has nothing to do with
-/// ordering — the `grid(char)` cell parser worked in bytes, so `β` was an
-/// "expected char" mismatch — and `read grid(char)` was then the only source of
-/// `Char` values in the language. That is an input-parser defect, S19/S20's
-/// territory alongside IPR-06's `grid(int)` granularity, and leaving it here
-/// would have made an ordering test go red until a parser fix landed.
-///
-/// **Both halves of that reason have since expired.** S20 made the cell parser
-/// read Unicode scalars, so `read grid(char)` over `aβ` answers `β` today; and
-/// ADR-086 made `t[i]` answer a `Char`, so `"β"[0]` writes one. The input is
-/// left at `ab\n` regardless: what this test owns is the four-byte payload
-/// width, which `ab` reaches, and rewriting it to chase a reason that no longer
-/// applies would change what it pins.
-///
-/// What survives is the property P0-12 owns and this input still reaches: two
-/// `Char` cells are ordered by their four-byte payloads, not by eight bytes
-/// read from one. `small_scalars_are_extracted_at_their_own_width` pins the
-/// lowering that makes it so, and
-/// `char_heap_entries_order_by_unicode_scalar_value` (praxis-runtime) covers
-/// the non-ASCII values the parser cannot yet deliver.
+/// `small_scalars_are_extracted_at_their_own_width` pins the lowering that
+/// makes it so, and `char_heap_entries_order_by_unicode_scalar_value`
+/// (praxis-runtime) covers non-ASCII scalar values.
 #[test]
 fn char_ordering_uses_unicode_scalar_values_without_out_of_bounds_reads() {
     let (runtime, result) = run_main_with_input(
@@ -1674,13 +1565,11 @@ fn char_ordering_uses_unicode_scalar_values_without_out_of_bounds_reads() {
     assert!(result.as_bool());
 }
 
-/// P0-08: `Int` arithmetic lowers natively.
-///
-/// The old shape boxed both operands with `praxis_alloc_int`, called the
-/// wrapper, and `praxis_int_load`ed the result. That `int_load` ran *before*
-/// the fault check, so on overflow it read eight bytes past the size-0 Unit
-/// payload the wrapper returned. Asserting on the emitted symbols is what keeps
-/// the pair from coming back.
+/// `Int` arithmetic lowers natively, and asserting on the emitted symbols is
+/// what keeps the boxing shape from coming back: boxing both operands with
+/// `praxis_alloc_int` and `praxis_int_load`ing the wrapper's result puts the
+/// load *before* the fault check, so on overflow it reads eight bytes past the
+/// size-0 Unit payload the wrapper returns.
 #[test]
 fn int_arithmetic_emits_no_boxing_wrappers() {
     let src = "fn main() -> Int { 2 + 3 * 4 - 1 }";
@@ -1835,7 +1724,7 @@ fn runtime_symbols_emitted_for(src: &str) -> std::collections::BTreeSet<&'static
     for func in &mut funcs {
         annotate(func);
         // Every host verifies after annotating; the tests are a host too, and
-        // are the only one that runs the whole corpus (MIR-10).
+        // are the only one that runs the whole corpus.
         if let Err(errs) = praxis_mir::verify(func) {
             panic!("{}", praxis_mir::verify::report(&errs));
         }
@@ -1854,12 +1743,11 @@ fn runtime_symbols_emitted_for(src: &str) -> std::collections::BTreeSet<&'static
         .collect()
 }
 
-/// RT-12, end to end. Each JIT generation interns its own schemas, so two
-/// compiles of one program produce two `RecordSchema` allocations for one
-/// record type. Equality compared those *addresses*, so a `Point { x: 1, y: 2 }`
-/// from one compile was not equal to the identical value from the next — which
-/// is what the debugger hits every time it evaluates `p` in its own module, and
-/// why it works around the problem by sharing one evaluation generation.
+/// Each JIT generation interns its own schemas, so two compiles of one program
+/// produce two `RecordSchema` allocations for one record type. Equality must
+/// not compare those *addresses*, or a `Point { x: 1, y: 2 }` from one compile
+/// is not equal to the identical value from the next — the comparison the
+/// debugger performs every time it evaluates `p` in its own module.
 ///
 /// Both records live on one heap here, so this is the comparison a program
 /// could actually perform.
@@ -1901,10 +1789,10 @@ fn records_from_two_generations_are_equal_when_their_type_is() {
 /// The comparison lowerings a program emits, as a set of tags: which scalar
 /// widths were extracted, and which of the four compare instructions ran.
 ///
-/// P0-12 is a lowering choice, so asserting on the choice is what keeps it
-/// fixed — a later refactor that reintroduces "extract eight bytes and compare"
-/// for a `Text` or a `Char` fails here rather than at whatever the payload
-/// happened to hold.
+/// Comparison width is a lowering choice, so asserting on the choice is what
+/// keeps it fixed — a refactor that reintroduces "extract eight bytes and
+/// compare" for a `Text` or a `Char` fails here rather than at whatever the
+/// payload happened to hold.
 fn comparison_shapes_for(src: &str) -> std::collections::BTreeSet<String> {
     let map = SourceMap::new();
     let file = map.intern("adversarial_audit.px", src);
@@ -1935,7 +1823,7 @@ fn comparison_shapes_for(src: &str) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
-/// P0-12. A `Text` comparison — of either kind — goes through the descriptor.
+/// A `Text` comparison — of either kind — goes through the descriptor.
 /// It must never extract a scalar from a `Text`: the payload is an enum of a
 /// `Box<str>` and a `(GcRef, usize, usize)` slice, so an eight-byte load reads
 /// the discriminant or a pointer.
@@ -1962,23 +1850,20 @@ fn text_comparison_never_extracts_a_scalar_from_the_payload() {
     );
 }
 
-/// P0-12. A `Char` payload is four bytes and a `Bool` one; both were extracted
-/// as `Int`, an eight-byte load from a smaller, differently-aligned payload.
+/// A `Char` payload is four bytes and a `Bool` one, so neither may be extracted
+/// as an `Int` — an eight-byte load from a smaller, differently-aligned
+/// payload.
 ///
-/// The `ScalarKind` this pins carries more weight since ADR-102: it no longer
-/// only selects which wrapper is called, it selects the **inline** load's
-/// descriptor and width. A defect of this class would now be an out-of-bounds
-/// read in generated code rather than one inside a callee.
-/// `a_bool_extract_reads_one_byte_and_a_char_four` (praxis-codegen-cranelift's
-/// `lower.rs`) is the other half — this pins the kind, that pins the
-/// instruction the kind selects.
+/// The `ScalarKind` this pins selects the **inline** load's descriptor and
+/// width (ADR-102), not merely which wrapper is called, so a defect of this
+/// class is an out-of-bounds read in generated code rather than one inside a
+/// callee. `a_bool_extract_reads_one_byte_and_a_char_four`
+/// (praxis-codegen-cranelift's `lower.rs`) is the other half — this pins the
+/// kind, that pins the instruction the kind selects.
 #[test]
 fn small_scalars_are_extracted_at_their_own_width() {
-    // `grid(char)` was the only source of `Char` values when this was written.
-    // It is not since ADR-086: `Text.get`/`t[i]` answer a `Char` too, so
-    // `"#"[0]` names one. The language still has no char literal (D19). The
-    // property under test is unaffected either way — this reads a grid because
-    // that is what it read when P0-12 was measured.
+    // The language has no char literal, so a `Char` value comes either from
+    // `grid(char)` or from `Text.get`/`t[i]` (ADR-086). This reads a grid.
     let chars = comparison_shapes_for(
         "fn main() -> Bool {\n  var g = read grid(char)\n  g.get(0, 0) < g.get(1, 0)\n}\n",
     );
@@ -1995,13 +1880,12 @@ fn small_scalars_are_extracted_at_their_own_width() {
     let bools = comparison_shapes_for(
         "fn main() -> Bool {\n  var a = 1 == 1\n  var b = 2 == 2\n  a == b\n}\n",
     );
-    // Since ADR-121 the strongest form of this is what actually happens: `a` and
-    // `b` are promoted to `Scalar(Bool)` slots, so the comparison is an
-    // `IntCmp` over two raw words and there is **no** payload read to get the
-    // width of. The property under test is "a `Bool` is never read as an
-    // eight-byte `Int`", and no read at all satisfies it more completely than a
-    // one-byte read does — so the assertion is the absence of the defect, not
-    // the presence of the instruction that used to avoid it.
+    // `a` and `b` are promoted to `Scalar(Bool)` slots (ADR-121), so the
+    // comparison is an `IntCmp` over two raw words and there is **no** payload
+    // read to get the width of. The property under test is "a `Bool` is never
+    // read as an eight-byte `Int`", and no read at all satisfies it more
+    // completely than a one-byte read does — so the assertion is the absence of
+    // the defect, not the presence of a particular instruction.
     assert!(
         !bools.contains("extract:Int"),
         "a Bool is never read as an eight-byte Int: {bools:?}"
@@ -2013,7 +1897,7 @@ fn small_scalars_are_extracted_at_their_own_width() {
     );
 }
 
-/// MIR-01: a shadow slot whose local has died must be nulled, or the collector
+/// A shadow slot whose local has died must be nulled, or the collector
 /// keeps reading it and the object never becomes garbage.
 ///
 /// The two programs differ only in whether `xs` is read again after the loop
@@ -2030,16 +1914,13 @@ fn small_scalars_are_extracted_at_their_own_width() {
 /// three thousand elements real allocations, which is what makes "freed almost
 /// nothing" a statement about the shadow slot rather than about interning.
 ///
-/// **The second loop has to allocate, and saying so is ADR-121's doing.** Its
-/// job is to run the collector while `main`'s frame is live — a slot that is
-/// never scanned cannot be observed to have been nulled — and it used to do
-/// that as a side effect of `sum = sum + j` boxing a fresh out-of-range `Int`
-/// per iteration. Promotion turns both `sum` and `j` into `Scalar` slots, so
-/// that loop became pure register arithmetic that allocates nothing, no
-/// collection ran in *either* program, and the two heaps came out at 3003 and
-/// 3004 live objects — a difference of one, and the test read it as `xs` still
-/// being rooted. The pressure is now a `Vec` per iteration that dies at the end
-/// of it, which is allocation no scalar optimization can remove.
+/// **The second loop has to allocate.** Its job is to run the collector while
+/// `main`'s frame is live — a slot that is never scanned cannot be observed to
+/// have been nulled. Scalar promotion (ADR-121) turns `sum` and `j` into
+/// `Scalar` slots, so arithmetic over them allocates nothing and no collection
+/// would run in *either* program. The pressure is therefore a `Vec` per
+/// iteration that dies at the end of it, which no scalar optimization can
+/// remove.
 #[test]
 fn a_dead_local_stops_being_reachable_from_its_frame() {
     const FILL_AND_LOOP: &str = "\
@@ -2083,10 +1964,10 @@ fn main() -> Int {
 /// `praxis_mir::build` cannot state.
 ///
 /// The failure this rules out is not "the wrong number": reading a `Set`'s
-/// payload through `praxis_vec_get` hung or killed the process, and a
-/// `MinHeap`'s was a silently wrong answer — the two failure modes `IterPlan`
-/// exists to prevent, and the reason the pipeline had to stop opening its source
-/// with a hardcoded `Vec` accessor pair.
+/// payload through `praxis_vec_get` hangs or kills the process, and a
+/// `MinHeap`'s is a silently wrong answer — the two failure modes `IterPlan`
+/// exists to prevent, and the reason a pipeline never opens its source with a
+/// hardcoded `Vec` accessor pair.
 #[test]
 fn a_pipeline_over_a_snapshotted_collection_answers_from_every_member() {
     let (runtime, result) = run_main(
@@ -2264,14 +2145,16 @@ fn a_conversion_builds_the_collection_it_names() {
     );
 }
 
-/// **Decision 5.** `sorted_by_key` orders by the key the closure extracts, and
-/// the sort is stable — so the answer is a function of the input alone.
+/// **ADR-127 Decision 5.** `sorted_by_key` orders by the key the closure
+/// extracts, and the sort is stable — so the answer is a function of the input
+/// alone.
 ///
 /// The whole point is a pipeline whose item is a **pair**: no composite is
-/// orderable in the *source language* (ADR-045; the container order a `Map` now
+/// orderable in the *source language* (ADR-045; the container order a `Map`
 /// walks its keys in is a different question, ADR-138), so `sorted` is
-/// unavailable the moment the source is a `Map` or a `Counter`, and "the most
-/// common value" had no spelling.
+/// unavailable the moment the source is a `Map` or a `Counter`. `max_by`
+/// reaches the single most common value; `sorted_by_key` is what spells "the
+/// *n* most common".
 #[test]
 fn sorted_by_key_orders_a_pair_by_the_key_it_carries() {
     let (runtime, result) = run_main(
@@ -2293,8 +2176,8 @@ fn sorted_by_key_orders_a_pair_by_the_key_it_carries() {
 
     // A `Text` key, which is the case a payload-bytes comparison gets wrong: a
     // `Text` is a pointer-and-length structure, so ordering one by its first
-    // eight bytes compares *addresses* (P0-12). The key goes through the
-    // descriptor's `compare`, as `sorted` does.
+    // eight bytes compares *addresses*. The key goes through the descriptor's
+    // `compare`, as `sorted` does.
     let (runtime, result) = run_main(
         "fn main() -> Int {\n  var v = Vec()\n  v.push(3)\n  v.push(1)\n  v.push(2)\n  \
          v.sorted_by_key(|x| \"abc\"[x - 1])[0]\n}\n",

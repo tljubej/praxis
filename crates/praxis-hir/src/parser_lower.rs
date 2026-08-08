@@ -1,5 +1,5 @@
 //! Conversion of the rowan `ParserExpr` tree into the input-parser `ParserAst`
-//! (§7.9, M6).
+//! (§7.9).
 //!
 //! The ordinary language parser emits rowan nodes (`PARSER_EXPR`,
 //! `PARSER_ATOM`, `PARSER_TEMPLATE`, `PARSER_CALL`, …). This module walks that
@@ -45,8 +45,8 @@ pub fn analyze_parser_expr(
             return None;
         }
     };
-    // Registration is bounded and can refuse (IP-12). A refusal is a
-    // diagnostic, not a wrapped index into somebody else's plan.
+    // Registration is bounded and can refuse. A refusal is a diagnostic, not a
+    // wrapped index into somebody else's plan.
     let plan = match register_plan(lower_to_plan(&ast)) {
         Ok(id) => id,
         Err(e) => {
@@ -190,13 +190,9 @@ fn convert_parser_expr(
 
 /// Convert a template's `BacktickTemplate` token into `TemplatePart`s.
 ///
-/// The scanner returns the parts **complete** now, each capture carrying the
-/// parser its own body names (IP-05). This function used to throw that away and
-/// rebuild every capture by calling `extract_capture_kind(&template_text,
-/// &name)` — which rescanned the whole template from the beginning, returned
-/// the *first* recognizable atomic name, and ignored the `name` parameter
-/// entirely. So `` `{name:word},{port:int}` `` typed both captures `Text`, and
-/// a template it recognized nothing in defaulted to `Int`.
+/// The scanner returns the parts **complete**, each capture carrying the parser
+/// its own body names, so this function's job is to hand it the template's
+/// interior and rebase the spans it hands back onto the file.
 fn convert_template(
     parser_expr: &ParserExpr,
     file: FileId,
@@ -206,14 +202,13 @@ fn convert_template(
         return Vec::new();
     };
     let text = token.text().to_string();
-    // **An unterminated template has no interior**, and scanning one anyway is
-    // the IP-03 class: the lexer emits the token it managed to read, which for
-    // `` read `{int` `` runs to the end of the file, and `unwrap_or(&text)` then
-    // handed the scanner text whose offsets mean nothing. It answered with a
-    // second diagnostic — "malformed capture body at byte 5: unterminated
-    // nested template" — describing something the source does not contain, at a
-    // position that is not where anything is. The lexer has already reported
-    // `T002` and it is the truthful report; there is nothing to add.
+    // **An unterminated template has no interior**, so there is nothing to
+    // scan. The lexer emits the token it managed to read, which for
+    // `` read `{int` `` runs to the end of the file; scanning that text anyway
+    // would answer with a second diagnostic describing something the source
+    // does not contain, at a position that is not where anything is. The lexer
+    // has already reported `T002` and it is the truthful report; there is
+    // nothing to add.
     let Some(interior) = text.strip_prefix('`').and_then(|s| s.strip_suffix('`')) else {
         return Vec::new();
     };
@@ -230,20 +225,19 @@ fn convert_template(
             parts
         }
         Err(e) => {
-            // **The code comes from the error** (IP-06). Every `ScanError` used
-            // to be flattened into `TemplateScan` (I030) here, so the codes
-            // ADR-051 allocated for a bad capture name (I011), an unknown
-            // capture kind (I012) and an unknown constructor (I013) were
-            // constructed nowhere in the tree. `ScanError::code` is an
+            // **The code comes from the error.** ADR-051 allocates a distinct
+            // code for a bad capture name (I011), an unknown capture kind
+            // (I012) and an unknown constructor (I013); flattening every
+            // `ScanError` into `TemplateScan` (I030) here would leave those
+            // three constructed nowhere in the tree. `ScanError::code` is an
             // exhaustive match, so a new variant has to decide.
             let at = base + e.byte_offset() as u32;
             let end = u32::from(token.text_range().end());
             // An error about a *name* underlines the name: the scanner anchors
-            // at an offset, and a caret with no width is all a caller could
-            // draw until the error started carrying what it could not resolve.
-            // Everything else keeps the point it was anchored at, because for
-            // an unterminated capture or a nesting bound there is no word to
-            // underline.
+            // at an offset, and the width comes from the word the error carries
+            // as the one it could not resolve. Everything else keeps the point
+            // it was anchored at, because for an unterminated capture or a
+            // nesting bound there is no word to underline.
             let name = e.unknown_parser_name();
             let extent = match name {
                 Some(name) => {
@@ -266,7 +260,7 @@ fn convert_template(
 ///
 /// The **token**, not its text: the capture bodies' spans are relative to the
 /// template's interior and have to be rebased onto the file, which needs the
-/// token's start (IP-05).
+/// token's start.
 fn find_template_token(parser_expr: &ParserExpr) -> Option<praxis_syntax::SyntaxToken> {
     use rowan::NodeOrToken;
     parser_expr
@@ -285,17 +279,15 @@ fn find_template_token(parser_expr: &ParserExpr) -> Option<praxis_syntax::Syntax
 /// The **whole** of §7.5's argument handling lives in
 /// [`praxis_input_parser::build_call`], which checks the call's shape before it
 /// builds anything and which the capture-body parser shares. This function's
-/// job is only to turn rowan into a [`CallArg`] list. It used to be an
-/// `if ctor_name == "…"` chain that ran ahead of the arity table, took
-/// `args.into_iter().next()` and dropped the rest (IP-07).
+/// job is only to turn rowan into a [`CallArg`] list.
 fn convert_constructor_call(
     parser_expr: &ParserExpr,
     file: FileId,
     diagnostics: &mut Vec<Diagnostic>,
     span: Span,
 ) -> Option<ParserAst> {
-    // The PARSER_EXPR wraps a PARSER_CALL; descend to find it. A `?` here was
-    // one more silent `None`: nothing downstream would have reported it.
+    // The PARSER_EXPR wraps a PARSER_CALL; descend to find it. A `?` here would
+    // be a silent `None`: nothing downstream would report it.
     let Some(parser_call) = parser_expr
         .syntax()
         .children()
@@ -312,9 +304,9 @@ fn convert_constructor_call(
     let reported_before = diagnostics.len();
     let (ctor_name, args, all_args_converted) = extract_call_args(&parser_call, file, diagnostics);
 
-    // An unknown constructor used to be `Constructor::from_keyword(&name)?` —
-    // a `?` on an `Option`, so `read frobnicate(int)` returned `None` with no
-    // diagnostic at all and the whole `read` silently became nothing (IP-07).
+    // An unknown constructor reports rather than answering a bare `None`: a
+    // `?` on the `Option` would make `read frobnicate(int)` compile to nothing
+    // with no diagnostic at all.
     let Some(ctor) = Constructor::from_keyword(&ctor_name) else {
         // The **name's** span, not the call's: it is what the report is about,
         // and it is what a fix replaces (§15.3, ADR-132). Falling back to the
@@ -340,12 +332,9 @@ fn convert_constructor_call(
     // the shortened list would report a *second*, wrong thing — an arity error
     // naming an argument the source did write.
     //
-    // "Has already reported" is an assumption, and it was **false**: the
-    // `repeated(...)` unwrapper answered `None` for an empty argument list
-    // without saying anything, so `sections(boards: repeated())` compiled to a
-    // `read` that produced nothing, with zero diagnostics. Every path that
-    // clears the flag now reports — and rather than trust that, this checks it,
-    // because a silent `None` here is invisible by construction.
+    // "Has already reported" is a claim about every path that clears the flag,
+    // and this checks it rather than trusting it, because a silent `None` here
+    // is invisible by construction.
     if !all_args_converted {
         if diagnostics.len() == reported_before {
             diagnostics.push(err_diag(
@@ -383,8 +372,8 @@ fn extract_call_args(
 ) -> (String, Vec<CallArg>, bool) {
     // The constructor's name comes first, on purpose: whether a `name:`
     // argument is a keyword (`chars`'s `skip:`, `grid`'s `fill:`) or a named
-    // parser is **the constructor's** question, and this used to be answered
-    // from the argument's name alone.
+    // parser is **the constructor's** question, not one the argument's own name
+    // can answer.
     let name = parser_call
         .children()
         .find(|c| c.kind() == praxis_syntax::SyntaxKind::PATH_EXPR)
@@ -407,18 +396,17 @@ fn extract_call_args(
             praxis_syntax::SyntaxKind::PARSER_EXPR | praxis_syntax::SyntaxKind::PARSER_TEMPLATE => {
                 if let Some(pe) = praxis_ast::ParserExpr::cast(arg.clone()) {
                     // A bare keyword that is not a parser — today
-                    // only `grid(P, ragged, fill: v)`'s `ragged`.
-                    // It used to be *skipped*, so the shape table
-                    // could not require it and a lone `fill:`
-                    // silently produced the ragged parser.
+                    // only `grid(P, ragged, fill: v)`'s `ragged`. It
+                    // is carried as a `CallArg::Flag` so the shape
+                    // table can require it.
                     //
                     // *Which* name that is is `Constructor::flag_arg`'s
-                    // question, like `skip:`/`fill:` below: read from
-                    // the bare name alone, as this was, `ragged` is a
-                    // flag in **every** constructor's argument list, so
-                    // `lines(ragged)` was told it had written a flag
-                    // where a parser belongs and the word was reserved
-                    // everywhere rather than in `grid`.
+                    // question, like `skip:`/`fill:` below. Read from
+                    // the bare name alone, `ragged` would be a flag in
+                    // **every** constructor's argument list, so
+                    // `lines(ragged)` would be told it had written a
+                    // flag where a parser belongs and the word would be
+                    // reserved everywhere rather than in `grid`.
                     if let Some(flag) = flag_arg {
                         if pe.text().as_deref() == Some(flag) {
                             args.push(CallArg::Flag(flag.to_string()));
@@ -461,7 +449,7 @@ fn extract_call_args(
                 }
             }
             praxis_syntax::SyntaxKind::PARSER_NAMED_ARG => {
-                // A named argument `name: parser_expr` (M9, §7.5).
+                // A named argument `name: parser_expr` (§7.5).
                 if let Some(na) = ParserNamedArg::cast(arg.clone()) {
                     let Some(name) = na.name() else { continue };
                     // A **literal** value (`fill: 0`, `fill: "-"`): the grammar
@@ -492,13 +480,12 @@ fn extract_call_args(
                         // "unknown atomic parser" diagnostic fires.
                         // Only for the constructor that has one: a
                         // `block` item or a `sections` field called
-                        // `fill` is a field, and it used to be minted
-                        // as a keyword and then dropped in silence.
+                        // `fill` is a field, not a keyword argument.
                         if Some(name.as_str()) == keyword_arg {
                             // **Not `unwrap_or_default`.** A value the AST
                             // cannot read is not the empty string; laundering
-                            // it into one is how `fill: 0` built a ragged grid
-                            // padded with `""` and said nothing.
+                            // it into one would pad a `fill: 0` grid with `""`
+                            // and say nothing.
                             let Some(raw_text) = value.text() else {
                                 diagnostics.push(err_diag(
                                     file,
@@ -606,10 +593,9 @@ fn parser_int_literal(raw: &str) -> Option<i64> {
 /// argument is not a well-formed text literal.
 ///
 /// Delegates to [`praxis_syntax::literal::unquote_text`] — the workspace's one
-/// decoder (IP-08). The predecessor trimmed quote *characters* off both ends
-/// and never unescaped, so `sep("\t", int)` split on the two characters `\` and
-/// `t`, `one_of("\"")` was broken, and `sep("\"\"", int)` lost both real quotes
-/// to `trim_end_matches`.
+/// decoder — so escapes mean here what they mean everywhere else: `sep("\t",
+/// int)` splits on a tab rather than on the two characters `\` and `t`, and an
+/// escaped quote survives instead of being trimmed off as a delimiter.
 fn unquote_parser_literal(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if !praxis_syntax::literal::is_text_literal(trimmed) {
@@ -626,13 +612,12 @@ fn rowan_span(node: &rowan::SyntaxNode<praxis_syntax::PraxisLanguage>) -> Span {
 /// The **whole** argument list of a `repeated(...)` tail marker, or `None` if
 /// something in it did not convert (which has already reported).
 ///
-/// This used to be `unwrap_repeated_child`: a `find_map` over the argument
-/// list's children that returned the *first* parser expression and ignored
-/// everything else. So `repeated(matrix(int), word, int)` lowered as
-/// `repeated(matrix(int))` — two arguments silently gone — and `repeated()`
-/// produced no diagnostic at all, because "no first child" was `None` and
-/// `None` was assumed to have reported. The shape check is
-/// [`build_repeated_tail`]'s, and it needs the list it is checking.
+/// The whole list, not the first parser child: the shape check — exactly one
+/// argument, and it must be a parser — is [`build_repeated_tail`]'s, and it
+/// needs the list it is checking. Taking the first child instead would lower
+/// `repeated(matrix(int), word, int)` as `repeated(matrix(int))` with two
+/// arguments silently gone, and answer `None` for `repeated()` with nothing
+/// reported.
 fn repeated_call_args(
     call: &ParserExpr,
     file: FileId,

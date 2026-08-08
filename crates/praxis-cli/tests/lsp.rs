@@ -1,14 +1,9 @@
-//! WS1's gate: a scripted JSON-RPC session over a pipe, driving the **real**
-//! `praxis lsp` binary.
-//!
-//! This is the test that replaced `check.rs`'s "`praxis lsp` exits 2 and says it
-//! is not implemented" assertion. Against `bcc5319`'s binary it fails at the
-//! first read: the process printed a line to stderr and exited 2 without ever
-//! framing a response.
+//! A scripted JSON-RPC session over a pipe, driving the **real** `praxis lsp`
+//! binary.
 //!
 //! The framing is written out by hand rather than pulled from a client library:
-//! what M11 promises is that *an editor* can talk to this process, and an editor
-//! speaks `Content-Length` headers over stdio.
+//! what is being promised is that *an editor* can talk to this process, and an
+//! editor speaks `Content-Length` headers over stdio.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -142,7 +137,7 @@ fn the_handshake_completes_and_advertises_the_implemented_capabilities() {
     // Incremental document sync, not full.
     assert_eq!(caps["textDocumentSync"]["change"], 2);
 
-    // M12's five.
+    // The navigation and edit providers.
     assert_eq!(caps["referencesProvider"], true);
     assert_eq!(caps["workspaceSymbolProvider"], true);
     assert_eq!(caps["inlayHintProvider"], true);
@@ -152,9 +147,8 @@ fn the_handshake_completes_and_advertises_the_implemented_capabilities() {
     assert_eq!(caps["renameProvider"]["prepareProvider"], true);
 
     // …and **no more**. Advertising a capability the server does not implement
-    // makes the editor stop offering its own fallback — and the formatter is
-    // deliberately not in this milestone (see the M12 handover), so a client
-    // must keep whatever it would do by itself.
+    // makes the editor stop offering its own fallback — there is no formatter,
+    // so a client must keep whatever it would do by itself.
     for absent in [
         "documentFormattingProvider",
         "documentRangeFormattingProvider",
@@ -241,7 +235,7 @@ fn an_edit_changes_what_the_server_answers() {
     assert_eq!(session.finish(), 0);
 }
 
-/// M12's requests over the wire, against the real binary.
+/// The navigation and edit requests over the wire, against the real binary.
 ///
 /// The query layer has its own gates (`praxis-lsp/tests/m12.rs`); what this adds
 /// is that each method is **routed and serialized** — a handler the loop does not
@@ -430,16 +424,12 @@ fn diagnostics_are_published_with_a_code_and_a_span() {
 /// **`praxis lsp --stdio` completes the handshake.**
 ///
 /// Several clients append `--stdio` to the server's argv to name a transport —
-/// `vscode-languageclient` does it whenever `TransportKind.stdio` is set, which
-/// is how the extension shipped and how it failed: clap rejected the flag and
-/// exited 2 before a byte of protocol, and the client reported it as "the server
-/// crashed 5 times".
+/// `vscode-languageclient` does it whenever `TransportKind.stdio` is set. A CLI
+/// that rejected the flag would exit 2 before a byte of protocol, and the
+/// client would report it as a crash.
 ///
-/// The extension no longer sets `transport`, so it no longer passes the flag.
-/// This test is the *other* half — the one that does not depend on the
-/// extension being right, because the next client to pass it will not be ours.
-/// `the_extensions_argv_names_only_subcommands_the_cli_has` could not catch it:
-/// the flag was never in `argv.ts` to be read.
+/// This does not depend on our own extension's argv being right, because the
+/// next client to pass the flag will not be ours.
 #[test]
 fn the_server_accepts_the_stdio_flag_clients_append() {
     let mut session = Session::start_with(&["--stdio"]);
@@ -454,16 +444,16 @@ fn the_server_accepts_the_stdio_flag_clients_append() {
 ///
 /// `{` is registered as a trigger character for the parser sublanguage, where
 /// `` `{n:int}` `` needs a menu over text that is not yet an expression. The
-/// editor fires it wherever the character is typed, so before this gate every
-/// `fn f() {` and every `if x {` popped the whole lexical list — pre-selected,
-/// over an empty prefix, at the moment the user was about to type a name that
-/// is by definition not in it — and the next <kbd>Enter</kbd> committed its
-/// first row.
+/// editor fires it wherever the character is typed, so without this gate every
+/// `fn f() {` and every `if x {` would pop the whole lexical list —
+/// pre-selected, over an empty prefix, at the moment the user is about to type
+/// a name that is by definition not in it — and the next <kbd>Enter</kbd> would
+/// commit its first row.
 ///
 /// This has to be a wire test: what distinguishes the two cases is
 /// `params.context`, which the query layer never sees. And the second half is
-/// the half that keeps the gate honest — a fix that simply dropped `{` from the
-/// trigger list would pass the first assertion and lose `P {` → `x`, `y`.
+/// the half that keeps the gate honest — simply dropping `{` from the trigger
+/// list would pass the first assertion and lose `P {` → `x`, `y`.
 #[test]
 fn a_trigger_character_opens_a_menu_only_where_it_means_something() {
     let mut session = Session::start();

@@ -99,7 +99,7 @@ impl TypeDb {
             TypeData::Collection { ctor, args } => {
                 let _ = out.write_str(ctor.name());
                 // Through the same writer the nominal types use, so a nullary
-                // ctor prints bare: `Range`, not `Range[]` (REP-13).
+                // ctor prints bare: `Range`, not `Range[]`.
                 self.write_type_args(args, out, names, binders);
             }
             TypeData::Record { def, args } => {
@@ -133,16 +133,14 @@ impl TypeDb {
                         let _ = out.write_str(name);
                         self.write_type_args(args, out, names, binders);
                     }
-                    // An anonymous enum (`choice(...)`) has no name to write —
-                    // and used to write *nothing at all*, so every diagnostic
-                    // about one read as though the type were missing: `Y001`
-                    // said "expected `Int`, found " and `Y122` said "`` has no
-                    // variant `Bogus`" (REP-56). It renders like the anonymous
-                    // record it sits beside (§5.6): braces for "structural, no
-                    // name", `|` between the variants, and each payload in
-                    // parentheses so `{ A({ x: Int }) }` cannot be misread as a
-                    // record. Every payload is written, so the rendering is
-                    // total and no variant is silently invisible.
+                    // An anonymous enum (`choice(...)`) has no name to write, and
+                    // writing nothing would leave every diagnostic about one
+                    // reading as though the type were missing. It renders like
+                    // the anonymous record it sits beside (§5.6): braces for
+                    // "structural, no name", `|` between the variants, and each
+                    // payload in parentheses so `{ A({ x: Int }) }` cannot be
+                    // misread as a record. Every payload is written, so the
+                    // rendering is total and no variant is silently invisible.
                     None => {
                         out.write_str("{ ").ok();
                         for (i, v) in edef.variants.iter().enumerate() {
@@ -167,9 +165,8 @@ impl TypeDb {
             }
             TypeData::Var(state) => match state {
                 // A variable the enclosing scheme quantifies prints bare; one it
-                // does not is leaking, and the `?` is how that shows. The state
-                // used to answer this (`Generalized` vs `Unbound`), which is
-                // why the arena had to carry a flag about schemes at all (F10).
+                // does not is leaking, and the `?` is how that shows. The
+                // scheme's binder list decides, not the variable's state.
                 VarState::Unbound { .. } => {
                     if binders.contains(&VarId::from_raw(t.to_u32())) {
                         let _ = out.write_str(names.name_for(t.to_u32()));
@@ -184,15 +181,10 @@ impl TypeDb {
 
     /// Write a type's arguments, `[A, B]`, or nothing when it has none.
     ///
-    /// `Option` used to print as a bare name whatever it held, because the
-    /// element type lived in a *fresh def per site* rather than in the type
-    /// (TY-06) — which is also why the monomorphizer's `db.render` cache key
-    /// could not tell `Option[Int]` from `Option[Text]` (MONO-03).
-    ///
-    /// Collections come through here too, which is REP-13: the collection arm
-    /// wrote its own brackets unconditionally, so a `Y001` about a range said
-    /// "found `Range[]`". One writer, one rule — the brackets belong to the
-    /// arguments and a type with none has none.
+    /// Nominal types and collections both come through here, so there is one
+    /// rule: the brackets belong to the arguments, and a type with none has
+    /// none. `Option[Int]` and `Option[Text]` therefore render apart, and a
+    /// `Range` prints bare rather than as `Range[]`.
     fn write_type_args(
         &self,
         args: &[Type],

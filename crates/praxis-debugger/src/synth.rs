@@ -9,10 +9,9 @@
 //! It prints a nominal record as the bare name `Foo` — a name the synthetic
 //! module never declares — an anonymous parser-template record as
 //! `{ x: Int, y: Int }`, which the type grammar has no syntax for at all, and an
-//! unresolved variable as `?T`. Handing any of those to the parser is what made
-//! **every** `p`/`type`/`heap` command fail — `p 1 + 2` included, which mentions
-//! no local at all — in a program that merely had a `struct`, a
-//! `read lines(…)` binding, or an empty `Vec()` in scope (DBG-06).
+//! unresolved variable as `?T`. Handing any of those to the parser fails the
+//! whole command — `p 1 + 2` included, which mentions no local at all — because
+//! one unparseable parameter annotation sinks the synthetic module.
 //!
 //! [`Speller`] answers the other question. It walks a [`Type`] and returns
 //! source the synthetic module compiles, **emitting the `struct`/`enum`
@@ -27,8 +26,8 @@
 //! (`__p_rec0`, `__p_enum0`) and declared like any other. Nominal identity is
 //! static-only — a record object carries a field schema, not a name — so a
 //! minted name describes the value exactly as well as the original did.
-//! [`Speller::humanize`] puts the structural rendering back for display, so
-//! `type` still answers `Vec[{ x: Int, y: Int }]`.
+//! [`humanize`] puts the structural rendering back for display, so `type` still
+//! answers `Vec[{ x: Int, y: Int }]`.
 //!
 //! Spelling is **fallible on purpose**: a type with no source syntax (an
 //! unresolved `?T`, a `Byte`, the internal `Seq`) returns `None` rather than
@@ -169,7 +168,7 @@ impl<'a> Speller<'a> {
     /// spelled and never declared. Every other enum is the user's.
     fn spell_enum(&mut self, def: EnumDefId, args: &[Type], ty: Type) -> Option<String> {
         if def == self.db.option_def() {
-            // The one generic def (F12): exactly one argument, always.
+            // The one generic def: exactly one argument, always.
             let [elem] = args else { return None };
             let elem = self.spell(*elem)?;
             return Some(format!("Option[{elem}]"));
@@ -399,9 +398,8 @@ mod tests {
         assert_eq!(speller.declarations(), "", "no user type was named");
     }
 
-    /// DBG-06, the reported defect: a nominal record spelled as its bare name is
-    /// an *undeclared* name in the synthetic module, and ``unknown type `Foo` ``
-    /// was what every command reported — `p 1 + 2` included.
+    /// A nominal record spelled as its bare name is an *undeclared* name in the
+    /// synthetic module, so the spelling has to bring the declaration with it.
     #[test]
     fn a_nominal_record_brings_its_declaration() {
         let mut db = TypeDb::new();
@@ -449,10 +447,9 @@ mod tests {
     }
 
     /// The ``read lines(`{x:int},{y:int}`)`` case: an anonymous structural record
-    /// has *no* syntax in type position, so `{ x: Int, y: Int }` went to the
-    /// parser and every command answered "expected a type". It gets a minted
-    /// declaration instead — nominal identity is static-only, so the name
-    /// describes the value just as completely.
+    /// has *no* syntax in type position, so it gets a minted declaration instead
+    /// — nominal identity is static-only, so the name describes the value just as
+    /// completely.
     #[test]
     fn an_anonymous_record_is_minted_a_declaration() {
         let mut db = TypeDb::new();
@@ -499,8 +496,7 @@ mod tests {
 
     /// A type the expression *writes* is declared too. Spelling reaches only the
     /// types some local has, so `p Pt{x: 1, y: 2}` in a frame holding no `Pt`
-    /// answered ``type error: `Pt` is not defined`` about a struct the program
-    /// declares at the top of the file.
+    /// needs the declaration to come from the name the expression mentions.
     #[test]
     fn a_type_the_expression_names_is_declared_even_with_no_local_of_it() {
         let mut db = TypeDb::new();
@@ -649,8 +645,7 @@ mod tests {
 
     /// A type with no source syntax declines to be written rather than producing
     /// text the parser rejects. `?T` is the common one: an unfilled `Vec()` types
-    /// as `Vec[?T]`, and rendering that made `p 1 + 2` fail with "expected a
-    /// type".
+    /// as `Vec[?T]`.
     #[test]
     fn a_type_with_no_syntax_is_not_spelled() {
         let mut db = TypeDb::new();

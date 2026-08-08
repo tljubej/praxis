@@ -1,4 +1,4 @@
-//! The teardown proof that gates generation reclamation (F13, hazard H15).
+//! The teardown proof that gates generation reclamation.
 //!
 //! JIT metadata — record schemas, tuple schemas, field-name strings, debug
 //! local metadata — is reachable from *live heap objects*, not only from
@@ -8,12 +8,10 @@
 //! schemas live in is a use-after-free waiting for the next `==`, `format` or
 //! `hash`.
 //!
-//! Before S8 that could not happen, because the metadata was `Box::leak`ed and
-//! never freed. S8 makes it reclaimable, so the ordering has to be *encoded*
-//! rather than documented: a generation is reclaimed by handing it a
-//! [`HeapDrained`], and the only way to obtain one is [`Runtime::teardown`],
-//! which consumes the runtime and drops the heap — running every finalizer
-//! first.
+//! The metadata is reclaimable, so the ordering is *encoded* rather than
+//! documented: a generation is reclaimed by handing it a [`HeapDrained`], and
+//! the only way to obtain one is [`Runtime::teardown`], which consumes the
+//! runtime and drops the heap — running every finalizer first.
 //!
 //! [`Runtime::teardown`]: crate::Runtime::teardown
 
@@ -47,7 +45,7 @@ impl HeapDrained {
 }
 
 /// Drop every registered parser plan and every schema the parser interpreter
-/// built from one (IP-12).
+/// built from one.
 ///
 /// These two have to go together. A named-capture template's `RecordSchema`
 /// borrows its field names straight out of plan storage, so retiring the plans

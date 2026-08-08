@@ -1,9 +1,10 @@
 //! ADR-098's gate: the parser AST survives inference, with a type per node.
 //!
-//! Every assertion here was **observed red** with the index removed — not
-//! "hover returned something", but "hover on the inner constructor returned the
-//! inner constructor's type". An implementation that answers the root's type for
-//! every position inside the expression passes any weaker test.
+//! The type assertions are stated against *inner* nodes — not "hover returned
+//! something", but "hover on the inner constructor returned the inner
+//! constructor's type". An implementation that answers the root's type for
+//! every position inside the expression passes any weaker test and fails
+//! these.
 
 #![cfg(test)]
 
@@ -12,7 +13,7 @@ use praxis_source::Span;
 use crate::hir_tests::test_util::analyze;
 use crate::ParserMode;
 
-/// The byte offset of the first occurrence of `needle` in `src`, plus `within`.
+/// The byte offset of the first occurrence of `needle` in `src`.
 fn at(src: &str, needle: &str) -> u32 {
     u32::try_from(
         src.find(needle)
@@ -141,7 +142,7 @@ fn an_anonymous_capture_has_no_name_span() {
 }
 
 /// A capture name written with spaces around it — `{ n :int}` — names `n`, and
-/// the span has to name the same three-byte-shorter thing.
+/// the span covers the name alone rather than the padding around it.
 #[test]
 fn a_padded_capture_name_spans_only_the_name() {
     let src = "var v = read lines(`{ n :int}`)\n";

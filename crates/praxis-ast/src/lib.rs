@@ -4,12 +4,11 @@
 //! view over a [`SyntaxNode`] whose [`SyntaxKind`] is fixed by construction. They
 //! avoid copying source strings: accessors borrow into the underlying green tree.
 //!
-//! The wrappers are deliberately minimal — only the nodes M2 (name resolution +
-//! type inference) needs were added (ADR-009). More land as later milestones
-//! consume them.
+//! The wrappers are deliberately minimal: a node is wrapped when a consumer
+//! needs it (ADR-009), not ahead of one.
 //!
 //! Naming note: source-language *names* (binding sites and references) are bare
-//! `Ident` tokens in M1's tree; there is no `NAME`/`NAME_REF` wrapper node. The
+//! `Ident` tokens in the tree; there is no `NAME`/`NAME_REF` wrapper node. The
 //! wrappers here expose those `Ident` tokens directly. Re-nesting names is a
 //! refinement that could land later without breaking these accessors.
 
@@ -65,7 +64,7 @@ pub trait AstNode {
 ///
 /// Every wrapper in [`nodes`] is the same four items — doc comment, the
 /// `Clone, Debug` derive, a one-field struct, and an `impl` whose only content
-/// is the kind constant. Written out, the 48 copies were a place for a
+/// is the kind constant. Written out, each copy would be a place for a
 /// copy-paste to name the *wrong* [`SyntaxKind`](praxis_syntax::SyntaxKind):
 /// that compiles, and then the wrapper silently casts nodes it was never meant
 /// to accept. Here the kind is written once, beside the name it belongs to.

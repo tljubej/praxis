@@ -1,9 +1,9 @@
-//! The anonymous structural `Record` descriptor (§7.8, provisional in M6).
+//! The `Record` descriptor (§7.8).
 //!
-//! The input parser's named-capture templates produce anonymous records, e.g.
-//! `lines(`{x:int},{y:int}`)` → `Vec[{x:Int,y:Int}]`. Nominal records and enums
-//! formally land in M7; M6 ships a **provisional structural record** that holds
-//! exactly what parser results need: a fixed set of named fields, each a `GcRef`.
+//! A record is a fixed set of named fields, each a `GcRef`. It backs both
+//! declared record types and the anonymous structural records the input
+//! parser's named-capture templates produce, e.g. `lines(`{x:int},{y:int}`)` →
+//! `Vec[{x:Int,y:Int}]`.
 //!
 //! Each distinct record *shape* (field names + element descriptors) gets a
 //! [`RecordSchema`]. The schema is leaked to `&'static` (one per parser plan)
@@ -30,17 +30,16 @@ pub struct RecordField {
 }
 
 /// Which *type* a record schema describes — the half of a record's identity
-/// that its field list cannot express (RT-12).
+/// that its field list cannot express.
 ///
 /// `struct Point { x: Int, y: Int }` and `struct Vector { x: Int, y: Int }` are
 /// different types with one shape, and §5.6's anonymous records are the
 /// opposite case: the same shape *is* the same type, however many times it is
 /// built. One enum distinguishes them.
 ///
-/// F12 will replace the name with a `DefId + args` key once nominal identity
-/// carries type arguments; until then the declared name is the identity, and it
-/// is compared alongside the shape (see [`RecordSchema::same_type`]) so a
-/// generic record's two instantiations do not collide.
+/// A nominal identity is the declared *name*, so it is compared alongside the
+/// shape (see [`RecordSchema::same_type`]) to keep a generic record's two
+/// instantiations from colliding.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 pub enum SchemaIdentity {
@@ -105,13 +104,13 @@ impl RecordSchema {
     /// Whether two schemas describe the *same record type* — the same identity
     /// and the same field shape.
     ///
-    /// Type identity, not allocation identity (RT-12). Schemas are interned per
-    /// def *within a generation*, and there are three producers — every JIT
-    /// generation, the runtime's parser registry, and test fixtures — so
-    /// `pa.schema != pb.schema` made two records of one type compare unequal
-    /// as soon as they came from different compiles. The debugger hit this
-    /// directly: `p` evaluates in its own module, and comparing its result to a
-    /// program value was always false.
+    /// Type identity, not allocation identity. Schemas are interned per def
+    /// *within a generation*, and there are three producers — every JIT
+    /// generation, the runtime's parser registry, and test fixtures — so a
+    /// `pa.schema != pb.schema` test would call two records of one type unequal
+    /// as soon as they came from different compiles. The debugger depends on
+    /// this directly: `p` evaluates in its own module, and its result is
+    /// compared against program values.
     ///
     /// The shape is compared even for a `Nominal` pair, which the name alone
     /// would settle. It costs an arity check and a slice walk, and it is what
@@ -181,8 +180,8 @@ unsafe fn record_equals(a: *const u8, b: *const u8) -> bool {
     let pa = unsafe { &*(a as *const RecordPayload) };
     let pb = unsafe { &*(b as *const RecordPayload) };
     // Equality is same-type + field-wise equality (§5.5). "Same type" is the
-    // schema's identity and shape, not its *address* (RT-12): each JIT
-    // generation interns its own schemas, so comparing pointers made two
+    // schema's identity and shape, not its *address*: each JIT generation
+    // interns its own schemas, so comparing pointers would call two
     // `Point { x: 1, y: 2 }`s from different compiles unequal.
     if pa.schema.is_null() || pb.schema.is_null() {
         return false;
@@ -214,8 +213,7 @@ unsafe fn record_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     // SAFETY: caller guarantees `payload` points at an initialized RecordPayload.
     let p = unsafe { &*(payload as *const RecordPayload) };
     let schema = unsafe { &*p.schema };
-    // Everything `same_type` compares is hashed, so `Eq` and `Hash` still agree
-    // now that equality is type identity rather than a schema address: two
+    // Everything `same_type` compares is hashed, so `Eq` and `Hash` agree: two
     // records that differ only in which type they are must be free to land in
     // different buckets.
     match schema.identity {
@@ -298,7 +296,7 @@ unsafe fn record_compare(a: *const u8, b: *const u8) -> std::cmp::Ordering {
 /// through the per-shape schema's field descriptors. A record is
 /// equatable/hashable iff every field is; functions never are, so a record
 /// containing a function field is neither. This lets records serve as map/set
-/// keys (M8 containers) — which is why a container has to be able to order one.
+/// keys — which is why a container has to be able to order one.
 pub static RECORD: TypeDescriptor = TypeDescriptor::builtin::<RecordPayload>(
     BuiltinTypeId::Record,
     "Record",
@@ -313,7 +311,7 @@ pub static RECORD: TypeDescriptor = TypeDescriptor::builtin::<RecordPayload>(
 )
 .with_owned_bytes(record_owned_bytes);
 
-/// The heap bytes a record owns beyond its payload, for GC pacing (RT-04).
+/// The heap bytes a record owns beyond its payload, for GC pacing.
 /// `capacity`, not `len`: the buffer's real footprint is what the collector is
 /// paced against.
 ///
@@ -339,8 +337,7 @@ mod tests {
 
     #[test]
     fn grid_descriptor_reports_capabilities() {
-        // M8-WS5: Grid is now equatable and hashable (grid-as-map-key enabled),
-        // closing the M6 "grid-as-key deferred" note.
+        // A grid is equatable and hashable, so it can be a map key.
         assert!(crate::collections::GRID.is_equatable());
         assert!(crate::collections::GRID.is_hashable());
         assert_eq!(crate::collections::GRID.name, "Grid");
@@ -397,10 +394,10 @@ mod tests {
         h.finish()
     }
 
-    /// RT-12. Two schemas of one anonymous shape, separately allocated — what
-    /// two JIT generations, or a generation and the parser registry, produce
-    /// for the same `{x: Int, y: Int}`. Records built through them are the same
-    /// value, and `record_equals` compared schema *addresses*, so they were not.
+    /// Two schemas of one anonymous shape, separately allocated — what two JIT
+    /// generations, or a generation and the parser registry, produce for the
+    /// same `{x: Int, y: Int}`. Records built through them are one value, so
+    /// equality cannot rest on the schema *address*.
     #[test]
     fn anonymous_records_of_one_shape_are_equal_across_schema_allocations() {
         let mut rt = crate::Runtime::new();
@@ -425,9 +422,9 @@ mod tests {
     /// The ordering analogue of the test above (ADR-138). A record's container
     /// order is its type identity, then its fields — and identity is compared
     /// by *name*, never by schema address, for the same reason equality is:
-    /// there are three producers of a schema and their allocations differ, so
-    /// an address order would have two `Point`s from two generations sort into
-    /// an order that changes between runs.
+    /// there are three producers of a schema and their allocations differ, so an
+    /// address order would sort two `Point`s from two generations differently
+    /// between runs.
     #[test]
     fn record_compare_is_identity_then_fields() {
         let mut rt = crate::Runtime::new();
@@ -464,10 +461,9 @@ mod tests {
         assert_eq!(cmp(p, a), std::cmp::Ordering::Greater);
     }
 
-    /// RT-12's other half: a *nominal* record is its declared type, so two
-    /// records with identical fields and different type names are not equal —
-    /// and a nominal record is never equal to a structural one of the same
-    /// shape (§5.6).
+    /// A *nominal* record is its declared type, so two records with identical
+    /// fields and different type names are not equal — and a nominal record is
+    /// never equal to a structural one of the same shape (§5.6).
     #[test]
     fn nominal_records_of_different_types_are_never_equal() {
         let mut rt = crate::Runtime::new();

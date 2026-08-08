@@ -16,10 +16,7 @@ use praxis_source::{DiagCode, Span};
 pub struct ValidationError {
     /// The byte span of the offending node.
     pub span: Span,
-    /// Which diagnostic this is. A registered [`DiagCode`] rather than the
-    /// `&'static str` it used to be: the string was parsed back into a number
-    /// by `praxis-hir` to build the real code, so a typo in it was a silent
-    /// `I000` (F2).
+    /// Which diagnostic this is.
     pub code: DiagCode,
     /// A human-readable explanation.
     pub message: String,
@@ -42,9 +39,9 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
         // payload some of them carry is not this pass's to check, and is
         // already answered where the node is *built*: `sep`'s separator by
         // `Separator::new`, the type's only constructor, which refuses the `""`
-        // that never advances a cursor (IP-10); `chars`'s skip policy and
-        // ragged `grid`'s fill by `build_call`. A check `validate` performs is
-        // one the next construction site can forget.
+        // that never advances a cursor; `chars`'s skip policy and ragged
+        // `grid`'s fill by `build_call`. A check `validate` performs is one the
+        // next construction site can forget.
         ParserAst::Lines { child, .. }
         | ParserAst::Sections { child, .. }
         | ParserAst::Csv { child, .. }
@@ -91,10 +88,10 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
                 seen.push(name.to_string());
                 validate_node(item.parser(), errs);
             }
-            // The tail is a field of the generated record too (IP-09). It used
-            // to be validated for its *parser* and never for its *name*, so
-            // `sections(items: lines(int), items: repeated(int))` synthesized a
-            // record with two fields called `items`.
+            // The tail is a field of the generated record too, so its name
+            // shares the uniqueness check: `sections(items: lines(int), items:
+            // repeated(int))` would otherwise synthesize a record with two
+            // fields called `items`.
             if let Some((name, tail)) = repeated_tail {
                 if seen.contains(name) {
                     errs.push(ValidationError {
@@ -265,11 +262,9 @@ pub enum ArgKind {
     /// A named argument `name: keyword` whose value is a **keyword, not a
     /// parser**: `chars`'s `skip:`, `grid`'s `fill:`.
     ///
-    /// This used to project onto [`ArgKind::Named`], so [`check_call`] could
-    /// not tell the two apart: `block`, `choice` and named `sections` accepted
-    /// a keyword as a well-shaped named argument and their builders then
-    /// `filter_map`ed it away. A projection that loses the distinction its
-    /// consumer needs is the bug, not the arm that fails to use it.
+    /// Distinct from [`ArgKind::Named`] because [`check_call`] must tell the
+    /// two apart: only the constructors §7.5 gives a keyword argument accept
+    /// one, and `block`, `choice` and named `sections` must refuse it.
     Keyword(String),
     /// A named `name: repeated(P)` tail.
     RepeatedTail(String),
@@ -290,15 +285,15 @@ impl ArgKind {
 }
 
 /// Check a constructor call against §7.5's shape for that constructor —
-/// **before anything is built** (IP-07).
+/// **before anything is built**.
 ///
 /// Returns every problem found; an empty vector means the argument list has
 /// exactly the shape the constructor's builder expects, so the builder has
-/// nothing left to drop. The predecessor compared one number
-/// (`positional_arity`) against one number (`expected_arity`), which is why
-/// `optional(int, word)` (checked by no table at all), `choice(int)` (a
-/// positional in a named-only constructor) and `sep(int, int)` (a parser where
-/// a separator belongs) all passed.
+/// nothing left to drop. Each constructor gets its own [`ArgShape`] arm, and
+/// each argument is checked *in place* rather than only counted: `choice(int)`
+/// (a positional in a named-only constructor) and `sep(int, int)` (a parser
+/// where a separator belongs) both have the right arity and the wrong
+/// arguments.
 pub fn check_call(ctor: Constructor, args: &[ArgKind], span: Span) -> Vec<ValidationError> {
     let mut errs = Vec::new();
     let name = ctor.keyword();
@@ -385,12 +380,12 @@ pub fn check_call(ctor: Constructor, args: &[ArgKind], span: Span) -> Vec<Valida
             }
         }
         ArgShape::ParserWithOptionalCount => {
-            // The count comes **first**, unlike the arms above, because one
-            // caller reads only the first error: the capture-body scanner turns
-            // a shape failure into a single `ScanError::CallShape`. A wrong
-            // number of arguments is the more useful of the two things a
-            // three-argument `repeated` is wrong about, and it is the one the
-            // rowan front end has always reported for it.
+            // The arity check comes **first**, unlike the arms above, because
+            // one caller reads only the first error: the capture-body scanner
+            // turns a shape failure into a single `ScanError::CallShape`. A
+            // wrong number of arguments is the more useful of the two things a
+            // three-argument `repeated` is wrong about, and it is what the
+            // rowan front end reports for it.
             if args.is_empty() || args.len() > 2 {
                 arity(&mut errs, "1 or 2 arguments", args.len());
             }
@@ -446,9 +441,9 @@ pub fn check_call(ctor: Constructor, args: &[ArgKind], span: Span) -> Vec<Valida
                     ),
                 }
             }
-            // §7.5 spells them together: `grid(P, ragged, fill: value)`. A
-            // `fill:` with no `ragged` used to *become* the ragged form, which
-            // is a different parser than the one written.
+            // §7.5 spells them together: `grid(P, ragged, fill: value)`.
+            // Accepting a `fill:` with no `ragged` would silently build the
+            // ragged form, a different parser than the one written.
             if ragged != fill {
                 errs.push(ValidationError {
                     span,
@@ -610,12 +605,11 @@ mod tests {
 
     /// **A keyword argument is not a named parser.**
     ///
-    /// `CallArg::Keyword{name}` and `CallArg::Named{name}` used to project onto
-    /// the same `ArgKind::Named(name)`, so this function could not tell them
-    /// apart: `block`, `choice` and named `sections` accepted a `skip:`/`fill:`
-    /// keyword as a well-shaped named argument, and their builders then
-    /// `filter_map`ed it away. A projection that loses the distinction its
-    /// consumer needs is the bug.
+    /// `CallArg::Keyword{name}` and `CallArg::Named{name}` project onto
+    /// distinct `ArgKind`s so [`check_call`] can tell them apart: only the
+    /// constructors §7.5 gives a keyword argument accept one, and `block`,
+    /// `choice` and named `sections` refuse it rather than having their
+    /// builders `filter_map` it away.
     ///
     /// The last two assertions are the ones that make this a test of the
     /// *distinction* rather than of a blanket refusal: the same position,
@@ -660,8 +654,7 @@ mod tests {
             );
         }
 
-        // The same shape with a named *parser* there is fine — which is what
-        // the collapsed projection could not express.
+        // The same shape with a named *parser* there is fine.
         assert!(check_call(
             Constructor::Block,
             &[ArgKind::Parser, named("fill")],
@@ -680,12 +673,10 @@ mod tests {
     ///
     /// [`check_call`] answers from `ArgKind`s, which carry names and no values,
     /// so the shape table can never see this — the check belongs to the
-    /// builder, and `fill:` was the one keyword that had none. `chars`'s
-    /// `skip:` refuses a policy it does not recognize; `grid`'s `fill:` took
-    /// whatever text preceded the delimiter, including none of it, and built a
-    /// ragged grid padded with `""` without a word. That is IP-10's rule one
-    /// field over: `Separator::new` refuses `""` because an empty separator
-    /// never advances, and an empty pad fills nothing.
+    /// builder. `chars`'s `skip:` refuses a policy it does not recognize;
+    /// `grid`'s `fill:` refuses an empty pad, the same rule one field over from
+    /// `Separator::new` refusing `""`: an empty separator never advances, and
+    /// an empty pad fills nothing.
     ///
     /// The builder is shared, so both front ends inherit whatever it decides —
     /// which is the point of asserting it here rather than at either one.
@@ -725,20 +716,16 @@ mod tests {
         }
     }
 
-    /// **The assertion is inverted on purpose (IP-10).**
+    /// **The assertion is inverted on purpose.**
     ///
-    /// This test used to build `ParserAst::Sep { separator: String::new(), … }`
-    /// and ask whether `validate` reported it. That question presumes the value
-    /// exists — and the value is the hazard: an empty separator drives
-    /// `walk_sep`'s `region[pos..].starts_with(sep_bytes)` loop, which is
-    /// unconditionally true for an empty needle, so the cursor never advances
-    /// and the loop allocates forever. A check `validate` performs is one the
-    /// *next* construction site can forget.
-    ///
-    /// So the rule the name states is now enforced by the type: `Separator` has
-    /// exactly one constructor and it refuses `""`. The empty separator is not
-    /// rejected before plan construction — it is not constructible at all, and
-    /// the `String::new()` this test used to write no longer compiles.
+    /// An empty separator drives `walk_sep`'s
+    /// `region[pos..].starts_with(sep_bytes)` loop, which is unconditionally
+    /// true for an empty needle, so the cursor never advances and the loop
+    /// allocates forever. A check `validate` performs is one the *next*
+    /// construction site can forget, so the rule the name states is enforced by
+    /// the type instead: `Separator` has exactly one constructor and it refuses
+    /// `""`. The empty separator is not rejected before plan construction — it
+    /// is not constructible at all.
     #[test]
     fn empty_separator_is_rejected_before_plan_construction() {
         assert_eq!(
@@ -807,7 +794,7 @@ mod tests {
 
     /// **A counted group alone is a `sections` call; an unbounded tail alone is
     /// not.** `sections(boards: repeated(P))` is `sections(P)` written the long
-    /// way round — every section, one parser — and I025 has always said so. A
+    /// way round — every section, one parser — which is what I025 says. A
     /// counted group consumes a *known* prefix and leaves the rest unread, so
     /// it is a heterogeneous call with one field, and the same check must let
     /// it through. That is why the emptiness test is `fields`, which holds the
@@ -838,10 +825,9 @@ mod tests {
         );
     }
 
-    /// The shape table now owns `repeated`'s arity, which it did not: the
-    /// marker's builder hand-rolled `args.len() != 1`, the one call site
-    /// ADR-073's "check the shape before building" never covered. Adding the
-    /// count meant closing that exemption, and this is the table answering.
+    /// The shape table owns `repeated`'s arity, not the marker's builder —
+    /// ADR-073's "check the shape before building" covers this call site like
+    /// every other, and this is the table answering.
     #[test]
     fn repeated_takes_a_parser_and_an_optional_count() {
         let ok = |args: &[ArgKind]| check_call(Constructor::Repeated, args, Span::at(0));

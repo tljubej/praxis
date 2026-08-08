@@ -44,7 +44,7 @@ pub struct Snapshot {
     parsed: OnceCell<ParseOutput>,
     analysis: OnceCell<Analysis>,
     /// How many times the parse actually ran. Memoization that is asserted
-    /// rather than assumed — WS2's gate reads this.
+    /// rather than assumed: the tests read this.
     parse_runs: Cell<u32>,
     /// How many times inference actually ran, for the same reason.
     analyze_runs: Cell<u32>,
@@ -138,10 +138,10 @@ impl Snapshot {
     ///
     /// **The one place the set and the order are decided** (ADR-097). Lex and
     /// parse diagnostics first by construction, then name and type diagnostics,
-    /// all sorted by span — which is what `praxis check` printed from its own
-    /// private copy of this sequence until M11 deleted it. The comparator itself
-    /// is [`Diagnostic::sort_key`], shared with every other stage that merges two
-    /// diagnostic lists; what is decided *here* is the set and the sequence.
+    /// all sorted by span; `praxis check` prints this sequence rather than
+    /// building its own. The comparator itself is [`Diagnostic::sort_key`],
+    /// shared with every other stage that merges two diagnostic lists; what is
+    /// decided *here* is the set and the sequence.
     ///
     /// Analysis runs even when parsing reported: recovery keeps the tree usable,
     /// and a file with one stray token still deserves its type errors. That
@@ -403,7 +403,7 @@ mod tests {
         Snapshot::new("q.px", text.to_string(), Revision(0))
     }
 
-    /// **WS2's gate.** Two queries at one revision parse once.
+    /// Two queries at one revision parse once.
     #[test]
     fn two_queries_at_one_revision_parse_once() {
         let s = snap("var x = 1\nout(x)\n");
@@ -477,13 +477,11 @@ mod tests {
         );
     }
 
-    /// **ADR-133, at the surface the user reported it from.** The editor
-    /// publishes exactly this list, so a diagnostic missing here is a program the
-    /// compiler refuses and the editor calls fine.
+    /// **ADR-133.** The editor publishes exactly this list, so a diagnostic
+    /// missing here is a program the compiler refuses and the editor calls fine.
     ///
-    /// Each of these was reported by `praxis run` and by nothing else, because it
-    /// was raised while the program was being lowered and this query does not
-    /// lower. The first two are the user's own report.
+    /// Each code here is one a pattern earns, and this query does not lower — so
+    /// every one of them has to be raised by analysis to reach the editor at all.
     #[test]
     fn the_editor_sees_every_diagnostic_run_refuses_a_program_for() {
         for (src, want) in [

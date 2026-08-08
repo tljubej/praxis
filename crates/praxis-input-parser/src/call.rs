@@ -2,12 +2,10 @@
 //!
 //! Two callers construct a `sep(",", int)`: the HIR bridge, walking the rowan
 //! tree of `read sep(",", int)`, and [`crate::body`], parsing the text of a
-//! capture body `{xs:sep(",", int)}`. Before D10 was answered the second did
-//! not exist and the first was an `if ctor_name == "…"` chain in `praxis-hir`
-//! that dropped whatever it did not read (IP-07). Now they meet here: both
-//! produce a [`CallArg`] list, and [`build_call`] is the only thing that turns
-//! one into a [`ParserAst`]. Neither the shape rules nor the builders can drift
-//! from each other, because there is one of each.
+//! capture body `{xs:sep(",", int)}`. They meet here: both produce a
+//! [`CallArg`] list, and [`build_call`] is the only thing that turns one into a
+//! [`ParserAst`]. Neither the shape rules nor the builders can drift from each
+//! other, because there is one of each.
 
 use crate::ast::{
     BlockItem, Constructor, InvalidRepeatCount, ParserAst, RepeatCount, SectionItem, Separator,
@@ -58,12 +56,11 @@ impl CallArg {
             CallArg::Int(_) => ArgKind::Int,
             CallArg::Flag(f) => ArgKind::Flag(f.clone()),
             CallArg::Named { name, .. } => ArgKind::Named(name.clone()),
-            // **Not `Named`.** These two collapsed onto one `ArgKind` and
-            // `check_call` could not tell them apart, so `block`, `choice` and
-            // named `sections` accepted a `skip:`/`fill:` keyword as a
-            // well-shaped named argument and their builders then `filter_map`ed
-            // it away: a field named `fill` vanished from the record with no
-            // diagnostic.
+            // **Not `Named`.** A `skip:`/`fill:` keyword and a `name: parser`
+            // argument are different shapes. Collapsing them onto one `ArgKind`
+            // would leave `check_call` unable to tell them apart, so `block`,
+            // `choice` and named `sections` would accept a keyword as a
+            // well-shaped named argument their builders have nowhere to put.
             CallArg::Keyword { name, .. } => ArgKind::Keyword(name.clone()),
             CallArg::RepeatedTail { name, .. } => ArgKind::RepeatedTail(name.clone()),
         }
@@ -90,7 +87,7 @@ pub fn build_call(
         // `repeated(...)` is not a parser in its own right — it is the marker
         // on a named argument of a `sections` call, saying that the field takes
         // a *group* of sections rather than one. Anywhere else there is nothing
-        // for it to repeat over, and it used to be dropped in silence (IP-09).
+        // for it to repeat over, so it is reported rather than dropped (IP-09).
         return Err(vec![ValidationError {
             span,
             code: DiagCode::MisplacedRepeatedTail,
@@ -171,9 +168,9 @@ pub fn build_call(
                     other => return Err(unexpected(&other)),
                 }
             }
-            // A missing separator used to be laundered into `String::new()` by
-            // the HIR bridge, which is the one separator that can never advance
-            // a cursor (IP-10). `Separator::new` refuses it.
+            // An empty separator is the one separator that can never advance a
+            // cursor (IP-10), so `Separator::new` refuses it rather than
+            // letting a missing one default to `String::new()`.
             let separator = Separator::new(separator.as_deref().unwrap_or("")).map_err(|_| {
                 vec![ValidationError {
                     span,
@@ -213,9 +210,9 @@ pub fn build_call(
                     CallArg::Keyword { name, value }
                         if Some(name.as_str()) == ctor.keyword_arg() =>
                     {
-                        // An unrecognized policy used to leave the default in
-                        // place, so `skip: wihtespace` silently ran as
-                        // `whitespace`.
+                        // An unrecognized policy is reported rather than left at
+                        // the default, so `skip: wihtespace` cannot silently
+                        // run as `whitespace`.
                         skip = SkipPolicy::from_keyword(&value).ok_or_else(|| {
                             vec![ValidationError {
                                 span,
@@ -254,21 +251,18 @@ pub fn build_call(
                     CallArg::Keyword { name, value }
                         if Some(name.as_str()) == ctor.keyword_arg() =>
                     {
-                        // The decode lives here, once, so both front ends
-                        // agree: `fill: "-"` reached the plan as `"\"-\""`,
-                        // quotes and all, because the value was carried as raw
-                        // text and nothing ever unquoted it (IP-08's rule for
-                        // every other parser string literal).
+                        // The value arrives as raw source text, so the decode
+                        // lives here, once, and both front ends agree:
+                        // `fill: "-"` reaches the plan as `-` and not as
+                        // `"\"-\""`, quotes and all (IP-08's rule for every
+                        // other parser string literal).
                         let decoded = praxis_syntax::literal::unquote_text(&value);
-                        // **A keyword argument's value is part of its shape.**
-                        // `chars`'s `skip:` has always checked its value; this
-                        // one checked nothing, so `grid(P, ragged, fill:)` was
-                        // accepted with no diagnostic at all and built a ragged
-                        // grid padded with the empty string. That is the same
-                        // unrepresentable value IP-10 refuses one field over,
-                        // where `Separator::new` rejects an empty separator
-                        // because it never advances: a cell of no characters
-                        // pads nothing.
+                        // **A keyword argument's value is part of its shape**,
+                        // as `chars`'s `skip:` value is. An empty `fill:` is
+                        // the same unrepresentable value IP-10 refuses one
+                        // field over, where `Separator::new` rejects an empty
+                        // separator because it never advances: a cell of no
+                        // characters pads nothing.
                         if decoded.is_empty() {
                             return Err(vec![ValidationError {
                                 span,
@@ -333,19 +327,9 @@ pub fn build_call(
 /// it lives here for the same reason [`build_call`] does: **both front ends
 /// must apply it**.
 ///
-/// They did not. The capture-body parser checked it inline; the HIR bridge
-/// unwrapped the marker with a `find_map` that returned the *first* parser-expr
-/// child of the argument list and ignored the rest. So
-/// `repeated(matrix(int), word, int)` quietly became `repeated(matrix(int))`
-/// and `repeated()` produced no diagnostic at all — while the identical text
-/// written inside a capture body was rejected with I022. ADR-073 claims the two
-/// front ends share one shape check; this is the function that makes the claim
-/// true for the marker.
-///
-/// The shape check is [`check_call`]'s, like every other constructor's. This
-/// function used to hand-roll its own arity test, which is the one call site
-/// ADR-073's "nothing is built before the shape is checked" never covered —
-/// and the exemption is why the count could not simply be added to the table.
+/// The shape check is [`check_call`]'s, like every other constructor's, so
+/// ADR-073's "nothing is built before the shape is checked" covers the marker
+/// too and the two front ends cannot disagree about it.
 ///
 /// # Errors
 /// A non-empty [`ValidationError`] list: `ConstructorArity` (I022) for a wrong
@@ -421,10 +405,9 @@ fn sole_parser(args: Vec<CallArg>) -> Option<ParserAst> {
 /// Build a heterogeneous `sections(name: P, …, tail: repeated(P))` (§7.5).
 ///
 /// §7.5: "`repeated(parser)` may appear only as the final named argument."
-/// Neither half of that was checked (IP-09) — a second tail silently overwrote
-/// the first, and a tail written before another field was silently moved to the
-/// end, so the parser that ran was not the one that was written. `args` is in
-/// source order, which is what makes "final" a checkable claim.
+/// Both halves are checked here (IP-09): at most one unbounded tail, and it
+/// last. `args` is in source order, which is what makes "final" a checkable
+/// claim.
 ///
 /// **The position rule is the unbounded form's alone.** `repeated(P)` consumes
 /// every section that is left, so a field after it could never match — that is

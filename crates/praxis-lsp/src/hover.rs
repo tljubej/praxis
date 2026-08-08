@@ -1,4 +1,4 @@
-//! Hover (WS4, §15.2, §19.11 criterion 3; documentation is M12's).
+//! Hover (§15.2, §19.11 criterion 3).
 //!
 //! The whole query is a lookup: every type shown here was computed by inference
 //! and recorded under a range or a node key. What this module adds is **which**
@@ -76,8 +76,8 @@ pub fn hover(snapshot: &Snapshot, offset: u32, enc: Encoding) -> Option<Hover> {
     let range = token.text_range();
 
     // A method name, then a name reference — `Analysis::hover` already decides
-    // between those two, and it is the M2 query the LSP was always meant to
-    // reuse rather than reimplement.
+    // between those two, so this reuses that query rather than reimplementing
+    // the preference here.
     if let Some(info) = analysis.hover(range) {
         let mut body = format!("```praxis\n{}: {}\n```", info.name, info.scheme);
         // A method call has a catalog entry behind it, and the entry carries the
@@ -112,8 +112,8 @@ pub fn hover(snapshot: &Snapshot, offset: u32, enc: Encoding) -> Option<Hover> {
     // A name written in **type position**. Nothing above answers for it: name
     // resolution records a type reference in its own map precisely because it is
     // not a value reference — nothing instantiates a scheme for it — and there
-    // is no expression node under a `TYPE_REF` either. So hover over the `Int`
-    // in `var n: Int` used to fall all the way through and return nothing.
+    // is no expression node under a `TYPE_REF` either. Without this arm hover
+    // over the `Int` in `var n: Int` falls through and answers nothing.
     if let Some(doc) = type_position_doc(snapshot, offset) {
         return Some(markdown(
             format!(

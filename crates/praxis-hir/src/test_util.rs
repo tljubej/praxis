@@ -1,8 +1,5 @@
-//! Helpers shared by this crate's test modules.
-//!
-//! Each of them replaced a copy-paste family: five `analyze`/`resolve_src`
-//! wrappers that differed only in the interned filename, nineteen copies of the
-//! parse → analyze → lower preamble, and thirteen searches for a lowered `fn`
+//! Helpers shared by this crate's test modules: interning and parsing a
+//! fixture, the parse → analyze → lower preamble, and finding a lowered `fn`
 //! by name.
 //!
 //! These stay here rather than in `praxis-test-support`: that crate does not
@@ -18,9 +15,7 @@ use praxis_test_support::single_file;
 
 use crate::{analyze_root, Analysis, TypedFn, TypedItem, TypedModule};
 
-/// The name every fixture is interned under. Nothing asserts on it — the
-/// per-module names it replaced (`hover_test.px`, `lower_diags_test.px`, …)
-/// were read by nothing but the preamble that minted them.
+/// The name every fixture is interned under. Nothing asserts on it.
 const TEST_FILE: &str = "test.px";
 
 /// Intern `text` as a whole file and parse it.
@@ -48,10 +43,10 @@ pub(crate) fn parse_analyze_and_lower(text: &str) -> (ParseOutput, Analysis, Typ
 /// [`parse_analyze_and_lower`] without the parse output.
 ///
 /// Lowering runs checks analysis does not (exhaustiveness, closure capture), so
-/// tests reach for this when they need those. A test that asserts on
-/// `analysis.diagnostics` still means what it did before the helper lowered
-/// first: `lower` destructures `diagnostics: _` and never pushes to it, so
-/// everything it reports lands in `module.diagnostics` instead.
+/// tests reach for this when they need those. `lower` destructures
+/// `diagnostics: _` and never pushes to it, so everything it reports lands in
+/// `module.diagnostics` and a test asserting on `analysis.diagnostics` is
+/// unaffected by the extra pass.
 pub(crate) fn analyze_and_lower(text: &str) -> (Analysis, TypedModule) {
     let (_, analysis, module) = parse_analyze_and_lower(text);
     (analysis, module)
@@ -73,9 +68,9 @@ pub(crate) fn fn_named<'m>(module: &'m TypedModule, name: &str) -> &'m TypedFn {
         .unwrap_or_else(|| panic!("no `{name}` item in the lowered module"))
 }
 
-/// [`fn_named`] for the item a file's top-level statements are lowered into
-/// (REP-19). Its name is [`ENTRY_NAME`](crate::ENTRY_NAME), which no source
-/// file can spell.
+/// [`fn_named`] for the item a file's top-level statements are lowered into.
+/// Its name is [`ENTRY_NAME`](crate::ENTRY_NAME), which no source file can
+/// spell.
 pub(crate) fn entry_fn(module: &TypedModule) -> &TypedFn {
     fn_named(module, crate::ENTRY_NAME)
 }

@@ -1,10 +1,9 @@
-//! Tests for name resolution (§13.3) — the Slice 4 layer.
+//! Tests for name resolution (§13.3).
 //!
 //! These cover the §19-M2 acceptance criteria that name resolution owns:
 //! distinct symbol ids for shadowed bindings, and a shadowing initializer that
-//! resolves to the *previous* binding. (The type-inference criteria land with
-//! Slice 5.) They parse a source fragment, resolve it, and inspect the symbol
-//! table and reference map.
+//! resolves to the *previous* binding. They parse a source fragment, resolve
+//! it, and inspect the symbol table and reference map.
 
 #![cfg(test)]
 
@@ -37,8 +36,8 @@ fn shadowed_let_bindings_get_distinct_symbol_ids() {
     // to the correct symbol.
     let src = "var a = 4\nvar a = \"Foo\"";
     let (analysis, refs) = refs(src);
-    // Two references? No — there are no name *references* here (the RHSes are
-    // literals). But there are two *declarations* named `a`, with distinct ids.
+    // There are no name *references* here (both RHSes are literals), but two
+    // *declarations* named `a`, with distinct ids.
     let a_symbols: Vec<_> = analysis
         .names
         .all()
@@ -189,8 +188,7 @@ fn known_type_annotations_resolve_cleanly() {
 
 #[test]
 fn unknown_type_annotation_emits_n002() {
-    // `Byte` is reserved but not yet constructible (§4.3) → N002. (`Float` was
-    // reserved too but is now wired end-to-end, so it no longer triggers this.)
+    // `Byte` is reserved but not yet constructible (§4.3) → N002.
     let src = "var x: Byte = 1";
     let analysis = analyze(src);
     assert!(analysis

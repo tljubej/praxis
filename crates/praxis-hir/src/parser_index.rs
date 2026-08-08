@@ -1,16 +1,16 @@
 //! The retained parser AST and its per-node types (ADR-098, §15.3).
 //!
-//! Inference used to convert a `read`/`parse` body into a
-//! [`ParserAst`](praxis_input_parser::ParserAst), read one type off the root and
-//! **drop the tree**. Four M11 deliverables need what was dropped: hover on an
-//! inner constructor, completion inside `{…}` and after `read`, the four parser
-//! semantic-token classes (§19.11 criterion 4), and §15.3's five-way "which mode
-//! is the cursor in" question.
+//! Inference converts a `read`/`parse` body into a
+//! [`ParserAst`](praxis_input_parser::ParserAst); this module **retains** that
+//! tree together with the type synthesized for each of its nodes. Four editor
+//! answers need more than the root type: hover on an inner constructor,
+//! completion inside `{…}` and after `read`, the four parser semantic-token
+//! classes (§19.11 criterion 4), and §15.3's five-way "which mode is the cursor
+//! in" question.
 //!
-//! This module is the answer to all four, and it is deliberately *here* rather
-//! than in `praxis-lsp`: the compiler already knows where every capture, name
-//! and capture type ends, and a second scanner in the language server would be
-//! free to disagree with it. See ADR-098.
+//! It lives *here* rather than in `praxis-lsp`: the compiler already knows where
+//! every capture, name and capture type ends, and a second scanner in the
+//! language server would be free to disagree with it. See ADR-098.
 
 use praxis_input_parser::{AtomicKind, BlockItem, ParserAst, SectionItem, TemplatePart};
 use praxis_source::Span;

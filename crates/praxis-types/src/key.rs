@@ -1,15 +1,11 @@
-//! A hashable structural key for a type (F12).
+//! A hashable structural key for a type.
 //!
 //! A [`Type`] is an arena index, so two separately-interned `Int`s are different
 //! handles for one type, and `==` on them answers "same slot", not "same type".
 //! Anything that has to *group* types — a monomorphization cache, a schema
-//! cache — therefore needs a canonical form.
-//!
-//! What stood in for one was the **pretty-printed string**: `db.render(t)` as a
-//! `HashMap` key (MONO-03). Rendering is display, not identity, and it lost
-//! exactly the distinction that mattered — `Option` printed as a bare name
-//! whatever it held, so `id[Option[Int]]` and `id[Option[Text]]` hashed to the
-//! same key and the second call reused the first's specialization.
+//! cache — therefore needs a canonical form. A pretty-printed string is not one:
+//! rendering is display, not identity, and two types that print alike are not
+//! thereby the same type.
 //!
 //! [`TypeKey`] is the identity: nominal types are keyed by their **def id and
 //! arguments**, structural ones by their shape, and an unresolved variable by

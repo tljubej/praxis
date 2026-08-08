@@ -6,7 +6,7 @@
 //! SOURCE_FILE@0..11
 //!   VAR_STMT@0..10
 //!     KW_VAR "var "@0..4
-//!     IDENT "x"@4..5
+//!     Ident "x"@4..5
 //!     ...
 //! ```
 //!
@@ -94,7 +94,8 @@ mod tests {
     /// Build a tiny tree by hand to verify the printer format without depending
     /// on the parser (which is the consumer of this helper, not a dependency).
     fn manual_tree() -> SyntaxNode {
-        // Emulates `var x= 1` as: SOURCE_FILE > VAR_STMT > { KW_VAR "var ", IDENT "x", EQ "=", WS " ", INT "1" }
+        // Emulates `var x= 1` as: SOURCE_FILE > VAR_STMT >
+        // { KW_VAR "var ", Ident "x", EQ "=", Whitespace " ", IntLit "1" }
         let mut b = GreenNodeBuilder::new();
         b.start_node(PraxisLanguage::kind_to_raw(SyntaxKind::SOURCE_FILE));
         b.start_node(PraxisLanguage::kind_to_raw(SyntaxKind::VAR_STMT));
@@ -129,6 +130,5 @@ mod tests {
         // The lossless property: concatenating all token text reproduces source.
         let tree = manual_tree();
         assert_eq!(tree.to_string(), "var x= 1");
-        // (The manually built tree's text is exactly what we put in.)
     }
 }

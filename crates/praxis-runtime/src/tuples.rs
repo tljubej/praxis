@@ -1,4 +1,4 @@
-//! The `Tuple` value descriptor (§4.5 structural tuples, M7).
+//! The `Tuple` value descriptor (§4.5 structural tuples).
 //!
 //! A tuple is an anonymous, positional product: a fixed number of elements, each
 //! a `GcRef`, in source order. Unlike records (§4.5) tuples carry no field names
@@ -30,10 +30,10 @@ use crate::GcRef;
 ///
 /// A slot may be **null**, meaning the compiler had no static type for that
 /// element — the same honest encoding a `Vec`'s element descriptor already uses
-/// (HIR-01/MONO-01: `var m = Map()` generalizes at the `var`, so a use whose
-/// program never inspects the elements leaves them unresolved). The arity is
-/// still exact, so nothing is lost; the *value's own* descriptor answers for a
-/// null slot, and it is read from the object's header, so it is never wrong.
+/// (`var m = Map()` generalizes at the `var`, so a program that never inspects
+/// the elements leaves them unresolved). The arity is still exact, so nothing
+/// is lost; the *value's own* descriptor answers for a null slot, and it is
+/// read from the object's header, so it is never wrong.
 #[repr(C)]
 pub struct TupleSchema {
     pub descriptors: &'static [*const TypeDescriptor],
@@ -49,9 +49,8 @@ impl TupleSchema {
     /// when the compiler had it, and the value's own otherwise.
     ///
     /// Falling back to the header is what makes a null slot safe rather than
-    /// merely tolerated — the alternative that was there first, refusing to
-    /// compile, rejected `var m = Map()` followed by a `for` that never looks
-    /// inside the pair (REP-15).
+    /// merely tolerated: the alternative, refusing to compile, would reject
+    /// `var m = Map()` followed by a `for` that never looks inside the pair.
     fn descriptor_at(&self, i: usize, value: GcRef) -> &'static TypeDescriptor {
         match self.descriptors.get(i).copied() {
             Some(d) if !d.is_null() => {
@@ -65,12 +64,12 @@ impl TupleSchema {
     /// Whether two schemas describe the *same* tuple shape: equal arity and the
     /// same element descriptor in every slot.
     ///
-    /// Shape, not allocation identity (RT-11). Schemas are interned per shape
-    /// *within* a producer, but there are three producers — the codegen's
+    /// Shape, not allocation identity. Schemas are interned per shape *within*
+    /// a producer, but there are three producers — the codegen's
     /// `tuple_schema_for` cache, the runtime's `point_schema`, and the input
-    /// parser — and two of them minting an `(Int, Int)` used to yield tuples
-    /// that compared unequal to each other. Descriptors are `static`, so slot
-    /// comparison is pointer comparison (ADR-038).
+    /// parser — so two of them minting an `(Int, Int)` must still yield tuples
+    /// that compare equal. Descriptors are `static`, so slot comparison is
+    /// pointer comparison (ADR-038).
     ///
     /// A **null** slot is unknown, not a fourth type: it agrees with whatever
     /// the other side says, and the values decide (see `tuple_equals`, which
@@ -132,8 +131,8 @@ unsafe fn tuple_equals(a: *const u8, b: *const u8) -> bool {
     let pb = unsafe { &*(b as *const TuplePayload) };
     // Structural equality is shape + element-wise equality (§5.5). Shape is
     // compared slot by slot, not by schema *address*: three independent
-    // producers intern schemas, so two `(Int, Int)` tuples could hold different
-    // pointers to the same shape and compare unequal (RT-11).
+    // producers intern schemas, so two `(Int, Int)` tuples can hold different
+    // pointers to the same shape.
     if pa.schema.is_null() || pb.schema.is_null() {
         return false;
     }
@@ -150,8 +149,8 @@ unsafe fn tuple_equals(a: *const u8, b: *const u8) -> bool {
         let desc = schema.descriptor_at(i, *x);
         // For a slot the compiler had no type for, `desc` is `x`'s own — so `y`
         // must carry the same one before its payload is read through it. Two
-        // values of different types are unequal; reading one as the other is the
-        // wrong-payload read P0-11 is about.
+        // values of different types are unequal; reading one as the other would
+        // be a wrong-payload read.
         if !std::ptr::eq(desc, schema.descriptor_at(i, *y)) {
             return false;
         }
@@ -174,8 +173,8 @@ unsafe fn tuple_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     // Length first to distinguish prefixes (standard sequence-hash practice).
     hasher.write_bytes(&(p.items.len() as u64).to_le_bytes());
     for (i, item) in p.items.iter().enumerate() {
-        // The slot's type is part of the shape `eq` now compares, so it is part
-        // of the hash too — two tuples that differ only in shape must be free to
+        // The slot's type is part of the shape `eq` compares, so it is part of
+        // the hash too — two tuples that differ only in shape must be free to
         // land in different buckets. Reading it off the *value* for an unknown
         // slot is what keeps hash and eq agreeing there: both ask the object.
         let elem_desc = schema.descriptor_at(i, *item);
@@ -232,7 +231,7 @@ unsafe fn tuple_compare(a: *const u8, b: *const u8) -> std::cmp::Ordering {
     Ordering::Equal
 }
 
-/// Descriptor for the `Tuple` value type (M7, §4.5). Structural equality,
+/// Descriptor for the `Tuple` value type (§4.5). Structural equality,
 /// hashing (§5.5) and the container ordering (ADR-138) all recurse element-wise
 /// through the per-shape schema's element descriptors. A tuple is
 /// equatable/hashable iff every element is; functions never are, so a tuple
@@ -252,7 +251,7 @@ pub static TUPLE: TypeDescriptor = TypeDescriptor::builtin::<TuplePayload>(
 )
 .with_owned_bytes(tuple_owned_bytes);
 
-/// The heap bytes a tuple owns beyond its payload, for GC pacing (RT-04).
+/// The heap bytes a tuple owns beyond its payload, for GC pacing.
 /// `capacity`, not `len`: the buffer's real footprint is what the collector is
 /// paced against.
 ///
@@ -322,15 +321,14 @@ mod tests {
         assert_eq!(unsafe { (*payload).items.len() }, 2);
     }
 
-    /// **REP-15's collateral.** A schema slot may be **null** — the compiler had
-    /// no static type for that element — and the value's own descriptor answers
-    /// for it.
+    /// A schema slot may be **null** — the compiler had no static type for that
+    /// element — and the value's own descriptor answers for it.
     ///
     /// `var m = Map()` followed by a `for kv in m` whose body never opens the
     /// pair is the program that produces one: nothing ever resolves K or V, and
-    /// refusing to compile it (which is what happened first) rejects a working
-    /// program. It is the same answer `collection_arg_descriptor` already gives
-    /// an unresolved element type, and the header is why it is safe rather than
+    /// refusing to compile it would reject a working program. It is the same
+    /// answer the codegen's `nullable_descriptor_for_type` gives a collection's
+    /// unresolved element type, and the header is why it is safe rather than
     /// merely permissive — an object always knows what it is.
     #[test]
     fn an_unknown_schema_slot_reads_the_values_own_descriptor() {
@@ -373,7 +371,7 @@ mod tests {
         assert!(!mixed.equals(&other));
 
         // Two values of *different* types in one slot are unequal rather than
-        // one being read as the other (P0-11).
+        // one being read as the other.
         let swapped = build(&mut ctx, rt.alloc_text("hi"), rt.alloc_int(1));
         assert!(!mixed.equals(&swapped));
 

@@ -1,4 +1,4 @@
-//! The `p EXPR` / `type EXPR` read-only JIT evaluator (§9.5, M10b-WS4).
+//! The `p EXPR` / `type EXPR` read-only JIT evaluator (§9.5).
 //!
 //! §9.5's pipeline:
 //! 1. Parse the expression using ordinary Praxis syntax.
@@ -13,8 +13,8 @@
 //! snapshot frame's locals (name + full static type). The standard pipeline
 //! (parse → analyze → lower → mono → MIR) then resolves `EXPR`'s identifiers
 //! against those params and type-checks it with the captured local types — no
-//! bespoke resolver needed. The full static `Type` ids threaded in WS1 are what
-//! make this work: the runtime `descriptor` alone loses element types, so
+//! bespoke resolver needed. The full static `Type` ids the snapshot carries are
+//! what make this work: the runtime `descriptor` alone loses element types, so
 //! `vec[0]` / `vec.len()` / `rec.field` could not type-check without them.
 //!
 //! The read-only gate (`crate::purity`) runs between steps 3 and 4, rejecting
@@ -25,25 +25,24 @@
 //! arguments") so a GC inside the evaluator cannot collect them. Step 6 formats
 //! the returned `GcRef` via its descriptor (ADR-032: allocate on the main heap).
 //!
-//! # What the frame contributes (DBG-06)
+//! # What the frame contributes
 //!
-//! Only the locals the expression **names**. The frame used to contribute all
-//! of them, and since the synthetic function has to be *whole* to compile, one
-//! unusable local was a total failure — every command, `p 1 + 2` included, died
-//! on the frame rather than on the expression. Three ways a local was unusable,
-//! all reported by the user in one sitting:
+//! Only the locals the expression **names**. The synthetic function has to be
+//! *whole* to compile, so binding every local would make one unusable local a
+//! total failure — every command, `p 1 + 2` included, would die on the frame
+//! rather than on the expression. Three ways a local is unusable:
 //!
-//! - its type named a `struct` or `enum` the synthetic module never declared
+//! - its type names a `struct` or `enum` the synthetic module never declared
 //!   (``unknown type `Foo` ``);
-//! - its type had no source syntax at all — an anonymous `read lines(…)` record,
+//! - its type has no source syntax at all — an anonymous `read lines(…)` record,
 //!   an unfilled `Vec()`'s `Vec[?T]` ("expected a type");
-//! - there were more than [`MAX_SUPPORTED_ARITY`] of them, so the arity check
-//!   refused the call before looking at what was asked.
+//! - there are more than [`MAX_SUPPORTED_ARITY`] of them, so the arity check
+//!   refuses the call before looking at what was asked.
 //!
-//! Binding by mention fixes the third outright and narrows the other two to the
-//! expression that actually asks for the local; [`crate::synth`] then declares
-//! what it can and refuses what it cannot, so an unusable local costs its own
-//! name and nothing else. The mention set is over-approximated from the
+//! Binding by mention removes the third outright and narrows the other two to
+//! the expression that actually asks for the local; [`crate::synth`] then
+//! declares what it can and refuses what it cannot, so an unusable local costs
+//! its own name and nothing else. The mention set is over-approximated from the
 //! expression's *tokens* — binding a local named `y` because `foo.y` was
 //! written is harmless, missing one is not.
 
@@ -71,17 +70,17 @@ const P_EXPR_FN: &str = "__p_expr";
 /// + pipeline; `type` stops before the purity gate and JIT.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// `p EXPR` (M10b-WS4, §9.5): synthesize the read-only
-    /// `fn __p_expr(<typed params>) { EXPR }`, type-check it against the
-    /// selected frame's locals, purity-gate it, JIT a fresh function, and call
-    /// it with the snapshot locals.
+    /// `p EXPR` (§9.5): synthesize the read-only `fn __p_expr(<typed params>)
+    /// { EXPR }`, type-check it against the selected frame's locals,
+    /// purity-gate it, JIT a fresh function, and call it with the snapshot
+    /// locals.
     Print,
-    /// `type EXPR` (M10b-WS4, §9.5): the same synthesis and pipeline, rendering
-    /// the expression's inferred type instead of running it.
+    /// `type EXPR` (§9.5): the same synthesis and pipeline, rendering the
+    /// expression's inferred type instead of running it.
     Type,
-    /// `heap EXPR` (M10b-WS5, §9.4): recursively inspect a value. Like
-    /// [`Mode::Print`], but prefixes the result with its type, so the structure
-    /// and the type are visible at a glance.
+    /// `heap EXPR` (§9.4): recursively inspect a value. Like [`Mode::Print`],
+    /// but prefixes the result with its type, so the structure and the type are
+    /// visible at a glance.
     Heap,
 }
 
@@ -89,8 +88,7 @@ impl Mode {
     /// The mode a REPL command word selects, or `None` for any other word.
     ///
     /// The words live beside the variants they name rather than in
-    /// [`crate::repl`]'s dispatch, which carried one arm per mode that differed
-    /// only in the word and the variant.
+    /// [`crate::repl`]'s dispatch.
     #[must_use]
     pub fn from_command(cmd: &str) -> Option<Mode> {
         match cmd {
@@ -104,17 +102,15 @@ impl Mode {
 
 /// What a bound local hands the synthetic function.
 ///
-/// **Two variants and not three**, which is the whole repair: a snapshot local
-/// can be a reference, an elided scalar, or reclaimed storage
-/// ([`praxis_runtime::DebugValue`]), and only the third is unbindable. Reading
-/// the frame through `DebugValue::reference` collapsed the first two — a scalar
-/// answers `None` there, exactly as reclaimed storage does — so every local
-/// whose box the compiler elided became "not defined" to `p`, while the
-/// `locals` pane went on printing it.
+/// **Two variants and not three.** A snapshot local can be a reference, an
+/// elided scalar, or reclaimed storage ([`praxis_runtime::DebugValue`]), and
+/// only the third is unbindable — reading the frame through
+/// `DebugValue::reference` would collapse the first two, because a scalar
+/// answers `None` there exactly as reclaimed storage does.
 ///
-/// Modelling the bindable pair as its own type is what stops that from
-/// recurring: `Reclaimed` is filtered at the one place it can be, and nothing
-/// downstream has to remember that a scalar is not an absence.
+/// Modelling the bindable pair as its own type keeps `Reclaimed` filtered at
+/// the one place it can be, so nothing downstream has to remember that **a
+/// scalar is a value, not an absence**.
 #[derive(Clone, Copy)]
 enum BoundValue {
     /// An object. The snapshot already roots it.
@@ -137,11 +133,9 @@ struct LocalBinding {
 /// call site supports up to this many ABI args (extend [`call_with_arity`] to
 /// raise it).
 ///
-/// It used to bound the whole *frame*, which is a different and much smaller
-/// number to run out of: a program with seven top-level `var`s could not
-/// evaluate `p 1 + 2`, because the frame was counted before the expression was
-/// read. Six names in one debugger expression is a real ceiling; six bindings in
-/// a function is not.
+/// It bounds the *expression*, not the frame — those are very different numbers
+/// to run out of. Six names in one debugger expression is a real ceiling; six
+/// bindings in a function is not.
 const MAX_SUPPORTED_ARITY: usize = 6;
 
 /// The synthetic module one command compiles, and what building it cost.
@@ -202,9 +196,9 @@ pub fn evaluate(
     assert_read_only(&typed_fn.body.tail)?;
     let result = exec(runtime, snapshot, &synthetic, generation)?;
     let mut out = String::new();
-    // The debugger's rendering, as on the locals rows: `p s` on an empty `Text`
-    // answered `<unreadable>` when it should have answered `""`, and the two
-    // displays disagreeing about the same value is its own defect.
+    // The debugger's rendering, as on the locals rows — the two displays must
+    // not disagree about the same value. `UNREADABLE` is only for a value that
+    // renders to nothing at all; an empty `Text` renders as `""`.
     result.format_debug(&mut out);
     Ok(if out.is_empty() {
         UNREADABLE.to_string()
@@ -227,7 +221,7 @@ pub fn type_of(db: &mut TypeDb, frame: &SnapshotFrame, expr_text: &str) -> EvalR
     }
 }
 
-/// Recursively inspect a value (§9.4 `heap EXPR`, M10b-WS5). Evaluates `EXPR`
+/// Recursively inspect a value (§9.4 `heap EXPR`). Evaluates `EXPR`
 /// (reusing the `p EXPR` path, including the purity gate) and renders the
 /// result with its type prefix and the descriptor's recursive `format`
 /// (which already walks record fields, collection elements, tuple members).
@@ -248,8 +242,8 @@ pub fn heap(
     let result = exec(runtime, snapshot, &synthetic, generation)?;
     let type_str = crate::synth::humanize(&synthetic.minted, &fresh_db.render(expr_ty));
     let mut value_str = String::new();
-    // As `evaluate`: `heap` is a debugger display, and `Text: ` with nothing
-    // after it was never the answer.
+    // As `evaluate`: a value that renders to nothing is `<unreadable>`, not a
+    // bare `Text: ` with an empty tail.
     result.format_debug(&mut value_str);
     Ok(if value_str.is_empty() {
         format!("{type_str}: {UNREADABLE}")
@@ -261,33 +255,28 @@ pub fn heap(
 /// Extract the named, real-valued user locals from `frame`, pairing each with a
 /// static `Type` and its current `GcRef`. Skips sentinel (uninit) values and
 /// compiler temporaries (only bindings the programmer wrote are valid `p EXPR`
-/// parameters). The temp filter is structural — `l.is_user()` — replacing the
-/// old `name != "<tmp>"` string match (the codegen no longer emits `"<tmp>"`;
-/// temps now carry an empty name and the `Temp` kind).
+/// parameters). The temp filter is structural (`l.is_user()`): temps carry an
+/// empty name and the `Temp` kind.
 ///
-/// "A binding the programmer wrote" is ADR-125's set, not the narrower one this
-/// used to mean in practice. A `for` variable and a `match` arm's payload
-/// reached the frame nameless or temp-classified, so this filter dropped them
-/// and `p item` answered "`item` is not defined" for a name in plain sight;
-/// naming those slots in MIR (ADR-139) is what admits them here, and this
-/// filter is the contract that made it a one-sided change.
+/// "A binding the programmer wrote" is ADR-125's set: a `for` variable and a
+/// `match` arm's payload are named slots in MIR (ADR-139), so they reach the
+/// frame as user locals and bind here like any other.
 ///
 /// The type is derived primarily from **what the value itself records** (via
 /// [`praxis_repr::type_for_value`]), which is always concrete — the static
-/// `type_id` (WS1) is only a fallback. This is necessary because Praxis's
+/// `type_id` is only a fallback. This is necessary because Praxis's
 /// inference leaves collection element types as unbound vars when a `Vec()` is
 /// filled by later `push` calls (`var xs = Vec(); xs.push(11)` types `xs` as
 /// `Vec[?T]`, not `Vec[Int]`); the payload carries the real element type, so
 /// `p xs.len()` / `p xs.get(0)` type-check correctly.
 ///
 /// The bridge reads the payload rather than guessing from the top-level
-/// descriptor, so a `Vec[Text]` is now a `Vec[Text]` here and not the `Vec[Int]`
-/// the hand-written map answered for every vector (DBG-02, bounded by P0-11).
+/// descriptor, so a `Vec[Text]` binds as a `Vec[Text]` and not as a `Vec[Int]`.
 ///
-/// Only the locals `expr_text` **mentions** are candidates (DBG-06). Every local
-/// used to be one, which made the synthetic function's health a property of the
-/// frame rather than of the expression: one local the module could not declare,
-/// or a seventh local of any kind, and `p 1 + 2` failed too.
+/// Only the locals `expr_text` **mentions** are candidates, which makes the
+/// synthetic function's health a property of the expression rather than of the
+/// frame: a local the module cannot declare, or a seventh local of any kind,
+/// costs only the expressions that name it.
 fn collect_bindings(
     frame: &SnapshotFrame,
     db: &mut TypeDb,
@@ -299,21 +288,12 @@ fn collect_bindings(
         .filter(|l| l.is_user() && is_bindable_name(&l.name()))
         .filter(|l| mentioned.contains(&l.name()))
         .filter_map(|l| {
-            // **A scalar is a value, not an absence.** This read used to be
-            // `DebugValue::reference`, whose contract is "the reference this
-            // names, or `None` if it is a scalar" — so an unboxed local was
-            // dropped here and `p` answered "not defined" about a name the
-            // `locals` pane was printing one line above.
-            //
-            // The comment that stood here justified it: "in practice no such
-            // local is ever a candidate anyway … the forwarding only elides
-            // compiler temps." ADR-121 made that false — a *user* binding that
-            // provably holds a scalar is not a box either — and nothing failed,
-            // because the only coverage for `p` in those scopes is the book's
-            // examples and `book-verify` was not a CI gate.
-            //
-            // Reclaimed storage is the one unbindable state, and it is refused
-            // by name rather than by falling out of a `None`.
+            // **A scalar is a value, not an absence.** A *user* binding that
+            // provably holds a scalar carries no box (ADR-121), and it binds
+            // like any other local. Reclaimed storage is the one unbindable
+            // state, and it is refused by name rather than by falling out of a
+            // `None` — which is what reading this through
+            // `DebugValue::reference` would do to a scalar as well.
             match l.value? {
                 praxis_runtime::DebugValue::Reference(r) => {
                     Some((l.type_id, l.name().to_string(), BoundValue::Reference(r)))
@@ -334,10 +314,10 @@ fn collect_bindings(
                     // a snapshot local's `GcRef` is rooted by the snapshot
                     // (ADR-033).
                     let recovered = unsafe { praxis_repr::type_for_value(r, db) }.ok();
-                    // F5: the fallback id is rehydrated through the arena's
-                    // checked route. A frame whose `type_id` this `TypeDb` never
-                    // minted has no type to bind, so the local is dropped rather
-                    // than bound to whatever slot the raw index named.
+                    // The fallback id is rehydrated through the arena's checked
+                    // route. A frame whose `type_id` this `TypeDb` never minted
+                    // has no type to bind, so the local is dropped rather than
+                    // bound to whatever slot the raw index named.
                     recovered.or_else(|| db.type_from_raw(type_id))?
                 }
                 // **A scalar carries its own type**, so this needs neither the
@@ -472,8 +452,7 @@ fn synthesize_from(
         .map(|(name, ty)| (name, db.render(ty)))
         .collect();
     // The declarations are their own statements, so the function starts on the
-    // next line; a module that declared nothing is exactly the one-line source
-    // this synthesis has always produced.
+    // next line; a module that declares nothing is the one-line source alone.
     let source = format!(
         "{decls}{}fn {P_EXPR_FN}({}) {{ {expr_text} }}",
         if decls.is_empty() { "" } else { "\n" },
@@ -545,7 +524,7 @@ fn exec(
     // The *generation* is shared, though: the module is thrown away after the
     // call, but the schemas and debug metadata it minted may still be named by
     // values this call left in the heap, and interning them is what keeps a
-    // long session from growing without bound (DBG-05).
+    // long session from growing without bound.
     let map = praxis_source::SourceMap::new();
     let file = map.intern("p_expr.px", source);
     let parsed = praxis_parser::parse(file, source);
@@ -588,11 +567,10 @@ fn exec(
     // (§12.3). The synthetic fn pushes its own shadow frame at entry, but the
     // args are in flight before the prologue spills them, and the REPL has
     // *taken* the snapshot out of the runtime — so `RuntimeRoots` cannot see
-    // it through `ctx.crash_snapshot`. This used to be a `RootScope` attached
-    // to nothing at all: the collector never consulted it, so a collection
-    // inside `__p_expr` could reclaim the very locals being printed (DBG-04).
-    // A `NativeScope` chains onto the context, which is what the collector
-    // actually walks.
+    // it through `ctx.crash_snapshot`. It must be a `NativeScope`, which chains
+    // onto the context: that is what the collector actually walks, and a root
+    // set attached to anything else is one a collection inside `__p_expr` would
+    // never consult.
     // SAFETY: `ctx` is live for the whole call below, and the scope is dropped
     // before it.
     let scope = unsafe { NativeScope::new(&mut ctx) };
@@ -644,9 +622,9 @@ unsafe fn call_with_arity(entry: *const u8, ctx: *mut RuntimeContext, vals: &[Gc
     match vals.len() {
         0 => {
             // A zero-parameter synthetic function is `fn(ctx) -> GcRef`, which
-            // is what codegen emitted for it. The previous arm transmuted to a
-            // one-slot signature and filled the slot with a dangling `GcRef` —
-            // an invalid value handed across an ABI that promises a valid one.
+            // is what codegen emits for it. Transmuting to a one-slot signature
+            // and filling the slot would hand a dangling `GcRef` across an ABI
+            // that promises a valid one.
             let f: unsafe extern "C" fn(*mut RuntimeContext) -> GcRef =
                 unsafe { std::mem::transmute(entry) };
             unsafe { f(ctx) }
@@ -698,17 +676,16 @@ unsafe fn call_with_arity(entry: *const u8, ctx: *mut RuntimeContext, vals: &[Gc
     }
 }
 
-/// Whether a snapshot local's name can be a `__p_expr` parameter (DBG-03).
+/// Whether a snapshot local's name can be a `__p_expr` parameter.
 ///
 /// Snapshot source names are already valid identifiers — they came from the
 /// parser — so this is the guard for a synthetic name that slipped past the
-/// temp filter. It **rejects** rather than rewrites, for two reasons. Rewriting
-/// mapped every unusable name to the single name `_x`, which is not injective:
-/// two such locals became two parameters both called `_x`, and a synthetic
-/// function with a duplicate parameter is a worse failure than the one being
-/// papered over. And the question it asked was ASCII-only, so §4.1's Unicode
-/// identifiers — which the lexer accepts and which are therefore real local
-/// names — were "sanitized" into `_x` as if they were malformed.
+/// temp filter. It **rejects** rather than rewrites: a rewrite that mapped
+/// every unusable name onto one placeholder would not be injective, and a
+/// synthetic function with a duplicate parameter is a worse failure than the
+/// one being papered over. The question is not ASCII-only either — §4.1's
+/// Unicode identifiers are names the lexer accepts and therefore real local
+/// names.
 ///
 /// A rejected local is dropped, exactly as one whose `type_id` this `TypeDb`
 /// never minted is: `p EXPR` cannot mention a name the language cannot spell,
@@ -756,10 +733,9 @@ mod tests {
         assert_eq!(synthetic.source, "fn __p_expr(n: Int) { n + 1 }");
     }
 
-    /// DBG-06, the reported defect, at the level `p` builds its module: a
-    /// `struct` local made the module name a type it never declared, so the
-    /// pipeline answered ``unknown type `Foo` `` — to `p foo`, and equally to
-    /// `p 1 + 2`, which names nothing.
+    /// A `struct` local brings its declaration — and its fields' declarations —
+    /// into the synthetic module, so no parameter type names a type the module
+    /// never declared.
     #[test]
     fn a_struct_local_brings_its_declaration_into_the_module() {
         let runtime = Runtime::new();
@@ -806,8 +782,7 @@ mod tests {
     }
 
     /// …and the same struct local costs an expression that never mentions it
-    /// nothing at all. This is the half of DBG-06 that made the report "`p`
-    /// doesn't work" rather than "`p foo` doesn't work".
+    /// nothing at all: an unusable local makes `p foo` fail, never `p 1 + 2`.
     #[test]
     fn an_expression_binds_only_the_locals_it_names() {
         let runtime = Runtime::new();
@@ -849,8 +824,8 @@ mod tests {
     }
 
     /// A local the expression *does* name but whose type has no spelling is
-    /// dropped — and the failure says so. "unknown name `foo`" about a name the
-    /// `locals` listing shows is the answer this note exists to replace.
+    /// dropped — and the failure says so, rather than reporting "unknown name"
+    /// about a name the `locals` listing plainly shows.
     #[test]
     fn an_unspellable_local_is_dropped_with_an_explanation() {
         let runtime = Runtime::new();
@@ -881,9 +856,9 @@ mod tests {
         assert!(explained.contains("Vec[?T]"), "{explained}");
     }
 
-    /// A shadowed name is two locals in one flattened frame. Both used to become
-    /// parameters — legal, since the later wins, but it spent an ABI slot on a
-    /// binding nothing could refer to. The innermost is the one kept.
+    /// A shadowed name is two locals in one flattened frame, and only the
+    /// innermost binds — so no ABI slot is spent on a parameter nothing in the
+    /// expression could refer to.
     #[test]
     fn a_shadowed_local_binds_once_innermost() {
         let runtime = Runtime::new();
@@ -910,9 +885,7 @@ mod tests {
     }
 
     /// The arity ceiling counts what the *expression* names, not what the frame
-    /// holds. Eight top-level `var`s used to mean `p 1 + 2` reported "frame has
-    /// 8 named locals" — a refusal about the program, before the expression was
-    /// even parsed.
+    /// holds: a frame of eight locals must not refuse `p 1 + 2`.
     #[test]
     fn the_arity_ceiling_counts_the_expressions_names_not_the_frames() {
         let runtime = Runtime::new();
@@ -951,8 +924,8 @@ mod tests {
             Ok("3".to_string()),
             "a frame of eight locals does not refuse an expression that names none"
         );
-        // Seven *named* in one expression is still past the ABI dispatch, and
-        // the message now says which count it is talking about.
+        // Eight *named* in one expression is past the ABI dispatch, and the
+        // message says which count it is talking about.
         let err = evaluate(
             &mut db,
             &mut runtime,
@@ -976,11 +949,8 @@ mod tests {
         assert!(mentioned_idents("foo +").contains("foo"));
     }
 
-    /// DBG-03. This test **asserted the defect** it now rules out (plan §8.2):
-    /// it pinned `sanitize_name`'s rewrite of every unusable name to `_x`, and
-    /// with it the ASCII-only rule that treated a Unicode identifier as damage
-    /// to be repaired. A name is now either usable as written or its local is
-    /// dropped; there is no third name, so nothing can collide with anything.
+    /// A name is either usable as written or its local is dropped; there is no
+    /// rewritten third name, so nothing can collide with anything.
     #[test]
     fn an_unusable_local_name_is_rejected_rather_than_rewritten() {
         assert!(!is_bindable_name("1abc"));
@@ -989,17 +959,15 @@ mod tests {
         assert!(is_bindable_name("ok_name"));
         assert!(is_bindable_name("x9"));
         // §4.1 allows Unicode identifiers, so these are names the lexer really
-        // produces — the old rule rewrote all three to `_x`.
+        // produces.
         assert!(is_bindable_name("δx"));
         assert!(is_bindable_name("Ünicode"));
         assert!(is_bindable_name("日本語"));
     }
 
-    /// …and the collision the rewrite created is what `collect_bindings` must
-    /// not be able to build: two unspellable locals used to become two
-    /// parameters both called `_x`, so the synthetic
-    /// `fn __p_expr(_x: Int, _x: Int)` failed to compile — and `p` reported a
-    /// duplicate-declaration error about a name the program never contained.
+    /// …so `collect_bindings` cannot build a parameter list with a duplicate in
+    /// it. Two unusable names are two dropped locals, never two parameters
+    /// sharing one synthesized name.
     #[test]
     fn two_unusable_names_do_not_collide_into_one_parameter() {
         let runtime = Runtime::new();
@@ -1029,14 +997,13 @@ mod tests {
         assert_eq!(synthetic.source, "fn __p_expr(δx: Int) { δx }");
     }
 
-    /// DBG-04: the values the `p` evaluator holds must be in the collector's
-    /// root set for the duration of the synthetic call.
+    /// The values the `p` evaluator holds must be in the collector's root set
+    /// for the duration of the synthetic call.
     ///
-    /// The evaluator used to build a `RootScope::child(snapshot)` — a root set
-    /// attached to nothing at all. Nothing consulted it: automatic collection
-    /// roots from the context, and the REPL has already *taken* the snapshot
-    /// out of the runtime, so `RuntimeRoots` cannot reach it through
-    /// `ctx.crash_snapshot` either.
+    /// Automatic collection roots from the context, and the REPL has already
+    /// *taken* the snapshot out of the runtime, so `RuntimeRoots` cannot reach
+    /// it through `ctx.crash_snapshot`: the evaluator's own scope is the only
+    /// thing holding these values.
     ///
     /// Generated prologues mask the argument case (the first safepoint spills
     /// the params into the shadow frame before anything can collect), so the
@@ -1117,13 +1084,11 @@ mod tests {
         );
     }
 
-    /// DBG-05/MIR-13: a debugger session that evaluates `p EXPR` a hundred
-    /// times must not leak a hundred copies of the metadata.
+    /// A debugger session that evaluates `p EXPR` a hundred times must not leak
+    /// a hundred copies of the metadata.
     ///
-    /// Each `p` compiles a throwaway module. Before S8 every one of them minted
-    /// its function-name strings, debug-local metadata and schemas with
-    /// `Box::leak`, so the process grew for the life of the session and nothing
-    /// was ever reclaimable. They now belong to the session's one
+    /// Each `p` compiles a throwaway module, but its function-name strings,
+    /// debug-local metadata and schemas belong to the session's one
     /// [`Generation`] and are interned by content, so after the caches are
     /// primed the arena stops moving entirely.
     #[test]
@@ -1235,20 +1200,17 @@ mod tests {
         }
     }
 
-    /// **The regression `p` shipped with.** A local whose box ADR-121 elided is
-    /// a *value*, not an absence, and `p n` must bind it — while the `locals`
-    /// pane was printing `n: Int = 7` one line above, `p n` answered
-    /// ``type error: `n` is not defined``.
+    /// **A local whose box ADR-121 elided is a value, not an absence**, and
+    /// `p n` must bind it exactly as it binds a boxed one.
     ///
     /// The `type_id` is deliberately `Int` in every arm while the payload is
     /// something else, which is the second claim: a scalar's binding type comes
     /// from **what the value is**, not from what inference last recorded — the
     /// same argument `type_for_value` makes on the reference path.
     ///
-    /// HOW IT GOES RED, OBSERVED: restore `collect_bindings`' old
-    /// `l.value.and_then(DebugValue::reference)` and every arm binds nothing,
-    /// because `reference()` answers `None` for a scalar exactly as it does for
-    /// reclaimed storage.
+    /// Reading the slot through `DebugValue::reference` alone binds none of
+    /// these, because `reference()` answers `None` for a scalar exactly as it
+    /// does for reclaimed storage.
     #[test]
     fn an_elided_scalar_local_still_binds_and_at_its_own_type() {
         use praxis_runtime::ScalarValue as S;
@@ -1270,13 +1232,11 @@ mod tests {
             assert_eq!(synthetic.bindings.len(), 1, "{spelling}");
         }
 
-        // **`Byte` is the fifth payload and the one that still does not bind**,
-        // and it is not a gap in this fix: §4.3 reserves `Byte` and `UInt`
-        // without giving them a source spelling, so `Speller::spell` refuses
-        // them and no synthetic parameter can name one. What matters is *which*
-        // refusal it earns — DBG-06's unbound note, naming the local and its
-        // unspellable type, rather than the "not defined" the reference-only
-        // read produced for every scalar alike.
+        // **`Byte` is the fifth payload and the one that does not bind**: §4.3
+        // reserves `Byte` and `UInt` without giving them a source spelling, so
+        // `Speller::spell` refuses them and no synthetic parameter can name
+        // one. What matters is *which* refusal it earns — the unbound note,
+        // naming the local and its unspellable type, and not "not defined".
         let mut db = TypeDb::new();
         let int = db.int();
         let frame = frame_with(vec![scalar_local("n", S::Byte(3), int)]);
@@ -1289,12 +1249,12 @@ mod tests {
         );
     }
 
-    /// …and reclaimed storage is the one slot state that still does not bind,
-    /// which is what keeps the fix above from being "bind everything".
+    /// …and reclaimed storage is the one slot state that does not bind, which
+    /// is what keeps the rule above from being "bind everything".
     ///
-    /// The object is gone, so there is no argument to pass. `p n` reports the
-    /// ordinary unknown-name error, and that is the honest answer here in a way
-    /// it never was for a scalar.
+    /// The object is gone, so there is no argument to pass, and `p n` reports
+    /// the ordinary unknown-name error — the honest answer for a slot holding
+    /// no value, and only for that.
     #[test]
     fn a_reclaimed_local_is_the_one_that_does_not_bind() {
         let mut db = TypeDb::new();

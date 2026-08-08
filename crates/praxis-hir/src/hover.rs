@@ -1,9 +1,8 @@
 //! Hover query: given a source position, return the inferred type and symbol
-//! identity of the name there (§15.2 hover, §19-M2 criterion 5).
+//! identity of the name there (§15.2 hover).
 //!
-//! The real LSP lands in M11; for M2 this is a library-level query exercised by
-//! a test, satisfying "hover returns the inferred type and symbol identity for
-//! each shadowed occurrence."
+//! A library-level query: the language server presents what it answers, and
+//! each shadowed occurrence of a name answers its own `(symbol, type)`.
 
 use praxis_syntax::span_bridge::range_to_span;
 use rowan::TextRange;
@@ -17,12 +16,11 @@ pub struct HoverInfo {
     /// source name have *different* ids — this is how hover distinguishes them.
     ///
     /// `None` where the hovered thing is not a name binding at all: a method
-    /// name resolves to a catalog entry rather than a `SymbolId` (HIR-02). That
-    /// case used to be carried as [`SymbolId::UNRESOLVED`], which is a *different*
-    /// question — `lower.rs` still uses that constant to mean "resolution ran and
-    /// found no declaration". One sentinel answering both left every reader to
-    /// guess which it had, so the absence that hover can produce is spelled in
-    /// the type instead.
+    /// name resolves to a catalog entry rather than a `SymbolId`. That absence
+    /// is spelled in the type and not as [`SymbolId::UNRESOLVED`], which is a
+    /// *different* question — `lower.rs` uses that constant to mean "resolution
+    /// ran and found no declaration", and one sentinel answering both would
+    /// leave every reader to guess which it had.
     pub symbol: Option<SymbolId>,
     /// The name as written in source.
     pub name: String,
@@ -37,11 +35,9 @@ impl Analysis {
     /// occurrence of a name returns a distinct `(symbol, type)`.
     #[must_use]
     pub fn hover(&self, range: TextRange) -> Option<HoverInfo> {
-        // A method name is not a name reference (HIR-02): it resolves to a
-        // catalog entry, not a `SymbolId`, so it has no entry in `refs` and
-        // hover used to return nothing at all for `v.len()`'s `len`. Its result
-        // type used to be smuggled into `ref_types` at the same range, where the
-        // `refs` lookup above meant nothing could ever read it.
+        // A method name is not a name reference: it resolves to a catalog
+        // entry, not a `SymbolId`, so it has no entry in `refs` and must be
+        // answered from `method_refs` before the `refs` lookup below.
         if let Some(m) = self.method_refs.get(&range) {
             return Some(HoverInfo {
                 symbol: None,
@@ -70,13 +66,14 @@ impl Analysis {
         })
     }
 
-    /// Hover over a *declaration* site (a `var`/`fn`/param binding),
-    /// identified by its name-token range. Uses the `decls`... actually the
-    /// decls map is not carried into Analysis; instead, look the symbol up
-    /// directly by id among the symbols whose declaration span covers `range`.
+    /// Hover over a *declaration* site (a `var`/`fn`/param binding), identified
+    /// by its name-token range: the answer is the symbol whose own recorded
+    /// declaration span is exactly `range`.
+    ///
+    /// A declaration is not a reference, so it has no entry in `refs` and
+    /// [`Analysis::hover`] cannot answer it.
     #[must_use]
     pub fn hover_decl(&self, range: TextRange) -> Option<HoverInfo> {
-        // Find the symbol declared at this range by matching its decl span.
         let span = range_to_span(range);
         let sym = self
             .names
@@ -100,9 +97,8 @@ impl Analysis {
     /// Answers the synthesized type of the *innermost* parser node containing
     /// `offset` — so hovering `lines(…)` inside `sections(lines(…))` reports
     /// `Vec[{ … }]` and not the root's `Vec[Vec[{ … }]]`. That distinction is
-    /// the whole of ADR-098: before the index existed, the only type in reach
-    /// was the root's, and an implementation that answered it everywhere passed
-    /// "hover over a parser expression shows a type".
+    /// the whole of ADR-098, and it is what the per-node index exists for:
+    /// answering the root's type everywhere would also "show a type".
     ///
     /// Returns `None` outside every `read`/`parse` body, and for a body the
     /// compiler rejected — there is no synthesized type for a tree that did not

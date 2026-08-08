@@ -5,7 +5,7 @@
 //! rule: when a variable is linked to a type containing variables at a *deeper*
 //! level, those deeper variables are lowered to the linked variable's level —
 //! otherwise generalizing at the inner level would quantify a variable the outer
-//! environment can still reach (soundness bug; TY-01).
+//! environment can still reach, which is unsound.
 //!
 //! All failures are returned as [`UnifyError`]; unification never panics.
 
@@ -28,11 +28,10 @@ pub enum UnifyError {
     /// (`Y024`, ADR-089).
     ///
     /// **A special case of `Mismatch`, raised because the general one reads as
-    /// an inference accident.** `assert(cond, "why")` came back as
+    /// an inference accident.** A `Mismatch` for `assert(cond, "why")` says
     /// *expected `(Bool) -> Unit`, found `(Bool, Text) -> ?T`* — two whole
-    /// function types to diff by eye, next to a `Y007` that names collection
-    /// arity and a `Y110` that names method arity. The arm below already
-    /// compared the lengths and discarded the fact.
+    /// function types to diff by eye, where `Y007` names collection arity and
+    /// `Y110` names method arity outright.
     ///
     /// It is raised **here** rather than in `infer_call` so that every
     /// function-to-function unification benefits, not just a direct call.
@@ -54,9 +53,9 @@ impl TypeDb {
     /// operand, a parameter before its argument.
     ///
     /// The parameters are named rather than positional (`a`/`b`) because the
-    /// orientation is invisible at a call site otherwise, and five call sites had
-    /// it backwards — `"a" + "b"` reported `expected Text, found Int`, naming the
-    /// operand as the requirement and the requirement as the mistake (REP-61).
+    /// orientation is otherwise invisible at a call site, and getting it
+    /// backwards names the operand as the requirement and the requirement as
+    /// the mistake.
     pub fn unify(&mut self, expected: Type, found: Type) -> Result<(), UnifyError> {
         let a = self.prune(expected);
         let b = self.prune(found);
@@ -83,7 +82,7 @@ impl TypeDb {
     /// the else branch has type `Never`, it produces no value, and asking the
     /// two branches to be *equal* rejects a program that is fine. `Never` is
     /// the bottom type, so it is absorbed — `join(Never, T)` and `join(T, Never)`
-    /// are both `T` — and every other pair still has to unify (TY-19).
+    /// are both `T` — and every other pair still has to unify.
     ///
     /// Returns the joined type, or the reason the two are incompatible. It
     /// delegates to [`unify`](Self::unify), so it inherits that orientation:
@@ -177,8 +176,8 @@ impl TypeDb {
     ) -> Result<(), UnifyError> {
         // Every structural failure below reports the same pair: the
         // representatives at this failure point, context first and program
-        // second (`unify`'s doc, REP-61). Bound once so the orientation is
-        // stated once rather than restated at each `return`.
+        // second (`unify`'s doc). Bound once so the orientation is stated once
+        // rather than restated at each `return`.
         let mismatch = || UnifyError::Mismatch {
             expected: a,
             found: b,
@@ -283,16 +282,11 @@ impl TypeDb {
             // unify pairwise by variant position and the later def-id is
             // rewritten to point at the canonical (earlier) one.
             //
-            // The second clause used to also cover *named* enums, because the
-            // prelude `Option` was registered as a fresh nominal def per
-            // annotation site and per instantiation (TY-06) — so `Some(5)` and
-            // an `Option[Int]` annotation carried different def-ids for what is
-            // one type, and unification had to put the copies back together by
-            // name. F12 gives `Option` a single def with a type parameter, so
-            // the copies do not exist and the relaxed arm is not needed for
-            // them. Two user-declared enums can never share a name in one scope
-            // (the resolver binds the name once), so nothing else reached it.
-            // What remains is the anonymous case, mirroring the anonymous
+            // *Named* enums are deliberately not covered by the second clause:
+            // each has a single def (the prelude `Option` has one def with a
+            // type parameter, and the resolver binds a user-declared enum's
+            // name once per scope), so two named defs with different ids are
+            // two different types. The anonymous case mirrors the anonymous
             // record arm above: structural identity by variant signature, then
             // link.
             (
@@ -326,11 +320,6 @@ impl TypeDb {
                 }
                 // Unify each variant's payload pairwise (zip by declaration
                 // order, which the name check above already aligned).
-                //
-                // TY-05: one representation, so one comparison. The three-way
-                // match this replaces had a catch-all that rejected
-                // `(None, Some([]))` — the very pair `EnumVariantDef`'s own doc
-                // comment called equivalent.
                 for (va, vb) in ea.variants.iter().zip(&eb.variants) {
                     if va.payload.len() != vb.payload.len() {
                         return Err(mismatch());
@@ -385,22 +374,15 @@ impl TypeDb {
     }
 }
 
-/// Pottier's level-lowering rule as a folder (F9): every unbound variable
-/// inside the type being linked is pulled *out* to the level of the variable it
-/// is linked to, so a later generalization at an inner level cannot quantify a
-/// variable the outer environment can still reach.
+/// Pottier's level-lowering rule as a folder: every unbound variable inside the
+/// type being linked is pulled *out* to the level of the variable it is linked
+/// to, so a later generalization at an inner level cannot quantify a variable
+/// the outer environment can still reach.
 ///
-/// # TY-01
-///
-/// The comparison used to run the other way — `if level < min_level`, writing
-/// `min_level` back — which **raised** older variables into the inner scope
-/// instead of lowering inner ones out of it. The effect is the soundness bug
-/// the rule exists to prevent: linking an outer variable to a type containing
-/// an inner one left the inner one deep, so generalizing the result quantified
-/// a variable still reachable from the environment.
-///
-/// [`Level::clamp_to`] is the whole fix, and it is why `Level` is a newtype:
-/// the rule is monotone-decreasing, so the reversed form is now unwritable.
+/// The lowering goes through [`Level::clamp_to`], which is why `Level` is a
+/// newtype: the rule is monotone-decreasing, so the reversed form — raising an
+/// outer variable into the inner scope, which is exactly the unsoundness the
+/// rule exists to prevent — is unwritable.
 ///
 /// Inspection only — it rewrites variable *states*, never the types that
 /// contain them, so it uses [`visit_only_composites`] rather than the rebuilding
@@ -432,13 +414,12 @@ impl TypeFolder for LevelLowerer<'_> {
     visit_only_composites!();
 }
 
-/// The occurs check as a folder (F9): does `var` appear anywhere inside the
-/// type it is about to be linked to?
+/// The occurs check as a folder: does `var` appear anywhere inside the type it
+/// is about to be linked to?
 ///
 /// The fold visits every reachable type once rather than short-circuiting on
-/// the first hit, which is what the memo buys — the hand-written version had no
-/// memo and would recurse forever on a type that reaches itself through a
-/// record def.
+/// the first hit. The memo is what makes that terminate on a type that reaches
+/// itself through a record def.
 struct OccursCheck<'a> {
     db: &'a mut TypeDb,
     memo: FoldMemo,

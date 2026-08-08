@@ -1,16 +1,16 @@
-//! The runtime input-parser interpreter (§7, M6).
+//! The runtime input-parser interpreter (§7).
 //!
 //! Evaluates a compiled [`ParserPlan`] against the process-input buffer (or a
-//! `Text` value), allocating GC results (`Int`, `Char`, source-slice `Text`,
-//! `Vec`, `Grid`, `Record`) and raising `FaultKind::ParseFailed` on mismatch.
+//! `Text` value), allocating GC results (`Int`, `Float`, `Byte`, `Char`,
+//! source-slice `Text`, `Vec`, `Grid`, `Record`, `Tuple`, enum values) and
+//! raising `FaultKind::ParseFailed` on mismatch.
 //!
 //! The plan type and global arena live in `praxis-input-parser`; this
 //! interpreter looks up a plan by its [`PlanId`] and walks its node arena.
 //!
 //! **The arena is not `#[repr(C)]`.** It is ordinary Rust enums and slices, and
 //! nothing here crosses an FFI boundary — only the plan *id* is a JIT immediate.
-//! `praxis_input_parser::plan`'s own doc is the authority; this line claimed a C
-//! layout the types never had.
+//! `praxis_input_parser::plan`'s own doc is the authority on its layout.
 
 mod cursor;
 
@@ -29,11 +29,10 @@ use praxis_input_parser::{AtomicKind, ParserPlan, PlanNode, SectionItemNode, Tem
 /// mismatch → sets `ParseFailed` fault + `None`).
 ///
 /// `raw_id` arrives as the payload of a boxed `Int` — an `i64` the ABI cannot
-/// constrain — so it is validated here rather than narrowed with an `as`. The
-/// predecessor wrote `idx as u32`, which silently folded `0x1_0000_0005` onto
-/// plan 5 and every negative onto a huge index (IP-12). Zero is rejected too:
-/// [`PlanId`](praxis_input_parser::PlanId) is non-zero precisely so the HIR's
-/// old failure sentinel cannot name a plan.
+/// constrain — so it is validated here rather than narrowed with an `as`, which
+/// would fold `0x1_0000_0005` onto plan 5 and every negative onto a huge index.
+/// Zero is rejected too: [`PlanId`](praxis_input_parser::PlanId) is non-zero
+/// precisely so a failure sentinel cannot name a plan.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `input` must be a valid `Text` GcRef.
@@ -50,15 +49,15 @@ pub unsafe fn run_plan_by_id(ctx: *mut RuntimeContext, raw_id: i64, input: GcRef
 ///
 /// Clears the runtime's [`ParseDetail`] slot at the start so a stale failure
 /// from a prior parse does not leak in; on a mismatch, the deepest failure is
-/// recorded there (§7.11, M10-WS1) before the `ParseFailed` fault is raised.
+/// recorded there (§7.11) before the `ParseFailed` fault is raised.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `input` must be a valid `Text` GcRef.
 unsafe fn run_plan(ctx: *mut RuntimeContext, plan: &ParserPlan, input: GcRef) -> GcRef {
-    // The buffer **and its owner** both come from the `input` argument. They
-    // used to come from two places — the bytes from here, the owner from
-    // `ctx.input_source` — so `parse(text, P)` produced `Text` values that were
-    // views of the stdin buffer at the offsets of a different string (IPR-03).
+    // The buffer **and its owner** both come from the `input` argument. Taking
+    // the bytes from here and the owner from `ctx.input_source` would make
+    // `parse(text, P)` produce `Text` values that are views of the stdin buffer
+    // at the offsets of a different string.
     // SAFETY: the caller guarantees `input` is a valid Text GcRef.
     let Some(i) = (unsafe { Input::new(input) }) else {
         unsafe { clear_parse_detail(ctx) };
@@ -69,21 +68,17 @@ unsafe fn run_plan(ctx: *mut RuntimeContext, plan: &ParserPlan, input: GcRef) ->
     // a child that leaves only whitespace fill its bound, `trailing_blank_run`
     // lets a line-splitting construct leave a trailing blank line to nobody
     // when its parser makes nothing of it, and `split_lines` does not end a
-    // region in empty lines — so nothing is left here to special-case. Two
-    // earlier attempts special-cased it anyway, first by applying the bound
-    // rule at a root region that still held the terminator and then by trimming
-    // exactly one terminator, and a file ending "\n\n" defeated the second the
-    // way the first was defeated by "\n". A trim count is the wrong kind of
-    // answer (ADR-078).
+    // region in empty lines — so nothing is left here to special-case. A trim
+    // count is the wrong kind of answer (ADR-078).
     //
     // It also matters *whose* buffer this is: `run_plan` is the single body
     // behind both `read <parser>` and the host `parse(text, P)`, so a trim here
-    // deleted a byte from a Text the program wrote itself and `parse(t, rest)`
-    // stopped being the identity on `t`.
+    // would delete a byte from a Text the program wrote itself, and
+    // `parse(t, rest)` would stop being the identity on `t`.
     let region = i.whole();
     // Root the input for the whole parse. `RuntimeRoots`'s `input` arm reads
     // `ctx.input_source`, which for `parse(text, P)` is a *different* Text —
-    // and this one owns every source-slice the parse produces (IPR-14).
+    // and this one owns every source-slice the parse produces.
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(ctx) };
     let _input = scope.root(input);
@@ -109,12 +104,8 @@ unsafe fn run_plan(ctx: *mut RuntimeContext, plan: &ParserPlan, input: GcRef) ->
 }
 
 /// Run `plan`'s root against `input` and hand back the value or the failure,
-/// with no fault raised and no detail recorded.
-///
-/// The interpreter's own unit tests used to call `walk` directly with a
-/// `(bytes, offset)` pair. That pair is exactly what this stage deleted, and
-/// the tests are gates for defects this stage closes, so they get a root entry
-/// rather than a rewrite against internals or a deletion.
+/// with no fault raised and no detail recorded — which is what lets the
+/// interpreter's own unit tests assert on a [`ParseFail`] directly.
 #[cfg(test)]
 unsafe fn run_root(
     ctx: *mut RuntimeContext,
@@ -147,8 +138,8 @@ unsafe fn set_parse_fault(ctx: *mut RuntimeContext) {
 /// Clear the runtime's [`ParseDetail`] slot at the start of a parse.
 ///
 /// `pub(crate)` for `praxis_run_parser`'s §6.3 descriptor guard, which returns
-/// before `run_plan` and so has to do its own clearing — otherwise it reports the
-/// *previous* parse's offset and expectation for a parse that never ran (REP-60).
+/// before `run_plan` and so has to do its own clearing — otherwise it reports
+/// the *previous* parse's offset and expectation for a parse that never ran.
 ///
 /// # Safety
 /// `ctx` must be live and wired with a non-null `parse_detail`.
@@ -196,14 +187,11 @@ unsafe fn heap_ref<'a>(ctx: *mut RuntimeContext) -> &'a crate::Heap {
 impl Rt {
     /// Give the collector its chance, against the whole root set.
     ///
-    /// Every allocation in this file goes through here now. It could not
-    /// before: the interpreter's `Vec<GcRef>` intermediates were invisible to
-    /// every root set, so a collection anywhere inside a parse would have
-    /// reclaimed the values it was in the middle of assembling. Pacing was
-    /// therefore the *only* thing keeping them alive, and adding a safepoint
-    /// before rooting them would have turned unbounded heap growth into a
-    /// use-after-free (ADR-040, hazard H1). The `NativeScope`s in the helpers
-    /// below are what make this line safe to write.
+    /// Every allocation in this file goes through here, which is safe only
+    /// because the `NativeScope`s in the helpers below root the interpreter's
+    /// `Vec<GcRef>` intermediates. Were they invisible to the root set, a
+    /// collection anywhere inside a parse would reclaim the values the parse is
+    /// in the middle of assembling (ADR-040, hazard H1).
     fn safepoint(&self) -> (&crate::Heap, crate::heap::Safepoint<'_>) {
         // SAFETY: ctx is valid (caller upholds).
         let heap = unsafe { heap_ref(self.ctx) };
@@ -216,15 +204,15 @@ impl Rt {
     /// The boxed `Int` for `value` — the interned immortal when it is small
     /// ([`crate::small_int`]), a fresh allocation otherwise.
     ///
-    /// The safepoint is taken either way, for [`Interp::safepoint`]'s reason and
-    /// not out of symmetry: a `number` atomic repeated over a large input is one
+    /// The safepoint is taken either way, for [`Rt::safepoint`]'s reason and
+    /// not out of symmetry: an `int` atomic repeated over a large input is one
     /// of the few things in a parse that allocates on every step, so it is
     /// exactly where the collector must keep being offered a turn even once most
     /// of the digits it parses answer from the table.
     fn alloc_int(&self, value: i64) -> GcRef {
         let (heap, safepoint) = self.safepoint();
         match crate::small_int::index_of(value) {
-            // SAFETY: `ctx` is valid (the `Interp`'s invariant) and `index_of`
+            // SAFETY: `ctx` is valid (the `Rt`'s invariant) and `index_of`
             // bounds `i` by the table's length.
             Some(i) => {
                 drop(safepoint);
@@ -238,20 +226,20 @@ impl Rt {
     /// ([`crate::small_char`]), a fresh allocation otherwise.
     ///
     /// [`Rt::alloc_int`]'s shape, and the site ADR-107 was written for: the
-    /// `char` atomic runs once per **grid cell**, so `read grid(char)` over a
-    /// 140×140 AoC map used to box 19,600 objects of which at most 128 had
-    /// distinct values. Now it boxes none of them.
+    /// `char` atomic runs once per **grid cell**, so without interning
+    /// `read grid(char)` over a 140×140 AoC map boxes 19,600 objects of which at
+    /// most 128 have distinct values.
     ///
     /// The safepoint is taken either way, for [`Rt::alloc_int`]'s reason: a grid
     /// parse is one of the few things that allocates on every step, so it is
     /// exactly where the collector must keep being offered a turn even once every
     /// cell answers from the table. The `Grid`'s own item vector is what still
     /// grows, and it is what a collection here would have to find rooted — which
-    /// is `walk_grid`'s `NativeScope`'s job, unchanged.
+    /// is `walk_grid`'s `NativeScope`'s job.
     fn alloc_char(&self, value: u32) -> GcRef {
         let (heap, safepoint) = self.safepoint();
         match crate::small_char::index_of(value) {
-            // SAFETY: `ctx` is valid (the `Interp`'s invariant) and `index_of`
+            // SAFETY: `ctx` is valid (the `Rt`'s invariant) and `index_of`
             // bounds `i` by the table's length.
             Some(i) => {
                 drop(safepoint);
@@ -274,7 +262,7 @@ impl Rt {
     }
 
     /// Allocate a source-slice `Text` pointing into `owner`, or `None` if the
-    /// range is not a `Text` (RT-06).
+    /// range is not a `Text`.
     ///
     /// The parser computes its offsets from byte positions in the very buffer
     /// it is slicing, so `None` means the interpreter has a bug — but it must
@@ -293,9 +281,9 @@ impl Rt {
     ///
     /// Used only for a ragged grid's `fill` literal, which lives in plan
     /// storage rather than in the input. Giving it a `Text` of its own is what
-    /// lets the cell parser slice it: the predecessor walked the fill's bytes
-    /// while allocating slices against the *input*, so a `Text` fill cell named
-    /// input bytes chosen by the fill's length (IPR-03).
+    /// lets the cell parser slice it: walking the fill's bytes while allocating
+    /// slices against the *input* would make a `Text` fill cell name input bytes
+    /// chosen by the fill's length.
     fn alloc_text_owned(&self, s: &str) -> GcRef {
         let payload = TextPayload::owned(s);
         let (heap, safepoint) = self.safepoint();
@@ -318,10 +306,10 @@ impl Rt {
         unsafe { heap.alloc_payload(safepoint, &crate::collections::VEC, payload) }
     }
 
-    /// Allocate an enum value (M9): `schema` says which enum type it is, `tag`
+    /// Allocate an enum value: `schema` says which enum type it is, `tag`
     /// selects the variant, and `items` are the payload values. Matches the
-    /// `EnumPayload` layout that codegen-produced `match` code expects (§4.6,
-    /// M7). Used by `choice`/`optional`.
+    /// `EnumPayload` layout that codegen-produced `match` code expects (§4.6).
+    /// Used by `choice`/`optional`.
     fn alloc_enum(
         &self,
         schema: *const crate::enums::EnumSchema,
@@ -403,10 +391,9 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
     let s = trim_leading_ws(rest);
     let at = region.start().advance(rest.len() - s.len());
     // The name a failure reports is the atomic's own keyword, taken from the one
-    // place that owns those ten strings ([`AtomicKind::keyword`]). Spelling them
-    // per-arm is what let `rest` drift: it shares the `Text` arm, whose literal
-    // was `"text"`, so a failing `rest` reported a parser the program did not
-    // write.
+    // place that owns those ten strings ([`AtomicKind::keyword`]) rather than
+    // spelled per-arm — arms are shared between kinds, so a per-arm literal
+    // would report a parser the program did not write.
     let what = kind.keyword();
     match kind {
         AtomicKind::Int => {
@@ -437,18 +424,16 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
             })
         }
         AtomicKind::Char => {
-            // One Unicode scalar value, stepped by the region rather than
-            // decoded out of an ad-hoc `from_utf8` of the tail.
+            // One Unicode scalar value, stepped by the region.
             //
             // **A space is a character**, so `char` reads the scalar at the
             // cursor and does not trim first. §7.4's "surrounding horizontal
             // space handled by caller" is a rule for the *numeric* atomics; a
             // character parser that skipped spaces cannot represent one. That
-            // is not a nicety: a `grid` column is positional, so with the trim
-            // in place `grid(char)` over `"ab\na b\n"` counted two cells in
-            // both rows and reported a genuinely ragged input as a clean 2x2
-            // grid with `b` shifted into the space's slot — a wrong answer
-            // where the byte-width predecessor at least gave a wrong shape.
+            // is not a nicety: a `grid` column is positional, so a trim here
+            // would make `grid(char)` over `"ab\na b\n"` count two cells in
+            // both rows and report a genuinely ragged input as a clean 2x2
+            // grid with `b` shifted into the space's slot.
             let at = region.start();
             let Some(next) = region.next_scalar(i, at) else {
                 return Err(ParseFail::at(at.offset(), 0, what));
@@ -528,7 +513,7 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
             })
         }
         AtomicKind::Identifier => {
-            // §4.1's identifier class, not a local ASCII rule (F3). §7.4 says
+            // §4.1's identifier class, not a local ASCII rule. §7.4 says
             // "ASCII-like … by default"; accepting fewer names than the
             // language itself declares would be the narrower mistake.
             let len = take_ident_run(s);
@@ -544,15 +529,14 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
             })
         }
         AtomicKind::Text | AtomicKind::Rest => {
-            // `text`/`rest` consume the rest of **the region**, which is what
-            // the doc comment always claimed and the code never did: it ran to
-            // `bytes.len()`, so a `text` capture swallowed the literal that
-            // followed it and every `pre{body:text}post` template was
-            // unmatchable (IPR-10). Leading whitespace is part of the text.
+            // `text`/`rest` consume the rest of **the region**, not the rest of
+            // the buffer: running to `bytes.len()` would let a `text` capture
+            // swallow the literal that follows it, making every
+            // `pre{body:text}post` template unmatchable. Leading whitespace is
+            // part of the text.
             //
-            // The two kinds share a rule but not a name: `what` is the one the
-            // program wrote, where the literal `"text"` here reported `text` for
-            // a failing `rest`.
+            // The two kinds share a rule but not a name: `what` is the keyword
+            // the program actually wrote.
             let start = region.start();
             let len = region.end().delta_from(start);
             let slice = rt
@@ -571,13 +555,10 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
 /// The kind of bound a [`walk_exact`] caller computed, for the mismatch it
 /// names.
 ///
-/// A closed set rather than a free-form `&'static str`: twelve call sites typed
-/// the description out by hand, and `"the rest of the section"` and `"the rest
-/// of the token"` were spelled four times each. Nothing outside this file reads
-/// the wording — `praxis-cli/tests/design_doc.rs` and
-/// `praxis-codegen-cranelift/tests/adversarial_audit.rs` quote it only in doc
-/// comments narrating historical output, and both assert on the exit code and
-/// the parsed values instead.
+/// A closed set rather than a free-form `&'static str`, so each description is
+/// spelled once for the dozen call sites that name one. The strings are user
+/// visible: the book's fault reference (`docs/book/src/input/faults.md`)
+/// tabulates them verbatim against the constructor that raises each.
 #[derive(Clone, Copy)]
 enum ExactBound {
     Line,
@@ -606,12 +587,7 @@ impl ExactBound {
 ///
 /// §7.5's rule for a bounded construct is that "each application must consume
 /// the entire line" (and the same for a section, a CSV field, a
-/// whitespace-delimited token, a matrix cell). The predecessor computed those
-/// bounds and then walked the child against everything from the bound's start
-/// to the end of the buffer, discarding the child's cursor — five separate
-/// `var (value, _consumed) = …` and one explicit `var _ = token_end;`. So
-/// `lines(int)` accepted `12junk` and `csv(rest)` returned the whole remainder
-/// for its first field.
+/// whitespace-delimited token, a matrix cell).
 ///
 /// Returning a bare `GcRef` is the point: there is no cursor left for a caller
 /// to forget to check, so "I bounded the child but did not require it to fill
@@ -621,10 +597,8 @@ impl ExactBound {
 /// half of the rule stated in [`cursor`]. §7.4 puts "surrounding horizontal
 /// space" on the caller, and this is the caller for every bounded construct
 /// there is: a line, a section, a CSV field, a `ws`/`sep` token, a matrix cell,
-/// a template capture. `lines(int)` over `"1 \n2 \n"` faulted on the space
-/// while `grid(int)` over the same bytes called it padding, which is two
-/// constructs disagreeing about one byte; the rule lives here now, so there is
-/// one answer and every construct inherits it.
+/// a template capture. The rule lives in this one place, so no two constructs
+/// can disagree about a leftover space.
 ///
 /// It is deliberately the child's answer and not the region's. `int` cannot
 /// read `"1 "`'s trailing space, so the space is padding; `char` reads it as a
@@ -632,11 +606,10 @@ impl ExactBound {
 /// about the data, not about a file convention. The same answer covers the
 /// shape next door: `grid(char)` over `"ab\ncd\n  \n"` is three rows, because a
 /// trailing line of spaces is offered too (`cursor::trailing_blank_run`) and
-/// `char` reads it. Round three answered those two shapes opposite ways.
+/// `char` reads it.
 ///
-/// And it is only what the child *leaves*: `lines(int)` over `"12junk"` still
-/// faults, because `"junk"` is not whitespace, which is the IPR-02 defect this
-/// check exists for.
+/// And it is only what the child *leaves*: `lines(int)` over `"12junk"` faults,
+/// because `"junk"` is not whitespace, which is what this check exists for.
 ///
 /// # Safety
 /// `ctx` must be live and wired.
@@ -662,12 +635,11 @@ unsafe fn walk_exact(
 
 /// The text a region spans, or a parse failure naming `what`.
 ///
-/// The predecessor wrote `str::from_utf8(region).unwrap_or("")` in three
-/// places, which turned a region whose ends were not scalar boundaries into an
-/// *empty* one — a zero-row, zero-width `Grid` where there should have been a
-/// mismatch (IPR-05). A region of a validated [`Input`] can only fail this by
-/// splitting a scalar, which is an interpreter bug; it is reported as a parse
-/// failure rather than asserted, because this runs inside `extern "C"`.
+/// A region of a validated [`Input`] can only fail this by splitting a scalar,
+/// which is an interpreter bug; it is reported as a parse failure rather than
+/// asserted, because this runs inside `extern "C"`. Substituting an empty `str`
+/// for an unconvertible region would answer a mismatch with a zero-row,
+/// zero-width `Grid`.
 fn region_str<'a>(
     i: &Input<'a>,
     region: ByteRegion,
@@ -682,8 +654,8 @@ fn region_str<'a>(
 /// subregions.
 ///
 /// Bounds are computed while splitting rather than recovered afterwards by
-/// searching the region for the token's text — which is what `csv` did, so
-/// every duplicate field mapped to the first occurrence (IPR-04).
+/// searching the region for the token's text, which would map every duplicate
+/// token to the first occurrence.
 fn whitespace_tokens(region: ByteRegion, s: &str) -> Vec<ByteRegion> {
     let base = region.start();
     let mut out = Vec::new();
@@ -706,27 +678,21 @@ fn whitespace_tokens(region: ByteRegion, s: &str) -> Vec<ByteRegion> {
 /// The comma-separated fields of `region`, whose text is `s`, as absolute
 /// subregions. A field runs from one comma to the next, **untrimmed**.
 ///
-/// §7.5's csv entry says "ignore horizontal whitespace around each comma", and
-/// this used to implement that with `str::trim()` on every field — which
-/// decided about whitespace *without asking the field's parser*, the one thing
-/// §7.5's rule forbids. `csv` was the last construct that did: `csv(char)`
-/// faulted on `"a, ,c"` where `sep(",", char)`, `ws(char)` and `grid(char)` all
-/// read the space as a cell, and `csv(rest)` lost the terminator that
-/// `sep(",", rest)` keeps — `trim()` eats vertical whitespace too, which is
-/// more than the entry ever authorised.
+/// §7.5's csv entry says "ignore horizontal whitespace around each comma".
+/// Implementing that with `str::trim()` on every field would decide about
+/// whitespace *without asking the field's parser*, the one thing §7.5's rule
+/// forbids — and `trim()` eats vertical whitespace too, which is more than the
+/// entry authorises.
 ///
-/// The entry's promise survives, from the rule instead of from a trim:
-/// `walk_csv` hands each field to [`walk_exact`], `int` (like every atomic §7.4
-/// puts surrounding space on the caller for) skips leading horizontal
-/// whitespace itself, and the bound half forgives a leftover run that is all
-/// whitespace. So `csv(int)` over `" 1, 2, 3"` still reads three ints, and
-/// `csv(char)` over `"a, ,c"` reads three characters — one of them a space,
-/// because `char` reads spaces everywhere else too.
+/// The entry's promise is kept by the rule instead: `walk_csv` hands each field
+/// to [`walk_exact`], `int` (like every atomic §7.4 puts surrounding space on
+/// the caller for) skips leading horizontal whitespace itself, and the bound
+/// half forgives a leftover run that is all whitespace. So `csv(int)` over
+/// `" 1, 2, 3"` reads three ints, and `csv(char)` over `"a, ,c"` reads three
+/// characters — one of them a space, because `char` reads spaces everywhere
+/// else too.
 ///
-/// An empty field yields an **empty region**, not a search for an empty needle:
-/// `region_offset_of` used to call `hay.windows(0)`, which panics, and
-/// `"10,20,\n"` was enough to reach it — a panic inside `extern "C"`
-/// (IPR-04, D12).
+/// An empty field yields an **empty region**.
 fn csv_tokens(region: ByteRegion, s: &str) -> Vec<ByteRegion> {
     let base = region.start();
     let mut out = Vec::new();
@@ -744,18 +710,12 @@ fn csv_tokens(region: ByteRegion, s: &str) -> Vec<ByteRegion> {
 /// Parse one grid row: apply the cell parser from the row's start until the row
 /// is consumed, appending each cell to `items`. Returns the row's cell count.
 ///
-/// **A cell is whatever the cell parser reads** (D11). §7.5's `grid` examples
-/// are `grid(char)` and `grid(digit)`, and `digit` exists *for* the
+/// **A cell is whatever the cell parser reads.** §7.5's `grid` examples are
+/// `grid(char)` and `grid(digit)`, and `digit` exists *for* the
 /// one-digit-per-cell case — if `grid(int)` meant that too, `digit` would name
 /// nothing. So a cell parser inside `grid` parses a cell exactly as it would
 /// parse anywhere else: `char` is one scalar, `digit` is one digit, `int` is an
 /// integer token.
-///
-/// The predecessor did neither. It measured width in **bytes** and walked the
-/// child once per byte against the whole remaining buffer, so over `"12\n34\n"`
-/// it answered the four cells `[12, 2, 34, 4]` — the token, and then the token's
-/// tail — and a row containing one `é` was two columns wide with a match
-/// attempted at a continuation byte (IPR-06).
 ///
 /// The row is exactly consumed by construction: the cell is bounded to the row,
 /// so it cannot overshoot, and the loop only ends at the row's end or on the
@@ -783,10 +743,10 @@ unsafe fn walk_grid_row(
                 // a cell** — `walk_exact`'s bound rule, in the second loop that
                 // is not `walk_exact`-shaped, through the same predicate.
                 // Trailing spaces are ordinary in real input, and `matrix(int)`
-                // already dropped them (`whitespace_tokens` never emits an
-                // empty token); without this rule `grid(int)` faulted on the
-                // very same file. §7.5 asks only that every row have the same
-                // cell count.
+                // already drops them (`whitespace_tokens` never emits an empty
+                // token); without this rule `grid(int)` would fault on the very
+                // same file. §7.5 asks only that every row have the same cell
+                // count.
                 //
                 // A cell parser that *can* read the run never gets here:
                 // `grid(char)` reads a space as a space, which is what keeps a
@@ -816,14 +776,10 @@ unsafe fn walk_grid_row(
 /// the line's own region, never the region the constructor was handed. Returns
 /// the width to carry forward.
 ///
-/// Two constructors enforce this and they used to state it twice, with two
-/// different answers: `grid` faulted at the line and `matrix` at `region`, so
-/// `matrix(int)` over `"1 2\n  \n3 4\n"` reported the whole input where
-/// `grid(digit)` over the analogous `"12\n  \n34\n"` reported the blank line
-/// itself (REP-55). What the count *counts* is the caller's — cells for `grid`,
-/// whitespace tokens for `matrix` — and so is `expected`; where the fault
-/// points is not. ADR-078 consequence 2 and §7.11 already say a fault names the
-/// position parsing broke at; this is the one constructor that missed it.
+/// Two constructors enforce this, so the rule is stated once here. What the
+/// count *counts* is the caller's — cells for `grid`, whitespace tokens for
+/// `matrix` — and so is `expected`; where the fault points is not. ADR-078
+/// consequence 2 and §7.11 say a fault names the position parsing broke at.
 ///
 /// It answers the width rather than taking `&mut Option<usize>` so that a caller
 /// cannot check the rule and forget to record the first row's width: the check
@@ -850,7 +806,7 @@ fn walk_lines(
 ) -> WalkResult {
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
     // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
-    // scope opened deeper covers everything its callers hold too (IPR-14).
+    // scope opened deeper covers everything its callers hold too.
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
@@ -859,10 +815,7 @@ fn walk_lines(
     // happens to it is the child's answer (`cursor`'s rule, bound half).
     let blank_run = trailing_blank_run(i, &lines);
     for (n, line) in lines.iter().enumerate() {
-        // One line, consumed exactly. The predecessor walked the child against
-        // everything from the line's start to the end of the buffer and threw
-        // the cursor away, so `lines(int)` accepted `12junk` and `lines(rest)`
-        // handed every element the whole remaining input (IPR-02).
+        // One line, consumed exactly.
         // SAFETY: ctx is valid (upheld by `walk`'s caller).
         match unsafe { walk_exact(rt, i, plan, child, *line, ExactBound::Line) } {
             Ok(value) => {
@@ -871,11 +824,11 @@ fn walk_lines(
             }
             // A trailing line of nothing but whitespace the child makes nothing
             // of belongs to nobody: `lines(int)` over `"1\n2\n  \n"` is two
-            // elements. `split_lines` used to delete that line before anyone
-            // was asked, which also deleted it for the children that *can* read
-            // it — `lines(rest)` lost a line, and `lines(rest)` losing a line is
-            // `rest`'s identity property failing one level up. The child is
-            // asked now, so `lines(rest)` and `lines(char)` keep it.
+            // elements. The child is asked rather than the line being deleted
+            // before anyone sees it — deleting it would also delete it for the
+            // children that *can* read it, and `lines(rest)` losing a line is
+            // `rest`'s identity property failing one level up. So
+            // `lines(rest)` and `lines(char)` keep it.
             Err(fail) => {
                 if n < blank_run {
                     return Err(fail);
@@ -899,16 +852,14 @@ fn walk_sections(
 ) -> WalkResult {
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
     // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
-    // scope opened deeper covers everything its callers hold too (IPR-14).
+    // scope opened deeper covers everything its callers hold too.
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
     for section in split_sections(i, region) {
         // A **narrowing of the same buffer**, not a re-slice walked at offset
-        // zero. The predecessor handed the child `&bytes[sec..sec+len]` with an
-        // offset of 0 while its Texts were still allocated against the whole
-        // input, so a `word` in section 2 named bytes at the start of the file
-        // (IPR-03, the stage's P0).
+        // zero: the child's offsets are the input's own, so a `word` in section
+        // 2 slices the bytes it actually matched.
         // SAFETY: ctx is valid.
         let value = unsafe { walk_exact(rt, i, plan, child, section, ExactBound::Section)? };
         scope.root(value);
@@ -921,19 +872,19 @@ fn walk_sections(
     })
 }
 
-/// Walk named heterogeneous `sections(name: P, ..., tail: repeated(P))` (M9,
-/// §7.5). The region is split on blank lines into sections, and the named
-/// arguments consume them **through one cursor, in source order**: a
+/// Walk named heterogeneous `sections(name: P, ..., tail: repeated(P))` (§7.5).
+/// The region is split on blank lines into sections, and the named arguments
+/// consume them **through one cursor, in source order**: a
 /// `SectionItemNode::One` takes the section at the cursor, a
 /// `SectionItemNode::Counted` takes its count's worth and collects them into a
 /// `Vec`, and the unbounded `repeated(P)` tail — if there is one — takes
 /// whatever the cursor has not reached. The result is an anonymous record
 /// assembled via [`alloc_record`].
 ///
-/// The cursor is what makes a counted group followable. The predecessor said
-/// "the fields take `sections[0..fields.len()]` and the tail takes the rest",
-/// which cannot express a field that wants six sections, let alone one that
-/// wants six and is followed by another field.
+/// The cursor is what makes a counted group followable: a rule of "the fields
+/// take `sections[0..fields.len()]` and the tail takes the rest" cannot express
+/// a field that wants six sections, let alone one that wants six and is
+/// followed by another field.
 fn walk_sections_named(
     rt: &Rt,
     i: &Input<'_>,
@@ -960,7 +911,7 @@ fn walk_sections_named(
     // input's own offsets and a source-slice `Text` is right by construction.
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
     // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
-    // scope opened deeper covers everything its callers hold too (IPR-14).
+    // scope opened deeper covers everything its callers hold too.
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut captures: Vec<(Option<&'static str>, u32, GcRef)> = Vec::new();
@@ -1021,12 +972,11 @@ fn walk_sections_named(
 /// What a `sections(...)` with too few sections was expecting, in the words
 /// [`ParseFail`] renders after "expected".
 ///
-/// A call of fixed fields keeps saying `section header`, which is the message
-/// this fault has always carried and the one the book documents: every field
-/// wants one section, so "another section" is the whole of what is missing. A
-/// counted group is different — the number is written in the program, and the
-/// reader's question is *which* group came up short — so the first item the
-/// section list cannot satisfy names itself and its count.
+/// A call of fixed fields says `section header`, the message the book
+/// documents: every field wants one section, so "another section" is the whole
+/// of what is missing. A counted group is different — the number is written in
+/// the program, and the reader's question is *which* group came up short — so
+/// the first item the section list cannot satisfy names itself and its count.
 fn sections_shortfall(fields: &'static [SectionItemNode], available: usize) -> String {
     let mut at = 0usize;
     for item in fields {
@@ -1042,8 +992,8 @@ fn sections_shortfall(fields: &'static [SectionItemNode], available: usize) -> S
     "section header".to_string()
 }
 
-/// Walk `block(item, ...)` (M9, §7.5): apply sequential parsers within one
-/// region, advancing the cursor after each. A positional named-capture template
+/// Walk `block(item, ...)` (§7.5): apply sequential parsers within one region,
+/// advancing the cursor after each. A positional named-capture template
 /// *flattens* its fields into the block record; a named item contributes one
 /// field. The result is a flattened anonymous record assembled via
 /// [`alloc_record`].
@@ -1063,7 +1013,7 @@ fn walk_block(
 ) -> WalkResult {
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
     // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
-    // scope opened deeper covers everything its callers hold too (IPR-14).
+    // scope opened deeper covers everything its callers hold too.
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut cursor = region.start();
@@ -1102,8 +1052,7 @@ fn walk_block(
             praxis_input_parser::BlockItemNode::Named { name, child } => {
                 // The same window as the positional arm, deliberately: the
                 // window is read off the item's plan node, so whether the item
-                // carries a name has no part in it. Giving one arm a window and
-                // not the other is the same half a rule this row was about.
+                // carries a name has no part in it.
                 // SAFETY: ctx is valid.
                 let walked = unsafe {
                     walk(
@@ -1131,16 +1080,15 @@ fn walk_block(
 /// gets the line it starts on, plus one more line for each `\n` the template
 /// writes; every other item gets the rest of the region.
 ///
-/// This is the one statement of the rule. `block` is the only sequencing
-/// construct that computed no window for its children — `lines` narrows to a
-/// line, `sections` to a section, `csv` to a field, `ws`/`sep`/`matrix` to a
-/// token — and ADR-078's thesis is that the window is the *parent's* job. With
-/// no parent bound, a capture that is its template's last part met
-/// `walk_template`'s unbounded-last-part rule and was handed the rest of the
-/// section: §7.7's own example, whose `` `  Starting items: {items:csv(int)}` ``
-/// fed the remaining five lines of the monkey to `csv`, which faulted on them.
-/// The identical template under `lines` read two ints, because `lines` had
-/// bounded it. One template, two answers.
+/// This is the one statement of the rule. Every other sequencing construct
+/// narrows for its children — `lines` to a line, `sections` to a section, `csv`
+/// to a field, `ws`/`sep`/`matrix` to a token — and ADR-078's thesis is that
+/// the window is the *parent's* job. With no parent bound, a capture that is
+/// its template's last part meets `walk_template`'s unbounded-last-part rule
+/// and is handed the rest of the section: §7.7's own example, whose
+/// `` `  Starting items: {items:csv(int)}` `` would feed the remaining five
+/// lines of the monkey to `csv`, where the identical template under `lines`
+/// reads two ints because `lines` bounded it.
 ///
 /// **Why the split is templates and not a list of greedy constructors.** §7.2
 /// defines a template as a description of characters *within a line*, and gives
@@ -1150,8 +1098,7 @@ fn walk_block(
 /// entries and compute their own extent, so bounding them here would be a
 /// second, disagreeing opinion. Any other split — "is this parser greedy?" —
 /// would need a per-constructor table, which is the rule-in-N-places trap
-/// ADR-078's corollary warns against, and it is what got the exhausting variant
-/// rejected too.
+/// ADR-078's corollary warns against.
 ///
 /// It is a **narrowing and not a bound**: the item may stop short of the window
 /// and `block` carries its cursor to the next item, which is how two items on
@@ -1194,8 +1141,7 @@ fn block_item_window(
 /// one line separated by spaces), only the horizontal whitespace is consumed.
 ///
 /// Where the *next* item starts, and only that. How far it may then reach is
-/// [`block_item_window`]'s, which is the other half of "block items are
-/// line-anchored" and the half that used to be missing.
+/// [`block_item_window`]'s — the other half of "block items are line-anchored".
 ///
 /// Byte-wise on purpose: space, tab, CR and LF are single-byte scalars and
 /// cannot occur inside a multi-byte one, so scanning bytes here can never land
@@ -1229,7 +1175,8 @@ fn flatten_record_into(
         let p = &*payload;
         (p.schema, &p.items)
     };
-    // SAFETY: schema is a valid leaked RecordSchema pointer.
+    // SAFETY: schema is a valid RecordSchema pointer, owned by the schema cache
+    // and live until `retire_schemas`.
     let schema = unsafe { &*schema };
     for (n, field) in schema.fields.iter().enumerate() {
         if let Some(value) = items.get(n) {
@@ -1238,7 +1185,7 @@ fn flatten_record_into(
     }
 }
 
-/// Walk `choice(Name: P, ...)` (M9, §7.5): try each case in source order from
+/// Walk `choice(Name: P, ...)` (§7.5): try each case in source order from
 /// the region's start. The first case whose parser succeeds wins; its value
 /// becomes the variant's payload and the cursor advances to where that parser
 /// stopped. If a case fails, the next case is tried from the same start
@@ -1262,7 +1209,7 @@ fn walk_choice(
 ) -> WalkResult {
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
     // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
-    // scope opened deeper covers everything its callers hold too (IPR-14).
+    // scope opened deeper covers everything its callers hold too.
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut deepest: Option<ParseFail> = None;
@@ -1281,14 +1228,13 @@ fn walk_choice(
                 });
             }
             Err(inner) => {
-                // Backtrack, **keeping the deepest case failure** (IPR-09).
-                // Every case's failure used to be discarded and replaced with a
-                // generic "any choice case" at the choice's own offset, so
-                // §7.11's detail named the outermost construct and pointed at
-                // the position where nothing had gone wrong yet. The deepest
+                // Backtrack, **keeping the deepest case failure**. The deepest
                 // failure is the most specific one — it is the same rule
                 // `ParseDetail::consider` applies across a whole parse — and a
                 // case that got further is the case the input was trying to be.
+                // Discarding them for a generic message at the choice's own
+                // offset would make §7.11's detail name the outermost construct
+                // and point where nothing had gone wrong yet.
                 let deeper = match &deepest {
                     None => true,
                     Some(best) => inner.input_span.0 > best.input_span.0,
@@ -1300,11 +1246,11 @@ fn walk_choice(
         }
     }
     // A choice with no cases has no case failure to report; that is the only
-    // shape the generic message ever described honestly.
+    // shape the generic message describes honestly.
     Err(deepest.unwrap_or_else(|| ParseFail::at(region.start().offset(), 0, "any choice case")))
 }
 
-/// Walk `optional(P)` (M9, §7.5): parse `P`; on success return `Some(value)`
+/// Walk `optional(P)` (§7.5): parse `P`; on success return `Some(value)`
 /// (Option tag 0) advancing the cursor, on failure return `None` (tag 1) and
 /// consume NO input (the cursor stays at the region's start). No fault is
 /// raised on a miss — this is parser-level optionality, not exception recovery.
@@ -1317,7 +1263,7 @@ fn walk_optional(
 ) -> WalkResult {
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
     // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
-    // scope opened deeper covers everything its callers hold too (IPR-14).
+    // scope opened deeper covers everything its callers hold too.
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     // SAFETY: ctx is valid.
@@ -1344,8 +1290,8 @@ fn walk_optional(
     }
 }
 
-/// Walk `scan(P)` (M9, §7.5): slide a cursor across the region; at each
-/// position try `P`. On success, push the value and advance past the match
+/// Walk `scan(P)` (§7.5): slide a cursor across the region; at each position
+/// try `P`. On success, push the value and advance past the match
 /// (so overlapping matches aren't found); on failure, advance one position.
 /// All unmatched text is ignored. Returns `Vec[result(P)]` in source order.
 fn walk_scan(
@@ -1357,7 +1303,7 @@ fn walk_scan(
 ) -> WalkResult {
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
     // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
-    // scope opened deeper covers everything its callers hold too (IPR-14).
+    // scope opened deeper covers everything its callers hold too.
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
@@ -1394,7 +1340,7 @@ fn walk_scan(
     })
 }
 
-/// Walk `one_of("LR")` (M9, §7.5): match one character from a literal set.
+/// Walk `one_of("LR")` (§7.5): match one character from a literal set.
 ///
 /// Like [`AtomicKind::Char`], it reads the scalar **at** the cursor: it is a
 /// character class, and a class that skipped spaces before matching could not
@@ -1402,9 +1348,8 @@ fn walk_scan(
 /// A caller that wants leading space skipped has `skip:` or `walk_exact`'s token
 /// bounds. **Not** a template's pre-capture skip: that skip *bounds* a capture
 /// and does not feed it, so it deletes nothing before the child is offered the
-/// bytes. Offering it as a third way was the same mistake one level up — it made
-/// ``lines(`{a:char}`)`` and `lines(char)` disagree about the same file — and
-/// ADR-079 records the correction.
+/// bytes. Offering it as a third way would make ``lines(`{a:char}`)`` and
+/// `lines(char)` disagree about the same file (ADR-079).
 fn walk_one_of(rt: &Rt, i: &Input<'_>, chars: &str, region: ByteRegion) -> WalkResult {
     let at = region.start();
     let Some(next) = region.next_scalar(i, at) else {
@@ -1428,7 +1373,7 @@ fn walk_one_of(rt: &Rt, i: &Input<'_>, chars: &str, region: ByteRegion) -> WalkR
     })
 }
 
-/// Walk `chars(P, skip:)` (M9, §7.5): apply a char-parser repeatedly, trimming
+/// Walk `chars(P, skip:)` (§7.5): apply a char-parser repeatedly, trimming
 /// between matches per the skip policy.
 fn walk_characters(
     rt: &Rt,
@@ -1440,7 +1385,7 @@ fn walk_characters(
 ) -> WalkResult {
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
     // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
-    // scope opened deeper covers everything its callers hold too (IPR-14).
+    // scope opened deeper covers everything its callers hold too.
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
@@ -1451,10 +1396,10 @@ fn walk_characters(
             break;
         }
         // **What is left is whitespace, or the child's failure is the parse's
-        // failure** (IPR-07). The failure half used to `break`, so `chars`
-        // returned `Ok` at the first mismatch and silently dropped the rest of
-        // the region — `chars(digit)` over `"12x34"` answered `[1, 2]` and
-        // reported nothing.
+        // failure.** Breaking on the failure half instead would return `Ok` at
+        // the first mismatch and silently drop the rest of the region —
+        // `chars(digit)` over `"12x34"` answering `[1, 2]` and reporting
+        // nothing.
         //
         // The whitespace half is `walk_exact`'s bound rule, in the one loop
         // that is not `walk_exact`-shaped: `chars` has no bound to fill, it
@@ -1487,10 +1432,10 @@ fn walk_characters(
         scope.root(walked.value);
         items.push(walked.value);
     }
-    // The element descriptor is the child's, not a hardcoded `CHAR`. The Vec
-    // used to be tagged `Char` whatever it held, so `chars(int, …)` filled a
-    // `Vec[Char]` with `Int` objects and `vec_format`/`vec_equals`/`vec_hash`
-    // dispatched through the wrong callback (IPR-07, D-S20-A).
+    // The element descriptor is the child's, not a hardcoded `CHAR`: a Vec
+    // tagged `Char` whatever it held would make `chars(int, …)` a `Vec[Char]`
+    // full of `Int` objects, with `vec_format`/`vec_equals`/`vec_hash`
+    // dispatching through the wrong callback.
     let elem_desc = child_descriptor(plan, child);
     Ok(Walked {
         value: rt.alloc_vec(elem_desc, items),
@@ -1503,18 +1448,15 @@ fn walk_characters(
 /// **`Newlines` is the broader policy, not the narrower one.** `Whitespace`
 /// skips spaces and tabs; `Newlines` skips those *and* line endings. The names
 /// do not say so and the arms below look backwards to a reader who assumes
-/// "whitespace" is the superset — which is exactly the assumption that made a
-/// stage believe `skip: whitespace` could absorb an input file's trailing
-/// newline. It cannot, and it does not have to. The terminator is **inside** the
-/// region — the root region is the whole buffer — and it is forgiven because it
-/// is whitespace no child read: [`walk_characters`] asks the child first and
-/// accepts a whitespace-only leftover through `ByteRegion::is_all_whitespace`,
-/// the bound half of `parser::cursor`'s rule. (An earlier comment here credited
-/// a deleted `Input::root_region` trim, which was round two's answer.)
+/// "whitespace" is the superset. In particular `skip: whitespace` cannot absorb
+/// an input file's trailing newline, and does not have to: the terminator is
+/// **inside** the region — the root region is the whole buffer — and it is
+/// forgiven because it is whitespace no child read. [`walk_characters`] asks the
+/// child first and accepts a whitespace-only leftover through
+/// `ByteRegion::is_all_whitespace`, the bound half of `parser::cursor`'s rule.
 /// `SkipPolicy`'s own documentation in `praxis-input-parser` carries the full
-/// note, and
-/// `the_skip_policies_are_ordered_by_what_they_skip` pins the inclusion so the
-/// sets cannot be quietly swapped.
+/// note, and `the_skip_policies_are_ordered_by_what_they_skip` pins the
+/// inclusion so the sets cannot be quietly swapped.
 ///
 /// Byte-wise like [`skip_line_boundary`], and sound for the same reason: every
 /// byte it tests is ASCII whitespace, which cannot appear inside a multi-byte
@@ -1535,9 +1477,9 @@ fn skip_chars(
     cursor.advance(n)
 }
 
-/// Walk `matrix(P)` (M9, §7.5, ADR-030): parse lines of whitespace-separated
-/// tokens into a rectangular `Grid[result(P)]`. Each row must have the same
-/// token count.
+/// Walk `matrix(P)` (§7.5, ADR-030): parse lines of whitespace-separated tokens
+/// into a rectangular `Grid[result(P)]`. Each row must have the same token
+/// count.
 fn walk_matrix(
     rt: &Rt,
     i: &Input<'_>,
@@ -1547,20 +1489,18 @@ fn walk_matrix(
 ) -> WalkResult {
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
     // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
-    // scope opened deeper covers everything its callers hold too (IPR-14).
+    // scope opened deeper covers everything its callers hold too.
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let lines = split_lines(i, region);
     let blank_run = trailing_blank_run(i, &lines);
     // **One loop, because the offending line has to still be in scope at the
-    // width check.** This was two — tokenize every line into a `Vec<Vec<_>>`,
-    // then check and walk each row — and the line's own `ByteRegion` was the
-    // first loop's variable, dropped before the second could name it. So the
-    // check had only `region`, and a ragged `matrix` reported the whole input
-    // where the identical `grid` rule reported the line (REP-55). Merging is
-    // order-preserving: the first observable failure was already the earliest
-    // row's, and `region_str` can only fail on a non-scalar-boundary region,
-    // which `split_lines` over a validated `Input` cannot produce.
+    // width check**: tokenizing every line first and checking afterwards leaves
+    // the width check with only `region` to name, so a ragged `matrix` would
+    // report the whole input where the identical `grid` rule reports the line.
+    // The single loop is order-preserving: the first observable failure is the
+    // earliest row's, and `region_str` can only fail on a non-scalar-boundary
+    // region, which `split_lines` over a validated `Input` cannot produce.
     let mut items = Vec::with_capacity(lines.len());
     let mut width: Option<usize> = None;
     for (n, line) in lines.iter().enumerate() {
@@ -1568,11 +1508,11 @@ fn walk_matrix(
         let tokens = whitespace_tokens(*line, text);
         // A **trailing** blank line yields no tokens, so `matrix` makes nothing
         // of it and it belongs to nobody — the same rule `grid` and `lines`
-        // answer from, not a `matrix` special case. The predecessor skipped
-        // *any* line that trimmed to nothing, interior ones included, which was
-        // exactly the per-constructor whitespace exception ADR-078's corollary
-        // warns against: `matrix(int)` silently dropped the middle of
-        // `"1 2\n  \n3 4\n"` while `lines(int)` and `grid(digit)` faulted on the
+        // answer from, not a `matrix` special case. Skipping *any* line that
+        // trims to nothing, interior ones included, would be the
+        // per-constructor whitespace exception ADR-078's corollary warns
+        // against: `matrix(int)` would silently drop the middle of
+        // `"1 2\n  \n3 4\n"` where `lines(int)` and `grid(digit)` fault on the
         // identical shape. An interior blank line is structure, so it is a
         // zero-token row and the width check below rejects it.
         if tokens.is_empty() && n >= blank_run {
@@ -1589,7 +1529,7 @@ fn walk_matrix(
         )?);
         for token in &tokens {
             // The token's own region, not its bytes copied into a fresh buffer
-            // walked at offset zero (IPR-03/IPR-05), and consumed exactly.
+            // walked at offset zero, and consumed exactly.
             // SAFETY: ctx is valid.
             let value = unsafe { walk_exact(rt, i, plan, child, *token, ExactBound::Token)? };
             scope.root(value);
@@ -1601,7 +1541,7 @@ fn walk_matrix(
     alloc_grid(rt, elem_desc, items, width, region.end())
 }
 
-/// Walk ragged `grid(P, ragged, fill:)` (M9, §7.5): permit uneven rows and pad
+/// Walk ragged `grid(P, ragged, fill:)` (§7.5): permit uneven rows and pad
 /// to the maximum width with the `fill` value (parsed by the cell parser).
 fn walk_grid_ragged(
     rt: &Rt,
@@ -1613,16 +1553,13 @@ fn walk_grid_ragged(
 ) -> WalkResult {
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
     // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
-    // scope opened deeper covers everything its callers hold too (IPR-14).
+    // scope opened deeper covers everything its callers hold too.
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let lines = split_lines(i, region);
-    // **The fill is not a region of the input.** It is a plan literal, and the
-    // predecessor walked `fill.as_bytes()` at offset 0 while the cell parser
-    // allocated its Texts against the input — so a `Text` fill cell named input
-    // bytes with no relationship at all to the fill text (IPR-03). It gets its
-    // own owned `Text` and its own `Input`, which is what makes a sliced fill
-    // cell name the fill.
+    // **The fill is not a region of the input.** It is a plan literal, so it
+    // gets its own owned `Text` and its own `Input` — which is what makes a
+    // sliced fill cell name the fill rather than unrelated input bytes.
     let fill_owner = rt.alloc_text_owned(fill);
     // The fill's `Text` and the value parsed out of it are both live across
     // every row: the value is a slice of the owner, and the padding cells all
@@ -1700,15 +1637,13 @@ fn walk_csv(
 ) -> WalkResult {
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
     // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
-    // scope opened deeper covers everything its callers hold too (IPR-14).
+    // scope opened deeper covers everything its callers hold too.
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let text = region_str(i, region, "csv")?;
     let mut items = Vec::new();
     for token in csv_tokens(region, text) {
-        // The field's own region. `csv` used to hand the child everything from
-        // the field's start to the end of the input and discard the cursor —
-        // the discard was even written out, `var _ = token_end;` (IPR-04).
+        // The field's own region, consumed exactly.
         // SAFETY: ctx is valid.
         let value = unsafe { walk_exact(rt, i, plan, child, token, ExactBound::Field)? };
         scope.root(value);
@@ -1725,14 +1660,13 @@ fn walk_csv(
 ///
 /// **A whitespace-delimited token contains no whitespace.** §7.5 says `ws`
 /// splits "on one or more spaces or tabs", which names the *separator*; it does
-/// not say a `\n` may sit inside a token, and nothing could want it to. The
-/// predecessor split on spaces and tabs alone, so a token ran through a line
-/// ending: `read ws(int)` over `"1 2\n3 4\n"` was three tokens — `1`, `2\n3`,
-/// `4\n` — and the middle one faulted. A line terminator is not `ws`'s
-/// separator but it is still a token terminator, which is the same rule
-/// [`whitespace_tokens`] has always applied for `matrix`; sharing that splitter
-/// is what stops the two whitespace-token constructors disagreeing about one
-/// file.
+/// not say a `\n` may sit inside a token, and nothing could want it to.
+/// Splitting on spaces and tabs alone would run a token through a line ending,
+/// making `read ws(int)` over `"1 2\n3 4\n"` three tokens — `1`, `2\n3`, `4\n`
+/// — the middle of which faults. A line terminator is not `ws`'s separator but
+/// it is still a token terminator, which is the rule [`whitespace_tokens`]
+/// applies for `matrix`; sharing that splitter is what stops the two
+/// whitespace-token constructors disagreeing about one file.
 fn walk_ws(
     rt: &Rt,
     i: &Input<'_>,
@@ -1742,7 +1676,7 @@ fn walk_ws(
 ) -> WalkResult {
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
     // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
-    // scope opened deeper covers everything its callers hold too (IPR-14).
+    // scope opened deeper covers everything its callers hold too.
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let text = region_str(i, region, "whitespace-separated tokens")?;
@@ -1774,8 +1708,8 @@ fn walk_sep(
     // The loop below advances by `sep_bytes.len()` on a match, and
     // `starts_with(&[])` is unconditionally true — so an empty separator is an
     // infinite loop that allocates a value per iteration. The compiler makes
-    // that unrepresentable (`praxis_input_parser::Separator`, IP-10); this
-    // records what the loop is relying on.
+    // that unrepresentable (`praxis_input_parser::Separator`); this records
+    // what the loop is relying on.
     debug_assert!(
         !sep_bytes.is_empty(),
         "Separator::new refuses an empty separator (IP-10): the loop below cannot advance past one"
@@ -1785,7 +1719,7 @@ fn walk_sep(
     }
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
     // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
-    // scope opened deeper covers everything its callers hold too (IPR-14).
+    // scope opened deeper covers everything its callers hold too.
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let mut items = Vec::new();
@@ -1828,7 +1762,7 @@ fn walk_grid(
 ) -> WalkResult {
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
     // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
-    // scope opened deeper covers everything its callers hold too (IPR-14).
+    // scope opened deeper covers everything its callers hold too.
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let lines = split_lines(i, region);
@@ -1842,17 +1776,16 @@ fn walk_grid(
         // it.** `char` does, so `grid(char)` over `"ab\ncd\n  \n"` is 2x3 —
         // which is the same answer that makes `"ab\ncd \n"` ragged, rather than
         // an exception to it. `digit`/`int` read no cell there, so the line
-        // belongs to nobody and the grid is 2x2. `split_lines` used to delete
-        // the line before the cell parser was asked, so the two answers
-        // contradicted each other and `"  \n  \n"` was an *empty* grid.
+        // belongs to nobody and the grid is 2x2.
         if cells == 0 && n >= blank_run {
             continue;
         }
-        // Grid rows must be uniform (§7.5). Ragged grids are M9. Uniform in
-        // **cells**, which is the only measure that means the same thing for
-        // every cell parser: `grid(char)` counts characters and `grid(int)`
-        // counts integer tokens. That choice of unit is grid's own; where the
-        // fault points is the shared rule, and `uniform_row_width` owns it.
+        // Grid rows must be uniform (§7.5); uneven rows are `walk_grid_ragged`'s
+        // job. Uniform in **cells**, which is the only measure that means the
+        // same thing for every cell parser: `grid(char)` counts characters and
+        // `grid(int)` counts integer tokens. That choice of unit is grid's own;
+        // where the fault points is the shared rule, and `uniform_row_width`
+        // owns it.
         width = Some(uniform_row_width(
             width,
             cells,
@@ -1870,26 +1803,18 @@ fn walk_grid(
 /// The run of template parts a capture must stop before: every part from
 /// `index + 1` up to (not including) the next capture.
 ///
-/// **The whole run, not its first constraining member.** Two spellings of one
-/// policy behaved differently while only the first was consulted:
-/// `` lines(`{a:text} bar`) `` read `"x y bar"` as `a = "x y"`, and
-/// `` lines(`{a:text}\\s+bar`) `` over the identical bytes faulted — because
-/// §7.9 lowers `\\s+` to its own empty-text part, and bounding the capture by
-/// that part alone stopped it at the first space, where `bar` is not. §7.4 says
-/// `text` "minimally consumes text until the following template literal can
-/// match"; what has to be able to match is everything before the next capture,
-/// which is the only reading under which the two spellings agree.
+/// **The whole run, not its first constraining member.** §7.4 says `text`
+/// "minimally consumes text until the following template literal can match";
+/// what has to be able to match is everything before the next capture. That is
+/// the only reading under which two spellings of one policy agree: §7.9 lowers
+/// `\\s+` to its own empty-text part, so bounding by the first part alone would
+/// stop `` lines(`{a:text}\\s+bar`) `` at the first space, where `bar` is not,
+/// while `` lines(`{a:text} bar`) `` reads the same bytes as `a = "x y"`.
 ///
-/// The predecessor before *that* looked only for a literal with **non-empty**
-/// text, so a capture followed by a whitespace-only part was not bounded at
-/// all: `` lines(`{name:text} {v:int}`) `` over `"foo 3"` reported "expected
-/// whitespace" at the end of the line, for the most ordinary template shape
-/// there is.
-///
-/// **A literal's trailing run is one of those parts** (REP-20). The scanner
-/// emits the run at a literal's *trailing* end as an empty literal carrying
-/// `SpaceRun` — a literal has one policy slot and it sits in front of the text —
-/// so `` `Card {id:int}: {body:rest}` `` bounds `id` by the two-part run
+/// **A literal's trailing run is one of those parts.** The scanner emits the
+/// run at a literal's *trailing* end as an empty literal carrying `SpaceRun` —
+/// a literal has one policy slot and it sits in front of the text — so
+/// `` `Card {id:int}: {body:rest}` `` bounds `id` by the two-part run
 /// `[":" with no policy, "" with `SpaceRun`]`, and `body` starts after the
 /// space rather than on it. Taking the *whole* run is what makes that work:
 /// bounding by the `":"` alone would stop `id` in the right place and then hand
@@ -1963,9 +1888,8 @@ fn match_literal_run(
 /// template that writes nothing in front of a literal gets no run in front of
 /// it — so the bound is the comma at byte 3, `a` is handed `"12 "`, and the
 /// space is forgiven by `walk_exact` because it is whitespace `int` did not
-/// read (ADR-078). An earlier version of this comment credited a `SpaceRun` on
-/// the comma with absorbing it; there is no such run, and removing
-/// `walk_exact`'s forgiveness makes that program fault at `2..3`.
+/// read (ADR-078). Removing `walk_exact`'s forgiveness would make that program
+/// fault at `2..3`.
 ///
 /// `None` means the run does not occur in the rest of the region at all, which
 /// is a mismatch the parts themselves will report.
@@ -1995,8 +1919,7 @@ fn capture_bound(
 /// is [`TemplateShape::of`]'s answer, read from the same `parts` — this
 /// function does not classify them itself, and neither does
 /// [`template_result_descriptor`], which tags the same value inside a
-/// collection. They used to classify separately and disagreed (REP-54,
-/// ADR-092).
+/// collection. Classifying in two places lets the two disagree (ADR-092).
 fn walk_template(
     rt: &Rt,
     i: &Input<'_>,
@@ -2006,7 +1929,7 @@ fn walk_template(
 ) -> WalkResult {
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
     // tail of `ctx.native_roots`, and `RuntimeRoots` scans the whole store, so a
-    // scope opened deeper covers everything its callers hold too (IPR-14).
+    // scope opened deeper covers everything its callers hold too.
     // SAFETY: ctx is live and outlives this scope.
     let scope = unsafe { NativeScope::new(rt.ctx) };
     let base = region.start();
@@ -2044,18 +1967,18 @@ fn walk_template(
                 // **The child is offered the bytes at the cursor, whitespace
                 // and all** — a capture answers from the one rule like every
                 // other construct (ADR-078's amended §, §7.5). The cursor is
-                // *not* advanced past leading horizontal whitespace here: doing
-                // that decided about whitespace without asking the child, so
-                // the same child on the same bytes answered one way as
-                // `lines(char)` and another as ``lines(`{a:char}`)``, and a
-                // `{a:text}`/`{a:rest}` capture lost bytes its child reads.
-                // `walk_atomic` already puts §7.4's "surrounding horizontal
-                // space handled by caller" where it belongs — it trims for the
-                // numeric atomics and deliberately does not for `char`, `text`
-                // and `rest` — so the trim was being re-imposed one level up
-                // for exactly the children that forbid it.
+                // *not* advanced past leading horizontal whitespace here:
+                // trimming would decide about whitespace without asking the
+                // child, so the same child on the same bytes would answer one
+                // way as `lines(char)` and another as ``lines(`{a:char}`)``,
+                // and a `{a:text}`/`{a:rest}` capture would lose bytes its
+                // child reads. `walk_atomic` already puts §7.4's "surrounding
+                // horizontal space handled by caller" where it belongs — it
+                // trims for the numeric atomics and deliberately does not for
+                // `char`, `text` and `rest` — so a trim here would re-impose it
+                // one level up for exactly the children that forbid it.
                 //
-                // The skip survives as a *lookahead offset for the bound scan
+                // The skip applies as a *lookahead offset for the bound scan
                 // only* (`search`, below). That is a bound question, not a
                 // whitespace-reading one: a capture may not be bounded by its
                 // own leading whitespace, or `` `{a:text} {v:int}` `` over
@@ -2063,15 +1986,14 @@ fn walk_template(
                 // run is `SpaceRun` + empty text, which matches the indent
                 // itself — and hand `int` the word.
                 let search = base.advance(skip_capture_ws(bytes, cursor.delta_from(base)));
-                // **Bound the capture by the literal that follows it** (IPR-10).
-                // §7.4 says `text` "minimally consumes text until the following
-                // template literal can match", and the predecessor consumed to
-                // the end of the whole buffer — so `pre{body:text}post` ate its
-                // own suffix and no template with a trailing literal could ever
-                // match. Done here rather than in `walk_atomic` because it is
-                // uniform: every capture is bounded, not only the `text` ones,
-                // which is also what stops a `word` at a `-` without adding `-`
-                // to `word`'s delimiter set (IPR-11).
+                // **Bound the capture by the literal that follows it.** §7.4
+                // says `text` "minimally consumes text until the following
+                // template literal can match"; unbounded, `pre{body:text}post`
+                // would eat its own suffix and no template with a trailing
+                // literal could match. Done here rather than in `walk_atomic`
+                // because it is uniform: every capture is bounded, not only the
+                // `text` ones, which is also what stops a `word` at a `-`
+                // without adding `-` to `word`'s delimiter set.
                 match following_bound(parts, index) {
                     Some(bound) => {
                         match capture_bound(i, region, base, search, bound) {
@@ -2142,7 +2064,7 @@ fn walk_template(
         // cannot produce, since it counts the same captures this loop pushed.
         // Bound by slice pattern rather than bridged with `expect`: this runs
         // beneath an `extern "C"` entry point, where a panic is undefined
-        // behaviour, and parser.rs already carries one such scar.
+        // behaviour.
         _ => alloc_unit(rt),
     };
     Ok(Walked {
@@ -2154,19 +2076,16 @@ fn walk_template(
 /// Where a capture's **bound scan** starts: past zero or more spaces or tabs.
 /// Returns that position as an offset into `bytes`.
 ///
-/// This is **not** a [`WsPolicy`](praxis_input_parser::WsPolicy) and it used to
-/// be one — `SpaceRun`, which is the one-or-more policy. It only worked because
-/// `SpaceRun` was implemented as zero-or-more; making `SpaceRun` mean what it
-/// says would otherwise have made every capture demand leading whitespace.
+/// This is **not** a [`WsPolicy`](praxis_input_parser::WsPolicy): `SpaceRun` is
+/// the one-or-more policy, and a capture may not demand leading whitespace.
 ///
-/// It also used to move the **cursor**, which is what the child is offered, and
-/// that was a violation of the one rule in §7.5: it decided about whitespace
+/// It offsets the bound scan and nothing else — never the **cursor**, which is
+/// what the child is offered. Moving the cursor would decide about whitespace
 /// without asking the child, and `walk_atomic` already answers that question
-/// per atomic — trimming for the numeric ones and deliberately not for `char`,
-/// `text` and `rest`. It offsets the bound scan and nothing else now: the
-/// earliest place the following literal run may match is *after* the capture's
-/// own leading whitespace, or a run that can match a space run would bound
-/// every indented capture at its first byte.
+/// per atomic, trimming for the numeric ones and deliberately not for `char`,
+/// `text` and `rest`. The earliest place the following literal run may match is
+/// *after* the capture's own leading whitespace, or a run that can match a
+/// space run would bound every indented capture at its first byte.
 fn skip_capture_ws(bytes: &[u8], cursor: usize) -> usize {
     let Some(rest) = bytes.get(cursor..) else {
         return cursor;
@@ -2183,16 +2102,16 @@ fn consume_ws(bytes: &[u8], cursor: usize, ws: praxis_input_parser::WsPolicy) ->
     match ws {
         WsPolicy::None => {
             // The template wrote no run in front of this literal, so no run is
-            // consumed. Without this variant every literal claimed `SpaceRun`
-            // and `SpaceRun` had to accept an empty run to compensate.
+            // consumed. Without this variant every literal would claim
+            // `SpaceRun`, and `SpaceRun` would have to accept an empty run to
+            // compensate.
         }
         WsPolicy::SpaceRun => {
             // **One or more** spaces or tabs — the flexible §7.2 default, as
-            // `WsPolicy`'s own definition states it. It used to accept an empty
-            // run, with a comment admitting the contradiction, because the
-            // scanner tagged every literal `SpaceRun` and requiring one would
-            // have made a template starting with a literal unmatchable. The
-            // scanner distinguishes them now (IPR-12).
+            // `WsPolicy`'s own definition states it. A literal the template
+            // wrote no run in front of carries `None`, not this policy, so
+            // requiring a run here cannot make a template that starts with a
+            // literal unmatchable.
             i = horizontal_ws_run(rest);
             if i == 0 {
                 return None;
@@ -2202,8 +2121,8 @@ fn consume_ws(bytes: &[u8], cursor: usize, ws: praxis_input_parser::WsPolicy) ->
             i = ascii_ws_run(rest);
         }
         WsPolicy::OneOrMore => {
-            // Literally `ZeroOrMore` plus a non-empty check, and it shares the
-            // run so the two cannot drift apart. They were the same loop twice.
+            // Literally `ZeroOrMore` plus a non-empty check, sharing the same
+            // run so the two cannot drift apart.
             i = ascii_ws_run(rest);
             if i == 0 {
                 return None;
@@ -2245,8 +2164,9 @@ fn alloc_unit(rt: &Rt) -> GcRef {
 }
 
 /// Allocate a record from named captures (§7.3). Builds (and caches) the
-/// `RecordSchema` from the capture names + the child result descriptors, leaks
-/// it to `&'static`, and fills the payload with the captured values.
+/// `RecordSchema` from the capture names + the child result descriptors, and
+/// fills the payload with the captured values. The schema is owned by the cache
+/// below, not leaked.
 fn alloc_record(rt: &Rt, captures: &[(Option<&'static str>, u32, GcRef)]) -> GcRef {
     // Build the schema fields. Named captures only (the record case requires
     // every capture to have a name in well-formed input; anonymous ones in a
@@ -2274,8 +2194,8 @@ fn alloc_record(rt: &Rt, captures: &[(Option<&'static str>, u32, GcRef)]) -> GcR
 }
 
 /// Allocate a tuple from positional capture values (§7.3). Builds (and caches)
-/// the `TupleSchema` from the element descriptors, leaks it to `&'static`, and
-/// fills the payload.
+/// the `TupleSchema` from the element descriptors and fills the payload. The
+/// schema is owned by the cache below, not leaked.
 fn alloc_tuple(rt: &Rt, elements: &[u32], plan: &ParserPlan, values: Vec<GcRef>) -> GcRef {
     let descriptors: Vec<*const crate::TypeDescriptor> = elements
         .iter()
@@ -2299,11 +2219,11 @@ fn alloc_tuple(rt: &Rt, elements: &[u32], plan: &ParserPlan, values: Vec<GcRef>)
 // them from the values the child plans produced. So the schemas are built here,
 // at runtime, and cached by shape so repeated parses of one template share one.
 //
-// **These entries own their storage** (IP-12). They used to be `Box::leak`ed,
-// which was not merely a leak: a `RecordField::name` is a `&'static str`
-// *borrowed from plan storage*, so a cache that outlives the plans holds
-// dangling names. Owning them lets `retire` drop the schemas in the same breath
-// as the plans, which is what makes reclaiming either one sound.
+// **These entries own their storage.** `Box::leak`ing them would not be merely
+// a leak: a `RecordField::name` is a `&'static str` *borrowed from plan
+// storage*, so a cache that outlives the plans holds dangling names. Owning
+// them lets `retire_schemas` drop the schemas in the same breath as the plans,
+// which is what makes reclaiming either one sound.
 
 /// One cached record schema and everything it points at.
 struct RecordSchemaEntry {
@@ -2400,7 +2320,7 @@ unsafe fn erase_lifetime<T: 'static>(slice: &[T]) -> &'static [T] {
 /// `record_equals`/`record_format`/`record_hash` dispatch through the schema's
 /// per-field descriptor, so a name-only cache would hand the second template
 /// the first template's descriptor and recompare/reformat via the wrong
-/// callback (the same class of segfault the §6.1 `alloc_record` fix closed).
+/// callback.
 fn record_schema_for(
     fields: Vec<crate::records::RecordField>,
 ) -> *const crate::records::RecordSchema {
@@ -2418,7 +2338,7 @@ fn record_schema_for(
         let borrowed = unsafe { erase_lifetime(&fields) };
         // A named-capture template produces an *anonymous* structural record
         // (§5.6): its identity is its shape, so two templates with the same
-        // fields yield records that compare equal (RT-12).
+        // fields yield records that compare equal.
         let schema = Box::new(crate::records::RecordSchema {
             identity: crate::records::SchemaIdentity::Anonymous,
             fields: borrowed,
@@ -2514,14 +2434,8 @@ fn tuple_schema_for(
 
 // ---- byte-splitting helpers -----------------------------------------------
 //
-// `split_lines` and `split_sections` live in `cursor.rs` now, because they
-// produce positions and positions are that module's business. `region_offset_of`
-// is gone entirely: it located a CSV token by *searching the region for the
-// token's text*, so duplicate fields all mapped to the first occurrence, and it
-// called `hay.windows(0)` — a panic — for any token that was empty, which
-// `"10,20,\n"` was enough to reach. Inside `extern "C"` that is not a panic, it
-// is undefined behaviour. `csv_tokens` computes the bounds while it splits, so
-// there is nothing to search for and nothing to be empty.
+// `split_lines` and `split_sections` live in `cursor.rs`, because they produce
+// positions and positions are that module's business.
 
 /// Skip leading horizontal whitespace (spaces and tabs).
 fn trim_leading_ws(bytes: &[u8]) -> &[u8] {
@@ -2675,10 +2589,9 @@ fn ascii_ws_run(bytes: &[u8]) -> usize {
 /// per-instance element type lives in the payload, not the descriptor — a nested
 /// constructor's result descriptor is just `VEC`/`GRID` regardless of how deep
 /// the nesting goes. The payload chain carries the inner element types, so
-/// `vec_format`/`vec_equals`/`vec_hash` recurse correctly through it. (The prior
-/// implementation collapsed the whole subtree to its leaf atomic and returned
-/// that scalar, mis-tagging every intermediate Vec/Grid — a silent mis-dispatch
-/// in any nested-collection format/eq/hash.)
+/// `vec_format`/`vec_equals`/`vec_hash` recurse correctly through it. Collapsing
+/// the subtree to its leaf atomic instead would mis-tag every intermediate
+/// Vec/Grid — a silent mis-dispatch in any nested-collection format/eq/hash.
 ///
 /// `RECORD`, `ENUM` and `TUPLE` are uniform in exactly the same way: one
 /// descriptor for every shape, with the `RecordSchema`/`EnumSchema`/
@@ -2720,9 +2633,9 @@ fn child_descriptor(plan: &ParserPlan, child: u32) -> &'static crate::TypeDescri
 /// Which kinds share a descriptor is [`AtomicClass::of`]'s decision, not this
 /// function's, and it is the same decision `synthesize::atomic_type` reads for
 /// the *static* type — `uint` is an `Int` on both sides because
-/// `ScalarType::UInt` has no runtime object to describe (§7.4, IP-11). Two
-/// copies of that grouping are precisely how a descriptor comes to disagree
-/// with the type behind it, which is REP-54/P0-11.
+/// `ScalarType::UInt` has no runtime object to describe (§7.4). Two copies of
+/// that grouping are precisely how a descriptor comes to disagree with the type
+/// behind it.
 fn atomic_descriptor(kind: AtomicKind) -> &'static crate::TypeDescriptor {
     match AtomicClass::of(kind) {
         AtomicClass::Int => &scalars::INT,
@@ -2737,18 +2650,14 @@ fn atomic_descriptor(kind: AtomicKind) -> &'static crate::TypeDescriptor {
 /// from that template carries for its elements. One arm per §7.3 shape, from
 /// the same [`TemplateShape::of`] that decides the value in [`walk_template`].
 ///
-/// **The tuple arm is a fixed descriptor, not a constructed one** — that is the
-/// whole of REP-54 (ADR-092). This function answered `&scalars::UNIT` for two
-/// or more anonymous captures, on a comment claiming that shape "lowers to a
-/// `Tuple` node, handled above": it does not, there was no "above", and the
-/// register's estimate followed the comment into predicting a tuple-descriptor
-/// constructor that this path would have to grow. There is nothing to
-/// construct. `TUPLE` is uniform like `VEC` and `RECORD`; the per-shape
-/// `TupleSchema` lives in the payload (`tuples.rs`), where `alloc_tuple`
-/// already interned it. So ``read lines(`{int},{int}`)`` held real tuples in a
-/// `Vec` tagged `Unit`, printed `[Unit, Unit]` through `unit_format`, and
-/// compared unequal to the same Vec built with `push` because `vec_equals`
-/// bails on unequal element tags before comparing an element.
+/// **The tuple arm is a fixed descriptor, not a constructed one** (ADR-092).
+/// There is nothing to construct: `TUPLE` is uniform like `VEC` and `RECORD`,
+/// and the per-shape `TupleSchema` lives in the payload (`tuples.rs`), where
+/// `alloc_tuple` interns it. Tagging ``read lines(`{int},{int}`)``'s elements
+/// anything else would hold real tuples in a mistagged `Vec`, print them
+/// through the wrong format callback, and compare them unequal to the same Vec
+/// built with `push`, because `vec_equals` bails on unequal element tags before
+/// comparing an element.
 fn template_result_descriptor(
     plan: &ParserPlan,
     parts: &[praxis_input_parser::TemplatePartNode],
@@ -2757,20 +2666,14 @@ fn template_result_descriptor(
         TemplateShape::Unit => &scalars::UNIT,
         // One anonymous capture → the child's own result descriptor.
         //
-        // This used to be `&scalars::INT`, defended by a comment arguing it was
-        // "a sound default" because the per-value descriptor is read from the
-        // object's header at trace time. It is not a default at all: it is the
-        // tag a *collection* carries for its elements, and `vec_format`,
-        // `vec_equals` and `vec_hash` dispatch through exactly that tag. So
-        // `lines(`{word}`)` produced a `Vec` of `Text` objects whose element
-        // descriptor said `Int`, and rendering it read a `Text` payload through
-        // the `Int` callback (IPR-13, ADR-078 Decision 5 — an earlier version
-        // of this comment credited ADR-079, which is the grid-cell decision).
+        // Not a guessed default: this is the tag a *collection* carries for its
+        // elements, and `vec_format`, `vec_equals` and `vec_hash` dispatch
+        // through exactly that tag (ADR-078 Decision 5). A fixed `&scalars::INT`
+        // here would give `lines(`{word}`)` a `Vec` of `Text` objects whose
+        // element descriptor says `Int`, rendering a `Text` payload through the
+        // `Int` callback.
         //
-        // Deriving it is only correct because a capture names its own parser
-        // body (IP-05, S19). Before that, every capture in a template shared
-        // one guessed kind, and reading the child here would have shipped a
-        // green test asserting the wrong descriptor.
+        // Deriving it is correct because a capture names its own parser body.
         TemplateShape::Scalar { child } => child_descriptor(plan, child),
         TemplateShape::Record => &crate::records::RECORD,
         TemplateShape::Tuple => &crate::tuples::TUPLE,
@@ -2790,18 +2693,17 @@ mod tests {
         }
     }
 
-    // `split_lines`/`split_sections` are covered by `cursor.rs`'s own tests
-    // now: they produce `ByteRegion`s over an `Input`, so their gates live
-    // beside the types whose invariants they establish.
+    // `split_lines`/`split_sections` are covered by `cursor.rs`'s own tests:
+    // they produce `ByteRegion`s over an `Input`, so their gates live beside
+    // the types whose invariants they establish.
 
     /// **ADR-136.** `t.int()`/`t.float()` and `parse(t, int)`/`parse(t, float)`
     /// read the same set, because they run the same scanner.
     ///
     /// This is the gate on that claim, and it is written as the *difference from
     /// the obvious implementation*: every row below is a text where
-    /// `i64::from_str`/`f64::from_str` — which is what the first cut of
-    /// `Text.int()` used — disagrees with §7.4's atomic. A regression to
-    /// `from_str` turns each of them red.
+    /// `i64::from_str`/`f64::from_str` disagrees with §7.4's atomic, so a
+    /// rewrite in terms of `from_str` turns each of them red.
     ///
     /// `abi::whole_trimmed` is the method side; it requires the run to cover the
     /// whole trimmed text, which is the only difference between a method and an
@@ -2845,10 +2747,9 @@ mod tests {
         assert_eq!(len, 3);
     }
 
-    /// **IP-11.** §7.4 lists ten atomic parsers and four of them did not exist:
-    /// `uint`, `float`, `byte`, `identifier`. This is the runtime half — every
-    /// kind parses something and has a descriptor, and the four new rules mean
-    /// what §7.4 says they mean.
+    /// §7.4's ten atomic parsers all exist at runtime: every kind parses
+    /// something and has a descriptor, and `uint`, `float`, `byte` and
+    /// `identifier` mean what §7.4 says they mean.
     ///
     /// The type half is in `praxis-input-parser`'s `synthesize`; the closed-set
     /// half is `atomic_round_trips_keywords` in its `ast.rs`.
@@ -2957,13 +2858,9 @@ mod tests {
         assert_eq!(values, vec!["first", "second"]);
     }
 
-    /// The other half of IPR-03: the owner of a slice is the buffer that was
-    /// *parsed*, not whatever the context happens to call its input.
-    ///
-    /// `parse(text, P)` hands the interpreter a `Text` that is not
-    /// `ctx.input_source`. The predecessor read the bytes from the argument and
-    /// the owner from the context, so every `Text` a `parse` produced was a
-    /// view of the stdin buffer at offsets chosen by a different string.
+    /// **The owner of a slice is the buffer that was *parsed*,** not whatever
+    /// the context happens to call its input: `parse(text, P)` hands the
+    /// interpreter a `Text` that is not `ctx.input_source`.
     #[test]
     fn a_parse_of_a_non_input_text_owns_its_slices() {
         let mut rt = crate::Runtime::new();
@@ -2998,10 +2895,10 @@ mod tests {
     /// `parse(t, P)` takes its owner from the argument, and that argument may
     /// itself be a slice. Naming it directly makes every produced `Text` one
     /// link longer than the last, and `text_bytes` walks the chain on every
-    /// read — so `t = parse(t, rest)` in a loop went quadratic and eventually
-    /// overflowed the stack. `Input::new` resolves to the root owned `Text` and
-    /// carries the base offset, so a slice of a slice is not constructible from
-    /// here however deep the argument was.
+    /// read — so `t = parse(t, rest)` in a loop would go quadratic and
+    /// eventually overflow the stack. `Input::new` resolves to the root owned
+    /// `Text` and carries the base offset, so a slice of a slice is not
+    /// constructible from here however deep the argument was.
     #[test]
     fn a_parse_of_a_slice_does_not_extend_the_owner_chain() {
         let mut rt = crate::Runtime::new();
@@ -3076,8 +2973,8 @@ mod tests {
     }
 
     /// **ADR-107, the parser half.** `read grid(char)` is the shape the interning
-    /// was written for: the `char` atomic runs once per cell, so a 140×140 AoC
-    /// map used to box 19,600 `Char`s of which at most 128 had distinct values.
+    /// was written for: the `char` atomic runs once per cell, so uninterned a
+    /// 140×140 AoC map boxes 19,600 `Char`s with at most 128 distinct values.
     ///
     /// The assertion is a *count*, not a spot check, because the property is
     /// "the parse allocates nothing per cell" and only a count can say that. One
@@ -3227,12 +3124,9 @@ mod tests {
         assert_eq!(values, vec!["a", "b"]);
     }
 
-    /// IPR-04's panic path, as a test that would have aborted the process.
-    ///
-    /// `csv` used to locate a token by searching the region for the token's
-    /// text; a token that trims to nothing made that `slice::windows(0)`, which
-    /// panics — inside `extern "C"`, where a panic is undefined behaviour.
-    /// `"10,20,"` is enough to reach it.
+    /// **An empty csv field is an empty `Text`, not a panic.** This runs inside
+    /// `extern "C"`, where a panic is undefined behaviour, and `"10,20,"` is
+    /// all it takes to produce a field that trims to nothing.
     #[test]
     fn an_empty_csv_field_does_not_panic() {
         let mut rt = crate::Runtime::new();
@@ -3259,16 +3153,14 @@ mod tests {
         );
     }
 
-    // --- M7-WS9: whitespace matcher (§7.2) -----------------------------------
+    // --- whitespace matcher (§7.2) -------------------------------------------
 
-    /// **IPR-09.** A failed `choice` reports the deepest case failure, not a
-    /// generic one at its own offset.
+    /// A failed `choice` reports the deepest case failure, not a generic
+    /// `"any choice case"` at its own offset.
     ///
-    /// Every case's failure used to be dropped on the floor and replaced with
-    /// `"any choice case"` at the position where the choice *started* — so
-    /// §7.11's detail named the outermost construct and pointed at a byte where
-    /// nothing had gone wrong. The case that got furthest is the case the input
-    /// was trying to be, and its own message is the one worth showing.
+    /// The case that got furthest is the case the input was trying to be, and
+    /// its own message is the one worth showing; a generic message would name
+    /// the outermost construct and point at a byte where nothing went wrong.
     #[test]
     fn a_failed_choice_reports_the_deepest_case_failure() {
         fn lit(text: &'static str) -> praxis_input_parser::TemplatePartNode {
@@ -3321,23 +3213,12 @@ mod tests {
         );
     }
 
-    /// **REP-55.** A ragged row's fault names *the row that broke it*, in both
-    /// constructors that have the rule.
-    ///
-    /// `grid` named the offending line and `matrix` named the whole region it
-    /// was handed, because `walk_matrix` was written as two loops and the
-    /// line's own `ByteRegion` was the first loop's variable — dropped before
-    /// the check in the second could name it. One rule, two statements, two
-    /// answers.
+    /// A ragged row's fault names *the row that broke it*, in both constructors
+    /// that have the rule.
     ///
     /// **Both halves are asserted in one test on purpose.** The gate is on the
-    /// *pair* stating one rule, so a future contributor cannot regress `grid`
-    /// to `matrix`'s old shape and stay green.
-    ///
-    /// Observed red with the fix removed: restoring `walk_matrix`'s
-    /// `ParseFail::at(region.start().offset(), region.len(), …)` fails the
-    /// matrix half with `left: (0, 11), right: (4, 6)` — the whole input where
-    /// the blank line was wanted.
+    /// *pair* stating one rule, so neither constructor can drift into naming
+    /// the whole region it was handed and stay green.
     #[test]
     fn a_ragged_row_fault_names_the_row_in_grid_and_in_matrix() {
         let mut rt = crate::Runtime::new();
@@ -3365,7 +3246,7 @@ mod tests {
             "the blank line's own bytes, not the region matrix was handed"
         );
 
-        // The analogous grid, whose answer was already right and must stay so.
+        // The analogous grid, which must answer the same way.
         // `"12\n  \n34\n"`: the blank line is 3..5.
         let input = rt.alloc_text("12\n  \n34\n");
         let mut ctx = rt.context();
@@ -3392,9 +3273,9 @@ mod tests {
     ///
     /// `Whitespace` is spaces and tabs; `Newlines` is those **and** line
     /// endings. The names imply the opposite containment — "whitespace" reads
-    /// like the superset — and a stage acted on that reading, concluding that
-    /// `skip: whitespace` could absorb an input file's trailing newline. It
-    /// cannot. The sets are deliberately kept (they are the ones §7.5's
+    /// like the superset — which invites the conclusion that `skip: whitespace`
+    /// can absorb an input file's trailing newline. It cannot. The sets are
+    /// deliberately kept as they are (they are the ones §7.5's
     /// `chars(one_of("^v<>"), skip: whitespace)` example needs, and swapping
     /// them would change what every existing `skip: newlines` program accepts),
     /// so what has to exist instead is this: a test that states the inclusion,
@@ -3449,9 +3330,10 @@ mod tests {
         }
     }
 
-    /// **IPR-07.** `chars` returned `Ok` at the first child failure, so it
-    /// silently dropped the rest of its region: `chars(digit, skip: none)` over
-    /// `"12x34"` answered `[1, 2]` and reported nothing at all.
+    /// **`chars` that cannot read its whole region faults**, rather than
+    /// returning `Ok` at the first child failure and silently dropping the
+    /// rest: `chars(digit, skip: none)` over `"12x34"` is a parse failure, not
+    /// `[1, 2]`.
     ///
     /// The rule §7.5 wants falls out of running the skip policy once more after
     /// the last match: whatever the skip does not absorb, the child must read.
@@ -3495,22 +3377,16 @@ mod tests {
             None,
             "`skip: none` absorbs nothing, so an interior newline is a mismatch"
         );
-        // **Inverted by the S20 repair, deliberately** (plan §8.2). This line
-        // used to assert that `parse("12\n", None)` faults, on the reading that
-        // "`skip: none` absorbs nothing, so a trailing newline is a mismatch".
-        // The premise was wrong about *which* newline: the byte at the end of
-        // an input file is the file's terminator, not a byte the program asked
-        // any parser to read, and requiring `chars` to consume it faulted every
-        // newline-terminated file — §7.5's own
-        // `chars(one_of("^v<>"), skip: whitespace)` example included. The
-        // terminator IS inside the region — the root region is the whole
-        // buffer — and `walk_characters` forgives it because it is whitespace
-        // the child declined (`ByteRegion::is_all_whitespace`, the bound half of
-        // `cursor`'s rule). No skip policy has to absorb it, and no root trim
-        // has to hide it; a trim was round two's answer and is deleted.
-        // `parse("1\n2", None)` above keeps the half of the claim that was
-        // true: a newline *inside* the data is still a mismatch under
-        // `skip: none`.
+        // **The byte at the end of an input file is the file's terminator, not
+        // a byte the program asked any parser to read.** It IS inside the
+        // region — the root region is the whole buffer — and `walk_characters`
+        // forgives it because it is whitespace the child declined
+        // (`ByteRegion::is_all_whitespace`, the bound half of `cursor`'s rule).
+        // No skip policy has to absorb it and no root trim has to hide it;
+        // requiring `chars` to consume it would fault every newline-terminated
+        // file, §7.5's own `chars(one_of("^v<>"), skip: whitespace)` example
+        // included. `parse("1\n2", None)` above states the other half: a
+        // newline *inside* the data is still a mismatch under `skip: none`.
         assert_eq!(
             parse("12\n", SkipPolicy::None),
             Some(vec![1, 2]),
@@ -3518,17 +3394,15 @@ mod tests {
         );
     }
 
-    /// **D11's answer to IPR-06, spelled out.** A `grid` cell is whatever the
-    /// cell parser reads, so `grid(int)` reads one integer **token** per cell
-    /// and `grid(digit)` reads one digit. §7.5's two examples are `grid(char)`
-    /// and `grid(digit)`, and `digit` exists *for* the one-digit case — if
-    /// `grid(int)` meant that too, `digit` would name nothing.
+    /// **A `grid` cell is whatever the cell parser reads**, so `grid(int)` reads
+    /// one integer **token** per cell and `grid(digit)` reads one digit. §7.5's
+    /// two examples are `grid(char)` and `grid(digit)`, and `digit` exists *for*
+    /// the one-digit case — if `grid(int)` meant that too, `digit` would name
+    /// nothing.
     ///
-    /// This pins the shape the finding named: over `"12\n34\n"` the predecessor
-    /// answered **four** cells `[12, 2, 34, 4]`, because it measured width in
-    /// bytes and walked the child once per byte against the whole remaining
-    /// buffer — reading the token at cell 0 and then re-reading the token's tail
-    /// at cell 1. That is not either candidate semantics.
+    /// Measuring width in bytes and walking the child once per byte answers
+    /// neither semantics: over `"12\n34\n"` it yields **four** cells
+    /// `[12, 2, 34, 4]`, the token and then the token's tail.
     #[test]
     fn a_grid_cell_is_whatever_its_cell_parser_reads() {
         fn cells(kind: AtomicKind, input: &str) -> Option<(usize, Vec<i64>)> {
@@ -3574,9 +3448,9 @@ mod tests {
         );
     }
 
-    /// **IPR-08.** `scan` used to advance one *byte* at a time, so on a
-    /// multi-byte run it attempted a match at continuation bytes — positions
-    /// that are not characters at all.
+    /// **`scan` advances one scalar at a time, not one byte**, so it never
+    /// attempts a match at a continuation byte — a position that is not a
+    /// character at all.
     ///
     /// Over `"ééé"` there are exactly three scalar starts and three
     /// continuation bytes. A byte-stepping `scan` visits six positions; a
@@ -3683,15 +3557,11 @@ mod tests {
     }
 
     /// The sibling of the test above: that one gates the *one*-capture tag,
-    /// this one gates the *many*-capture tag (ADR-092, REP-54).
+    /// this one gates the *many*-capture tag (ADR-092).
     ///
-    /// `Int` and `Word`, not `Int` and `Int`, on purpose: a "fix" that reached
-    /// for the first child's descriptor — the shape the one-capture arm has —
-    /// would answer `INT` and this assertion would still be red.
-    ///
-    /// GATE, observed red: with `template_result_descriptor`'s tuple arm
-    /// reverted to `&scalars::UNIT`, this failed with `left: TypeId(0)`
-    /// (`Unit`) against `right: TypeId(16)` (`Tuple`).
+    /// `Int` and `Word`, not `Int` and `Int`, on purpose: an implementation
+    /// that reached for the first child's descriptor — the shape the
+    /// one-capture arm has — would answer `INT` and stay red here.
     #[test]
     fn multi_anonymous_template_captures_are_a_tuple() {
         let parts: &'static [praxis_input_parser::TemplatePartNode] = Box::leak(

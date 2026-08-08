@@ -10,16 +10,16 @@
 //!   runtime (ADR-095).
 //!
 //! Everything between them is a query: [`diagnostics`], [`hover`],
-//! [`completion`], [`signature`], [`navigation`], [`semantic`], and M12's
-//! [`rename`], [`inlay`], [`code_action`] and [`workspace`]. [`position`] is the
-//! one module in the workspace that knows what a UTF-16 code unit is (ADR-096).
+//! [`completion`], [`signature`], [`navigation`], [`semantic`], [`rename`],
+//! [`inlay`], [`code_action`] and [`workspace`]. [`position`] is the one module
+//! in the workspace that knows what a UTF-16 code unit is (ADR-096).
 //!
 //! The parser sublanguage's editor support — hover on an inner constructor,
 //! capture-type completion, the four parser token classes, §15.3's cursor mode —
 //! reads the index inference retains on `Analysis` (ADR-098). There is no second
 //! scanner over template interiors in this crate, on purpose.
 //!
-//! # The three rules M12's modules are built on
+//! # The three rules this crate's editor features are built on
 //!
 //! Each is stated in full in its own ADR, and each exists so this crate does not
 //! come to hold a second opinion about something the compiler decides:
@@ -62,8 +62,7 @@ pub use position::{Encoding, PositionMap};
 pub use query::{Analyzer, CompletionContext, Snapshot};
 pub use server::{run, serve, Server};
 
-/// The milestone that filled this crate. M0's skeleton advertised it and a test
-/// asserted it; the number is now a fact rather than a promise.
+/// The milestone that filled this crate.
 pub const FILLED_AT_MILESTONE: u32 = 11;
 
 #[cfg(test)]

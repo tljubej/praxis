@@ -1,4 +1,4 @@
-//! Type-inference tests (Slice 5).
+//! Type-inference tests.
 //!
 //! These cover the §19-M2 acceptance criteria that inference owns: inferring
 //! function parameter and return types from use (criterion 1), and rejecting
@@ -14,8 +14,8 @@ use crate::hir_tests::test_util::{
 };
 use crate::{analyze_root, SymbolKind};
 
-/// The rendered scheme of the user binding named `name` (a Let/Var/Fn/Param),
-/// or `None` if it has no scheme.
+/// The rendered scheme of the user binding named `name` (a Var/Fn/Param), or
+/// `None` if it has no scheme.
 fn scheme_of(text: &str, name: &str) -> Option<String> {
     let analysis = analyze(text);
     analysis
@@ -75,7 +75,7 @@ fn errors_of(text: &str) -> Vec<String> {
 
 /// The `ParserAst` the first `read`/`parse` body in `src` converts to.
 ///
-/// Some of what S19 fixed is invisible in the synthesized *type*: a decoded
+/// Much of a parser's meaning is invisible in the synthesized *type*: a decoded
 /// separator, a capture's own parser, the shape of a `choice`'s cases. This is
 /// how those are asserted.
 fn parser_ast_of(src: &str) -> praxis_input_parser::ParserAst {
@@ -223,25 +223,22 @@ fn compound_assignment_type_checked() {
     assert!(has_type_error("var x = 0\nx += \"s\""));
 }
 
-/// **REP-61.** A mismatch names the *requirement* as `expected` and what the
-/// program wrote as `found` — at every site that reports one.
+/// A mismatch names the *requirement* as `expected` and what the program wrote
+/// as `found` — at every site that reports one.
 ///
-/// `TypeDb::unify` builds `Mismatch { expected, found }` in argument order, and
-/// five call sites passed the operand first. So `var c = a + b` over two `Text`
-/// bindings read `expected Text, found Int` **twice**: the operand named as the
-/// requirement, and `Int` — a type nobody wrote and no binding had — named as
-/// the mistake. Each row below reports its halves the other way round before the
-/// fix.
+/// `TypeDb::unify` builds `Mismatch { expected, found }` in argument order, so
+/// every caller must pass what the context requires first and what the program
+/// wrote second.
 ///
-/// The last row is the control. `var` reassignment was already oriented
-/// correctly (`unify(existing, rhs)`), so a "fix" that flipped the orientation
-/// inside `unify` itself rather than at the five call sites turns this one red.
+/// The last row is the control. `var` reassignment is oriented `unify(existing,
+/// rhs)`, so flipping the orientation inside `unify` itself rather than at the
+/// call sites turns this one red.
 #[test]
 fn a_mismatch_names_the_requirement_as_expected_and_the_program_as_found() {
     for (src, want) in [
         // Binary arithmetic: the operator requires Int, the operand is a Bool.
         // Deliberately not a `Text` operand — a `Text` beside `+` is
-        // concatenation now (ADR-085), so it is no longer a mismatch at all.
+        // concatenation (ADR-085), not a mismatch.
         ("var a = 1 + true", "expected Int, found Bool"),
         // Range bounds are Int only (ADR-059).
         ("var r = \"a\"..2", "expected Int, found Text"),
@@ -250,7 +247,7 @@ fn a_mismatch_names_the_requirement_as_expected_and_the_program_as_found() {
         ("var c = -\"x\"", "expected Int, found Text"),
         // `parse(text, parser)` requires Text in its first argument.
         ("var v = parse(1, int)", "expected Text, found Int"),
-        // The control — already correct before the fix.
+        // The control: `var` reassignment is oriented `unify(existing, rhs)`.
         ("var x = 0\nx = \"hi\"", "expected Int, found Text"),
     ] {
         let errors = errors_of(src);
@@ -261,30 +258,20 @@ fn a_mismatch_names_the_requirement_as_expected_and_the_program_as_found() {
     }
 }
 
-/// **D16 / ADR-089.** A call with the wrong argument count names the counts.
+/// **ADR-089.** A call with the wrong argument count names the counts (`Y024`),
+/// rather than diffing two whole function types as a `Y001`.
 ///
 /// A name in Praxis has exactly one signature — no arity-based overloading, no
 /// optional or default parameters — so a count mismatch is never a candidate
 /// for another overload and can be reported as the arithmetic mistake it is.
 ///
-/// It used to come back as `Y001`: `assert(cond, "why")` read *expected
-/// `(Bool) -> Unit`, found `(Bool, Text) -> ?T`*, two whole function types to
-/// diff by eye, sitting beside a `Y007` that names collection arity and a
-/// `Y110` that names method arity. `TypeDb::unify` already compared the two
-/// lengths and threw the fact away.
-///
-/// **`assert` is the first row because it is D16's own motivating case** — the
+/// **`assert` is the first row because it is ADR-089's motivating case** — the
 /// question was whether it should take a message, and the answer is that the
-/// language does not have the mechanism a second signature would need. This is
-/// what the compiler says instead of `Y001`.
-///
-/// Observed red with `UnifyError::Arity` reverted to `Mismatch`: every row
-/// reports `expected …, found …` with two function types and none contains the
-/// word "argument(s)".
+/// language does not have the mechanism a second signature would need.
 #[test]
 fn a_call_with_the_wrong_argument_count_names_the_counts() {
     for (src, want) in [
-        // D16's motivating case: `assert` takes a condition, and the name that
+        // The motivating case: `assert` takes a condition, and the name that
         // carries words is `panic` (ADR-089 decision 2).
         (
             "assert(1 == 1, \"why\")",
@@ -340,8 +327,9 @@ fn a_text_operand_makes_plus_concatenation_and_nothing_else_legal() {
     assert!(has_type_error("var s = \"a\"\ns -= \"b\""));
     assert!(has_type_error("var n = 0\nn += \"b\""));
 
-    // Nothing else is defined for Text. `Y016` is the code TY-27 added for
-    // `%` on `Float`: both operands agree and the operation has no meaning.
+    // Nothing else is defined for Text. `Y016` is the code for an operation
+    // whose operands agree but which has no meaning for that type — the same
+    // code `%` on `Float` reports.
     for src in [
         "var x = \"a\" - \"b\"",
         "var x = \"a\" * \"b\"",
@@ -401,7 +389,7 @@ fn logical_not_is_bool() {
     assert_eq!(expr_type("!true"), "Bool");
 }
 
-// --- tuples (M2 deliverable) ----------------------------------------------
+// --- tuples ----------------------------------------------------------------
 
 #[test]
 fn tuple_type_is_inferred() {
@@ -487,11 +475,11 @@ fn out_accepts_any_type() {
     assert!(!has_type_error("out(true)"));
 }
 
-// --- M6: input-parser type synthesis (§7.8) --------------------------------
+// --- input-parser type synthesis (§7.8) ------------------------------------
 
 #[test]
 fn read_atomic_synthesizes_scalar_type() {
-    // `read int` → Int; `read char` → Char (acceptance criterion 4: hover).
+    // `read int` → Int; `read char` → Char.
     assert_eq!(expr_type("read int"), "Int");
     assert_eq!(expr_type("read char"), "Char");
 }
@@ -542,7 +530,7 @@ fn read_in_fn_then_method_call_typechecks() {
     );
 }
 
-// --- M7-WS6: structural equality capability (§5.5) --------------------------
+// --- structural equality capability (§5.5) ----------------------------------
 
 #[test]
 fn record_equality_typechecks() {
@@ -578,13 +566,13 @@ fn record_with_function_field_not_equatable() {
 
 #[test]
 fn int_equality_still_typechecks() {
-    // Regression: `==` on Int (the pre-existing path) must still typecheck.
+    // `==` on Int typechecks.
     assert!(!has_type_error(
         "fn main() -> Int {\n  if 3 == 3 { 1 } else { 0 }\n}\n"
     ));
 }
 
-// --- M7-WSP: exhaustiveness checking (Y120/Y121) ----------------------------
+// --- exhaustiveness checking (Y120/Y121) ------------------------------------
 
 #[test]
 fn non_exhaustive_enum_match_is_rejected() {
@@ -643,9 +631,7 @@ fn arm_after_wildcard_is_unreachable() {
     assert!(has_type_error_with_lower(src));
 }
 
-// --- M7-WS7: closure type inference (§4.10) ---------------------------------
-// The frontend (parse, resolve, infer) is complete; runtime lowering is in
-// progress. These test the inferred types.
+// --- closure type inference (§4.10) -----------------------------------------
 
 #[test]
 fn closure_infers_identity_type() {
@@ -680,8 +666,8 @@ fn closure_by_value_capture_lowers_clean() {
 
 #[test]
 fn mutable_capture_now_supported() {
-    // WS7b: a capture of a reassigned binding is supported (boxed into a
-    // `VarCell`). It lowers without diagnostics.
+    // A capture of a reassigned binding is supported (boxed into a `VarCell`,
+    // ADR-027). It lowers without diagnostics.
     let src = "fn main() -> Int {\n  var c = 0\n  var f = |_| c\n  f(0)\n}\n";
     assert!(
         !has_type_error_with_lower(src),
@@ -693,10 +679,8 @@ fn mutable_capture_now_supported() {
 // Diagnostic span precision.
 //
 // A type mismatch must point at the offending sub-expression, not the enclosing
-// statement/function (the earlier behavior underlined the whole `fn` for a
-// return-type error). These tests pin the primary span's byte range to the
-// exact expression at fault, so a regression that re-coarsens the span fails
-// loudly. (AGENTS.md: "test every language feature extensively".)
+// statement or function. These tests pin the primary span's byte range to the
+// exact expression at fault, so a change that re-coarsens the span fails loudly.
 // ===========================================================================
 
 /// The primary span `[start, end)` of the first Y001 type-mismatch in `src`, or
@@ -721,9 +705,8 @@ fn span_of(src: &str, needle: &str) -> (u32, u32) {
 
 #[test]
 fn return_type_mismatch_points_at_tail_expression() {
-    // The user's original example: `out("kurac")` returns `Unit` but `main` is
-    // declared `-> Int`. The error must underline `out("kurac")`, not the whole
-    // `fn main() -> Int { … }`.
+    // `out("kurac")` returns `Unit` but `main` is declared `-> Int`. The error
+    // must underline `out("kurac")`, not the whole `fn main() -> Int { … }`.
     let src = "fn main() -> Int {\n    var depths = read lines(int)\n    out(\"kurac\")\n}\n";
     let expected = span_of(src, "out(\"kurac\")");
     let actual = first_mismatch_span(src).expect("expected a Y001 mismatch");
@@ -749,14 +732,12 @@ fn let_annotation_mismatch_points_at_initializer() {
 fn arithmetic_operand_mismatch_points_at_bad_operand() {
     // The error underlines the offending *operand*, not the whole binary
     // expression — and the span is the operand exactly, with no leading
-    // whitespace in it (REP-63).
+    // whitespace in it.
     //
-    // **Which operand is offending flipped with ADR-085.** This case used to be
-    // `s + 1` with `s` at fault, because `+` was numeric and a `Text` operand
-    // was the mistake. A `Text` operand now makes the operation concatenation,
-    // so `s` is the one that fits and `1` is the one that does not — the same
-    // rule that makes `1` the offender in `1 + 2.5`. The subject of the test is
-    // unchanged; only the answer under the new rule is.
+    // In `s + 1` over a `Text` `s`, the offender is `1`: a `Text` operand makes
+    // `+` concatenation (ADR-085), so `s` is the one that fits — the same rule
+    // that makes `1` the offender in `1 + 2.5`.
+    //
     // Bound rather than left as the tail expression: a tail carries the
     // function's return type too, and `-> Int` over a `Text` concatenation adds
     // a *second* mismatch at the whole `s + 1`. That one is correct and is not
@@ -816,11 +797,10 @@ fn mismatch_carries_a_help_hint_when_found_is_unit() {
 }
 
 // ===========================================================================
-// Adversarial front-end regressions.
+// Adversarial front-end contracts.
 //
-// These tests intentionally pin semantic contracts that cross AST accessors,
-// resolution, inference, and typed-HIR lowering. Several currently expose
-// known bugs and are expected to fail until the implementation is corrected.
+// These tests pin semantic contracts that cross AST accessors, resolution,
+// inference, and typed-HIR lowering.
 // ===========================================================================
 
 // --- annotation preservation ------------------------------------------------
@@ -869,9 +849,9 @@ fn user_enum_annotation_is_enforced() {
 
 #[test]
 fn function_typed_record_field_annotation_is_enforced() {
-    // The older equality test initializes this field with a function, which
-    // accidentally pins the dropped annotation and therefore cannot detect the
-    // accessor bug. An Int initializer distinguishes the two paths.
+    // The initializer is an Int on purpose: initializing the field with a
+    // function would type-check whether or not the annotation survived the
+    // accessor, so only a mismatching initializer proves the annotation arrived.
     let src = "struct Box { f: (Int) -> Int }\n\
                fn main() -> Int { var value = Box { f: 1 }; 0 }";
     assert!(
@@ -890,7 +870,7 @@ fn function_typed_enum_payload_annotation_is_enforced() {
     );
 }
 
-/// The exit tests all ask that a wrong use is *rejected*; this asks that the
+/// The tests above all ask that a wrong use is *rejected*; this asks that the
 /// right one is accepted and carries the shape the annotation wrote. A fresh
 /// variable would satisfy every rejection test by never rejecting, so both
 /// halves are needed to say the annotation arrived.
@@ -932,9 +912,7 @@ fn a_parenthesized_annotation_is_the_type_it_groups() {
     );
 }
 
-/// `()` in a parameter group is *no* parameters. It used to resolve to nothing
-/// at all, so `() -> Int` described a function of one invented argument and
-/// accepted a call with anything in it.
+/// `()` in a parameter group is *no* parameters, not one invented one.
 #[test]
 fn a_nullary_function_annotation_takes_no_arguments() {
     assert_eq!(
@@ -957,11 +935,9 @@ fn forward_struct_annotation_is_enforced() {
     );
 }
 
-/// TY-09 stated positively: the exit test only asks that a `Tile` parameter is
-/// not an `Int`, which a fresh variable also satisfies once *something* pins
-/// it. This asks that the annotation *is* the enum — the thing
-/// `lookup_enum_type` was written to do and never did, because nothing called
-/// it and `scalar_from_name` asked only for a `struct`.
+/// The rule stated positively. A rejection test only asks that a `Tile`
+/// parameter is not an `Int`, which a fresh variable also satisfies once
+/// *something* pins it; this asks that the annotation *is* the named type.
 #[test]
 fn a_user_type_annotation_is_the_type_it_names() {
     assert_eq!(
@@ -989,10 +965,9 @@ fn a_user_type_annotation_is_the_type_it_names() {
     );
 }
 
-/// TY-10's ordering property, past the one case the exit test names: it is
-/// *dependency* order, not "types first". A struct whose field names a struct
-/// declared below it needs the second registered before the first, and neither
-/// is a `fn`.
+/// Type declarations are registered in *dependency* order, not "types first".
+/// A struct whose field names a struct declared below it needs the second
+/// registered before the first, and neither is a `fn`.
 #[test]
 fn a_type_declaration_is_registered_after_the_types_it_names() {
     assert_eq!(
@@ -1028,12 +1003,8 @@ fn a_type_declaration_is_registered_after_the_types_it_names() {
 /// so the pass must not loop looking for one. The point of the gate is that
 /// `analyze` returns and the rest of the file is still inferred.
 ///
-/// **Amended by REP-14 (ADR-063).** The comment used to end "it registers what is
-/// left in source order, exactly as an unresolvable annotation has always been
-/// handled", which stated the defect: registering a cycle member with a fresh
-/// variable and saying nothing left one unchecked member per recursive
-/// declaration. It is reported now, and the assertion below says so — without
-/// that line the test passed equally well against the silence.
+/// A cycle member is not registered silently with a fresh variable: each one is
+/// reported as `N006` (ADR-063), exactly once, which the count below pins.
 #[test]
 fn a_type_declaration_cycle_still_analyzes() {
     let analysis = analyze(
@@ -1073,17 +1044,16 @@ fn value_binding_name_is_not_accepted_as_a_type() {
     );
 }
 
-/// The exit test uses a `var`; every other value kind must be rejected the same
-/// way, and the report must be `N003` — the name *is* known, so `N002 unknown
-/// type` would be a lie about which mistake was made.
+/// Every value kind is rejected in type position, and the report is `N003` —
+/// the name *is* known, so `N002 unknown type` would be a lie about which
+/// mistake was made.
 #[test]
 fn a_value_in_type_position_is_reported_as_a_value() {
     for src in [
         "var Alias = 1\nvar value: Alias = 1",
         "var Alias = 1\nvar value: Alias = 1",
         "fn Alias() -> Int { 1 }\nvar value: Alias = 1",
-        // A prelude value builtin: `out` resolves, and used to be a legal
-        // annotation on that basis alone.
+        // A prelude value builtin: `out` resolves as a name, but is not a type.
         "var value: out = 1",
         // …at any depth inside a structural annotation.
         "var Alias = 1\nfn f(x: (Int, Alias)) -> Int { 0 }",
@@ -1146,10 +1116,8 @@ fn local_var_reassignment_preserves_its_type() {
     );
 }
 
-/// **Inverted** from `reassignment_to_let_is_rejected`, which asserted TY-14's
-/// rule that only a `var` may be written. ADR-125 removed the immutable binding
-/// the rule existed to protect, so what is left to assert is that an ordinary
-/// reassignment goes through — and that it is still *checked*, which is
+/// There is no immutable binding form (ADR-125), so every binding is
+/// assignable. That the assignment is still *type-checked* is
 /// `local_var_reassignment_preserves_its_type` directly above.
 #[test]
 fn a_binding_is_assignable() {
@@ -1158,9 +1126,10 @@ fn a_binding_is_assignable() {
     ));
 }
 
-/// **ADR-125's soundness gate.** The `let`/`var` split carried §5.3's
-/// generalization rule, and removing the keyword had to keep the rule — so it
-/// moved onto `Symbol::reassigned`.
+/// **ADR-125's soundness gate.** §5.3's generalization rule is keyed on
+/// `Symbol::reassigned` rather than on a binding keyword: there is only one
+/// binding form, so what a binding *is* cannot carry the rule and what is done
+/// to it must.
 ///
 /// The failure it prevents is not a lost error message. Assignment
 /// *instantiates* the target's scheme and unifies the copy, so a generalized
@@ -1193,10 +1162,9 @@ fn compound_assignment_requires_a_numeric_target() {
     );
 }
 
-/// TY-13's other half: the disconnected lookup did not merely *miss* a local,
-/// it could find the wrong symbol. A local named like a top-level binding
-/// resolved out to the top-level one, and the assignment constrained *its*
-/// type.
+/// An assignment constrains the binding the resolver picked for its left-hand
+/// side, and no other — so a local shadowing a top-level name of the same
+/// spelling constrains the local.
 #[test]
 fn an_assignment_constrains_the_local_it_names_and_no_other() {
     // `count` exists at both levels. Assigning the local Text must not make
@@ -1238,10 +1206,8 @@ fn an_assignment_constrains_the_local_it_names_and_no_other() {
     );
 }
 
-/// **Inverted** from `only_a_var_may_be_assigned`, which swept the four binding
-/// kinds TY-14 made immutable and required `Y009` of each. ADR-125 retired the
-/// code and the concept: a `var`, a parameter, a `for` variable and a name a
-/// pattern introduces are one thing, and all four are writable.
+/// ADR-125: a `var`, a parameter, a `for` variable and a name a pattern
+/// introduces are one thing, and all four are writable.
 ///
 /// The paired negative is the point of the test, not an afterthought — "it is
 /// accepted" alone would also pass if assignment had stopped being checked at
@@ -1279,20 +1245,18 @@ fn every_binding_kind_is_assignable_and_still_type_checked() {
     }
 }
 
-/// TY-15 past the exit test's `Bool`: the rule is "numeric", not "not Bool",
-/// and an unconstrained target is not yet a mistake.
+/// A compound assignment requires a numeric target: the rule is "numeric", not
+/// "not Bool", and an unconstrained target is not yet a mistake.
 ///
-/// **`Text` left this list with ADR-085.** `var name = "a"; name += "b"` was
-/// pinned here as a `Y010` and is now legal — `+=` on a `Text` is
-/// concatenation, so what it requires is what `+` requires, and no number is
-/// involved. The inversion is asserted below rather than merely dropped: a
-/// `Text` target is excused for `+=` **only**, and `-=` on one is still `Y010`.
+/// A `Text` target is excused for `+=` **only** — `+=` on a `Text` is
+/// concatenation (ADR-085), so what it requires is what `+` requires and no
+/// number is involved. `-=` on one is still `Y010`.
 #[test]
 fn a_compound_assignment_needs_a_numeric_target() {
     for src in [
         "var flag = true\nflag += false",
         "fn f() -> Int { var pair = (1, 2); pair += (3, 4); 0 }",
-        // The half of the old `Text` row that survives ADR-085.
+        // A `Text` target is excused for `+=` only (ADR-085), not for these.
         "var name = \"a\"\nname -= \"b\"",
         "var name = \"a\"\nname *= \"b\"",
     ] {
@@ -1310,10 +1274,9 @@ fn a_compound_assignment_needs_a_numeric_target() {
         !has_type_error("var n = 0\nn += 1\nn -= 1\nn *= 2\nn /= 2\nn %= 2"),
         "every compound operator is fine on Int"
     );
-    // …and on Float. **This is an inference assertion only** — `f += 0.5`
-    // type-checks and then *lowers wrong*, adding two bit patterns as integers
-    // (REP-64). Nothing here can see that; the gate for it is a run, and it does
-    // not exist yet.
+    // …and on Float. This is an inference assertion only: that `f += 0.5` also
+    // *lowers* to Float arithmetic rather than to arithmetic on the IEEE-754 bit
+    // pattern is gated by the `float_compound_assign` run fixture.
     assert!(!has_type_error("var x = 1.5\nx += 0.5"), "…and on Float");
     assert!(
         !has_type_error("var n = 0\nn = 1"),
@@ -1337,9 +1300,8 @@ fn if_without_else_cannot_produce_the_then_value_type() {
     );
 }
 
-/// The half TY-17 must not break, and the reason it had to wait for TY-19: an
-/// `if` with no `else` whose then branch *diverges* is still legal, because
-/// there is no value to have nowhere to come from.
+/// An `if` with no `else` is Unit — unless its then branch *diverges*, which is
+/// still legal, because then there is no value to have nowhere to come from.
 #[test]
 fn an_else_less_if_is_unit_unless_its_branch_diverges() {
     // The ordinary case: no `else`, so the value is Unit.
@@ -1362,8 +1324,7 @@ fn an_else_less_if_is_unit_unless_its_branch_diverges() {
                 .collect::<Vec<_>>()
         );
     }
-    // …and a real value with no else is still the mismatch the exit test names,
-    // whatever the value's type.
+    // …and a real value with no else is still a mismatch, whatever its type.
     assert!(has_type_error(
         "fn f(c: Bool) -> Unit { if c { \"text\" } }"
     ));
@@ -1379,10 +1340,9 @@ fn early_return_value_must_match_the_function_result() {
     );
 }
 
-/// TY-18 in the shapes the exit test does not reach: a bare `return` is `Unit`,
-/// an unannotated function has its result *pinned* by its returns, a `return`
-/// nested in control flow is still checked, and a `return` inside a closure
-/// means the closure.
+/// A bare `return` is `Unit`, an unannotated function has its result *pinned*
+/// by its returns, a `return` nested in control flow is still checked, and a
+/// `return` inside a closure means the closure.
 #[test]
 fn a_return_is_checked_against_the_function_it_leaves() {
     // A bare `return` produces Unit.
@@ -1416,9 +1376,8 @@ fn a_return_is_checked_against_the_function_it_leaves() {
     );
 }
 
-/// TY-19 applied at the function result, which no finding names separately: a
-/// body that diverges cannot disagree with the declared type, because it
-/// produces no value. This was a `Y001` before the join.
+/// A body that diverges cannot disagree with the declared result type, because
+/// it produces no value.
 #[test]
 fn a_function_whose_body_diverges_matches_any_declared_result() {
     for src in [
@@ -1450,9 +1409,9 @@ fn expression_before_trailing_statement_is_not_the_block_value() {
     );
 }
 
-/// TY-16's rule, stated as the shape rather than as one rejection: the block's
-/// value is the *last* statement, and only if that statement is an expression.
-/// A pending tail is demoted by anything that follows it, whatever kind it is.
+/// A block's value is its *last* statement, and only if that statement is an
+/// expression. A pending tail is demoted by anything that follows it, whatever
+/// kind it is.
 #[test]
 fn a_blocks_value_is_its_last_statement_and_only_if_it_is_an_expression() {
     // A trailing expression is the value.
@@ -1505,7 +1464,7 @@ fn control_flow_terminators_require_a_legal_enclosing_context() {
     }
 }
 
-/// TY-20's two codes, and the boundaries that decide them. A closure is a
+/// The two terminator codes, and the boundaries that decide them. A closure is a
 /// *function* boundary: a `break` inside one cannot leave a loop outside it,
 /// and a `return` inside one leaves the closure rather than nothing at all.
 #[test]
@@ -1568,11 +1527,10 @@ fn expression_loop_uses_its_break_value_type() {
     );
 }
 
-/// TY-21's rule, stated rather than demonstrated once: a `loop` **is** the join
-/// of the values its `break`s carry. The exit test only asks that one such
-/// program is accepted, which a `loop` that stayed a fresh variable would also
-/// satisfy — these ask what the type actually *is*, and what belongs to which
-/// loop.
+/// A `loop` **is** the join of the values its `break`s carry. Merely asking
+/// that such a program is accepted would also be satisfied by a `loop` that
+/// stayed a fresh variable; these ask what the type actually *is*, and what
+/// belongs to which loop.
 #[test]
 fn a_loop_is_the_join_of_the_values_its_breaks_carry() {
     // The value is the break's, not the body's: the body here is `Unit`.
@@ -1629,9 +1587,8 @@ fn a_loop_is_the_join_of_the_values_its_breaks_carry() {
     );
 }
 
-/// D2's first half: a `loop` no `break` leaves produces nothing, so it is
-/// `Never` — the bottom type, absorbed wherever branches meet (TY-19). It used
-/// to be `Unit`, which made every one of these a `Y001`.
+/// A `loop` no `break` leaves produces nothing, so it is `Never` — the bottom
+/// type, absorbed wherever branches meet.
 #[test]
 fn a_loop_no_break_leaves_is_never() {
     for src in [
@@ -1662,7 +1619,7 @@ fn a_loop_no_break_leaves_is_never() {
     );
 }
 
-/// D2's second half, as `Y017`: only a `loop` is an expression loop. A `while`
+/// Only a `loop` is an expression loop, and `Y017` says so. A `while`
 /// or `for` also leaves by its condition failing, and there is no value the
 /// compiler could supply on that path.
 #[test]
@@ -1735,9 +1692,9 @@ fn never_branch_coerces_to_the_other_branch_type() {
 
 // --- scalar and builtin operation constraints -------------------------------
 
-/// TY-19 past the exit test's one shape: a divergent branch is absorbed
-/// wherever branches meet, in either position, and a `match` whose every arm
-/// diverges is itself `Never` rather than "whatever the first use wants".
+/// A divergent branch is absorbed wherever branches meet, in either position,
+/// and a `match` whose every arm diverges is itself `Never` rather than
+/// "whatever the first use wants".
 #[test]
 fn a_divergent_branch_is_absorbed_wherever_branches_meet() {
     for src in [
@@ -1856,11 +1813,10 @@ fn prelude_assert_requires_bool() {
     );
 }
 
-/// TY-33's first unit as a rule, not one rejection: each of the three
-/// output/control names has the type §8.1/§9.1 gives it, and the type is what
-/// makes each usable. `assert` refuses a non-`Bool`; `dbg` is the identity, so
-/// it can wrap any subexpression without changing what the program computes;
-/// `panic` is `Never`, so it satisfies any declared result.
+/// Each of the three output/control names has the type §8.1/§9.1 gives it, and
+/// the type is what makes each usable. `assert` refuses a non-`Bool`; `dbg` is
+/// the identity, so it can wrap any subexpression without changing what the
+/// program computes; `panic` is `Never`, so it satisfies any declared result.
 #[test]
 fn each_control_builtin_has_the_type_its_contract_needs() {
     // `assert` takes a Bool and gives back Unit.
@@ -1887,9 +1843,8 @@ fn each_control_builtin_has_the_type_its_contract_needs() {
 }
 
 /// The half a type test cannot see: each of the three lowers to a runtime call
-/// rather than to a user function that does not exist. `panic` **typechecked**
-/// before this stage and then failed the compile with "unresolved user function
-/// `panic`" — a clean program that could not run (TY-33).
+/// rather than to a user function that does not exist. Typing alone would
+/// accept a program that then fails the compile as an unresolved user function.
 #[test]
 fn each_control_builtin_reaches_the_backend() {
     assert!(is_clean_with_lower("fn main() -> Unit { panic(\"stop\") }"));
@@ -1897,14 +1852,10 @@ fn each_control_builtin_reaches_the_backend() {
     assert!(is_clean_with_lower("fn main() -> Int { dbg(7) }"));
 }
 
-/// TY-33's second unit as the rule: each of §16.1's seven numeric helpers is
-/// `(Int, …) -> Int` (ADR-058), which means each of the three things a phantom
-/// name could not do — reject a wrong operand type, reject a wrong operand
-/// count, and be used where an `Int` is required.
-///
-/// Before this every one of them got a fresh type variable, so `abs("x") + 1`
-/// was accepted and `min(1)` was accepted, and then the program failed the
-/// compile.
+/// Each of §16.1's seven numeric helpers is `(Int, …) -> Int` (ADR-058), which
+/// means each of the three things a fresh type variable could not do — reject a
+/// wrong operand type, reject a wrong operand count, and be used where an `Int`
+/// is required.
 #[test]
 fn each_numeric_helper_has_the_int_type_its_contract_needs() {
     // The result is `Int`, in each arity.
@@ -1970,11 +1921,11 @@ fn a_numeric_helper_composes_like_any_int_expression() {
     ));
 }
 
-/// TY-34's type rule (ADR-059): a range's bounds are `Int` and the range itself
-/// is the nullary `Range` collection, whose element type is `Int`.
+/// ADR-059: a range's bounds are `Int` and the range itself is the nullary
+/// `Range` collection, whose element type is `Int`.
 ///
-/// `Int` bounds **only**: `iter_item` already says a range yields `Int`, and
-/// admitting `Float` bounds would make that a lie with no step to fix it (D6).
+/// `Int` bounds **only**: `iter_item` says a range yields `Int`, and admitting
+/// `Float` bounds would make that a lie with no step to fix it.
 #[test]
 fn a_ranges_bounds_are_ints_and_a_range_is_a_collection_of_them() {
     // Both forms are `Range`, and a `Range` annotation accepts one.
@@ -2001,19 +1952,19 @@ fn a_ranges_bounds_are_ints_and_a_range_is_a_collection_of_them() {
         "fn f() -> Unit { for i in 0..3 { out(i + \"x\") } }"
     ));
     // …and a range is iterable at all, which is what `Range`'s `iter_item` arm
-    // has claimed since before the syntax existed. Annotated, because an
-    // *unannotated* iterated parameter unifies with its own element type — see
-    // `iter_item`'s optimism at `infer_for`, which affects every iterable
-    // equally and is not TY-34's.
+    // claims. Annotated, because an *unannotated* iterated parameter unifies
+    // with its own element type — see `iter_item`'s optimism at `infer_for`,
+    // which affects every iterable equally.
     assert!(!has_type_error(
         "fn total(r: Range) -> Int { var t = 0\n for i in r { t = t + i }\n t }\n\
          fn main() -> Int { total(0..4) }"
     ));
 }
 
-/// A range is a first-class **value** (D6), not only a `for`-header form: it
-/// binds to a name, passes as an argument, comes back as a result, and — because
-/// its bounds cannot change once it is built — is a legal `Map` key (ADR-057 D4).
+/// A range is a first-class **value** (ADR-059), not only a `for`-header form:
+/// it binds to a name, passes as an argument, comes back as a result, and —
+/// because its bounds cannot change once it is built — is a legal `Map` key
+/// (ADR-057 decision 3).
 #[test]
 fn a_range_is_an_ordinary_value() {
     assert!(!has_type_error(
@@ -2024,7 +1975,7 @@ fn a_range_is_an_ordinary_value() {
          fn main() -> Range { widen(1..2) }"
     ));
     // A `Range` is hashable *and* immutable, so it is a key — the distinction
-    // TY-32/D4 turned on.
+    // ADR-057 decision 3 turns on.
     assert!(!has_type_error(
         "fn main() -> Unit { var m = Map()\n m.insert(0..3, 1) }"
     ));
@@ -2038,14 +1989,9 @@ fn a_range_is_an_ordinary_value() {
 }
 
 /// A **bare** nullary collection name is the type it names. `Range` and `BitSet`
-/// are the only two ctors with no type arguments, so they are the only names that
-/// appear in type position without brackets — and that path never reached
-/// `collection_from_name`, so the annotation resolved to nothing and the binding
-/// silently became a fresh variable.
-///
-/// The symptom was a function whose annotated parameter took any type at all and
-/// then unified with whatever its body did: `fn total(r: Range) { for i in r { … } }`
-/// reported "values of type `Int` cannot be iterated". `BitSet` had it too.
+/// are the only two ctors with no type arguments, so they are the only names
+/// that appear in type position without brackets — and the annotation has to
+/// reach `collection_from_name` rather than resolving to a fresh variable.
 #[test]
 fn a_bare_nullary_collection_name_is_the_type_it_names() {
     // The annotation is enforced, in both nullary ctors, in every position.
@@ -2062,8 +2008,8 @@ fn a_bare_nullary_collection_name_is_the_type_it_names() {
         "fn f() -> Unit { var r: Range = 5\n out(r) }"
     ));
 
-    // …and a ctor that *does* take arguments, written bare, is the `Y007` it has
-    // always been for a wrong count — not a silent variable.
+    // …and a ctor that *does* take arguments, written bare, is a `Y007` for a
+    // wrong argument count — not a silent variable.
     let codes: Vec<u32> = analyze("fn f(v: Vec) -> Int { 1 }")
         .diagnostics
         .iter()
@@ -2077,9 +2023,7 @@ fn a_bare_nullary_collection_name_is_the_type_it_names() {
 }
 
 /// The half a type test cannot see: each of the seven lowers to its own runtime
-/// call. Before this they reached the backend as `CallTarget::User("abs")` and
-/// the compile failed with "unresolved user function `abs`" — `panic`'s symptom,
-/// on seven more names (TY-33).
+/// call, not to a `CallTarget::User` the backend cannot resolve.
 #[test]
 fn each_numeric_helper_reaches_the_backend() {
     for src in [
@@ -2095,7 +2039,7 @@ fn each_numeric_helper_reaches_the_backend() {
     }
 }
 
-// --- §6.5's graph helpers (TY-33 unit 3, ADR-060) ---------------------------
+// --- §6.5's graph helpers (ADR-060) -----------------------------------------
 
 /// A neighbour function over `Int` states, for the tests below. Written once
 /// because every graph helper takes one and the interesting part is never the
@@ -2105,10 +2049,6 @@ const STEPS: &str = "fn steps(n: Int) -> Vec[Int] { Vec() }\n";
 /// Each of the six has the signature its contract needs: one state type, a
 /// neighbour function of it, the result the helper's name promises — and the
 /// arity, which a fresh type variable could not enforce at all.
-///
-/// Before this every one of them got a fresh variable, so `bfs(1)` was accepted,
-/// `bfs("a", |n| steps(n))` was accepted, and the program then failed the
-/// compile with "unresolved user function `bfs`" (TY-33).
 #[test]
 fn each_graph_helper_has_the_signature_its_contract_needs() {
     // The results are what §6.5's names promise: an order, a set, a cost table,
@@ -2198,9 +2138,9 @@ fn a_graph_helpers_closures_agree_with_each_other_about_the_state() {
 }
 
 /// A graph helper's state has to be one the walk can *remember* — a `Set`
-/// element and a `Map` key — so D4's rule reaches it: a mutable collection is
-/// refused, and it is refused **at the call**, which is the only place that can
-/// name the type.
+/// element and a `Map` key — so ADR-057 decision 3 reaches it: a mutable
+/// collection is refused, and it is refused **at the call**, which is the only
+/// place that can name the type.
 #[test]
 fn a_graph_helpers_state_must_be_one_the_walk_can_remember() {
     let codes: Vec<u32> = analyze(
@@ -2238,13 +2178,10 @@ fn a_graph_helpers_state_must_be_one_the_walk_can_remember() {
     ));
 }
 
-/// The state requirement rides F10's channel rather than being decided at the
-/// call: a helper called on an *unannotated* parameter defers the requirement,
-/// the enclosing function's scheme claims it, and the caller that pins the type
-/// is where it is answered.
-///
-/// This is the hardest thing the channel does, and it is what D5 meant by "a
-/// graph helper's signature is where the channel gets its hardest test".
+/// The state requirement rides the deferred-constraint channel (ADR-057) rather
+/// than being decided at the call: a helper called on an *unannotated*
+/// parameter defers the requirement, the enclosing function's scheme carries
+/// it, and the caller that pins the type is where it is answered.
 #[test]
 fn a_graph_state_requirement_reaches_through_a_generic_function() {
     // `walk`'s parameter is a variable when `bfs` is checked, so the
@@ -2264,9 +2201,7 @@ fn a_graph_state_requirement_reaches_through_a_generic_function() {
 }
 
 /// The half a type test cannot see: each of the six lowers to its own runtime
-/// call. Before this they reached the backend as `CallTarget::User("bfs")` and
-/// the compile failed with "unresolved user function `bfs`" — `panic`'s
-/// symptom, on the last six names that had it (TY-33).
+/// call, not to a `CallTarget::User` the backend cannot resolve.
 #[test]
 fn each_graph_helper_reaches_the_backend() {
     for src in [
@@ -2319,13 +2254,12 @@ fn collection_method_constrains_unannotated_receiver_parameter() {
     );
 }
 
-/// TY-30 as the *rule*, not one accepted program: a method called on a receiver
-/// nothing has typed yet is a **requirement**, and the use site answers it.
+/// A method called on a receiver nothing has typed yet is a **requirement**,
+/// and the use site answers it.
 ///
-/// The exit test only asks that §5.2's program is accepted. What it cannot see is
-/// the answer — §5.2 states it exactly, `total: Vec[Int] -> Int` — and that the
-/// resolution runs in both directions: the entry's *result* pins the call, and
-/// the entry's *parameters* pin the arguments the deferred call passed.
+/// The answer is the one §5.2 states exactly — `total: Vec[Int] -> Int` — and
+/// the resolution runs in both directions: the entry's *result* pins the call,
+/// and the entry's *parameters* pin the arguments the deferred call passed.
 #[test]
 fn a_method_on_an_unannotated_receiver_is_resolved_by_the_use_site() {
     // §5.2's own answer, written down.
@@ -2367,7 +2301,8 @@ fn a_method_on_an_unannotated_receiver_is_resolved_by_the_use_site() {
     assert!(has_type_error_with_lower(wrong));
 }
 
-/// The receiver a method was called on is **pinned**, not quantified (TY-30).
+/// The receiver a method was called on is **pinned**, not quantified
+/// (ADR-057 decision 5).
 ///
 /// This is the contract, and it is why `pin_to_level` exists. There is one
 /// lowered body per source function — monomorphization clones a tree lowering
@@ -2376,7 +2311,7 @@ fn a_method_on_an_unannotated_receiver_is_resolved_by_the_use_site() {
 /// lower, so it is a disagreement about `total`'s signature instead.
 ///
 /// The second half is what keeps the rule from being "nothing generalizes": a
-/// parameter no method was called on is quantified exactly as before.
+/// parameter no method was called on is quantified as usual.
 #[test]
 fn a_receiver_a_method_was_called_on_is_not_quantified() {
     let two = "fn total(values) { values.sum() }\n\
@@ -2405,7 +2340,8 @@ fn a_receiver_a_method_was_called_on_is_not_quantified() {
 }
 
 /// A requirement the receiver's *type* carries is checked once the receiver
-/// resolves, and a deferred method call is no exception (TY-30 × TY-32/D4).
+/// resolves, and a deferred method call is no exception (ADR-057 decisions 3
+/// and 5).
 ///
 /// `store` never says what `m` is. The `insert` inside it is what makes it a
 /// `Map`, and the key rule then applies to the key the call site chose — so the
@@ -2441,8 +2377,8 @@ fn a_deferred_method_still_carries_its_receivers_own_requirements() {
 
 /// The catalog rows inference actually selected, by method name, sorted.
 ///
-/// This is the map lowering reads and nothing else (F15/HIR-02), so it is the
-/// only place a *silently* unresolved method call is visible from inference.
+/// This is the map lowering reads and nothing else, so it is the only place a
+/// *silently* unresolved method call is visible from inference.
 /// `has_type_error_with_lower` cannot see one: an unresolved call is not a
 /// diagnostic, it is an absence, and the absence is what MIR turns into an
 /// `internal compiler error`.
@@ -2462,22 +2398,19 @@ fn resolved_method_rows(text: &str) -> Vec<String> {
 ///
 /// `HasMethod`, `Iterable` and `HasField` are discharged by *producing* a type,
 /// and that production is what resolves the receiver of the next link. Draining
-/// one batch of dischargeable constraints therefore answered `t[i]` and dropped
-/// `t[i][j]`: `praxis check` exit 0, `praxis run` an ICE at the pipeline
-/// recognizer. Every row below is a single call site at one concrete type, so
-/// none of them is asking for polymorphism.
+/// a single batch of dischargeable constraints answers `t[i]` and leaves
+/// `t[i][j]` unresolved — an absence `check` cannot see and MIR turns into an
+/// ICE — which is why the channel runs to a fixpoint. Every row below is a
+/// single call site at one concrete type, so none of them is asking for
+/// polymorphism.
 ///
-/// RED before the fixpoint on the four `[]`/`len` chains — `resolved_method_rows`
-/// came back one row short, which is the compiler's own account of the crash.
-///
-/// Every program here calls at the **top level**, which is the handover's own
-/// spelling and the only faithful one. Wrapping the call in a later `fn` buys a
-/// second round for free, because `infer_fn` discharges once per body — that
-/// accident is how `fn f(v) { v[0].len() }` could be made to work at HEAD, and a
-/// test written that way is green before the fix.
+/// Every program here calls at the **top level**, deliberately: wrapping the
+/// call in a later `fn` buys a second discharge round for free, because
+/// `infer_fn` discharges once per body, and that would mask a channel that
+/// stops short of a fixpoint.
 #[test]
 fn a_method_on_a_derived_receiver_resolves_like_one_on_the_parameter() {
-    // The handover's two lines, and the answer inference should reach.
+    // A subscript of a subscript, and the answer inference should reach.
     let pick = "fn pick(t, i, j) { t[i][j] }\n\
                 out(pick([[7, 8]], 0, 0))";
     assert_eq!(
@@ -2490,12 +2423,12 @@ fn a_method_on_a_derived_receiver_resolves_like_one_on_the_parameter() {
         "both subscripts must carry a catalog row, not just the first"
     );
 
-    // Every row of the handover's table, including the three that already
-    // worked, so a fix that trades one shape for another is caught here.
+    // Every derived-receiver shape, so a change that trades one for another is
+    // caught here.
     for (src, rows) in [
-        // Method on the parameter — worked before.
+        // Method on the parameter.
         ("fn f(v) { v.len() }\nout(f([1, 2, 3]))", vec!["len"]),
-        // One subscript, result returned — worked before.
+        // One subscript, result returned.
         ("fn f(v) { v[0] }\nout(f([1, 2, 3]))", vec!["[]"]),
         // Subscript of a subscript.
         ("fn f(v) { v[0][1] }\nout(f([[1, 2, 3]]))", vec!["[]", "[]"]),
@@ -2537,11 +2470,10 @@ fn a_method_on_a_derived_receiver_resolves_like_one_on_the_parameter() {
 
 /// **ADR-137.** The channel runs to a *fixpoint*, not for a second round.
 ///
-/// Three links deep, with the call site inside a *later function* so the extra
-/// `infer_fn` discharge that HEAD's one-batch drain gets for free is already
-/// spent. That is what makes this the test a two-round patch cannot pass: two
-/// rounds resolve `v[0]` and `v[0][0]` and still drop the `len`, exactly as one
-/// round drops the second `[]` of `t[i][j]`.
+/// Three links deep, with the call site inside a *later function* so the free
+/// extra `infer_fn` discharge is already spent. A fixed number of rounds cannot
+/// pass this: two rounds resolve `v[0]` and `v[0][0]` and still drop the `len`,
+/// exactly as one round drops the second `[]` of `t[i][j]`.
 #[test]
 fn a_chain_of_deferred_receivers_resolves_to_a_fixpoint_not_one_link() {
     let three = "fn f(v) { v[0][0].len() }\n\
@@ -2568,14 +2500,13 @@ fn a_chain_of_deferred_receivers_resolves_to_a_fixpoint_not_one_link() {
 /// without the row is *reported*, at `check`.
 ///
 /// This is the half of the fixpoint that is not "more programs compile". The
-/// element of a `Vec[Int]` is an `Int`, which has no `len`; before the fixpoint
-/// the `HasMethod` on the subscript's result was never re-examined, so `check`
-/// exited 0 and `run` reached MIR and ICEd — precisely the check/run asymmetry
-/// ADR-133 exists to close, in one more place.
+/// element of a `Vec[Int]` is an `Int`, which has no `len`, so the `HasMethod`
+/// on the subscript's result has to be re-examined and reported — otherwise
+/// `check` exits 0 and `run` ICEs in MIR, the check/run asymmetry ADR-133
+/// exists to close.
 ///
-/// The two assertions are the pair the ADR-093 test uses, for its reason: the
-/// second is RED against a half-fix that re-adds a lowering backstop, which
-/// reports twice.
+/// The second assertion is the ADR-093 pair: exactly one emitter, so a lowering
+/// backstop that reported the same call again would turn it red.
 #[test]
 fn a_derived_receiver_that_resolves_to_a_type_without_the_row_is_reported() {
     for src in [
@@ -2622,13 +2553,11 @@ fn a_derived_receiver_that_resolves_to_a_type_without_the_row_is_reported() {
 /// ADR-057 decision 5 is untouched: there is one lowered body per source
 /// function, so a receiver a method was called on is pinned to the declaration
 /// group's level and `total` is the monotype `(Vec[Int]) -> Int`. Two element
-/// types at one call site is still the `Y001` the handover asked to keep, and it
-/// is produced by unifying the callee's monotype in `infer_call` — no number of
-/// discharge rounds can reach it.
+/// types at one call site is still a `Y001`, produced by unifying the callee's
+/// monotype in `infer_call` — no number of discharge rounds can reach it.
 ///
 /// The second half is the other side of the same fence: a parameter no method
-/// was called on still generalizes, so the fixpoint did not pin anything new
-/// either.
+/// was called on still generalizes, so the fixpoint pins nothing new either.
 #[test]
 fn a_derived_receiver_does_not_make_the_function_generic() {
     let two = "fn total(values) { values.sum() }\n\
@@ -2667,14 +2596,12 @@ fn a_derived_receiver_does_not_make_the_function_generic() {
     assert!(!has_type_error_with_lower(generic));
 }
 
-/// **ADR-137 decision 2.** The pin reaches the *derived* receiver too, and
-/// always did.
+/// **ADR-137 decision 2.** The pin reaches the *derived* receiver too.
 ///
-/// `require_method` pins the result variable alongside the receiver, so the
-/// subscript's result was pinned before the fixpoint existed — what was missing
-/// was the round that looked at it. The proof is that `pick` refuses two element
-/// types for exactly the reason `total` does, which is the shape a fix that
-/// quantified its way out of the ICE would have accepted.
+/// `require_method` pins the result variable alongside the receiver, so a
+/// subscript's result is pinned exactly as the receiver is: `pick` refuses two
+/// element types for the same reason `total` does. Quantifying a derived
+/// receiver instead would accept this program.
 #[test]
 fn a_derived_receiver_is_pinned_too() {
     let two = "fn pick(t, i, j) { t[i][j] }\n\
@@ -2698,23 +2625,15 @@ fn a_derived_receiver_is_pinned_too() {
 /// **ADR-093.** A method that cannot resolve is reported by **inference**, and
 /// only once.
 ///
-/// This test replaces `a_method_the_receiver_does_not_have_is_reported_once`,
-/// which asserted the opposite division — "reported once, **by lowering**" —
-/// and which was deliberate and wrong. `praxis check` runs inference and stops;
-/// only `praxis run` runs lowering. So a `Y110` that only lowering emits is a
-/// `Y110` `praxis check` cannot see, and every one of the four shapes below was
-/// `check` exit 0 and silent, then `run` exit 1. Appendix D — the design
-/// document's own first demo target — was the largest instance.
+/// `praxis check` runs inference and stops; only `praxis run` runs lowering. So
+/// a `Y110` that only lowering emits is a `Y110` `praxis check` cannot see.
 ///
 /// The two assertions are a pair and neither is redundant:
 ///
-/// * `analyze` **alone** yields exactly one `Y110`. RED before ADR-093 for all
-///   four shapes, which yielded **zero** — that is the finding.
-/// * `analyze` + `lower` still yields exactly one. RED against the tempting
-///   half-fix that adds inference's report and keeps lowering's as a backstop:
-///   that variant yields two, and only this assertion catches it. Observed: with
-///   lowering's `self.diag(…NoMethodOnType…)` restored, the first three shapes
-///   report twice here.
+/// * `analyze` **alone** yields exactly one `Y110`, for all four shapes.
+/// * `analyze` + `lower` still yields exactly one — a lowering backstop kept
+///   alongside inference's report would yield two, and only this assertion
+///   catches that.
 ///
 /// Both of inference's doors are covered, because they are different code and
 /// each was silent for its own reason.
@@ -2760,14 +2679,9 @@ fn a_method_that_cannot_resolve_is_reported_by_inference_and_only_once() {
 
 /// **ADR-093.** The report names the receiver type *and* the arity.
 ///
-/// This is how "one emitter" becomes observable rather than asserted. There were
-/// two builders and each said half of it: lowering's said the arity and "on this
-/// type", inference's said the type and no arity. Neither text below can be
-/// produced by either old builder, so a fix that quietly left one in place fails
-/// here.
-///
-/// RED before ADR-093 on both counts — the text was ``no method `nope` on this
-/// type taking 0 argument(s)``, and it arrived from `lower`, not from `analyze`.
+/// This is how "one emitter" becomes observable rather than asserted: a builder
+/// that names the arity but not the type (``on this type``), or the type but not
+/// the arity, cannot produce either text below.
 #[test]
 fn the_report_names_the_receiver_type() {
     let diags = analyze("var v = Vec[Int]()\nv.push(1)\nout(v.nope())").diagnostics;
@@ -2777,8 +2691,8 @@ fn the_report_names_the_receiver_type() {
     );
 
     // The deferred door names the type the call site pinned, which is the whole
-    // reason the report moved: lowering saw a receiver that was still a variable
-    // here and could only have said "this type".
+    // reason the report belongs to inference: at lowering the receiver here is
+    // still a variable, so the message could only have said "this type".
     let diags = analyze("fn f(x) -> Unit { x.push(1) }\nfn main() -> Unit { f(3) }").diagnostics;
     assert_eq!(
         diags.iter().map(|d| d.message()).collect::<Vec<_>>(),
@@ -2797,21 +2711,16 @@ fn the_report_names_the_receiver_type() {
 /// **ADR-093's boundary.** A name the catalog *does* hold is still deferred, and
 /// the generic still generalizes.
 ///
-/// The new rule refuses a method call whose name no catalog row holds at that
+/// The rule refuses a method call whose name no catalog row holds at that
 /// arity, before anything says what the receiver is. The spelling of that
-/// predicate is the whole difference between a repair and a regression, and this
-/// is the test that makes the difference visible.
+/// predicate matters: write `has_name_at_arity` as "no row matches this
+/// receiver" instead of "no row holds this name at this arity" and §5.2's own
+/// example — `fn total(values) { values.sum() }`, which the document prints as
+/// `(Vec[Int]) -> Int` — is rejected outright with a `Y110`, uncalled, with
+/// `sum` implemented and working.
 ///
-/// HOW IT GOES RED: write `has_name_at_arity` as "no row matches this receiver"
-/// instead of "no row holds this name at this arity" and §5.2's own example —
-/// `fn total(values) { values.sum() }`, which the document prints as `(Vec[Int])
-/// -> Int` — is rejected outright with a `Y110`, uncalled, with `sum`
-/// implemented and working.
-///
-/// The `run` half is asserted too, and it is a small improvement ADR-093 made by
-/// deleting lowering's report: this program used to be clean at `check` and
-/// `Y110` at `run`, because lowering met the unresolved receiver and complained.
-/// Both commands accept it now.
+/// The `run` half is asserted too: lowering must not report the still
+/// unresolved receiver either, so both commands accept the program.
 #[test]
 fn a_name_the_catalog_holds_is_still_deferred() {
     let src = "fn total(values) { values.sum() }\nfn main() -> Unit { }";
@@ -2824,20 +2733,20 @@ fn a_name_the_catalog_holds_is_still_deferred() {
         is_clean_with_lower(src),
         "…and must stay clean once lowering runs, which it did not before ADR-093"
     );
-    // The requirement is still on the channel, unchanged by ADR-093: the
-    // receiver is pinned to the declaration group's level (`require_method`), so
-    // `total` is a signature with an open receiver and an open result rather
-    // than a scheme, and a call site is what closes both. A rule that reported
-    // here would have had to answer this differently.
+    // The requirement is still on the channel: the receiver is pinned to the
+    // declaration group's level (`require_method`), so `total` is a signature
+    // with an open receiver and an open result rather than a scheme, and a call
+    // site is what closes both. A rule that reported here would have to answer
+    // this differently.
     assert_eq!(scheme_of(src, "total").as_deref(), Some("(?T) -> ?U"));
-    // With a call site, the deferred requirement resolves exactly as before.
+    // With a call site, the deferred requirement resolves.
     let called = "fn total(values) { values.sum() }\n\
                   fn main() -> Unit { var v = Vec[Int]()\nv.push(1)\nout(total(v)) }";
     assert!(is_clean_with_lower(called));
 }
 
-/// **REP-33 half (a).** A barrier combinator declares what its element must be,
-/// and `analyze` **alone** enforces it — so `praxis check` sees it.
+/// A barrier combinator declares what its element must be, and `analyze`
+/// **alone** enforces it — so `praxis check` sees it.
 ///
 /// `sorted` orders through the element descriptor's `compare` callback and
 /// `frequencies` builds a `Counter` whose keys go through `hash`/`equals`.
@@ -2847,15 +2756,14 @@ fn a_name_the_catalog_holds_is_still_deferred() {
 /// entitled to hold anything at all. The rule belongs to the row, which is what
 /// `Bound::Kind` is.
 ///
-/// HOW IT GOES RED, OBSERVED: delete the `TypePattern::of_kind` on
-/// `seq_sorted_on_vec`'s receiver (leaving `vec_of_t()`) and rebuild. This test
-/// fails with `[]` where it wants `["Y006"]`, and the whole program goes
-/// through: `praxis check` is silent and exits 0, and `praxis run` exits 1 with
-/// `error: program faulted: value does not have the declared type` — the
+/// How it goes red: drop the `TypePattern::of_kind` from `seq_sorted`'s receiver
+/// (leaving a bare element variable inside `TypePattern::iterable`) and the whole
+/// program goes through — `praxis check` silent and exit 0, `praxis run` exit 1
+/// with `error: program faulted: value does not have the declared type`, the
 /// `TypeMismatch` `praxis_vec_sorted` raises when the element descriptor has no
 /// `compare`. A fault from a program the checker accepted is the thing the bound
-/// exists to prevent. The same deletion on `seq_frequencies_on_vec` accepts a
-/// `Vec[Vec[Int]]` key, which is exactly what D4 forbids.
+/// exists to prevent. The same deletion on `seq_frequencies` accepts a
+/// `Vec[Vec[Int]]` key, which ADR-057 decision 3 forbids.
 ///
 /// **Two** closures, not one, and that is not padding: the wrapper returns early
 /// when there is nothing to compare, so a one-element `Vec` sorts happily
@@ -2947,7 +2855,7 @@ fn a_grouping_answers_a_sequence_of_sequences() {
         )));
 
         // The size is an `Int` and any `Int` expression will do — it is not a
-        // literal-only parameter, which is the shape MIR-03 was.
+        // literal-only parameter.
         assert!(is_clean_with_lower(&format!(
             "fn size() -> Int {{ 2 }}\nfn main() -> Unit {{ out([1, 2].{name}(size()).count()) }}"
         )));
@@ -2961,8 +2869,8 @@ fn a_grouping_answers_a_sequence_of_sequences() {
     ));
 }
 
-/// **REP-33 half (a).** The barrier's bound rides the **constraint channel**, so
-/// an element the program has not named yet is answered when something names it.
+/// The barrier's bound rides the **constraint channel**, so an element the
+/// program has not named yet is answered when something names it.
 ///
 /// This is why `Bound::Kind` goes through `require_cap` rather than calling
 /// `capability::check` directly, and the difference is only visible in one
@@ -2973,12 +2881,12 @@ fn a_grouping_answers_a_sequence_of_sequences() {
 /// would break polymorphic inference everywhere — so a direct call accepts the
 /// program and nothing ever asks again.
 ///
-/// HOW IT GOES RED, OBSERVED: replace the `require_cap` in `apply_bounds`'s
-/// `Bound::Kind` arm with `capability::check` + `report_cap_failure`, and the
-/// first case below is accepted with no diagnostic. (The generic-function shape
-/// is *not* the discriminator, and it was the first thing tried: a deferred
-/// `HasMethod` is discharged only after the receiver resolves, so `apply_bounds`
-/// there already sees a concrete element and a direct check catches it too.)
+/// How it goes red: replace the `require_cap` in `apply_bounds`'s `Bound::Kind`
+/// arm with `capability::check` + `report_cap_failure`, and the first case below
+/// is accepted with no diagnostic. The generic-function shape is *not* the
+/// discriminator — a deferred `HasMethod` is discharged only after the receiver
+/// resolves, so `apply_bounds` there already sees a concrete element and a
+/// direct check catches it too.
 #[test]
 fn a_barrier_bound_is_checked_at_the_call_site_that_pins_it() {
     // Ordered before it is populated: the bound is asked about `?T` and has to
@@ -3029,15 +2937,11 @@ fn sum_requires_int_elements() {
     );
 }
 
-/// TY-31 as the *rule*: the four aggregating sinks are **Int** operations, and
-/// the catalog says so now.
+/// The four aggregating sinks are **Int** operations, and the catalog says so.
 ///
-/// The exit test only asks about `Bool` on `sum`. `Float` is the case that
-/// mattered more and that no test asked for: `Vec[Float].sum()` typechecked and
-/// returned `9222246136947933184` — the float's bits, added as an integer. That
-/// is why the bound is `Int` and not `Numeric`, which is what the finding's
-/// wording ("numeric element types") would have given: `CapKind::Numeric`
-/// includes `Float`, and the lowering does not.
+/// The bound is `Int` and not `Numeric` because `CapKind::Numeric` includes
+/// `Float` and the lowering does not: a `Vec[Float].sum()` that type-checked
+/// would add the floats' bit patterns as integers.
 #[test]
 fn the_int_sinks_require_int_elements() {
     for sink in ["sum", "product", "min", "max"] {
@@ -3055,8 +2959,8 @@ fn the_int_sinks_require_int_elements() {
     }
 }
 
-/// A bound **pins** an element nothing has named yet — it does not merely permit
-/// one (TY-31).
+/// A bound **pins** an element nothing has named yet — it does not merely
+/// permit one.
 ///
 /// That is why [`Bound::Is`] is discharged by unification rather than by the
 /// constraint channel. A pipeline's intermediate element type is a fresh variable
@@ -3074,24 +2978,17 @@ fn a_sinks_element_bound_pins_an_unresolved_pipeline_stage() {
     assert!(!has_type_error_with_lower(
         "fn main() -> Int { var v = Vec(); v.push(1); v.map(|x| x * 2).sum() }"
     ));
-    // And through TY-30's deferred resolution, where the receiver itself was a
-    // variable when the method was written.
+    // And through deferred resolution, where the receiver itself is a variable
+    // when the method is written.
     assert!(has_type_error_with_lower(
         "fn total(values) { values.sum() }\n\
          fn main() -> Int { var v = Vec(); v.push(true); total(v) }"
     ));
 }
 
-/// `enumerate` and `zip` say what they build (TY-31).
-///
-/// Both rows declared `result: Vec[T]` — the *receiver's* element type — so
-/// `v.enumerate()` on a `Vec[Int]` came out `Vec[Int]` and the tuple the fused
-/// loop really builds was invisible. `zip` was wrong twice over: the same row
-/// also required the other sequence to have the receiver's element type.
-///
-/// Found by S15 while it was deciding whether `alloc_empty_vec` could read its
-/// element type from the chain's result (it could not, because of this), and
-/// recorded there as a finding the register does not have.
+/// `enumerate` and `zip` say what they build: the *pair*, not the receiver's
+/// element type. `enumerate` on a `Vec[T]` is a `Vec[(Int, T)]`, and `zip`
+/// pairs two sequences whose element types are independent of each other.
 #[test]
 fn enumerate_and_zip_report_the_pairs_they_build() {
     let e = "fn main() -> Unit { var v = Vec(); v.push(1); var pairs = v.enumerate(); out(pairs) }";
@@ -3106,8 +3003,7 @@ fn enumerate_and_zip_report_the_pairs_they_build() {
         Some("Vec[(Int, Text)]")
     );
 
-    // `zip` pairs two *different* element types — which the old row made
-    // impossible to write.
+    // `zip` pairs two *different* element types.
     let z = "fn main() -> Unit {\n\
                var a = Vec()\n\
                a.push(1)\n\
@@ -3120,14 +3016,13 @@ fn enumerate_and_zip_report_the_pairs_they_build() {
     assert!(!has_type_error_with_lower(z));
 }
 
-/// A compound assignment's numeric requirement survives generalization (TY-31,
-/// `Y015`).
+/// A compound assignment's numeric requirement survives generalization
+/// (`Y015`).
 ///
-/// S13 left this reported only for a target whose type was already known, and
-/// said why: `a += 1` inside a generic function says nothing about `a` yet, and
-/// pinning it to `Int` would silently narrow every unannotated numeric binding.
-/// Deferring is the third option — the requirement rides on the scheme, and the
-/// call site is where it is answered.
+/// `a += 1` inside a generic function says nothing about `a` yet, and pinning it
+/// to `Int` there would silently narrow every unannotated numeric binding. So
+/// the requirement is deferred: it rides on the scheme, and the call site is
+/// where it is answered.
 ///
 /// The two codes are the two situations. `Y010` is reported *at the operation*
 /// and can name it; `Y015` is reported at the use that pinned the target, which
@@ -3221,17 +3116,11 @@ fn heap_element_must_be_orderable() {
     );
 }
 
-/// **Inverted** by ADR-045, and rewritten rather than un-ignored. This asserted
-/// that a `MinHeap[Text]` must be a *type error*, because `SupportsOrd` admitted
-/// `Text` while `HeapEntry::cmp` read every payload as an `i64` — so accepting
-/// the program produced pointer ordering. The runtime half now exists
-/// (`TEXT.compare`, dispatched by `HeapEntry::cmp`), so the two agree and the
-/// program is legitimately accepted.
-///
-/// What it pins now is that agreement: a type the capability admits into a heap
-/// is one the runtime can actually order. `a_text_heap_pops_in_lexicographic_order`
-/// (praxis-runtime `heaps.rs`) is the other half — that the order is the right
-/// one.
+/// A type the capability admits into a heap is one the runtime can actually
+/// order (ADR-045). `SupportsOrd` admits `Text`, and `HeapEntry::cmp` dispatches
+/// to `TEXT.compare` rather than reading the payload as an `i64`, so the two
+/// halves agree. `a_text_heap_pops_in_lexicographic_order` (praxis-runtime
+/// `heaps.rs`) is the other half — that the order is the right one.
 #[test]
 fn heap_element_orderability_agrees_with_the_runtime() {
     let src = "fn main() -> Unit {\n\
@@ -3334,9 +3223,9 @@ fn analyzing_nested_function_never_panics() {
     );
 }
 
-/// …and it is *reported*, not merely survived. The exit test only asks that
-/// `analyze` returns; `N005` is what tells the programmer why the function they
-/// wrote does not exist.
+/// …and it is *reported*, not merely survived: `analyze` returning is not
+/// enough — `N005` is what tells the programmer why the function they wrote
+/// does not exist.
 #[test]
 fn a_nested_function_is_reported_as_one() {
     let analysis = analyze("fn main() -> Int { fn local(x: Int) -> Int { x }\n local(1) }");
@@ -3429,13 +3318,9 @@ fn record_literal_rejects_duplicate_fields() {
     );
 }
 
-/// FE-02/D7. A wildcard binds nothing, so `_` is not readable as a value.
-///
-/// **Rewritten**, not merely un-ignored: the assertion was `has_name_error`,
-/// which was the only failure available while `_` lexed as an `Ident` — the arm
-/// body was a *reference* to an undeclared name. Now `_` is its own token and
-/// has no expression form at all, so the parser rejects it where it stands.
-/// The property is the same one; the category it is reported under is not.
+/// A wildcard binds nothing, so `_` is not readable as a value. `_` is its own
+/// token with no expression form at all, so the parser — not the resolver — is
+/// what rejects it where it stands.
 #[test]
 fn wildcard_pattern_does_not_bind_a_value_named_underscore() {
     let src = "fn main() -> Int { match 1 { _ => _ } }";
@@ -3454,18 +3339,15 @@ fn wildcard_pattern_does_not_bind_a_value_named_underscore() {
     ));
 }
 
-/// D7's other three positions: a binding a program deliberately does not name
-/// is legal, introduces nothing, and still *runs* its initializer.
+/// The other three wildcard positions: a binding a program deliberately does
+/// not name is legal, introduces nothing, and still *runs* its initializer.
 ///
-/// **The "introduces nothing" assertion was sharpened by REP-32.** It used to be
-/// "no symbol in the table is named `_`", which is a claim about the table and
-/// not about the language, and it was the reason a `_` *parameter* had no slot at
-/// all — so `|_, b| b` dropped the parameter and returned the first argument. D7's
-/// actual property is that `_` introduces nothing **a program can read**, and that
-/// is what is asserted now: no reference anywhere resolves to a `_` symbol. The
-/// resolver never binds one into a scope, so no name can reach it; a wildcard
-/// *parameter* additionally owns an anonymous slot, exactly as a destructuring
-/// parameter does, because the argument still has to arrive somewhere.
+/// "Introduces nothing" is a claim about the language, not about the symbol
+/// table: `_` introduces nothing **a program can read**, which is what is
+/// asserted here — no reference anywhere resolves to a `_` symbol, because the
+/// resolver never binds one into a scope. A wildcard *parameter* still owns an
+/// anonymous slot, exactly as a destructuring parameter does, because the
+/// argument has to arrive somewhere.
 #[test]
 fn a_wildcard_binder_is_legal_and_declares_nothing() {
     for src in [
@@ -3541,19 +3423,17 @@ fn mixed_template_capture_kinds_are_preserved() {
         !has_type_error(src),
         "the `port` capture is Int even when an earlier capture is Word"
     );
-    // The types themselves, not just the absence of a complaint: both captures
-    // used to collapse to the *first* recognizable kind, so this record was
-    // `{ name: Text, port: Text }` and `row.port + 1` was the only thing that
-    // noticed.
+    // The types themselves, not just the absence of a complaint: each capture
+    // keeps its own kind rather than collapsing to the first recognizable one.
     assert_eq!(
         scheme_of("var row = read `{name:word},{port:int}`", "row").as_deref(),
         Some("{ name: Text, port: Int }")
     );
 }
 
-/// **D10, end to end.** A capture body is a full parser expression — nested
-/// calls and a nested template included — and the type it synthesizes is the
-/// body's own. §7.7's monkey line is the first case.
+/// A capture body is a full parser expression — nested calls and a nested
+/// template included — and the type it synthesizes is the body's own. §7.7's
+/// monkey line is the first case.
 #[test]
 fn a_capture_body_is_a_full_parser_expression() {
     for (src, expected) in [
@@ -3580,11 +3460,10 @@ fn a_capture_body_is_a_full_parser_expression() {
         );
     }
 
-    // A capture body may hold a template of its own, which also needs D10's
-    // lexer half: closing the token at the first inner backtick made this
-    // source three unrelated token runs. Asserted on the AST rather than the
-    // rendered type, because an anonymous enum renders as `{ g:  }` today — a
-    // display gap that belongs to whoever owns `TypeDb::render`.
+    // A capture body may hold a template of its own, so the lexer must not
+    // close the token at the first inner backtick. Asserted on the AST rather
+    // than the rendered type, because an anonymous enum renders as `{ g:  }` —
+    // a display gap that belongs to whoever owns `TypeDb::render`.
     {
         use praxis_input_parser::{ParserAst, TemplatePart};
         let src = "var m = read `{g:choice(Pt: `{x:int},{y:int}`, Name: word)}`";
@@ -3627,18 +3506,16 @@ fn unknown_template_capture_parser_is_diagnosed() {
         "a misspelled capture parser must not silently default to Int"
     );
     // Any `I0xx` satisfies the line above; only I012 satisfies ADR-051, which
-    // allocated `UnknownCaptureKind` for exactly this and had no constructor
-    // anywhere in the tree. Every `ScanError` used to be flattened into I030.
+    // allocated `UnknownCaptureKind` for exactly this rule.
     assert!(
         reports_input_code(src, praxis_source::DiagCode::UnknownCaptureKind),
         "the code ADR-051 allocated for this is I012, not the generic I030"
     );
 }
 
-/// **IP-04 and IP-06 through the bridge**, which is where they are observable
-/// as *diagnostics*: `ScanError` used to be flattened into `TemplateScan`
-/// (I030) by one `err_diag` call, so I011, I012 and I013 were allocated in
-/// ADR-051 and constructed nowhere.
+/// A template scan error reports the code ADR-051 allocated for its own rule —
+/// I011, I012, I013 — rather than being flattened into the generic
+/// `TemplateScan` (I030).
 #[test]
 fn a_template_scan_error_reports_the_code_its_own_rule_was_given() {
     use praxis_source::DiagCode;
@@ -3655,16 +3532,10 @@ fn a_template_scan_error_reports_the_code_its_own_rule_was_given() {
             DiagCode::ConstructorArity,
         ),
         // The `I030` rows are the ones with no code of their own, which is what
-        // makes them the control for the four above.
-        //
-        // **This row used to be `` read `prefix\` `` — an escaped closing
-        // backtick, so the run never closed.** ADR-094 took that program away
-        // from the scanner: a template ends at the line it opens on, so the
-        // lexer answers `T002` and the interior is never scanned at all. The
-        // row is replaced rather than deleted because what it was here to prove
-        // — that a `ScanError` with no allocated code still reports `I030`
-        // rather than being flattened with the four that do — is unchanged, and
-        // these two reach it through a *closed* template.
+        // makes them the control for the four above. Both reach it through a
+        // *closed* template: ADR-094 ends a template at the line it opens on,
+        // so an unclosed one is the lexer's `T002` and its interior is never
+        // scanned at all.
         ("var v = read `{}`", DiagCode::TemplateScan),
         ("var v = read `bad\\q escape`", DiagCode::TemplateScan),
     ] {
@@ -3693,12 +3564,9 @@ fn optional_rejects_extra_arguments() {
     );
 }
 
-/// **IP-07's sweep.** Eight of §7.5's fourteen constructors were dispatched by
-/// an `if ctor_name == "…"` chain that ran *before* the arity table, took
-/// `args.into_iter().next()`, and dropped everything else. So a wrong argument
-/// count was not an error, a wrong argument *kind* was not an error, and a name
-/// with no row at all was not an error either — it was `None` with no
-/// diagnostic.
+/// Every §7.5 constructor validates its arguments before it builds anything: a
+/// wrong argument count, a wrong argument *kind*, and a name with no row at all
+/// each report, rather than a truncated parser being built in silence.
 ///
 /// Every name at its correct shape is clean; every mistake reports; and the
 /// accepted calls are checked for the AST they built, not merely for the
@@ -3727,8 +3595,9 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
         ),
     ] {
         let src = format!("var value = read {call}");
-        // **Every** error, not just the `Input` category: `fill: 0` failed at
-        // the grammar with `P001`, which an Input-only filter cannot see.
+        // **Every** error, not just the `Input` category: a shape like
+        // `fill: 0` can fail at the *grammar* with `P001`, which an Input-only
+        // filter cannot see.
         assert_eq!(
             errors_of(&src),
             Vec::<String>::new(),
@@ -3741,16 +3610,14 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
         );
     }
 
-    // **The value, not the acceptance.** `grid(P, ragged, fill: v)`'s synthesized
-    // type is `Grid[Char]` whatever `v` is, so the row above cannot see a fill
-    // that was dropped — and it was: the rowan front end built
-    // `GridRagged { fill: "" }` from `fill: 0`, while the capture-body front end
-    // kept `"0"` from the identical text. Both spellings §7.5 writes, both front
-    // ends, asserted on the built AST.
-    // A quoted fill arrives decoded (IP-08's rule for every other parser string
-    // literal, which `fill:` alone was exempt from), and one containing the
-    // argument separator is still one value — the capture-body front end's
-    // delimiter search was blind to quoting and cut `","` in half.
+    // **The value, not the acceptance.** `grid(P, ragged, fill: v)`'s
+    // synthesized type is `Grid[Char]` whatever `v` is, so the row above cannot
+    // see a dropped fill. Both spellings §7.5 writes, both front ends, asserted
+    // on the built AST.
+    //
+    // A quoted fill arrives decoded, like every other parser string literal, and
+    // one containing the argument separator is still one value — the delimiter
+    // search has to respect quoting rather than cutting `","` in half.
     for (fill_src, expected_fill) in [
         ("0", "0"),
         ("9", "9"),
@@ -3778,8 +3645,7 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
         }
     }
 
-    // A name with no row: `Constructor::from_keyword(&name)?` used to swallow
-    // this whole.
+    // A name with no row at all.
     assert!(
         reports_input_code("var v = read frobnicate(int)", DiagCode::UnknownConstructor),
         "an unknown constructor is I013"
@@ -3838,8 +3704,7 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
 
     // **A keyword with no value at all.** The shape table sees `fill:` present
     // and is satisfied; only the builder can see that nothing followed the
-    // colon. The capture-body front end accepted this with *zero* diagnostics
-    // and built a ragged grid padded with `""`.
+    // colon, and a ragged grid padded with `""` is not what was written.
     for src in [
         "var v = read grid(char, ragged, fill:)",
         "var v = read `{g:grid(char, ragged, fill:)}`",
@@ -3852,7 +3717,7 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
     }
 }
 
-/// **D10, the file-level half of the nested-template span rebase.**
+/// The file-level half of the nested-template span rebase.
 ///
 /// A capture body's spans are the scanner's, relative to the template's
 /// interior; `convert_template` rebases them onto the file by `token_start + 1`.
@@ -3860,16 +3725,17 @@ fn every_constructor_checks_its_arguments_before_it_builds_anything() {
 /// the capture's parser, and if that parser is itself a `Template`, the
 /// `Template` arm of `ParserAst::shift_spans` has to recurse into *its* parts.
 ///
-/// Nothing depended on it. Deleting `shift_part_spans(parts, delta)` from that
-/// arm left the whole suite green, while every caret under a nested template in
-/// real source moved back by `token_start + 1`: the input-parser crate's own
-/// span gate reaches the shifting machinery through `body::parse_expr` only,
-/// where the shifted parts hold `Atomic` parsers and the `Template` arm never
-/// runs.
+/// Nothing else covers that recursion: the input-parser crate's own span gate
+/// reaches the shifting machinery through `body::parse_expr` only, where the
+/// shifted parts hold `Atomic` parsers and the `Template` arm never runs. So
+/// deleting `shift_part_spans(parts, delta)` from that arm leaves the rest of
+/// the suite green while every caret under a nested template in real source
+/// moves back by `token_start + 1`.
 ///
-/// So this asserts a **rendered caret**, from `analyze`, on the file offsets —
-/// at one level of nesting and at two. With the recursion removed both spans
-/// come back short by exactly the base, naming `read `{a:` instead of the call.
+/// This therefore asserts a **rendered caret**, from `analyze`, on the file
+/// offsets — at one level of nesting and at two. Without the recursion both
+/// spans come back short by exactly the base, naming `read `{a:` instead of the
+/// call.
 #[test]
 fn a_caret_under_a_nested_template_names_the_text_it_points_at() {
     // A `choice` with a duplicate case is reported against the `choice` node's
@@ -3893,53 +3759,50 @@ fn a_caret_under_a_nested_template_names_the_text_it_points_at() {
     }
 }
 
-/// **IP-08.** A parser constructor's string literal used to be decoded by
-/// `raw.trim_start_matches('"').trim_end_matches('"')` — a second decoder,
-/// beside `lower::unquote_text`, which never unescaped and which stripped
-/// *every* quote at each end rather than one.
+/// A parser constructor's string literal goes through the one decoder every
+/// other literal uses (`lower::unquote_text`), so escapes are decoded and
+/// exactly one delimiting quote is stripped at each end.
 #[test]
 fn a_parser_string_literal_is_decoded_once_like_every_other_literal() {
     use praxis_input_parser::ParserAst;
 
-    // `\t` is one tab, not the two characters `\` and `t`. This is the whole
-    // finding: `sep("\t", int)` split on a backslash.
+    // `\t` is one tab, not the two characters `\` and `t`, so `sep("\t", int)`
+    // splits on a tab.
     match parser_ast_of(r#"var v = read sep("\t", int)"#) {
         ParserAst::Sep { separator, .. } => assert_eq!(separator.as_str(), "\t"),
         other => panic!("expected Sep, got {other:?}"),
     }
 
-    // One quote, not zero: `trim_end_matches('"')` ate the escaped quote too.
+    // One quote, not zero: the escaped quote is content, not a delimiter.
     match parser_ast_of(r#"var v = read one_of("\"")"#) {
         ParserAst::OneOf { chars, .. } => assert_eq!(chars, "\""),
         other => panic!("expected OneOf, got {other:?}"),
     }
 
-    // Both real quotes survive. `trim_start_matches`/`trim_end_matches` strip a
-    // *run*, so this used to decode to the empty separator — the one IP-10 says
-    // cannot exist.
+    // Both real quotes survive: stripping a *run* of quotes would decode this
+    // to the empty separator, which is not a legal one.
     match parser_ast_of(r#"var v = read sep("\"\"", int)"#) {
         ParserAst::Sep { separator, .. } => assert_eq!(separator.as_str(), "\"\""),
         other => panic!("expected Sep, got {other:?}"),
     }
 
-    // And an escape neither decoder knows is preserved exactly as
-    // `unquote_text` preserves it — which is how the two are shown to be one.
+    // And an unknown escape is preserved exactly as `unquote_text` preserves
+    // it — which is how the two are shown to be one decoder.
     match parser_ast_of(r#"var v = read sep("\q", int)"#) {
         ParserAst::Sep { separator, .. } => assert_eq!(separator.as_str(), r"\q"),
         other => panic!("expected Sep, got {other:?}"),
     }
 }
 
-/// **IP-09's second half.** §7.5: "`repeated(parser)` may appear only as the
-/// final named argument". Neither half of that was checked — a second tail
-/// silently overwrote the first, and a tail written before other fields was
-/// silently moved to the end, so the parser that ran was not the one written.
+/// §7.5: "`repeated(parser)` may appear only as the final named argument".
+/// Both halves are checked — at most one tail, and it must be written last —
+/// because otherwise the parser that runs is not the one written.
 #[test]
 fn a_repeated_tail_is_last_and_singular() {
     use praxis_source::DiagCode;
 
     // Misordered: `boards` consumes every remaining section, so `draws` after
-    // it can never match. This used to compile into the *reordered* parser.
+    // it can never match.
     assert!(
         reports_input_code(
             "var b = read sections(boards: repeated(matrix(int)), draws: csv(int))",
@@ -3948,7 +3811,7 @@ fn a_repeated_tail_is_last_and_singular() {
         "a tail before another field silently reordered the call"
     );
 
-    // Two tails: the second used to overwrite the first, so `a` vanished.
+    // Two tails: `sections` takes at most one, and neither may be dropped.
     assert!(
         reports_input_code(
             "var b = read sections(a: repeated(int), b: repeated(int))",
@@ -3957,8 +3820,7 @@ fn a_repeated_tail_is_last_and_singular() {
         "`sections` takes at most one tail"
     );
 
-    // Outside `sections` there is nothing to repeat over. This used to fall
-    // through `Constructor::from_keyword`'s `?` and produce no diagnostic.
+    // Outside `sections` there is nothing to repeat over.
     assert!(
         reports_input_code(
             "var b = read repeated(int)",
@@ -3967,7 +3829,7 @@ fn a_repeated_tail_is_last_and_singular() {
         "a bare `repeated(...)` is not a parser"
     );
 
-    // And the legal shape is still clean and still builds the tail last —
+    // And the legal shape is clean and builds the tail last —
     // `tests/aoc-corpus/m9_bingo.px`'s own call.
     let legal = "var b = read sections(draws: csv(int), boards: repeated(matrix(int)))";
     assert!(!has_input_error(legal), "the ordered form is legal");
@@ -3978,22 +3840,20 @@ fn a_repeated_tail_is_last_and_singular() {
     );
 }
 
-/// **IP-07's residue: `build_call` still dropped arguments.** `skip:` and
-/// `fill:` were minted as keyword arguments from the argument's *name alone*,
-/// with no reference to the constructor being called; `CallArg::Keyword` and
-/// `CallArg::Named` then projected onto the same `ArgKind::Named`, so
-/// `check_call` accepted the keyword as a well-shaped named argument and the
-/// builders' `filter_map` threw it away. A `sections` field or a `block` item
-/// named `fill` or `skip` vanished from the record with **no diagnostic**.
+/// A keyword belongs to a *constructor*, so the constructor is what answers
+/// whether a name is one (`Constructor::keyword_arg`) — never the argument's
+/// name alone — and `CallArg::Keyword` and `CallArg::Named` do not collapse
+/// onto one `ArgKind`.
 ///
-/// A keyword belongs to a constructor, so the constructor answers the question
-/// (`Constructor::keyword_arg`), and the two kinds no longer collapse.
+/// If they did, `check_call` would accept `fill:` on a constructor with no such
+/// keyword as a well-shaped named argument and the builders' `filter_map` would
+/// throw it away: a `sections` field or a `block` item named `fill` or `skip`
+/// gone from the record with **no diagnostic**.
 #[test]
 fn a_field_named_fill_or_skip_is_a_field_and_not_a_dropped_keyword() {
     use praxis_input_parser::{BlockItem, ParserAst};
 
-    // `sections` has no keyword argument, so `fill:` is a field. This used to
-    // build `SectionsNamed { fields: [rules] }` and report nothing.
+    // `sections` has no keyword argument, so `fill:` is a field.
     let src = "var v = read sections(rules: lines(int), fill: lines(int))";
     assert!(!has_input_error(src), "`fill` is a section name here");
     assert_eq!(
@@ -4036,20 +3896,13 @@ fn a_field_named_fill_or_skip_is_a_field_and_not_a_dropped_keyword() {
     );
 }
 
-/// **ADR-073's claim, made true for the `repeated(...)` tail marker.** The two
-/// front ends — the HIR bridge walking rowan, and the capture-body parser
-/// reading text — must apply *one* shape check, and for the tail marker they
-/// did not.
-///
-/// The bridge unwrapped `name: repeated(P)` with a `find_map` that returned the
-/// first parser-expr child of the argument list and ignored the rest. So
-/// `repeated(matrix(int), word, int)` lowered as `repeated(matrix(int))` with
-/// two arguments silently gone, and `repeated()` produced *no diagnostic at
-/// all* — while the identical text inside a capture body was rejected with
-/// I022. Both now call `praxis_input_parser::build_repeated_tail`.
+/// **ADR-073.** The two front ends — the HIR bridge walking rowan, and the
+/// capture-body parser reading text — apply *one* shape check for the
+/// `repeated(...)` tail marker: both call
+/// `praxis_input_parser::build_repeated_tail`.
 ///
 /// Every case is asserted through **both** spellings, and on the same code, so
-/// the two cannot drift again without failing here.
+/// the two cannot drift without failing here.
 #[test]
 fn both_front_ends_apply_one_repeated_tail_rule() {
     use praxis_input_parser::ParserAst;
@@ -4119,11 +3972,11 @@ fn both_front_ends_apply_one_repeated_tail_rule() {
 /// `praxis_syntax::template::template_end` instead of implementing one rule
 /// twice.
 ///
-/// They had drifted the moment there were two copies. The lexer's counted
-/// `{`/`}` everywhere; the scanner's skipped string literals. So
-/// `` `{c:one_of("{")}` `` — legal §7.5, and accepted by the scanner — left the
-/// lexer's brace counter above zero at the closing backtick, which it read as
-/// an *opener*: the rest of the file went into one token, plus a false `T002`.
+/// Two copies of the rule drift: a brace counter that counts `{`/`}` everywhere
+/// disagrees with one that skips string literals, and `` `{c:one_of("{")}` `` —
+/// legal §7.5, and accepted by the scanner — then leaves the lexer's counter
+/// above zero at the closing backtick, which it reads as an *opener*: the rest
+/// of the file in one token, plus a false `T002`.
 ///
 /// This test lives here because it is the only place the two layers meet.
 /// `praxis-input-parser` must not depend on `praxis-parser` (ADR-023 fixes that
@@ -4141,7 +3994,7 @@ fn the_lexer_and_the_scanner_agree_on_where_a_template_ends() {
         r#"`{c:one_of("}")}`"#,
         r#"`{s:sep("{", int)}`"#,
         r#"`{c:one_of("`")}`"#,
-        // A nested template is part of the same token (D10).
+        // A nested template is part of the same token.
         "`{g:choice(A: `{x:int}`, B: word)}`",
         "`{a:choice(A: `{b:choice(C: `{c:int}`)}`)}`",
         // Ordinary shapes, so a rule that broke these would be caught too.
@@ -4205,11 +4058,10 @@ fn immediately_invoked_closure_boxes_its_mutable_capture() {
     );
 }
 
-/// HIR-09's other half: a capture whose first sighting is an assignment
-/// *target* keeps the type of the binding it names. Inference records a type at
-/// a name it reads; a write has no such record, so the capture fell back to a
-/// fresh variable and the env slot carried `?T` for a `var` every other pass
-/// knew was an `Int`.
+/// A capture whose first sighting is an assignment *target* keeps the type of
+/// the binding it names. Inference records a type at a name it *reads*; a write
+/// leaves no such record, so the capture has to take the binding's type rather
+/// than a fresh variable, or the env slot carries `?T` for a known `Int`.
 #[test]
 fn a_capture_first_seen_as_an_assignment_target_keeps_its_type() {
     let src =
@@ -4251,15 +4103,13 @@ fn a_capture_first_seen_as_an_assignment_target_keeps_its_type() {
     );
 }
 
-/// Handover 31 item 1, at the level where the defect was manufactured: the
-/// **outer** closure of `|a| |b| b + base` must carry `base` as a capture, with
-/// the binding's type and the right storage.
+/// The **outer** closure of `|a| |b| b + base` carries `base` as a capture,
+/// with the binding's type and the right storage.
 ///
-/// The type assertion is the load-bearing one. A missing capture did not fail
-/// loudly — MIR filled the inner closure's env slot with `Unit` — so the
-/// observable symptom for a captured `Text` was a well-typed program answering
-/// `Unit` at run time. A capture whose `ty` renders as anything but the
-/// binding's type is that hole reopening.
+/// The type assertion is the load-bearing one. A missing capture does not fail
+/// loudly — MIR fills the inner closure's env slot with `Unit` — so a captured
+/// `Text` becomes a well-typed program that answers `Unit` at run time. A
+/// capture whose `ty` renders as anything but the binding's type is that hole.
 #[test]
 fn a_curried_closures_outer_literal_carries_the_transitive_capture() {
     fn outer_closure(b: &crate::TypedBlock) -> &crate::TypedExpr {
@@ -4308,8 +4158,8 @@ fn a_curried_closures_outer_literal_carries_the_transitive_capture() {
     );
     assert_eq!(bare, braced, "the two spellings lower to the same captures");
 
-    // A reassigned binding is shared through a cell, transitively too — this is
-    // the shape that dereferenced a `Unit` as a `VarCell` and took a SIGSEGV.
+    // A reassigned binding is shared through a cell, transitively too — a
+    // `Unit` in this slot is dereferenced as a `VarCell` and segfaults.
     let cell = captures_of(
         "fn main() -> Int { var base = 10\n  base = 20\n  var mk = |a| |b| b + base\n  mk(5)(1) }",
     );
@@ -4321,10 +4171,9 @@ fn a_curried_closures_outer_literal_carries_the_transitive_capture() {
     );
 }
 
-/// F20: the one child walker really does cover the enum. A closure is placed in
+/// The one child walker really does cover the enum. A closure is placed in
 /// every expression *field* the macro lists, and the walk must find all of them
-/// — a field left out of a variant's row loses its subtree silently, which is
-/// exactly how HIR-08 hid for three walks and one release.
+/// — a field left out of a variant's row loses its subtree silently.
 ///
 /// The program is deliberately not type-correct in every position (a closure is
 /// not an `Int`); lowering builds the nodes regardless, and it is the shape of
@@ -4336,10 +4185,10 @@ fn the_child_walker_reaches_every_expression_position() {
         "struct R { f: Int }\n",
         "enum E { V(Int) }\n",
         "fn main(c: Bool, v: Vec[Int], k: Int) -> Int {\n",
-        "  var a = |n| 1\n",                // Let init
-        "  var b = |n| 2\n",                // Var init
+        "  var a = |n| 1\n",                // Var init
+        "  var b = |n| 2\n",                // Var init, reassigned below
         "  b = |n| 3\n",                    // Assign value
-        "  var d = (|n| 4)(0)\n",           // Call.callee_expr (HIR-08)
+        "  var d = (|n| 4)(0)\n",           // Call.callee_expr
         "  out(|n| 5)\n",                   // Call.args
         "  var w = v.map(|n| 6)\n",         // MethodCall.args
         "  var y = v.map(|n| 7).len()\n",   // MethodCall.receiver
@@ -4398,19 +4247,18 @@ fn the_child_walker_reaches_every_expression_position() {
     assert_eq!(unique.len(), found.len(), "a closure was visited twice");
 }
 
-// --- TY-07: type constructors validate their own arguments ------------------
+// --- type constructors validate their own arguments -------------------------
 
 /// A wrong number of type arguments in an annotation is named where it was
 /// written (`Y007`), not as a downstream `Y001` about a type the user never
-/// wrote. Before F5 the annotation interned a `Map[Text]` that could not unify
-/// with anything, so the only report came from the first use.
+/// wrote.
 #[test]
 fn a_wrong_type_argument_count_is_reported_at_the_annotation() {
     for src in [
         "fn main() -> Int { var m: Map[Text] = Map(); 0 }",
         "fn main() -> Int { var v: Vec[Int, Text] = Vec(); 0 }",
-        // A nominal def has a parameter count too, since F12 — `Option` is one
-        // definition applied to arguments rather than a name stamped per site.
+        // A nominal def has a parameter count too — `Option` is one definition
+        // applied to arguments rather than a name stamped per site.
         "fn main() -> Int { var o: Option[Int, Text] = None; 0 }",
     ] {
         let codes: Vec<u32> = analyze(src)
@@ -4430,9 +4278,8 @@ fn a_wrong_type_argument_count_is_reported_at_the_annotation() {
     ));
 }
 
-/// A declaration that names one member twice is rejected (`Y008`). It used to
-/// register a def holding both, and every lookup answered the first — so the
-/// second field was silently unreachable rather than diagnosed.
+/// A declaration that names one member twice is rejected (`Y008`) rather than
+/// registering a def whose second field no lookup can ever reach.
 #[test]
 fn a_duplicate_field_or_variant_is_rejected() {
     assert!(
@@ -4450,15 +4297,15 @@ fn a_duplicate_field_or_variant_is_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// F15 — the per-node inferred-type map, and lowering as its reader.
+// The per-node inferred-type map, and lowering as its reader.
 // ---------------------------------------------------------------------------
 
-/// A program with a closure in each of the twenty-five expression positions
-/// F20's walker gate enumerates, plus the shapes inference reaches without
+/// A program with a closure in each of the twenty-five expression positions the
+/// child-walker gate enumerates, plus the shapes inference reaches without
 /// going through `infer_expr` (branch, loop and function bodies).
 ///
-/// Shared by the F15 gates below: "every expression node has a type" is only
-/// worth asserting over a tree that has every expression node in it.
+/// Shared by the gates below: "every expression node has a type" is only worth
+/// asserting over a tree that has every expression node in it.
 const EVERY_EXPRESSION_POSITION: &str = concat!(
     "struct R { f: Int }\n",
     "enum E { V(Int) }\n",
@@ -4485,7 +4332,7 @@ const EVERY_EXPRESSION_POSITION: &str = concat!(
     "}\n"
 );
 
-/// **F15.** Inference records a type for *every* expression node it visits, and
+/// Inference records a type for *every* expression node it visits, and
 /// it visits every expression node. The map is what lets lowering read instead
 /// of re-deriving; a map with holes in it would just move the fresh-variable
 /// fallback from lowering into whoever consumes the map.
@@ -4522,10 +4369,9 @@ fn every_expression_node_has_a_recorded_type() {
     );
 }
 
-/// **F15.** Lowering never invents a type. `Y099` is what a miss looks like now,
-/// and a program covering every expression position produces none — which is
-/// the same statement as the test above, made where it matters: the pass that
-/// used to fall back to a fresh variable nineteen times over.
+/// Lowering never invents a type: it reads the map rather than falling back to
+/// a fresh variable. `Y099` is what a miss looks like, and a program covering
+/// every expression position produces none.
 #[test]
 fn lowering_invents_no_type_for_any_expression_position() {
     let (_, module) = analyze_and_lower(EVERY_EXPRESSION_POSITION);
@@ -4540,10 +4386,10 @@ fn lowering_invents_no_type_for_any_expression_position() {
     );
 }
 
-/// **F15.** A `NodeKey` is not a `TextRange`. A `PATH_EXPR` and the `Ident`
-/// token inside it occupy the *same* range, which is why the per-node map could
-/// not have been keyed by range beside `ref_types` — one would have overwritten
-/// the other, silently, exactly where a name reference and its expression meet.
+/// A `NodeKey` is not a `TextRange`. A `PATH_EXPR` and the `Ident` token inside
+/// it occupy the *same* range, which is why the per-node map cannot be keyed by
+/// range beside `ref_types` — one would silently overwrite the other, exactly
+/// where a name reference and its expression meet.
 #[test]
 fn a_node_key_separates_an_expression_from_the_name_inside_it() {
     use praxis_ast::AstNode;
@@ -4576,10 +4422,9 @@ fn a_node_key_separates_an_expression_from_the_name_inside_it() {
     );
 }
 
-/// **HIR-01.** The two exit tests pin a call and a method call; this pins the
-/// shapes lowering used to answer with something *other* than a second
-/// instantiation — the branch points, where it recomputed a join it had no need
-/// to, and got a different answer whenever one branch diverged.
+/// A lowered branch carries the join inference computed, read from the map
+/// rather than recomputed — recomputing gives a different answer whenever one
+/// branch diverges.
 #[test]
 fn a_lowered_branch_carries_the_join_not_its_first_arm() {
     let src = concat!(
@@ -4612,10 +4457,10 @@ fn a_lowered_branch_carries_the_join_not_its_first_arm() {
     );
 }
 
-/// **HIR-02.** A method name is not a name reference. It has no entry in
-/// `refs` — so hover, which asks `refs` first, could never see anything about
-/// it — and its result used to be written into `ref_types` at the same range,
-/// a map only reference consumers read.
+/// A method name is not a name reference: it resolves to a catalog entry rather
+/// than to a symbol. So it has no entry in `refs`, and its receiver and result
+/// live in `method_refs` rather than in `ref_types` — the map that reference
+/// consumers such as hover read.
 #[test]
 fn a_method_name_is_not_a_name_reference() {
     let src = "fn main(v: Vec[Int]) -> Int { v.len() }\n";
@@ -4644,10 +4489,9 @@ fn a_method_name_is_not_a_name_reference() {
     assert_eq!(analysis.db.render(analysis.db.follow(m.result)), "Int");
 }
 
-/// **HIR-03** as the rule, not one shadowing case. A constructor is a *symbol*
-/// with `SymbolKind::EnumVariant`, so every question about "is this name a
-/// constructor" has one answer — including for the prelude's `Some`/`None`,
-/// which no `enum` item declares.
+/// A constructor is a *symbol* with `SymbolKind::EnumVariant`, so every question
+/// about "is this name a constructor" has one answer — including for the
+/// prelude's `Some`/`None`, which no `enum` item declares.
 #[test]
 fn a_constructor_is_a_symbol_kind_not_a_spelling() {
     let a = analyze("enum E { A, B(Int) }\nfn main() -> Int { 0 }\n");
@@ -4682,14 +4526,13 @@ fn a_local_holding_a_variant_is_not_a_constructor() {
         "the local shadows the constructor: {:?}",
         main.body.tail
     );
-    // The `var A = 7` must survive too — lowering the tail as a constructor
-    // also discarded the binding's value.
+    // The `var A = 7` must survive too: lowering the tail as a constructor
+    // would discard the binding's value with it.
     assert_eq!(main.body.stmts.len(), 1, "the binding is still there");
 }
 
-/// **HIR-07** as the rule. A misspelled constructor is `Y122`; a constructor
-/// pattern against a type that has no variants at all is `Y123`; and the
-/// arms that *are* right still work.
+/// A misspelled constructor is `Y122`; a constructor pattern against a type that
+/// has no variants at all is `Y123`; and the arms that *are* right still work.
 #[test]
 fn a_pattern_that_names_no_variant_is_reported_not_widened() {
     let typo = analyze_and_lower_diags(
@@ -4715,9 +4558,8 @@ fn a_pattern_that_names_no_variant_is_reported_not_widened() {
     );
 }
 
-/// **HIR-07's second half.** A non-exhaustive `match` is reported at the
-/// `match`, not at byte 0 of the file — which for a program with two of them
-/// named neither.
+/// A non-exhaustive `match` is reported at the `match`, not at byte 0 of the
+/// file — a span at byte 0 names neither of a program's two matches.
 #[test]
 fn a_non_exhaustive_match_is_reported_where_it_is_written() {
     let src = "enum E { A, B }\nfn main() -> Int {\n  var x = A\n  match x { A => 1 }\n}\n";
@@ -4734,9 +4576,9 @@ fn a_non_exhaustive_match_is_reported_where_it_is_written() {
     );
 }
 
-/// **HIR-04** as the rule: a record literal names every declared field exactly
-/// once and nothing else. Each half has its own code, so a program with two
-/// mistakes reports two things.
+/// A record literal names every declared field exactly once and nothing else.
+/// Each half has its own code, so a program with two mistakes reports two
+/// things.
 #[test]
 fn a_record_literal_names_every_field_exactly_once() {
     let missing = analyze_and_lower_diags(
@@ -4773,8 +4615,8 @@ fn a_record_literal_names_every_field_exactly_once() {
 }
 
 /// …and an unknown field's initializer is still *type-checked*, because it is
-/// an expression the program wrote. It used to be skipped entirely, which is
-/// how `Point { x: 1, typo: side_effect() }` deleted the call.
+/// an expression the program wrote: skipping it would silently delete the call
+/// in `Point { x: 1, typo: side_effect() }`.
 #[test]
 fn an_unknown_fields_initializer_is_still_checked() {
     let diags = analyze_and_lower_diags(
@@ -4791,10 +4633,9 @@ fn an_unknown_fields_initializer_is_still_checked() {
     );
 }
 
-/// **HIR-06's first half as the rule.** Exhaustiveness is a question about
-/// *values*, so it is asked at every position a value has — not only at the
-/// top. The old check compared top-level variant indices, which made a
-/// one-variant enum exhaustive no matter what its payload said.
+/// Exhaustiveness is a question about *values*, so it is asked at every
+/// position a value has — not only at the top. Comparing top-level variant
+/// indices alone makes a one-variant enum exhaustive whatever its payload says.
 #[test]
 fn a_match_covers_every_payload_position_not_just_the_outer_constructor() {
     let enums = "enum Flag { On, Off }\nenum Wrapped { Wrap(Flag) }\n";
@@ -4841,9 +4682,8 @@ fn a_match_covers_every_payload_position_not_just_the_outer_constructor() {
     );
 }
 
-/// **HIR-06's second half as the rule.** An arm is unreachable when it matches
-/// no value the arms above it leave — which is a coverage question, not the
-/// syntactic "is there a `_` above me" the old scan asked.
+/// An arm is unreachable when it matches no value the arms above it leave — a
+/// coverage question, not the syntactic "is there a `_` above me".
 #[test]
 fn an_arm_is_unreachable_exactly_when_it_adds_no_coverage() {
     let y121 = |src: &str| {
@@ -4853,7 +4693,7 @@ fn an_arm_is_unreachable_exactly_when_it_adds_no_coverage() {
             .count()
     };
 
-    // A repeated constructor: the old scan saw no catch-all and said nothing.
+    // A repeated constructor, with no catch-all anywhere in the match.
     assert_eq!(
         y121(
             "enum E { A, B }\nfn main() -> Int { var v = A\n  match v { A => 1, A => 2, B => 3 } }"
@@ -4862,15 +4702,15 @@ fn an_arm_is_unreachable_exactly_when_it_adds_no_coverage() {
         "the second `A` is dead, and only it"
     );
 
-    // The case the old scan *did* catch still works.
+    // The purely syntactic case.
     assert_eq!(
         y121("enum E { A, B }\nfn main() -> Int { var v = A\n  match v { _ => 1, A => 2 } }"),
         1,
         "an arm after a catch-all"
     );
 
-    // A payload an earlier arm already covered — invisible to a top-level scan,
-    // because both arms name the same single variant.
+    // A payload an earlier arm already covered — invisible to a top-level
+    // check, because both arms name the same single variant.
     assert_eq!(
         y121(
             "enum Flag { On, Off }\nenum Wrapped { Wrap(Flag) }\n\
@@ -4935,17 +4775,12 @@ fn a_missing_case_is_named_by_the_value_that_is_missing() {
 
 /// A constructor at every-wildcard and that constructor with its payload named
 /// are the same test, because the builder pads a variant pattern to its payload
-/// arity (HIR-06). The matrix pairs each column with a type; a row narrower than
-/// the payload would pair them off by one.
+/// arity. The matrix pairs each column with a type; a row narrower than the
+/// payload would pair them off by one.
 ///
-/// (Named `a_bare_constructor_name_is_that_constructor_at_any_payload` until
-/// ADR-134, which is the spelling that left.)
-///
-/// The **bare** name used to be the third spelling of it and is `Y124` now
-/// (ADR-134) — see
-/// [`a_bare_name_for_a_variant_that_carries_a_payload_is_reported`]. The padding
-/// is unchanged: the arm still covers `Some` for coverage purposes, so the only
-/// thing that changed is that the program is asked to say so.
+/// The **bare** name is padded the same way — it still covers `Some` for
+/// coverage purposes — but writing it is `Y124` (ADR-134); see
+/// [`a_bare_name_for_a_variant_that_carries_a_payload_is_reported`].
 #[test]
 fn a_constructor_at_wildcards_is_that_constructor_at_any_payload() {
     for arm in ["Some(_)", "Some(n)"] {
@@ -4971,13 +4806,13 @@ fn a_constructor_at_wildcards_is_that_constructor_at_any_payload() {
 }
 
 /// **ADR-134.** A bare variant name for a variant that *carries* a payload is
-/// `Y124`, and `A(_)` is how you say "any payload" now.
+/// `Y124`, and `A(_)` is how "any payload" is written.
 ///
-/// `match bla { A => …, B => …, C => … }` over `enum Bla { A(Int), B, C }`
-/// compiled: the bare name was padded to the variant's arity and the arm said
-/// nothing at all about the value `A` holds. Three arms, three variants, one
-/// exhaustive match — and an arm that reads exactly like `B` and `C`, which
-/// carry nothing, to anyone who has not gone and read the declaration.
+/// Padding a bare name to the variant's arity is enough for coverage, so
+/// `match bla { A => …, B => …, C => … }` over `enum Bla { A(Int), B, C }` is
+/// exhaustive — and its first arm reads exactly like `B` and `C`, which carry
+/// nothing, to anyone who has not read the declaration. The code is what makes
+/// the program say which it is.
 ///
 /// Naming *fewer* inside parentheses is still the padding rule: `Pair(a)` on a
 /// two-slot variant is legal, because the parentheses are the place the author
@@ -5022,19 +4857,17 @@ fn a_bare_name_for_a_variant_that_carries_a_payload_is_reported() {
     assert!(is_clean_with_lower(
         "enum T { Empty, Wall }\nfn main() -> Int { var t = Empty\n match t { Empty => 1, Wall => 0 } }"
     ));
-    // And a bare name that is *not* a variant of the scrutinee's enum is still a
-    // binding, which is HIR-07's rule and not this one.
+    // And a bare name that is *not* a variant of the scrutinee's enum is still
+    // a binding, which is the binding rule and not this one.
     assert!(is_clean_with_lower(
         "enum T { Empty, Wall, Number(Int) }\n\
          fn main() -> Int { var t = Empty\n match t { Empty => 1, other => 2 } }"
     ));
 }
 
-/// TY-32/D4 as the **rule**, not the four exit cases. The question a key has to
-/// answer is not "can this be hashed" — a `Vec` hashes fine — it is "can this
-/// still be found after the program changes it". The two used to be one
-/// predicate (`supports_hash` was literally `supports_eq`), and that is what
-/// admitted every mutable collection as a key.
+/// The question a key has to answer is not "can this be hashed" — a `Vec`
+/// hashes fine — it is "can this still be found after the program changes it"
+/// (ADR-057 decision 3). Hashability and key-ness are two predicates, not one.
 #[test]
 fn a_mutable_collection_is_not_a_key() {
     // Every mutable collection, in a `Map` key position.
@@ -5106,9 +4939,8 @@ fn a_heap_element_must_be_orderable() {
 /// requirement is claimed by its scheme, and the *call site* is what chooses a
 /// type that cannot be a key.
 ///
-/// The map is built inside `store`, not passed in: a `Map` *parameter* is an
-/// unresolved receiver, and constraining one of those is TY-30, which this
-/// stage's own exit test still covers separately.
+/// The map is built inside `store`, not passed in: a `Map` *parameter* would be
+/// an unresolved receiver, which is the deferred-method rule covered separately.
 #[test]
 fn a_key_requirement_reaches_through_a_generic_function() {
     let src = "fn store(k) -> Unit { var m = Map(); m.insert(k, 1) }\n\
@@ -5127,12 +4959,10 @@ fn a_key_requirement_reaches_through_a_generic_function() {
     assert!(!has_type_error(ok));
 }
 
-/// TY-25's other half, and the reason the finding looked like an inference bug:
-/// `parse` is **syntax**, not a call of a binding. It used to be lexed into a
-/// `PATH_EXPR` inside its own `PARSE_EXPR`, which made every use an `N001` — and
-/// made `ParseExpr::text_expr` ("the first `Expr` child") answer with the
-/// keyword's own path rather than the argument, so the text argument's type was
-/// never looked at.
+/// `parse` is **syntax**, not a call of a binding. The keyword is not a
+/// `PATH_EXPR` inside the `PARSE_EXPR`, so there is no name to resolve and
+/// `ParseExpr::text_expr` — "the first `Expr` child" — is the text argument
+/// rather than the keyword's own path.
 #[test]
 fn parse_is_syntax_and_its_text_argument_is_the_one_checked() {
     // The name is not a binding, so a well-formed `parse` reports nothing.
@@ -5153,9 +4983,8 @@ fn parse_is_syntax_and_its_text_argument_is_the_one_checked() {
     ));
 }
 
-/// TY-26 as the rule: negation follows the operand's **type**, and the
-/// per-literal shortcut was only ever an approximation of it. A `Float`-typed
-/// variable was negated as an `Int` and then failed to unify with itself.
+/// Negation follows the operand's **type**, not the spelling of the literal
+/// beneath it — a per-literal rule negates a `Float`-typed variable as an `Int`.
 #[test]
 fn negation_follows_the_operands_type_not_its_spelling() {
     assert!(!has_type_error("fn negate(x: Float) -> Float { -x }"));
@@ -5165,13 +4994,13 @@ fn negation_follows_the_operands_type_not_its_spelling() {
     assert!(!has_type_error("fn f() -> Int { -3 }"));
     // …and negation still has a type: an Int operand does not produce a Float.
     assert!(has_type_error("fn f(x: Int) -> Float { -x }"));
-    // A Float expression that is not a literal — the shape the old rule missed.
+    // A Float expression that is not a literal.
     assert!(!has_type_error("fn f(x: Float) -> Float { -(x + 1.0) }"));
 }
 
-/// TY-27: `%` has no `Float` lowering, and MIR's unsupported-operator fallback
-/// mapped it to **addition** — so `5.0 % 2.0` computed `7.0`. There is no
-/// operation to lower, so there is nothing to accept.
+/// `%` has no `Float` lowering, so there is nothing to accept. MIR's
+/// `FloatBinOp` has no `Rem` arm and `binop_to_float`'s defensive fallback is
+/// `Add`, so an accepted `5.0 % 2.0` would compute `7.0`.
 #[test]
 fn float_remainder_has_no_operation_to_lower() {
     assert!(has_type_error("fn bad() -> Float { 5.0 % 2.0 }"));
@@ -5186,21 +5015,20 @@ fn float_remainder_has_no_operation_to_lower() {
     }
 }
 
-/// **REP-64's inference half.** `%=` is the same operation as `%`, so it is the
-/// same `Y016` — in both spellings a compound assignment has.
+/// `%=` is the same operation as `%`, so it is the same `Y016` — in both
+/// spellings a compound assignment has.
 ///
 /// The numeric requirement beside it does not cover this: a `Float` *is*
-/// numeric, so `f %= 2.0` passed `praxis check` while `f % 2.0` was refused, and
-/// MIR was then asked for a float remainder that does not exist. It answered by
-/// taking the `Int` channel and doing integer arithmetic on two IEEE-754 bit
-/// patterns.
+/// numeric, so without this rule `f %= 2.0` passes `praxis check` while
+/// `f % 2.0` is refused, and MIR is then asked for a float remainder that does
+/// not exist.
 #[test]
 fn a_compound_remainder_on_a_float_is_the_same_y016_the_binary_one_is() {
     for src in [
         // The binding target.
         "var f = 5.0\nf %= 2.0",
         "fn bad(x: Float) -> Float { var f = x\nf %= 2.0\nf }",
-        // The subscript target (REP-21, ADR-064).
+        // The subscript target (ADR-064).
         "var m = Map()\nm[\"k\"] = 5.0\nm[\"k\"] %= 2.0",
     ] {
         let errors = errors_of(src);
@@ -5220,26 +5048,23 @@ fn a_compound_remainder_on_a_float_is_the_same_y016_the_binary_one_is() {
             "Float `{op}=` through a subscript"
         );
     }
-    // …and `%=` on an `Int` is untouched, which is the whole of what it was.
+    // …and `%=` on an `Int` is defined, in both spellings.
     assert!(!has_type_error("var n = 7\nn %= 4"));
     assert!(!has_type_error(
         "var m = Map()\nm[\"k\"] = 7\nm[\"k\"] %= 4"
     ));
 }
 
-/// TY-28: an `Int` is signed 64-bit (§4.3), so a literal outside that range
-/// names a value the language cannot represent. It became `i64::MAX` silently,
-/// on the theory that the arithmetic would fault — but a saturated literal is a
-/// perfectly good `Int` and the program runs with a number nobody wrote.
+/// An `Int` is signed 64-bit (§4.3), so a literal outside that range names a
+/// value the language cannot represent. Saturating to `i64::MAX` is not a
+/// fallback: a saturated literal is a perfectly good `Int`, so the program runs
+/// with a number nobody wrote instead of faulting.
 #[test]
 fn an_out_of_range_int_literal_is_reported_rather_than_saturated() {
     for src in [
         "fn main() -> Int { 9223372036854775808 }",
         "fn main() -> Int { 99999999999999999999999 }",
-        // The separated spelling is the same literal and the same report. This
-        // is REP-11's own reproduction: before the lexer accepted separators it
-        // was `9` followed by the identifier `_223…`, so the mistake surfaced as
-        // an `N001` about an undefined name.
+        // The separated spelling is the same literal and the same report.
         "fn main() -> Int { 9_223_372_036_854_775_808 }",
     ] {
         let diags = analyze_and_lower_diags(src);
@@ -5259,14 +5084,14 @@ fn an_out_of_range_int_literal_is_reported_rather_than_saturated() {
     assert!(diags.iter().any(|d| d.code().to_string() == "Y013"));
 }
 
-/// **REP-01, ADR-061.** A top-level `fn` in value position lowers to a *function
-/// value*, and the typed tree says so.
+/// **ADR-061.** A top-level `fn` in value position lowers to a *function value*,
+/// and the typed tree says so.
 ///
-/// It used to lower to `TypedExpr::Path`, whose symbol has no local slot, so MIR
-/// answered `Unit` and `Inst::CallIndirect` read that Unit's payload as a
+/// A `TypedExpr::Path` would not do: its symbol has no local slot, so MIR
+/// answers `Unit` and `Inst::CallIndirect` reads that Unit's payload as a
 /// function pointer. The distinction is the symbol's **kind**: a `var` holding a
 /// closure is a `Path` and has a `Func` type too, so the scheme cannot tell them
-/// apart — the same reason `SymbolKind::EnumVariant` exists (HIR-03).
+/// apart — the same reason `SymbolKind::EnumVariant` exists.
 #[test]
 fn a_fn_name_in_value_position_is_a_function_value() {
     let src = "fn double(n: Int) -> Int { n * 2 }\n\
@@ -5288,8 +5113,8 @@ fn a_fn_name_in_value_position_is_a_function_value() {
     assert_eq!(callee_name, "double");
     assert_eq!(analysis.db.render(*ty), "(Int) -> Int");
 
-    // …and a `var` holding a *closure* is still a closure literal, so the new
-    // arm did not swallow the case it sits next to.
+    // …and a `var` holding a *closure* is still a closure literal, so the
+    // `FnValue` arm does not swallow the case it sits next to.
     let crate::TypedStmt::Var { init, .. } = &main.body.stmts[1] else {
         panic!("expected `var g = |n| n * 3`");
     };
@@ -5305,8 +5130,8 @@ fn a_fn_name_in_value_position_is_a_function_value() {
 /// Monomorphization is driven by call sites; a value has none, so the adapter
 /// would call a clone-source the mono pass drops and the JIT would say
 /// "unresolved user function `id`" — a Cranelift error for a program `praxis
-/// check` accepted, which is TY-33's shape all over again. `Y018` names the
-/// remedy instead, and the remedy works: a closure body *is* a call site.
+/// check` accepted. `Y018` names the remedy instead, and the remedy works: a
+/// closure body *is* a call site.
 #[test]
 fn a_generic_fn_used_as_a_value_is_reported_rather_than_run() {
     let diags =
@@ -5315,8 +5140,7 @@ fn a_generic_fn_used_as_a_value_is_reported_rather_than_run() {
         diags.iter().any(|d| d.code().to_string() == "Y018"),
         "expected Y018, got {diags:?}"
     );
-    // It is reported at *analysis*, so `praxis check` sees it — the asymmetry
-    // REP-12 was about.
+    // It is reported at *analysis*, so `praxis check` sees it.
     assert!(has_type_error(
         "fn id(x) { x }\nfn main() -> Int {\n  var f = id\n  f(3)\n}\n"
     ));
@@ -5335,14 +5159,14 @@ fn a_generic_fn_used_as_a_value_is_reported_rather_than_run() {
     ));
 }
 
-/// **REP-70.** A builtin or a constructor named without being called is `Y022`,
-/// because there is no value for the name to be.
+/// A builtin or a constructor named without being called is `Y022`, because
+/// there is no value for the name to be.
 ///
 /// `Y018`'s neighbour, one symbol kind over, and a blunter failure: a
 /// monomorphic user `fn` at least *has* a value (a closure over its adapter,
 /// ADR-061). A builtin has no adapter and a constructor is built at its call, so
-/// both lowered to `Unit` — `out(pi)` printed `Unit`, and `var h = abs` followed
-/// by `h(-3)` printed nothing at all and exited 0.
+/// both would otherwise lower to `Unit` — `out(pi)` printing `Unit`, and
+/// `var h = abs` followed by `h(-3)` printing nothing at all and exiting 0.
 #[test]
 fn a_builtin_or_constructor_used_as_a_value_is_reported() {
     for src in [
@@ -5351,8 +5175,7 @@ fn a_builtin_or_constructor_used_as_a_value_is_reported() {
         "fn main() -> Int { var h = abs\n h(-3) }",
         "fn main() -> Unit { out(Some) }",
         "enum E { A(Int), B }\nfn main() -> Unit { var f = A\n out(f(1)) }",
-        // Inside a composite, and as an argument, which is where it faulted
-        // rather than printed.
+        // Inside a composite, and as an argument.
         "fn main() -> Unit { out([pi]) }",
         "fn main() -> Unit { out([1, 2].map(abs)) }",
     ] {
@@ -5377,7 +5200,7 @@ fn a_builtin_or_constructor_used_as_a_value_is_reported() {
         unary[0].message()
     );
 
-    // Calling them is untouched, which is the whole point…
+    // Calling them is accepted, which is the whole point…
     for src in [
         "fn main() -> Unit { out(pi()) }",
         "fn main() -> Unit { out(abs(-3)) }",
@@ -5396,18 +5219,18 @@ fn a_builtin_or_constructor_used_as_a_value_is_reported() {
     }
 }
 
-/// **REP-06.** A `struct`/`enum` inside a function body is reported where it is
-/// written, not left silent.
+/// A `struct`/`enum` inside a function body is reported where it is written,
+/// not left silent.
 ///
 /// `register_top_level` walks the source file's own statements, so a nested
-/// declaration got no symbol, no type and **no diagnostic**: declaring one was
-/// accepted in silence, and using it was an `N001` about a name written two lines
-/// above. It is `N005` now — the code a nested `fn` already uses (TY-23), because
-/// it is the same mistake, and a *use* still reports its own `N001` exactly as it
-/// does for a nested `fn`.
+/// declaration gets no symbol and no type: unreported, declaring one is accepted
+/// in silence and *using* it is an `N001` about a name written two lines above.
+/// The code is `N005` — the one a nested `fn` uses, because it is the same
+/// mistake — and a use still reports its own `N001` as it does for a nested
+/// `fn`.
 #[test]
 fn a_nested_type_declaration_is_reported_at_the_declaration() {
-    // Declared and never used: this was complete silence.
+    // Declared and never used, so nothing else can report it.
     for src in [
         "fn main() -> Int {\n  struct Inner { a: Int }\n  3\n}",
         "fn main() -> Int {\n  enum Inner { On, Off }\n  3\n}",
@@ -5433,24 +5256,21 @@ fn a_nested_type_declaration_is_reported_at_the_declaration() {
          fn main() -> Int { get(Point { x: 1, y: 2 }) }\n"
     ));
     // A top-level `var` beside them, so "top level" is the file and not
-    // "the first statement". The `var` is read by a *top-level* statement here:
-    // it used to be read by `main`, which is `N007` now that a `fn` reading a
-    // binding around it is reported (REP-22) — a different check, and one this
-    // test is not about.
+    // "the first statement". The `var` is read by a *top-level* statement, not
+    // by `main`: a `fn` reading a binding around it is `N007`, a different
+    // check and one this test is not about.
     assert!(is_clean_with_lower(
         "var base = 1\nstruct Point { x: Int }\nvar total = base\nfn main() -> Int { 0 }\n"
     ));
 }
 
-/// **REP-05.** A pattern naming more sub-patterns than the variant holds is
-/// reported; naming fewer *inside parentheses* is still the padding rule.
+/// A pattern naming more sub-patterns than the variant holds is reported
+/// (`Y124`); naming fewer *inside parentheses* is still the padding rule.
 ///
-/// `match w { Wrap(a, b) => a }` against a one-slot variant **compiled and ran**,
-/// answering the payload: `b` was lowered (so a mistake inside it still reported)
-/// and then dropped. Truncating is strictly safer than the payload read past the
-/// end it replaced — which is why it stays — but accepting is not the answer.
-/// `Y122` and `Y123` covered the two neighbouring mistakes and this one had no
-/// code; it is `Y124` now.
+/// The builder truncates the extra sub-patterns rather than reading the payload
+/// past its end — `match w { Wrap(a, b) => a }` against a one-slot variant
+/// lowers `b` and drops it — so the program would otherwise compile and run.
+/// Truncating stays, because it is the safe lowering; accepting does not.
 #[test]
 fn a_pattern_naming_more_values_than_the_variant_holds_is_reported() {
     let diags = analyze_and_lower_diags(
@@ -5472,9 +5292,9 @@ fn a_pattern_naming_more_values_than_the_variant_holds_is_reported() {
         "a payload-less variant names zero values: {diags:?}"
     );
 
-    // …and naming *fewer inside parentheses* is legal at every count — HIR-06's
-    // padding rule. The bare spelling left this list at ADR-134; it is the other
-    // half of `Y124` now.
+    // …and naming *fewer inside parentheses* is legal at every count — the
+    // padding rule. The bare spelling is not in this list: it is the other half
+    // of `Y124` (ADR-134).
     for src in [
         "enum W { Wrap(Int) }\nfn main() -> Int { var w = Wrap(7)\n match w { Wrap(_) => 1 } }",
         "enum W { Wrap(Int) }\nfn main() -> Int { var w = Wrap(7)\n match w { Wrap(n) => n } }",
@@ -5485,25 +5305,23 @@ fn a_pattern_naming_more_values_than_the_variant_holds_is_reported() {
     }
 }
 
-/// **REP-03.** A `for` over an unannotated parameter is generic in the
-/// **iterable** and monomorphic in the **element** — the two are no longer one
-/// variable.
+/// A `for` over an unannotated parameter is generic in the **iterable** and
+/// monomorphic in the **element** — the two are not one variable.
 ///
-/// `iter_item` answered an unresolved receiver with *itself*, so the loop
-/// variable and the iterator came back as the same type. Two things followed, and
-/// both were wrong:
+/// If `iter_item` answered an unresolved receiver with *itself*, the loop
+/// variable and the iterator would be the same type, and two things would
+/// follow:
 ///
-/// - `t = t + i` pinned that one variable to `Int`, and the `for` then reported
-///   `Y005` "values of type `Int` cannot be iterated" — about a parameter the
-///   program never typed. A legal program rejected, identically for `Vec`,
-///   `BitSet` and `Range`, which is why TY-34's gates all annotate.
-/// - When nothing pinned it, the loop variable's recorded type was the
+/// - `t = t + i` pins that one variable to `Int`, so the `for` reports `Y005`
+///   "values of type `Int` cannot be iterated" about a parameter the program
+///   never typed — a legal program rejected.
+/// - With nothing to pin it, the loop variable's recorded type is the
 ///   *collection's*: `fn copy(vs) { var o = Vec()\n for v in vs { o.push(v) }\n
-///   o }` inferred `o: Vec[Vec[Int]]` and faulted at run time with "value does
-///   not have the declared type" — out of a program `praxis check` accepted.
+///   o }` infers `o: Vec[Vec[Int]]` and faults at run time with "value does not
+///   have the declared type", out of a program `praxis check` accepted.
 ///
-/// So the assertion is not only "accepted": it is what `total` *is*. `forall T.
-/// (T) -> Int` — any iterable, of `Int` — where it used to be `(Int) -> Int`.
+/// So the assertion is not only "accepted": it is what `total` *is*, `forall T.
+/// (T) -> Int` — any iterable, of `Int`.
 #[test]
 fn an_unannotated_iterated_parameter_is_generic_in_the_iterable_not_its_element() {
     const TOTAL: &str = "fn total(r) { var t = 0\n for i in r { t = t + i }\n t }\n";
@@ -5513,9 +5331,9 @@ fn an_unannotated_iterated_parameter_is_generic_in_the_iterable_not_its_element(
     let scheme = scheme_of(TOTAL, "total").expect("total has a scheme");
     insta::assert_snapshot!(scheme, @"forall T. (T) -> Int");
 
-    // …and it is satisfied by each of the three iterables the finding names.
-    // `Vec` and `Range` also *run*; a `BitSet` has no element accessor in the
-    // runtime, so this is the criterion's "accepted" and no more (see REP-15).
+    // …and it is satisfied by each of these iterables. `Vec` and `Range` also
+    // *run*; a `BitSet` has no element accessor in the runtime, so for it this
+    // is acceptance and no more.
     for call in [
         "fn main() -> Int { var v = Vec()\n v.push(1)\n total(v) }",
         "fn main() -> Int { total(0..4) }",
@@ -5536,10 +5354,9 @@ fn an_unannotated_iterated_parameter_is_generic_in_the_iterable_not_its_element(
         "{TOTAL}fn main() -> Int {{ var v = Vec()\n v.push(1)\n total(v) + total(0..4) }}"
     )));
 
-    // The loop variable is the **element**, not the collection: this is the half
-    // that faulted at run time rather than being reported. `o` is a `Vec[Int]`
-    // now, so returning it as one is accepted and returning `Vec[Vec[Int]]` is
-    // not.
+    // The loop variable is the **element**, not the collection: `o` is a
+    // `Vec[Int]`, so returning it as one is accepted and returning
+    // `Vec[Vec[Int]]` is not.
     const COPY: &str = "fn copy(vs) { var o = Vec()\n for v in vs { o.push(v) }\n o }\n";
     assert!(!has_type_error(&format!(
         "{COPY}fn main() -> Int {{ var s = Vec()\n s.push(1)\n var d: Vec[Int] = copy(s)\n d.len() }}"
@@ -5558,16 +5375,13 @@ fn an_unannotated_iterated_parameter_is_generic_in_the_iterable_not_its_element(
     ));
 }
 
-/// **REP-04.** An `Iterable` requirement is discharged by **unifying** the item,
-/// so a receiver that iterates at the wrong element type is reported.
+/// An `Iterable` requirement is discharged by **unifying** the item, so a
+/// receiver that iterates at the wrong element type is reported.
 ///
 /// `capability::check` answers iterability as a yes/no — its failure shape is
 /// "the offending type", and "iterates, but not at that element type" is a
-/// *mismatch*, not that. So a constraint carried through generalization and
-/// discharged at a differently-itemed iterable was silently accepted. This is the
-/// half that has never had a test, and it could not have had one before REP-03:
-/// on the unfixed tree the same program reports `Y005` at the `for`, because
-/// pinning the element pinned the iterator with it.
+/// *mismatch*, not that. A constraint carried through generalization and
+/// discharged by a yes/no at a differently-itemed iterable is silently accepted.
 ///
 /// The report goes to the **use site** with the `for` as its note (ADR-057
 /// decision 2): `for i in r { t = t + i }` is correct for every other
@@ -5607,9 +5421,8 @@ fn an_iterable_requirement_is_checked_at_the_element_type_the_body_needs() {
         );
     }
 
-    // Not iterable **at all** is still the channel's own `Y005`, unchanged —
-    // TY-29's gate, restated here because this is the function that now decides
-    // both outcomes.
+    // Not iterable **at all** is the channel's own `Y005`, restated here
+    // because one function decides both outcomes.
     let diags = analyze_and_lower_diags(&format!("{TOTAL}fn main() -> Int {{ total(1) }}"));
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y005"),
@@ -5629,18 +5442,18 @@ fn an_iterable_requirement_is_checked_at_the_element_type_the_body_needs() {
     }
 }
 
-/// **REP-14.** A `struct`/`enum` that refers to itself is reported where it is
-/// declared, rather than registered with a fresh variable in silence.
+/// A `struct`/`enum` that refers to itself is reported where it is declared
+/// (`N006`, ADR-063, superseding ADR-052's silence), rather than registered with
+/// a fresh variable.
 ///
-/// The declaration pass registers types in dependency order; a declaration in a
-/// cycle never becomes ready, and the recursive member fell back to a fresh type
-/// variable with no report. That is not merely silence — a variable unifies with
-/// everything, so `struct Node { next: Node, value: Int }` accepted `Node { next:
-/// 7, value: 1 }` and **ran** it. One unchecked member per recursive declaration.
+/// The declaration pass registers types in dependency order (ADR-052 decision
+/// 3), and a declaration in a cycle never becomes ready. Falling back to a fresh
+/// type variable for the recursive member is not merely silence — a variable
+/// unifies with everything, so `struct Node { next: Node, value: Int }` would
+/// accept `Node { next: 7, value: 1 }` and **run** it: one unchecked member per
+/// recursive declaration.
 ///
-/// D17's answer, as recommended: report it (`N006`), which supersedes ADR-052's
-/// silence. Supporting recursive types is a language feature and stays out of
-/// scope.
+/// Supporting recursive types is a language feature and stays out of scope.
 #[test]
 fn a_self_referring_type_declaration_is_reported_rather_than_registered_as_a_variable() {
     let n006 = |src: &str| -> usize {
@@ -5654,9 +5467,9 @@ fn a_self_referring_type_declaration_is_reported_rather_than_registered_as_a_var
     // Direct, in both declaration keywords.
     assert_eq!(n006("struct Node { next: Node, value: Int }"), 1);
     assert_eq!(n006("enum List { Nil, Cons(Int, List) }"), 1);
-    // Through a collection. A `Vec[Node]` *is* representable — every Praxis field
-    // holds a reference — so this is the same missing feature and not a different
-    // one, and it had the same silent variable (its element's).
+    // Through a collection. A `Vec[Node]` *is* representable — every Praxis
+    // field holds a reference — so this is the same missing feature, reached
+    // through the element type rather than the field type.
     assert_eq!(n006("struct Node { children: Vec[Node], value: Int }"), 1);
     assert_eq!(n006("struct Node { by_name: Map[Text, Node] }"), 1);
     // A mutual pair, and a three-cycle: each member is reported once.
@@ -5680,9 +5493,9 @@ fn a_self_referring_type_declaration_is_reported_rather_than_registered_as_a_var
     );
 
     // **A declaration that merely waits behind a cycle is not the mistake.**
-    // `C` is written above the recursive pair, so the stalled pass used to leave
-    // it in the remainder too: it got a fresh variable for `a` and accepted a
-    // `Text` in it. It is unreported and its field is a real `A` now.
+    // `C` is written above the recursive pair and names `A`, so a stalled pass
+    // would leave it in the remainder too. It is unreported, and its field is a
+    // real `A` — so a `Text` in it is a mismatch.
     let src = "struct C { a: A }\n\
                struct A { b: B }\n\
                struct B { a: A }\n\
@@ -5702,8 +5515,8 @@ fn a_self_referring_type_declaration_is_reported_rather_than_registered_as_a_var
     // annotation tokens are in `type_refs`, which is what makes this precise.
     assert_eq!(n006("struct Node { node: Int }"), 0);
     assert_eq!(n006("enum E { E }"), 0);
-    // …and a non-recursive forward reference still resolves, in both directions.
-    // TY-10's gate owns the rule; this is the code that could break it.
+    // …and a non-recursive forward reference still resolves, in both
+    // directions — the dependency-order rule this check must not break.
     assert_eq!(
         n006("struct Outer { inner: Inner }\nstruct Inner { n: Int }"),
         0
@@ -5733,16 +5546,14 @@ fn a_self_referring_type_declaration_is_reported_rather_than_registered_as_a_var
     );
 }
 
-/// **REP-07.** `&&` and `||` take two `Bool`s and produce one, and a divergent
-/// operand is absorbed rather than reported.
+/// `&&` and `||` take two `Bool`s and produce one, and a divergent operand is
+/// absorbed rather than reported.
 ///
 /// There is no truthiness, so the type rule is the whole rule and it is the same
-/// for both operators — the short-circuit is MIR's. The `Never` half is what the
-/// exit criterion's own example needs: `panic` is `Never`, so `false &&
-/// panic("x")` unified `Never` with `Bool` and reported "expected Never, found
-/// Bool" — a `Y001` about the operator rather than about the program. The
-/// operands **join** now (TY-19/ADR-053), which is what every other branch point
-/// in the language already does.
+/// for both operators — the short-circuit is MIR's. The operands **join**
+/// (ADR-053), as at every other branch point in the language: `panic` is
+/// `Never`, and unifying instead would make `false && panic("x")` an "expected
+/// Never, found Bool" `Y001` about the operator rather than about the program.
 #[test]
 fn the_logical_operators_take_two_bools_and_produce_one() {
     for op in ["&&", "||"] {
@@ -5783,18 +5594,13 @@ fn the_logical_operators_take_two_bools_and_produce_one() {
     }
 }
 
-/// **REP-08.** `p.0` reads a tuple element, and reading past the end — or off
-/// something that is not a tuple — is `Y019` in *inference*.
+/// `p.0` reads a tuple element, and reading past the end — or off something
+/// that is not a tuple — is `Y019` in *inference*.
 ///
-/// A `(Int, Int)` was a legal value, a legal `Map` key and a legal graph state
-/// (ADR-060) that **no function could read**: `p.0` was a `P001` at the dot, and
-/// `tests/aoc-corpus/day10_bfs_shortest_distance.px` says so in a comment and
-/// hand-encodes its adjacency around it.
-///
-/// The report is in inference and not at lowering, for `Y018`'s reason (ADR-061):
-/// `praxis check` does not run lowering, so a program reported only there is clean
-/// under `check` and fails under `run` — the asymmetry REP-12 was about. It is
-/// also **not** `Y112` ("no field on this type"): a tuple has no field *names*.
+/// The report is in inference and not at lowering, for `Y018`'s reason
+/// (ADR-061): `praxis check` does not run lowering, so a program reported only
+/// there is clean under `check` and fails under `run`. It is also **not** `Y112`
+/// ("no field on this type"): a tuple has no field *names*.
 #[test]
 fn a_tuple_element_is_read_by_position_and_a_bad_index_is_reported() {
     let y019 = |src: &str| -> bool {
@@ -5810,8 +5616,8 @@ fn a_tuple_element_is_read_by_position_and_a_bad_index_is_reported() {
     assert_eq!(expr_type("(1, \"a\").1"), "Text");
     assert_eq!(expr_type("(1, \"a\", true).2"), "Bool");
     assert_eq!(expr_type("(1, 2, 3, 4, 5).4"), "Int");
-    // …and a nested one, which is the case the lexer had to be taught: `n.0.1`
-    // is two indices and not an index and the float `0.1`.
+    // …and a nested one, which the lexer has to split: `n.0.1` is two indices,
+    // not an index followed by the float `0.1`.
     assert_eq!(expr_type("((1, \"a\"), 3).0.1"), "Text");
 
     // Through a binding, a parameter and a closure body.
@@ -5849,8 +5655,8 @@ fn a_tuple_element_is_read_by_position_and_a_bad_index_is_reported() {
     assert!(!y019("fn first(p) { p.0 }"));
 }
 
-/// **REP-16, the read form.** `m[key]` is the type the receiver holds at that
-/// key, and which receivers index is the catalog's answer.
+/// The read form: `m[key]` is the type the receiver holds at that key, and
+/// which receivers index is the catalog's answer.
 ///
 /// Six collections index and the arity is part of the operation, so this asserts
 /// the *result* type at each — a subscript that returned the receiver, or the
@@ -5929,10 +5735,8 @@ fn a_subscript_reads_the_type_the_receiver_holds_at_that_key() {
 
     // The two spellings are two rows, and `Map`'s differ on purpose (§4.7): the
     // subscript is the assertion-like half and answers `V`, while `.get` is the
-    // explicit-absence half and answers `Option[V]`. This assertion used to be
-    // its own negation — `.get` returning a bare `Int` was accepted, because the
-    // row said `V` while the wrapper answered the Unit sentinel (RT-14). A fix
-    // that made one spelling the other would still show here.
+    // explicit-absence half and answers `Option[V]`. A change that made one
+    // spelling the other would show here.
     assert!(has_type_error(
         "fn f(m: Map[Text, Int]) -> Int { m.get(\"a\") }"
     ));
@@ -5941,9 +5745,9 @@ fn a_subscript_reads_the_type_the_receiver_holds_at_that_key() {
     ));
 }
 
-/// **REP-16 through the constraint channel.** A subscript on an unannotated
-/// parameter defers and is answered by the call site, exactly as `values.sum()`
-/// is (TY-30) — because a subscript dispatches through the same catalog.
+/// A subscript on an unannotated parameter defers and is answered by the call
+/// site, exactly as `values.sum()` is — because a subscript dispatches through
+/// the same catalog.
 #[test]
 fn a_subscript_on_an_unannotated_parameter_is_answered_by_the_call_site() {
     // The requirement rides on the scheme: `first` is generic in its receiver.
@@ -5961,8 +5765,8 @@ fn a_subscript_on_an_unannotated_parameter_is_answered_by_the_call_site() {
         "fn first(m, k) { m[k] }\nfn main() -> Int { var s = Set()\n s.insert(1)\n first(s, 1) }"
     ));
     // A subscript is exactly as generic as a method call and no more: the
-    // requirement **pins** its receiver (`pin_to_level`, TY-30/ADR-057), so one
-    // function serves one receiver kind. Two kinds through one function is a
+    // requirement **pins** its receiver (`pin_to_level`, ADR-057 decision 5),
+    // so one function serves one receiver kind. Two kinds through one is a
     // `Y001` about the two signatures — the same answer `fn size(c) { c.len() }`
     // gives, which is what makes this a property of the channel rather than of
     // subscripts.
@@ -5985,9 +5789,9 @@ fn a_subscript_on_an_unannotated_parameter_is_answered_by_the_call_site() {
     ));
 }
 
-/// **REP-16, the store form.** `m[key] = v` and `counts[key] += 1` reach the
-/// five collections that have a store, and an assignment whose left side names
-/// no storage is `Y021` rather than a parse error.
+/// The store form: `m[key] = v` and `counts[key] += 1` reach the five
+/// collections that have a store, and an assignment whose left side names no
+/// storage is `Y021` rather than a parse error.
 #[test]
 fn a_store_through_a_subscript_needs_a_receiver_that_has_one() {
     let y020 = |src: &str| -> bool {
@@ -6027,17 +5831,18 @@ fn a_store_through_a_subscript_needs_a_receiver_that_has_one() {
     assert!(has_type_error("fn f(v: Vec[Int]) { v[\"a\"] = 1 }"));
     assert!(has_type_error("fn f(d: Deque[Int]) { d[0] = \"x\" }"));
 
-    // A `Text` reads through a subscript and has **no element store**, because it
-    // is immutable (§4.3) — so this is reported rather than given one silently.
-    // It is the one reader left with that asymmetry: `Vec` and `Deque` store now.
+    // A `Text` reads through a subscript and has **no element store**, because
+    // it is immutable (§4.3) — so this is reported rather than given one
+    // silently. It is the only reader without a store; `Vec` and `Deque` have
+    // both.
     assert!(y020("fn f(t: Text) { t[0] = 1 }"));
     assert!(!y020("fn f(t: Text) -> Char { t[0] }"));
     // And a receiver with no subscript at all is the same code from either side.
     assert!(y020("fn f(s: Set[Int]) { s[0] = 1 }"));
 
-    // A left side that names no storage. Each of these used to be a parse error
-    // about a missing statement separator, which said nothing about the mistake.
-    // A **field** is not among them — it is a place (§4.5); see
+    // A left side that names no storage: `Y021`, rather than a parse error
+    // about a missing statement separator, which says nothing about the
+    // mistake. A **field** is not among them — it is a place (§4.5); see
     // `a_store_through_a_field_writes_the_slot_the_read_would_have_read`.
     assert!(y021("fn g() -> Int { 1 }\nfn f() { g() = 3 }"));
     assert!(y021("fn f(v: Vec[Int]) { v.len() += 1 }"));
@@ -6050,16 +5855,16 @@ fn a_store_through_a_subscript_needs_a_receiver_that_has_one() {
     assert!(!has_type_error("fn f() { var x = 1\n x = 2\n x += 3 }"));
     assert!(!y021("fn f() { var x = 1\n x = 2 }"));
 
-    // A compound store still requires a numeric value (TY-15/TY-31 through the
-    // subscript): `m[k] += true` is the mistake `flag += false` was.
+    // A compound store still requires a numeric value, through the subscript
+    // too: `m[k] += true` is the same mistake as `flag += false`.
     assert!(has_type_error(
         "fn f(m: Map[Text, Bool]) { m[\"a\"] = true\n m[\"a\"] += true }"
     ));
 }
 
 /// **A field is a place.** `p.x = 5` stores into the slot `p.x` reads (§4.5),
-/// where it used to be `Y021` — "the left side of an assignment must be a name
-/// or an index" — and rebuilding the whole record was the only spelling.
+/// rather than being a `Y021` that leaves rebuilding the whole record as the
+/// only spelling.
 ///
 /// The assertions are about what a *plausible-but-wrong* implementation would
 /// get wrong: that the store checks the field's type rather than accepting any
@@ -6099,7 +5904,7 @@ fn a_store_through_a_field_writes_the_slot_the_read_would_have_read() {
         "{struct_p}fn f(p: P) {{ p.y *= \"z\" }}"
     )));
 
-    // …and none of these is `Y021` any more, which is the row this test is for.
+    // …and none of these is `Y021`: the target does name storage.
     assert!(!y021(&format!("{struct_p}fn f(p: P) {{ p.x = 5 }}")));
     assert!(!y021(&format!("{struct_p}fn f(p: P) {{ p.x += 1 }}")));
 
@@ -6118,9 +5923,9 @@ fn a_store_through_a_field_writes_the_slot_the_read_would_have_read() {
     assert!(!y021(&format!("{struct_p}fn f(p: P) {{ p.z = 5 }}")));
 
     // An **unannotated** receiver defers on the constraint channel and is
-    // answered by the call site (REP-28), so a store is exactly as generic as a
-    // read: this is the assertion that fails if the store resolves the field
-    // itself instead of going through `infer_field_get`.
+    // answered by the call site, so a store is exactly as generic as a read:
+    // this is the assertion that fails if the store resolves the field itself
+    // instead of going through `infer_field_get`.
     assert!(!has_type_error(&format!(
         "{struct_p}fn bump(q) {{ q.x += 1 }}\nfn f(p: P) {{ bump(p) }}"
     )));
@@ -6152,14 +5957,12 @@ fn a_store_through_a_field_writes_the_slot_the_read_would_have_read() {
     assert!(y021("fn f(p: (Int, Int)) { p.0 = 1 }"));
 }
 
-/// **REP-09.** `Counter[(Int, Int)]()` parses, and it means what the annotation
-/// says: the element type is the written one, and a use that disagrees is a
-/// `Y001`.
+/// `Counter[(Int, Int)]()` parses, and it means what the annotation says: the
+/// element type is the written one, and a use that disagrees is a `Y001`.
 ///
-/// §3.3 writes the explicit form. The element type is inferred from use as well,
-/// so `Counter()` already worked and the design doc's own spelling did not — which
-/// is why the assertions here are about the *type*, not about the absence of a
-/// diagnostic.
+/// §3.3 writes the explicit form. The element type is inferred from use as
+/// well, so a bare `Counter()` proves nothing — which is why the assertions here
+/// are about the *type*, not about the absence of a diagnostic.
 #[test]
 fn a_constructors_written_type_arguments_say_what_it_constructs() {
     // The written argument is the element type, at each arity the ctors have.
@@ -6193,7 +5996,7 @@ fn a_constructors_written_type_arguments_say_what_it_constructs() {
     assert!(has_type_error(
         "fn main() -> Int { var m = Map[Text, Int]()\n m.insert(\"a\", \"b\")\n m.len() }"
     ));
-    // …and through the subscript the same annotation now enables (REP-16).
+    // …and through the subscript, which reads the same annotation.
     assert!(!has_type_error(
         "fn main() -> Int { var c = Counter[(Int, Int)]()\n c[(1, 2)] += 1\n c[(1, 2)] }"
     ));
@@ -6227,8 +6030,8 @@ fn a_constructors_written_type_arguments_say_what_it_constructs() {
     assert!(has_type_error("var c: Counter[Int] = Counter[Text]()"));
 }
 
-/// The parser's closed list of type-constructor names and the compiler's are the
-/// same list (REP-09).
+/// The parser's closed list of type-constructor names and the compiler's are
+/// the same list.
 ///
 /// The parser has to know the names to tell `Counter[T]()` from `m[key]`, and it
 /// cannot ask the compiler — it does not depend on `praxis-stdlib`. So there are
@@ -6256,15 +6059,12 @@ fn the_parsers_type_constructors_are_the_compilers() {
     }
 }
 
-/// **REP-19's typed-tree shape** (ADR-067). A file's top-level statements are
-/// lowered into one generated item, in source order, and a file with none has no
-/// such item.
+/// **ADR-067.** A file's top-level statements are lowered into one generated
+/// item, in source order, and a file with none has no such item.
 ///
-/// §3.2 has always said this — "top-level statements are wrapped in a generated
-/// entry function" — and nothing wrapped them: `lower` walked the root looking
-/// only for `fn`/`struct`/`enum` and dropped everything else with a comment
-/// saying M4 only JITs `fn` items. So `out(1)` at top level type-checked and
-/// then vanished between the typed tree and MIR.
+/// §3.2: "top-level statements are wrapped in a generated entry function". A
+/// `lower` that walked the root for `fn`/`struct`/`enum` alone would drop them
+/// between the typed tree and MIR, after they had type-checked.
 #[test]
 fn a_files_top_level_statements_become_one_generated_item() {
     let lowered = |text: &str| analyze_and_lower(text).1;
@@ -6310,9 +6110,9 @@ fn a_files_top_level_statements_become_one_generated_item() {
             ..
         }
     ));
-    // And that tail is **spanless**. It used to carry the file's whole range,
-    // which is the one span in the program that is never the answer to "where?"
-    // — it reached the crash debugger as a temp whose `@ "expr"` provenance was
+    // And that tail is **spanless**. The file's whole range is the one span in
+    // the program that is never the answer to "where?": the crash debugger
+    // renders a temp's provenance as `@ "expr"`, so carrying it would print
     // every statement in the file collapsed onto one line.
     assert!(
         matches!(entry.body.tail, crate::TypedExpr::Lit { span, .. } if span == (0, 0)),
@@ -6346,13 +6146,12 @@ fn a_files_top_level_statements_become_one_generated_item() {
 /// A block that ends in a statement has a synthesized `Unit` tail, and that tail
 /// names **no source text** — at every block, not just the entry point's.
 ///
-/// The span it used to carry was the block's own, which is the widest span in
-/// reach and the least useful one. Two consumers read a temp's span and both are
-/// harmed by it: the debugger prints it as `@ "expr"` provenance, so a `{ … }`
-/// spanning twenty lines is rendered as twenty lines on one row; and
-/// `praxis_debugger`'s `fault_span` picks the *narrowest* unfinished temp to
-/// decide which line a frame faulted on, a question a whole-block span can only
-/// answer wrongly.
+/// The block's own span is the widest in reach and the least useful. Two
+/// consumers read a temp's span and a wide one harms both: the debugger prints
+/// it as `@ "expr"` provenance, so a `{ … }` spanning twenty lines would render
+/// as twenty lines on one row; and `praxis_debugger`'s `fault_span` picks the
+/// *narrowest* unfinished temp to decide which line a frame faulted on, a
+/// question a whole-block span can only answer wrongly.
 #[test]
 fn a_synthesized_block_tail_carries_no_span() {
     let src = "fn f() -> Unit {\n  var x = 1\n}\n";
@@ -6369,8 +6168,8 @@ fn a_synthesized_block_tail_carries_no_span() {
         ),
         "a statement-terminated body gets a spanless Unit tail"
     );
-    // A tail the source *did* write keeps its own span — the change is about
-    // what the compiler invents, not about erasing provenance generally.
+    // A tail the source *did* write keeps its own span — the rule is about what
+    // the compiler invents, not about erasing provenance generally.
     let src = "fn g() -> Int {\n  var x = 1\n  x\n}\n";
     let (_, module) = analyze_and_lower(src);
     let g = fn_named(&module, "g");
@@ -6381,8 +6180,8 @@ fn a_synthesized_block_tail_carries_no_span() {
     assert_eq!(&src[span.0 as usize..span.1 as usize], "x");
 }
 
-/// **REP-22.** A `fn` body that names a binding declared outside it is reported
-/// (`N007`, ADR-068) rather than compiling and answering wrongly.
+/// A `fn` body that names a binding declared outside it is reported (`N007`,
+/// ADR-068) rather than compiling and answering wrongly.
 ///
 /// ```praxis
 /// var x = 1
@@ -6390,10 +6189,11 @@ fn a_synthesized_block_tail_carries_no_span() {
 /// out(f())          // Unit
 /// ```
 ///
-/// It passed `praxis check` and printed `Unit`: the binding is a local of
-/// whatever function encloses it, and a `fn` body has no slot for another
-/// function's local. Through a closure it was worse — `fn g() { |n| n + x }`
-/// captured a symbol with no slot, so `g()(1)` printed a nine-digit number.
+/// Unreported, that passes `praxis check` and prints `Unit`: the binding is a
+/// local of whatever function encloses it, and a `fn` body has no slot for
+/// another function's local. Through a closure it is worse —
+/// `fn g() { |n| n + x }` captures a symbol with no slot, so `g()(1)` prints a
+/// nine-digit number.
 ///
 /// The boundary is a **`fn` body**, not a closure body, because a closure *does*
 /// capture (§4.10) and a function does not (§4.9). That asymmetry is the whole
@@ -6406,7 +6206,7 @@ fn a_fn_that_reads_a_binding_around_it_is_reported() {
             .any(|d| d.kind() == praxis_source::DiagCode::FunctionReadsOuterBinding)
     };
 
-    // Both forms, and the closure one is the one that answered with garbage.
+    // Both forms, including the closure one.
     assert!(reports_n007("var x = 1\nfn f() -> Int { x }\nout(f())\n"));
     assert!(reports_n007(
         "var x = 5\nfn g() { |n| n + x }\nout(g()(1))\n"
@@ -6421,9 +6221,9 @@ fn a_fn_that_reads_a_binding_around_it_is_reported() {
         "var x = 1\nfn f() -> Int { if true { x } else { 0 } }\n"
     ));
 
-    // A closure at the **top level** captures, and must keep doing so: after
-    // ADR-067 both it and the binding are inside the generated entry, so there
-    // is no boundary between them. This is §4.10's own example.
+    // A closure at the **top level** captures: under ADR-067 both it and the
+    // binding are inside the generated entry, so there is no boundary between
+    // them. This is §4.10's own example.
     assert!(!reports_n007(
         "var offset = 10\nvar v = Vec()\nv.push(1)\nout(v.map(|x| x + offset).sum())\n"
     ));
@@ -6477,8 +6277,8 @@ fn a_fn_that_reads_a_binding_around_it_is_reported() {
         .any(|d| d.kind() == praxis_source::DiagCode::FunctionReadsOuterBinding));
 }
 
-/// **Handover 31 item 6.** `N007` offers two ways out — a parameter or a closure
-/// — and for a **recursive** `fn` the second is one the compiler itself refuses:
+/// `N007` offers two ways out — a parameter or a closure — and for a
+/// **recursive** `fn` the second is one the compiler itself refuses:
 /// a closure cannot name itself, because a `var`'s initializer is resolved in the
 /// preceding environment, so `var f = |n| … f(n - 1) …` is `N001`.
 ///
@@ -6489,10 +6289,9 @@ fn a_fn_that_reads_a_binding_around_it_is_reported() {
 ///
 /// Recursion is exactly the case where threading state through the parameter
 /// list hurts — three AoC solves reached ten, seven and five parameters doing it
-/// — so it is the case where the unfollowable half of the advice was most likely
+/// — so it is the case where the unfollowable half of the advice is most likely
 /// to be taken. The recursive form drops it and says why; the far commoner
-/// non-recursive form is unchanged, which is what keeps the book's own examples
-/// byte-identical.
+/// non-recursive form keeps both ways out.
 #[test]
 fn a_recursive_fn_is_not_told_to_use_a_closure() {
     let n007 = |src: &str| -> Vec<praxis_source::Diagnostic> {
@@ -6587,14 +6386,12 @@ fn a_recursive_fn_is_not_told_to_use_a_closure() {
     );
 }
 
-/// **REP-10.** A record pattern binds each field it names at *that field's*
-/// type, and a tuple pattern binds each element at that element's.
+/// A record pattern binds each field it names at *that field's* type, and a
+/// tuple pattern binds each element at that element's.
 ///
-/// `match p { P { x, y } => x }` was a `P001` and there was no way to take a
-/// record or a tuple apart in a pattern at all. The assertion is the *types*
-/// rather than the absence of a diagnostic: a pattern that bound every name at
-/// the scrutinee's own type would also be clean, and it would be wrong at the
-/// first arithmetic.
+/// The assertion is the *types* rather than the absence of a diagnostic: a
+/// pattern that bound every name at the scrutinee's own type would also be
+/// clean, and it would be wrong at the first arithmetic.
 ///
 /// The record's fields differ in type on purpose, so binding by name is
 /// observable — a lowering that paired fields by position rather than by name
@@ -6618,7 +6415,7 @@ fn a_record_pattern_binds_a_field_at_the_fields_own_type() {
     );
 
     // A field the pattern does not name is simply not bound; naming fewer is
-    // legal, which is HIR-06's padding rule at a second kind of composite.
+    // legal, which is the padding rule at a second kind of composite.
     assert!(is_clean_with_lower(&format!(
         "{DECL}var r = match p {{ P {{ x }} => x }}\n"
     )));
@@ -6661,8 +6458,8 @@ fn a_record_pattern_binds_a_field_at_the_fields_own_type() {
     );
 }
 
-/// **REP-10.** A tuple pattern binds by position, and the scrutinee it is
-/// matched against has to be a tuple of that arity.
+/// A tuple pattern binds by position, and the scrutinee it is matched against
+/// has to be a tuple of that arity.
 #[test]
 fn a_tuple_pattern_binds_by_position() {
     // Two differently-typed elements, so a pattern that bound both at one type
@@ -6708,12 +6505,9 @@ fn a_tuple_pattern_binds_by_position() {
     );
 }
 
-/// **REP-10's exit criterion.** A record and a tuple have **one constructor**,
-/// so a `match` on one is exhaustive without a `_`.
-///
-/// Both were `Open` before, and only because no pattern could name them: the
-/// matrix has always handled a `Closed` signature with a single constructor —
-/// `exhaustive.rs` needed the two `Ctor` rows and nothing else.
+/// A record and a tuple have **one constructor**, so a `match` on one is
+/// exhaustive without a `_`. Their signatures are `Closed` with that single
+/// constructor, which `exhaustive.rs`'s matrix handles through its `Ctor` rows.
 #[test]
 fn a_record_or_tuple_match_is_exhaustive_without_a_catch_all() {
     const DECL: &str = "struct P { x: Int, y: Int }\nvar p = P { x: 1, y: 2 }\nvar t = (1, 2)\n";
@@ -6732,8 +6526,8 @@ fn a_record_or_tuple_match_is_exhaustive_without_a_catch_all() {
         );
     }
 
-    // …so a `_` after it is now *unreachable*, which is the other half of the
-    // same fact and the regression a signature that stayed `Open` would hide.
+    // …so a `_` after it is *unreachable*, which is the other half of the same
+    // fact and what an `Open` signature would hide.
     let diags = analyze_and_lower_diags(&format!(
         "{DECL}var r = match p {{ P {{ x, y }} => x, _ => 0 }}\n"
     ));
@@ -6768,8 +6562,8 @@ fn a_record_or_tuple_match_is_exhaustive_without_a_catch_all() {
     }
 
     // An enum whose payload is a record or a tuple is exhaustive when the
-    // payload's own components are covered — the two new constructors recurse
-    // like a variant's, which is the whole of HIR-06 at a second shape.
+    // payload's own components are covered — the record and tuple constructors
+    // recurse exactly as a variant's does.
     assert!(is_clean_with_lower(
         "struct P { x: Int, y: Int }\n\
          var o = Some(P { x: 1, y: 2 })\n\
@@ -6777,8 +6571,8 @@ fn a_record_or_tuple_match_is_exhaustive_without_a_catch_all() {
     ));
 }
 
-/// **REP-21.** `min=` and `max=` are catalog rows of their own, on a `Map` whose
-/// value type is bound to `Int`.
+/// `min=` and `max=` are catalog rows of their own, on a `Map` whose value type
+/// is bound to `Int`.
 ///
 /// §6.2 writes `distance[key] min= candidate` and says "an absent entry accepts
 /// the first value" — a semantics no read-modify-write over the subscript rows
@@ -6835,8 +6629,8 @@ fn an_updating_store_is_a_row_on_a_map_of_ints() {
     );
 
     // The receiver may be an unannotated parameter: the row defers through
-    // `HasMethod` exactly as a method call does (TY-30), and the call site
-    // answers it — in both directions.
+    // `HasMethod` exactly as a method call does, and the call site answers it —
+    // in both directions.
     assert!(is_clean_with_lower(
         "fn relax(d, k, v) { d[k] min= v }\n\
          var dist = Map()\ndist[\"a\"] = 10\nrelax(dist, \"a\", 4)\nout(dist[\"a\"])\n"
@@ -6854,12 +6648,12 @@ fn an_updating_store_is_a_row_on_a_map_of_ints() {
     assert_eq!(expr_type("min(3, 4) + max(3, 4)"), "Int");
 }
 
-/// **REP-25.** A `for` binding is a pattern, and it must match **every** item.
+/// A `for` binding is a pattern, and it must match **every** item.
 ///
-/// `for (k, v) in m` was unspellable: the header took one `Ident`, so a `Map`'s
-/// pair could only be named and then read with `kv.0`/`kv.1`. ADR-066 decision 3
-/// left the destructuring half to REP-10's grammar; this is that grammar in the
-/// one other position a binding appears.
+/// The header takes a full pattern rather than one `Ident`, so a `Map`'s pair is
+/// destructured as `for (k, v) in m` instead of being named and read with
+/// `kv.0`/`kv.1` (ADR-066 decision 3). It is the pattern grammar in the one
+/// other position a binding appears.
 #[test]
 fn a_for_binding_is_a_pattern_and_must_match_every_item() {
     // Each name binds at its own component's type, which a binding that named
@@ -6913,16 +6707,14 @@ fn a_for_binding_is_a_pattern_and_must_match_every_item() {
     }
 }
 
-/// **REP-26.** A record literal's head must name a `struct`.
+/// A record literal's head must name a `struct`.
 ///
-/// `var x = 1` / `var p = x { a: 1 }` passed `praxis check`, printed `Unit`, and
-/// `p + 1` printed a raw pointer — REP-01's shape, a program the checker accepts
-/// whose value has no representation. `infer_record_lit` read the head symbol's
-/// type and never asked what the symbol *was*.
+/// `infer_record_lit` has to ask what the head symbol *is*, not only what its
+/// type is. Reading the type alone accepts `var x = 1` / `var p = x { a: 1 }`,
+/// a program the checker takes and whose value has no representation.
 #[test]
 fn a_record_literals_head_must_name_a_struct() {
-    // The reproduction, and it is `N008` in **inference** — so `praxis check`
-    // sees it, which is the whole point (REP-12).
+    // It is `N008` in **inference**, so `praxis check` sees it.
     let analysis = analyze("var x = 1\nvar p = x { a: 1 }\nout(p)\n");
     assert!(
         analysis
@@ -6961,8 +6753,7 @@ fn a_record_literals_head_must_name_a_struct() {
     }
 
     // The literal answers a fresh variable rather than the head's own type, so
-    // the arithmetic that used to print a pointer no longer has an `Int` to
-    // pretend to be.
+    // arithmetic on it has no `Int` to pretend to be.
     assert_ne!(
         scheme_of("var x = 1\nvar p = x { a: 1 }\n", "p").as_deref(),
         Some("Int"),
@@ -6996,24 +6787,20 @@ fn a_record_literals_head_must_name_a_struct() {
     );
 }
 
-/// **REP-28.** A field read constrains its receiver, so §4.9's own example
-/// compiles.
+/// A field read constrains its receiver, so §4.9's own example compiles.
 ///
-/// `struct P { x: Int, y: Int }` / `fn dist(a) -> Int { a.x + a.y }` /
-/// `out(dist(P { x: 1, y: 2 }))` passed `praxis check` clean and then failed under
-/// `praxis run` with `Y112`: `infer_field_get` answered an unresolved receiver with
-/// a fresh variable and recorded nothing, so `a` was generalized with no
-/// requirement to re-ask at the call. This is TY-30 at the third door, through
-/// `require_cap` — a predicate called directly is TY-29 by another name.
+/// `infer_field_get` records a `HasField` requirement rather than answering an
+/// unresolved receiver with a fresh variable — otherwise the parameter is
+/// generalized with nothing to re-ask at the call. It is the deferred-method
+/// rule at a third door, through `require_cap`.
 ///
-/// **REP-28's second half** is that the requirement has to be able to *fail*. It
-/// was first landed with `infer_field_get` deferring only a variable receiver and
-/// `resolve_deferred_field` returning silently when the receiver turned out to
-/// have no such field, which left `Capability::HasField`'s rejection arm as dead
-/// code and every one of the programs below check-clean and run-broken — the very
-/// divergence the row exists to close. Each `check_diags` assertion here is that
-/// half; each is a plain `analyze`, with no lowering, because lowering is the pass
-/// `praxis check` does not run.
+/// The second half is that the requirement has to be able to *fail*. If
+/// `infer_field_get` deferred only a variable receiver and
+/// `resolve_deferred_field` returned silently when the receiver turned out to
+/// have no such field, `Capability::HasField`'s rejection arm would be dead code
+/// and every program below would be check-clean and run-broken. Each
+/// `check_diags` assertion here is that half; each is a plain `analyze`, with no
+/// lowering, because lowering is the pass `praxis check` does not run.
 #[test]
 fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
     /// Only what `praxis check` sees: analysis, without lowering.
@@ -7024,8 +6811,7 @@ fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
         diags.iter().any(|d| d.code().to_string() == code)
     }
 
-    // §4.9's own example, and it is clean through lowering — which is what
-    // "passed `check` and failed under `run`" means it was not.
+    // §4.9's own example, clean at `check` and through lowering alike.
     assert!(is_clean_with_lower(
         "struct P { x: Int, y: Int }\n\
          fn dist(a) -> Int { a.x + a.y }\n\
@@ -7036,10 +6822,9 @@ fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
     // site, nothing to pin `a` or `b`. It has to compile, because an uncalled
     // generic function is not an error — `fn f(a) { a + 1 }` has always been
     // accepted, and a field read was singled out only because it needed a record
-    // definition to produce an index. Before this, lowering demanded that
-    // definition and answered with four `Y112`s that `praxis check` never saw.
-    // `crates/praxis-cli/tests/design_doc.rs` drives the byte-for-byte fence
-    // through the real binary; this is the same claim where the fix lives.
+    // definition to produce an index — which lowering must not demand of an
+    // unpinned receiver. `crates/praxis-cli/tests/design_doc.rs` drives the
+    // byte-for-byte fence through the real binary; this is the same claim.
     assert!(is_clean_with_lower(
         "fn manhattan(a, b) {\n    abs(a.x - b.x) + abs(a.y - b.y)\n}\n"
     ));
@@ -7066,8 +6851,8 @@ fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
 
     // A **deferred** receiver that resolves to a non-record is rejected when the
     // call site resolves it — the solver door into the same arm. Lowering could
-    // not have reported this one at all: by the time it runs, `a` is still a
-    // variable and REP-28's own rule says a variable is nobody's to reject.
+    // not report this one at all: by the time it runs, `a` is still a variable,
+    // and an unresolved variable is nobody's to reject.
     assert!(
         has(
             &check_diags(
@@ -7090,8 +6875,8 @@ fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
         "a call that pins the receiver to a record lacking the field is `check`'s"
     );
 
-    // The shape the reviewers reproduced through the closure channel: the
-    // parameter defers a `HasField` and then unifies with `Int`.
+    // Through the closure channel: the parameter defers a `HasField` and then
+    // unifies with `Int`.
     assert!(
         has(
             &check_diags("var v = Vec[Int]()\nv.push(1)\nout(v.map(|a| a.x).sum())\n"),
@@ -7150,13 +6935,11 @@ fn a_field_read_requires_the_field_of_whatever_the_receiver_turns_out_to_be() {
     ));
 }
 
-/// **REP-29.** A closure parameter is a pattern, and it must match **every**
-/// argument.
+/// A closure parameter is a pattern, and it must match **every** argument.
 ///
-/// Appendix D's "first public demo" program writes `|(a, b)| abs(a - b)` and did
-/// not parse. REP-25 established the rule this reuses — destructuring in binding
-/// position *is* a pattern — and `Y125` is its rule too: a parameter has no second
-/// arm to send an argument that does not match.
+/// Destructuring in binding position *is* a pattern, so `|(a, b)| abs(a - b)` is
+/// the language; and `Y125` applies here as it does in a `for` header, because a
+/// parameter has no second arm to send an argument that does not match.
 #[test]
 fn a_closure_parameter_is_a_pattern_and_must_match_every_argument() {
     // Each name binds at its own component's type, which a parameter that named
@@ -7217,9 +7000,9 @@ fn a_closure_parameter_is_a_pattern_and_must_match_every_argument() {
         "expected Y001, got {diags:?}"
     );
 
-    // A destructured name is a binding like any other: it captures, and since
-    // ADR-125 it is assignable — at its own type, which is the component's and
-    // not the whole argument's.
+    // A destructured name is a binding like any other: it captures, and it is
+    // assignable (ADR-125) — at its own type, which is the component's and not
+    // the whole argument's.
     assert!(is_clean_with_lower(
         "var g = |(a, b)| { var h = |n| n + a + b\n h(1) }\nout(g((2, 3)))\n"
     ));
@@ -7233,28 +7016,17 @@ fn a_closure_parameter_is_a_pattern_and_must_match_every_argument() {
     );
 }
 
-/// **REP-31.** A zero-argument accessor is a **call**, and a bare `receiver.name`
-/// is a field read and only that (ADR-077).
+/// A zero-argument accessor is a **call**, and a bare `receiver.name` is a field
+/// read and only that (ADR-077). `len`, `width` and `height` are catalog rows of
+/// arity zero, not property reads.
 ///
-/// The design doc wrote `grid.width`, `grid.height` and `Vec[T].len -> Int` as
-/// property reads in three places and as calls everywhere else. The tree has only
-/// ever had the call form — `len`, `width` and `height` are catalog rows of arity
-/// zero — so the doc was corrected and this pins the rule it now states.
+/// The rule is load-bearing rather than merely tidy: a field read rides the
+/// constraint channel, and a bare `.name` that could be *either* a field or a
+/// nullary row would emit a requirement with two possible discharges and no way
+/// to choose between them.
 ///
-/// The rule is load-bearing rather than merely tidy: REP-28 put a field read on
-/// the constraint channel, and a bare `.name` that could be *either* a field or a
-/// nullary row would emit a requirement with two possible discharges and no way to
-/// choose between them.
-///
-/// **This is a characterization test, not a gate, and the distinction is the
-/// finding's.** REP-31 changed no code — its commit touches
-/// `praxis_technical_design.md`, ADR-077 and the decisions index and nothing else
-/// — so there is no state of the tree in which these assertions fail. Every claim
-/// below already held at `d8179e1`, and *that is the evidence*: the doc was wrong
-/// and the tree was right, which is exactly what a doc-only row concludes. A test
-/// that pins a rule nobody may quietly change later is worth keeping; calling it a
-/// gate is not. The one assertion here that is a real gate is the last, and it
-/// belongs to REP-28.
+/// This is a characterization test: it pins a rule the tree already follows so
+/// that nobody may quietly change it.
 #[test]
 fn a_zero_argument_accessor_is_a_call_and_a_bare_name_is_a_field() {
     // The call form is the one that works, on every receiver the doc writes it
@@ -7266,11 +7038,10 @@ fn a_zero_argument_accessor_is_a_call_and_a_bare_name_is_a_field() {
         "var m = Map()\nm[1] = 2\nout(m.len())\n"
     ));
 
-    // The property spelling is not a syntax this language has: it is a field read
-    // of a name no record declares, so it is `Y112`. Since REP-28's correction it
-    // comes from *inference* — the receiver is concrete, so `require_cap_as`
-    // decides it — which is why `analyze` alone is enough here and why the message
-    // now names the type.
+    // The property spelling is not a syntax this language has: it is a field
+    // read of a name no record declares, so it is `Y112`. It comes from
+    // *inference* — the receiver is concrete, so `require_cap_as` decides it —
+    // which is why `analyze` alone is enough here.
     for src in [
         "var v = Vec()\nv.push(1)\nout(v.len)\n",
         "var m = Map()\nm[1] = 2\nout(m.len)\n",
@@ -7289,31 +7060,28 @@ fn a_zero_argument_accessor_is_a_call_and_a_bare_name_is_a_field() {
     assert!(is_clean_with_lower(
         "struct P { len: Int }\nvar p = P { len: 7 }\nout(p.len)\n"
     ));
-    // Asked of `analyze` alone, not of `analyze` + `lower`. It used to be the
-    // latter, which stopped proving anything the moment ADR-093 moved `Y110`
-    // into inference — the point of this half is that a record carries no
-    // catalog rows, and `check` is where the user finds that out.
+    // Asked of `analyze` alone, not of `analyze` + `lower`: a record carries no
+    // catalog rows, `Y110` is inference's to report (ADR-093), and `check` is
+    // where the user finds that out.
     let diags = analyze("struct P { len: Int }\nvar p = P { len: 7 }\nout(p.len())\n").diagnostics;
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y110"),
         "a record has no rows: {diags:?}"
     );
 
-    // …and the deferred read REP-28 added resolves to the **field**, not to a row
-    // — which is the property this rule exists to protect.
+    // …and a deferred read resolves to the **field**, not to a row — which is
+    // the property this rule exists to protect.
     let src = "struct P { len: Int }\nfn n(a) { a.len }\nout(n(P { len: 7 }))\n";
     assert_eq!(scheme_of(src, "n").as_deref(), Some("(P) -> Int"));
 }
 
-/// **REP-47, ADR-084.** A backtick template outside `read`/`parse` is reported,
-/// not silently reinterpreted.
+/// **ADR-084.** A backtick template outside `read`/`parse` is reported, not
+/// silently reinterpreted.
 ///
-/// It used to be typed `Text` unconditionally and lowered as a text literal of
-/// the raw interior, so ``var t = `n = {int}` `` type-checked and `out(t)`
-/// printed `n = {int}` — the capture emitted as characters rather than
-/// reported. §7.1 enters the parser-expression sublanguage at `read` or
-/// `parse(text, …)` and nowhere else, which is the boundary REP-34 established
-/// from the other side for labelled arguments.
+/// Typing it `Text` and lowering it as a text literal of the raw interior makes
+/// ``var t = `n = {int}` `` type-check and `out(t)` print `n = {int}` — the
+/// capture emitted as characters rather than reported. §7.1 enters the
+/// parser-expression sublanguage at `read` or `parse(text, …)` and nowhere else.
 #[test]
 fn a_parser_template_in_value_position_is_reported() {
     let diags = analyze_and_lower_diags("var t = `n = {int}`\nout(t)\n");
@@ -7338,31 +7106,26 @@ fn a_parser_template_in_value_position_is_reported() {
     assert_eq!(errors, 1, "expected exactly one error, got {diags:?}");
 }
 
-/// **REP-56.** A `choice(...)` payload record's fields are readable, because a
-/// variant pattern's enum is the **scrutinee's**.
+/// A `choice(...)` payload record's fields are readable, because a variant
+/// pattern's enum is the **scrutinee's**.
 ///
-/// Inference reached the enum only through the constructor's resolved *symbol*,
-/// and an anonymous enum has no declaration and therefore no symbol. The arm was
-/// skipped whole: the scrutinee was never unified, the payload never asked for,
-/// and `p` in `Mul(p)` kept an unbound variable — so `p.a` took `infer_field_get`'s
-/// REP-28 tolerance and lowered to `Unit`.
+/// Reaching the enum through the constructor's resolved *symbol* instead
+/// (`ctor.and_then(lookup_enum_variant)`) skips the arm whole for an anonymous
+/// enum, which has no declaration and therefore no symbol: the scrutinee is
+/// never unified, the payload never asked for, and `p` in `Mul(p)` keeps an
+/// unbound variable — so `p.a` takes `infer_field_get`'s tolerance for an
+/// unresolved receiver and lowers to `Unit`.
 ///
-/// **Observed red with the scrutinee-first rule removed** (`infer_variant_pattern`
-/// reverted to `ctor.and_then(lookup_enum_variant)`): this test reports "expected
-/// Y112 from analysis alone, got []" — `praxis check` says nothing at all about a
-/// field read that does not exist. The same program under `praxis run` prints
-/// `Unit` for `out(p.a)`, and once the value is used arithmetically it aborts the
-/// process: `int_payload wants a `Int` payload; this value is a `Unit` (REP-56)`,
-/// rc=134. The gate asserts the **rendered type** in the message, not
-/// merely that some diagnostic fired: naming `{ a: Int, b: Int }` is what proves
-/// the anonymous payload record reached inference rather than that inference
-/// tripped over something else.
+/// The assertions name the **rendered type** in the message rather than merely
+/// checking that some diagnostic fired: naming `{ a: Int, b: Int }` is what
+/// proves the anonymous payload record reached inference, rather than that
+/// inference tripped over something else.
 #[test]
 fn a_bad_field_on_a_choice_payload_is_reported_at_check() {
     const READ: &str = "var ms = read scan(choice(Mul: `mul({a:int},{b:int})`, Do: `do()`))\n";
 
-    // The reproduction: a field the payload record does not have. Reported by
-    // `analyze` alone, so `praxis check` sees it (REP-12).
+    // A field the payload record does not have, reported by `analyze` alone so
+    // that `praxis check` sees it.
     let diags = analyze(&format!(
         "{READ}for m in ms {{ match m {{ Mul(p) => out(p.zzz), Do(_) => {{}} }} }}\n"
     ))
@@ -7387,18 +7150,12 @@ fn a_bad_field_on_a_choice_payload_is_reported_at_check() {
     );
 }
 
-/// **REP-57, ADR-091.** A record pattern needs no head, and a headless one pins
-/// its record from the scrutinee.
+/// **ADR-091.** A record pattern needs no head, and a headless one pins its
+/// record from the scrutinee.
 ///
 /// A `choice(...)` payload record is *anonymous*, so no head can name it —
-/// `Mul({a, b})` is the only spelling there is. The grammar had no headless form
-/// at all.
-///
-/// **Observed red with the parser's `L_BRACE` arm removed**: 23 diagnostics on
-/// the two-line program below, the first being `P001 expected a pattern` at the
-/// `{`, followed by "expected `)` to close variant pattern" and "expected `=>` in
-/// match arm" — the arm list and everything after it disintegrate from that one
-/// token, down to `N001: `a` is not defined` for bindings that no longer exist.
+/// `Mul({a, b})` is the only spelling there is, and the pattern grammar has an
+/// `L_BRACE` arm for it.
 #[test]
 fn a_record_pattern_needs_no_head_and_pins_from_the_scrutinee() {
     // Nested inside a variant pattern, over an anonymous payload record: the
@@ -7414,8 +7171,8 @@ fn a_record_pattern_needs_no_head_and_pins_from_the_scrutinee() {
     assert_eq!(scheme_of(src, "b").as_deref(), Some("Int"));
 
     // One production, so every pattern position gets it: a top-level match arm,
-    // a `for` header (REP-25), and a closure parameter. Against a *nominal*
-    // record too — the head is optional, not forbidden.
+    // a `for` header, and a closure parameter. Against a *nominal* record too —
+    // the head is optional, not forbidden.
     const DECL: &str = "struct P { x: Int, tag: Text }\n";
     let src =
         format!("{DECL}var p = P {{ x: 1, tag: \"a\" }}\nvar r = match p {{ {{x, tag}} => x }}\n");
@@ -7443,21 +7200,16 @@ fn a_record_pattern_needs_no_head_and_pins_from_the_scrutinee() {
     }
 }
 
-/// **ADR-091 Decision 2.** A headless record pattern against a scrutinee nothing
+/// **ADR-091 decision 2.** A headless record pattern against a scrutinee nothing
 /// has pinned is reported, and a non-record scrutinee is `Y123`.
 ///
-/// The plan for this row proposed *silence* against an open scrutinee, by
-/// analogy with `infer_field_get`'s REP-28 tolerance. It was measured and it is
-/// not the same trade. **Observed red with this arm silent** (the `Var` case
-/// falling through to `infer_record_pattern_fields_only` with no diagnostic):
-/// `var f = |{x, y}| x + y` / `out(f(Point { x: 10, y: 20 }))` passed
-/// `praxis check` with rc=0 and then died under `praxis run` with
-/// `int_payload wants a `Int` payload; this value is a `Unit` (REP-56)`, rc=134.
-/// Inference had bound `x` and `y` to fresh variables while lowering — which
-/// reads the record off the scrutinee and by then knows it — stored the fields at
-/// `Int`. A field *read* can be silent because lowering answers `Unit` too,
-/// consistently; a *binding* cannot, and that divergence is the very shape REP-56
-/// is about.
+/// Silence against an open scrutinee — by analogy with `infer_field_get`'s
+/// tolerance for an unresolved receiver — is not the same trade. A field *read*
+/// may be silent because lowering answers `Unit` too, consistently; a *binding*
+/// may not. Inference would bind `x` and `y` to fresh variables, while lowering
+/// — which reads the record off the scrutinee and by then knows it — would store
+/// the fields at their real types: a program clean at `check` that dies under
+/// `run`.
 #[test]
 fn a_headless_record_pattern_needs_a_record_it_can_see() {
     const DECL: &str = "struct P { x: Int, y: Int }\n";
@@ -7505,27 +7257,19 @@ fn a_headless_record_pattern_needs_a_record_it_can_see() {
     );
 }
 
-/// **REP-66.** `P {}` is a record pattern, not a binding named `P`.
+/// **ADR-091 decision 3.** `P {}` is a record pattern, not a binding named `P`.
 ///
-/// `Pattern::kind()` decided the record shape from the presence of a
-/// `PATTERN_FIELD` child. `P {}` has none, so it fell through to
-/// `PatternKind::Name("P")` — a **binding**, which matches anything.
-///
-/// **Observed red with the brace test in `Pattern::kind()` removed**: this test
-/// reports "expected Y001, got []" — analysis and lowering together say *nothing*
-/// about a pattern for the wrong record. On the binary as it stood before this
-/// row, the same program (`struct Q { z: Int }` / `struct P { a: Int }` /
-/// `match q { P {} => 1 }` with `q` a `Q`) was rc=0 at `praxis check` and printed
-/// `1` under `praxis run`. A record pattern naming the wrong record silently
-/// covered every value — HIR-07's defect at the one pattern shape HIR-07 did not
-/// reach.
+/// `Pattern::kind()` decides the record shape from the *brace*, with the
+/// `PATTERN_FIELD` child only as a second witness. `P {}` has no field child, so
+/// deciding on that child alone falls through to `PatternKind::Name("P")` — a
+/// **binding**, which matches anything, so a record pattern naming the wrong
+/// record would silently cover every value.
 #[test]
 fn a_record_pattern_with_a_head_and_no_fields_is_still_a_record_pattern() {
     const DECL: &str = "struct Q { z: Int }\nstruct P { a: Int }\nvar q = Q { z: 1 }\n";
 
-    // The reproduction: the head names another record, so it is the ordinary
-    // mismatch — and it is a mismatch at all only because the pattern is read as
-    // a record pattern.
+    // The head names another record, so it is the ordinary mismatch — and it is
+    // a mismatch at all only because the pattern is read as a record pattern.
     let diags = analyze_and_lower_diags(&format!("{DECL}var r = match q {{ P {{}} => 1 }}\n"));
     assert!(
         diags.iter().any(|d| d.code().to_string() == "Y001"),
@@ -7547,14 +7291,10 @@ fn a_record_pattern_with_a_head_and_no_fields_is_still_a_record_pattern() {
     );
 }
 
-/// **REP-56; ADR-091 Decision 5.** A variant a concrete enum does not have is `Y122` at
-/// **inference**, not only at lowering.
-///
-/// **Observed red before this report was added**: `praxis check` on the program
-/// below exits 0 with no output while `praxis run` on the same file exits 1 with
-/// `Y122` — REP-12's asymmetry, and for *every* enum rather than only the
-/// anonymous ones this row is about. `praxis check` is the command that is
-/// supposed to know.
+/// **ADR-091 decision 5.** A variant a concrete enum does not have is `Y122` at
+/// **inference**, not only at lowering — otherwise `praxis check` exits 0 on the
+/// program below while `praxis run` reports it, for *every* enum and not only
+/// the anonymous ones. `praxis check` is the command that is supposed to know.
 #[test]
 fn an_unknown_variant_is_reported_at_check() {
     // A nominal enum…
@@ -7658,8 +7398,8 @@ fn a_list_literal_is_a_vec_everywhere_a_vec_goes() {
         "fn main() -> Int { [1, 2, 3].len() }",
         "fn main() -> Int { [1, 2, 3][0] }",
         "fn main() -> Int { var v: Vec[Int] = [1]\n v.len() }",
-        // Passed to a function that iterates an unannotated parameter (REP-03):
-        // a list literal is one of the iterables that instantiates it.
+        // Passed to a function that iterates an unannotated parameter: a list
+        // literal is one of the iterables that instantiates it.
         "fn total(r) { var t = 0\n for i in r { t = t + i }\n t }\n\
          fn main() -> Int { total([1, 2, 3]) }",
     ] {
@@ -7675,11 +7415,8 @@ fn a_list_literal_is_a_vec_everywhere_a_vec_goes() {
 
 /// **A `Text` is iterable and yields `Char`** (§4.13, ADR-086).
 ///
-/// `for c in text` was `Y005` — `capability::iter_item` answered `None` for
-/// every scalar — and `crates/praxis-stdlib/src/builtins.rs` recorded it as a
-/// standing gap next to `Char.to_text()`. The item type is the assertion, not
-/// merely that the loop is accepted: a `Text` that yielded `Text` would accept
-/// every body a `Char` does not.
+/// The item type is the assertion, not merely that the loop is accepted: a
+/// `Text` that yielded `Text` would accept every body a `Char` does not.
 #[test]
 fn a_text_is_iterable_and_yields_char() {
     assert!(!has_type_error(
@@ -7714,11 +7451,10 @@ fn a_text_is_iterable_and_yields_char() {
 /// **ADR-127 decision 1.** A pipeline's receiver is anything a `for` loop can
 /// walk, and it yields what the `for` loop's variable would bind.
 ///
-/// Every one of these was `Y110` against `target/debug/praxis check` before the
-/// generic receiver landed. The gap was never a missing feature per collection —
-/// `capability::iter_item` has answered "what does this yield" for eleven
-/// collections plus `Text` since M8-WS6 — it was one feature registered against
-/// one receiver.
+/// The pipeline entry is one feature registered against every receiver rather
+/// than a feature per collection: `capability::iter_item` answers "what does
+/// this yield" for eleven collections plus `Text`, and the entry reads that
+/// answer.
 #[test]
 fn a_pipeline_walks_every_iterable_and_binds_what_the_for_loop_would() {
     // The five sequence-shaped receivers and the two nullary ones.
@@ -7744,7 +7480,7 @@ fn a_pipeline_walks_every_iterable_and_binds_what_the_for_loop_would() {
     ));
 
     // **`Grid` is excluded, and `grid.map` is why** (§6.4 asks for the
-    // shape-preserving row by name). It is still the `Y110` it was.
+    // shape-preserving row by name). It is a `Y110`.
     assert!(has_type_error(
         "fn main() -> Unit { var g = Grid()\n out(g.map(|c| c)) }"
     ));
@@ -7767,8 +7503,8 @@ fn a_pipeline_walks_every_iterable_and_binds_what_the_for_loop_would() {
 /// so a wrong item shape is an ordinary unification report at the method name.
 ///
 /// The alternative — a row that matches anything and faults at runtime — is what
-/// writing the pair shape in prose would have produced. `lookup` still accepts
-/// the receiver (it is one of the ten); the item unification is what reports.
+/// writing the pair shape in prose would produce. `lookup` accepts the receiver
+/// (it is one of the ten); the item unification is what reports.
 #[test]
 fn a_conversion_reports_a_wrong_item_shape_at_the_method_name() {
     // `[1, 2]` yields an `Int`, and `to_map` wants a pair.
@@ -7838,9 +7574,9 @@ fn a_pipelines_second_source_is_a_vec_and_the_spelling_is_to_vec() {
 /// key, so the composite-ordering question ADR-045 deferred stays deferred.
 ///
 /// `pairs.sorted()` is `Y006` — "values of type `(Text, Int)` cannot be ordered"
-/// — and that is correct: MIR has one integer compare, so `(1, 2) < (1, 3)` would
-/// have compared two schema pointers. Which left "the five most common values"
-/// with no spelling at all.
+/// — and that is correct: MIR has one integer compare, so `(1, 2) < (1, 3)`
+/// would compare two schema pointers. `sorted_by_key` is what gives "the five
+/// most common values" a spelling.
 #[test]
 fn sorted_by_key_orders_what_sorted_cannot() {
     let pairs = "var m = Map()\n m[\"a\"] = 1\n var pairs = m.keys().zip(m.values())\n";
@@ -7867,20 +7603,18 @@ fn sorted_by_key_orders_what_sorted_cannot() {
     ));
 }
 
-/// **REP-68.** `reduce`'s accumulator *is* the element type, so its closure is
-/// `(T, T) -> T` and a body that answers anything else is `Y001`.
+/// `reduce`'s accumulator *is* the element type, so its closure is `(T, T) -> T`
+/// and a body that answers anything else is `Y001`.
 ///
-/// It shared `fold`'s `(Acc, T) -> Acc` shape, and the free `Acc` that `fold`
-/// needs — its seed is a separate argument and may be a separate type — was the
-/// defect here. Nothing tied the closure's first parameter to the element, so
-/// `["ab", "c"].reduce(|a, b| a.len())` type-checked: `a` was an unpinned
-/// variable, `len` resolved against no receiver at all, and the closure answered
-/// `Int` while `reduce` answered `Text`. The two disagreeing reached MIR and
-/// panicked the compiler.
+/// It may not share `fold`'s `(Acc, T) -> Acc` shape: the free `Acc` that `fold`
+/// needs — its seed is a separate argument and may be a separate type — leaves
+/// the closure's first parameter untied to the element. Then
+/// `["ab", "c"].reduce(|a, b| a.len())` type-checks with `a` an unpinned
+/// variable, `len` resolved against no receiver at all, and the closure
+/// answering `Int` while `reduce` answers `Text`.
 #[test]
 fn reduces_accumulator_is_the_element_type() {
-    // The reproduction, and the neighbouring shapes that share its cause: a
-    // literal body and a method body are the same mistake.
+    // A method body, a literal body and a comparison body are one mistake.
     for src in [
         "fn main() -> Unit { out([\"ab\", \"c\"].reduce(|a, b| a.len())) }",
         "fn main() -> Unit { out([\"ab\", \"c\"].reduce(|a, b| 1)) }",
@@ -7889,15 +7623,12 @@ fn reduces_accumulator_is_the_element_type() {
         assert!(has_type_error(src), "{src} must be Y001");
     }
 
-    // The receiver is *pinned* now, which is the other half: an unknown method
-    // on it can name the type it is not on. It used to say "no type has a
-    // method `sqrt`", because there was no type in hand to name.
+    // The receiver is *pinned*, which is the other half: an unknown method on it
+    // names the type it is not on, rather than "no type has a method `sqrt`".
     //
-    // `sqrt` and not `to_text`: this read `to_text` until ADR-143 gave `Int` one,
-    // at which point the call resolved and the report became the (correct) `Y001`
-    // about the accumulator. The probe has to be a name the catalog holds at this
-    // arity and `Int` does not, or `has_name_at_arity` refuses it before a
-    // receiver is ever in hand — `sqrt` is `Float`'s alone.
+    // The probe has to be a name the catalog holds at this arity and `Int` does
+    // not, or `has_name_at_arity` refuses it before a receiver is ever in hand
+    // — `sqrt` is `Float`'s alone.
     let diags = analyze("fn main() -> Unit { out([1, 2].reduce(|a, b| a.sqrt())) }").diagnostics;
     let y110 = diags
         .iter()
@@ -7925,13 +7656,14 @@ fn reduces_accumulator_is_the_element_type() {
     ));
 }
 
-/// **REP-71.** `let` is a retired keyword, not a typo, and it gets `N009` with
-/// the fix it actually needs.
+/// `let` is a retired keyword, not a typo, and it gets `N009` with the fix it
+/// actually needs.
 ///
-/// It used to be `N001` with `help: did you mean `Set`?` — the suggestion budget
-/// is `max(1, len/3)`, `let` is three characters, so the budget is 1 and `Set`
-/// is one edit away. The budget is rustc's rule and it is right in general; what
-/// was wrong is asking it about a word whose replacement is known exactly.
+/// Left to the generic near-miss suggester it is an `N001` with
+/// `help: did you mean `Set`?` — the suggestion budget is `max(1, len/3)`, `let`
+/// is three characters, so the budget is 1 and `Set` is one edit away. The
+/// budget is rustc's rule and it is right in general; a word whose replacement
+/// is known exactly should not be put to it.
 #[test]
 fn the_retired_let_keyword_is_named_rather_than_guessed_at() {
     for src in ["let x = 1\n", "fn f() -> Int {\n    let y = 2\n    y\n}\n"] {
@@ -7981,9 +7713,8 @@ fn a_char_literal_is_a_char() {
     assert_eq!(expr_type("'😀'"), "Char");
 }
 
-/// The `Y001` the whole item is named after: `match c { "#" => … }` over a
-/// `Char` scrutinee was `expected Char, found Text`, and there was no third
-/// thing to write.
+/// A `Char` literal pattern is the spelling that fits a `Char` scrutinee:
+/// `match c { "#" => … }` is `expected Char, found Text`.
 #[test]
 fn a_char_literal_pattern_unifies_with_a_char_scrutinee() {
     assert!(!has_type_error(
@@ -7994,11 +7725,10 @@ fn a_char_literal_pattern_unifies_with_a_char_scrutinee() {
     ));
 }
 
-/// **The direct gate on `pattern.rs`'s literal type.** While that arm answered
-/// `scrutinee_ty`, a `Char` pattern agreed with whatever it was asked about, so
-/// this program type-checked and then compared an `Int` payload against a
-/// `Char`'s. It passed vacuously before the literal existed, which is exactly
-/// how a hole like this survives.
+/// **The direct gate on `pattern.rs`'s literal type.** An arm that answered
+/// `scrutinee_ty` would make a `Char` pattern agree with whatever it is asked
+/// about, so this program would type-check and then compare an `Int` payload
+/// against a `Char`'s.
 #[test]
 fn a_char_pattern_against_an_int_scrutinee_is_y001() {
     let errs = errors_of("fn f(n: Int) -> Int { match n { 'a' => 1, _ => 0 } }");
@@ -8021,15 +7751,12 @@ fn a_char_literal_and_a_text_subscript_are_the_same_type() {
         "fn main() -> Unit { out('#' == \"#\"[0]) }"
     ));
     assert!(!has_type_error("fn main() -> Unit { out('a' < 'b') }"));
-    // A `Char` is not a `Text`, which is the rule that made the workaround
-    // necessary in the first place. It has not changed.
+    // A `Char` is not a `Text`.
     assert!(has_type_error("fn main() -> Unit { out('a' == \"a\") }"));
 }
 
-/// **The first `Lit::Char` in the tree's history built from source.** `Lit::Char`
-/// has existed since M6 for the input parser's `grid(char)` and was constructed
-/// nowhere — six mentions across `praxis-hir` and `praxis-mir`, every one a match
-/// arm waiting for a producer. This is the producer.
+/// A `Char` literal lowers to a `Lit::Char` carrying the code point — the same
+/// node the input parser's `grid(char)` produces.
 #[test]
 fn a_char_literal_lowers_to_a_lit_char() {
     // `'a'` is U+0061, and the type on the node is the one inference decided.
@@ -8052,8 +7779,8 @@ fn a_char_literal_lowers_to_a_lit_char() {
     }
 
     // The escape and the multi-byte scalar decode to their code points and not
-    // to their first byte — the decoder is `praxis-syntax`'s, asked here for the
-    // second time after the lexer asked it for the length.
+    // to their first byte — through `praxis-syntax`'s decoder, the same one the
+    // lexer asks for the literal's length.
     for (src, code) in [("'\\n'", 0x0A_u32), ("'é'", 0xE9), ("'😀'", 0x1_F600)] {
         let (_, module) = analyze_and_lower(&format!("var c = {src}\n"));
         let entry = entry_fn(&module);
@@ -8107,9 +7834,8 @@ fn a_written_type_argument_constrains_a_sized_constructor() {
     assert!(has_type_error("var g = Grid(2, false, 0)\n"));
 }
 
-/// The wrong count reports the arity **the count selected**, which is what
-/// makes `Y024` sharper rather than blunter: `Vec(3)` used to be measured
-/// against the empty form's zero.
+/// The wrong count reports the arity **the count selected**: `Vec(3)` is
+/// measured against the sized form's two, not against the empty form's zero.
 #[test]
 fn a_sized_constructor_with_the_wrong_count_names_its_own_arity() {
     for (src, expected) in [
@@ -8173,8 +7899,8 @@ fn only_vec_and_grid_are_sized_and_the_rest_still_take_nothing() {
     }
 }
 
-/// A binding that shadows a constructor name is called, not constructed
-/// (HIR-03). The sized table is consulted only for a `SymbolKind::Builtin`
+/// A binding that shadows a constructor name is called, not constructed: the
+/// symbol's kind decides. The sized table is consulted only for a `Builtin`
 /// resolution, so the closure's own signature is what the call is checked
 /// against — including its arity.
 #[test]
@@ -8210,14 +7936,12 @@ fn a_constructor_still_has_no_function_value() {
 
 // --- string interpolation (§8.1, ADR-147) ---------------------------------
 
-/// **The gate for ADR-147 decision 3**, and the reason that decision needed
-/// writing at all.
+/// **ADR-147 decision 3.** A hole and `+` are *complements*: a hole is a
+/// rendering site the program wrote, and `+` is not one.
 ///
-/// ADR-085 decision 2 refused an implicit conversion to `Text` for `+`, and
-/// ADR-143 decision 4 recorded that a universal rendering was entangled with
-/// that refusal — "adding it as a rider would settle that by accident". ADR-147
-/// settles it on purpose, and the settlement is that the two are *complements*:
-/// a hole is a rendering site the program wrote, and `+` is not one.
+/// So ADR-085 decision 2's refusal of an implicit conversion to `Text` for `+`
+/// stands beside a universal rendering inside holes, rather than being settled
+/// by it.
 ///
 /// Both halves are asserted from **one** source file, so an edit that "unifies"
 /// the two by relaxing `+` cannot pass this by only being run against the half

@@ -1,6 +1,5 @@
-//! Integration test for the `praxis check` command — the Milestone 0
-//! acceptance criterion: "a dummy `.px` file can be loaded and diagnosed
-//! through the CLI".
+//! Integration test for the `praxis check` command: a `.px` file is loaded and
+//! diagnosed through the CLI.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -66,8 +65,8 @@ fn bad_byte_file_exits_nonzero_with_diagnostic() {
 
 #[test]
 fn parse_error_file_reports_multiple_diagnostics() {
-    // Milestone 1 acceptance: the parser produces multiple diagnostics from
-    // one malformed file and the CLI surfaces them end to end.
+    // The parser produces multiple diagnostics from one malformed file and the
+    // CLI surfaces them end to end.
     let output = Command::new(bin_path())
         .arg("check")
         .arg(fixture("parse_error.px"))
@@ -90,8 +89,8 @@ fn parse_error_file_reports_multiple_diagnostics() {
 
 #[test]
 fn type_error_file_reports_y001() {
-    // Milestone 2 acceptance: cross-type `var` reassignment is rejected end to
-    // end through `praxis check`, surfacing a Y001 type diagnostic.
+    // Cross-type `var` reassignment is rejected end to end through
+    // `praxis check`, surfacing a Y001 type diagnostic.
     let output = Command::new(bin_path())
         .arg("check")
         .arg(fixture("type_error.px"))
@@ -135,11 +134,9 @@ fn missing_file_exits_two() {
 
 /// The stubbed commands must not pretend to succeed.
 ///
-/// **`lsp` left this list at M11.** It was `["repl", "lsp"]` and asserting
-/// `main.rs:82`'s `not_implemented("lsp", None, 11)`; the server is real now and
-/// `crates/praxis-cli/tests/lsp.rs` drives a scripted JSON-RPC session against
-/// the same binary instead. `watch` is not here because it takes a file
-/// argument and is covered where the run tests live.
+/// `lsp` is not in this list: the server is real, and `tests/lsp.rs` drives a
+/// scripted JSON-RPC session against the same binary. `watch` is not here
+/// because it takes a file argument and is covered where the run tests live.
 #[test]
 fn unimplemented_commands_exit_two() {
     // One entry today. Kept as a list because `watch` joins it the moment it
@@ -172,12 +169,9 @@ fn unimplemented_commands_exit_two() {
 /// truthful report of that.
 ///
 /// What must not follow is a *second* diagnostic about the token's interior.
-/// There is no interior: the token has no closing backtick. `convert_template`
-/// used to fall back to `unwrap_or(&text)` and hand the scanner the whole token
-/// including its opening backtick, which answered "malformed capture body at
-/// byte 5: unterminated nested template" — a construct this file does not
-/// contain, at an offset that is not where anything is. That is the IP-03 class
-/// (a diagnostic describing something other than what was read), one layer up.
+/// There is no interior: the token has no closing backtick, so handing the
+/// capture-body scanner the whole token would fabricate a nested template the
+/// file does not contain, at an offset where nothing is.
 ///
 /// The scanner's own `unterminated_capture_errors` cannot see this: it calls
 /// `scan_template` directly and never goes through the lexer. This test is the
@@ -212,20 +206,14 @@ fn an_unterminated_template_does_not_also_report_a_fabricated_interior() {
 /// **D18 / ADR-094.** An unterminated template names its own line, and is the
 /// *only* thing reported.
 ///
-/// The report used to be true and three times too wide. The token ran to EOF,
-/// so `T002`'s caret covered the rest of the file; the `}` closing the enclosing
-/// block was swallowed inside it, which produced a `P001` for the block that
-/// never closed; and a `Y001` followed that. One typo, three errors, two of them
-/// about damage the first one caused.
+/// An unbounded token would run to EOF: `T002`'s caret would cover the rest of
+/// the file, the `}` closing the enclosing block would be swallowed inside it
+/// and produce a `P001` for a block that never closed, and a `Y001` would
+/// follow that — one typo, three errors, two of them about damage the first
+/// caused.
 ///
-/// **The count is the assertion.** "It reports `T002`" was already true before
-/// the fix and is the acceptance-not-value shape — what changed is that nothing
-/// else is reported, and that the caret is one line.
-///
-/// Observed red before the rule landed: three errors, `T002` + `P001` + `Y001`.
-/// Observed red at an intermediate state where the lexer bounded the token but
-/// the parser did not accept the new token kind: three again, `T002` + `P001` +
-/// `I000`.
+/// **The count is the assertion**, not "it reports `T002`": what this pins is
+/// that nothing else is reported and that the caret is one line.
 #[test]
 fn an_unterminated_template_names_its_own_line_and_nothing_else() {
     let output = Command::new(bin_path())
@@ -259,18 +247,16 @@ fn an_unterminated_template_names_its_own_line_and_nothing_else() {
     );
 }
 
-/// **REP-73.** `--help` is user-facing text, and it names nothing only the
-/// implementers can read.
+/// `--help` is user-facing text, and it names nothing only the implementers can
+/// read.
 ///
-/// The clap doc comments *are* the implementation notes, so `praxis --help`
-/// printed `run … (Milestone 4+)`, `lsp … (§15, M11)`, `--input … (§7.1, M6)`
-/// and `--debug … (§9.6, M10)`. A reader of `--help` has no idea what `§7.1` or
-/// `M6` is, and no way to find out from there. The notes are worth keeping and
-/// they now live in a plain `//` comment beside the doc comment, where clap
-/// cannot reach them.
+/// A clap doc comment *is* the help page, so a spec reference or a milestone
+/// marker written there reaches the user, who has no idea what `§7.1` is and no
+/// way to find out from there. Such notes belong in a plain `//` comment beside
+/// the doc comment, where clap cannot reach them.
 ///
-/// Every help page, not just the root: the two worst offenders were flags, and
-/// clap prints those under `run --help`.
+/// Every help page, not just the root: flags carry these markers too, and clap
+/// prints those under `run --help`.
 #[test]
 fn no_help_page_leaks_an_implementation_marker() {
     for args in [
@@ -299,10 +285,9 @@ fn no_help_page_leaks_an_implementation_marker() {
 
 /// …and the stub commands do not name a milestone either.
 ///
-/// Both call sites passed a hardcoded `0` to `not_implemented`, so the message
-/// read "planned for Milestone 0" — a milestone that completed long ago. `watch`
-/// is §19 M-later and `repl` is scheduled nowhere, so the honest message names
-/// no number at all.
+/// A number in "planned for Milestone N" goes stale the moment the milestone
+/// passes, and neither `watch` nor `repl` has a scheduled one, so the honest
+/// message names no number at all.
 #[test]
 fn a_stub_command_does_not_name_a_milestone() {
     for args in [vec!["repl"], vec!["watch", "prog.px"]] {
@@ -376,10 +361,10 @@ fn a_char_literal_that_is_not_one_character_is_reported_at_the_literal() {
     assert!(stderr.contains("2 error(s)"), "{stderr}");
 }
 
-/// **The readability half, and the one a user actually notices.** A `'` used to
-/// be `T003`, and `var c = 'a'` was seven diagnostics: two unknown characters,
-/// two `P001`s, two `P002`s and an `N001` for the `a` in between. An
-/// unterminated literal now reports once and does not cascade.
+/// **The readability half, and the one a user actually notices.** An
+/// unterminated character literal reports once — a lexer that treated `'` as an
+/// unknown character instead would turn one typo into a cascade of `P001`,
+/// `P002` and `N001` reports about the text between the quotes.
 #[test]
 fn an_unterminated_char_literal_does_not_cascade() {
     let (code, stderr) = check_source("char_unterminated.px", "var c = 'a\nout(c)\n");

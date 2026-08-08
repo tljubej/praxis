@@ -1,18 +1,13 @@
-//! The design document's own programs, run through the real binary (REP-28).
+//! The design document's own programs, run through the real binary.
 //!
 //! # Why this file exists
 //!
-//! REP-28 was signed off on a *paraphrase*. The finding named §4.9's fence; the
-//! fix was gated on a synthetic program with a call site the fence does not have,
-//! and the report counted the two `Y112`s the paraphrase emits rather than the
-//! four the fence does. Both numbers were true of some program and only one of
-//! them was the document's, so a fence that still passed `praxis check` and then
-//! failed under `praxis run` was recorded as closed.
-//!
-//! So the fence is not retyped here. It is **extracted from
+//! A fence is never retyped here. It is **extracted from
 //! `praxis_technical_design.md` at test time**, byte for byte, and driven through
 //! the same two commands a reader would type. A test that quotes the doc can
-//! drift from it; a test that reads it cannot.
+//! drift from it; a test that reads it cannot. A paraphrase is a different
+//! program — it can hold a call site the fence lacks, and then agree with the
+//! compiler about a program the document does not contain.
 //!
 //! # What "clean" means for a fence
 //!
@@ -32,7 +27,7 @@ use common::{bin_path, workspace_root};
 /// The first ```praxis fence after the line whose text is `heading`, verbatim.
 ///
 /// Panics rather than returning `None` if the heading or the fence is missing:
-/// a gate that silently covers nothing is what this file is a correction for.
+/// a gate that silently covers nothing is worse than no gate.
 fn fence_after(doc: &str, heading: &str) -> String {
     let mut lines = doc.lines();
     lines
@@ -68,14 +63,12 @@ fn codes(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// **REP-28.** §4.9's fence, as the document writes it, compiles under both
-/// `praxis check` and `praxis run`.
+/// §4.9's fence, as the document writes it, compiles under both `praxis check`
+/// and `praxis run`.
 ///
-/// Before the fix this was the whole finding in one program: `check` exited 0 with
-/// no output, and `run` exited 1 with four `Y112`s — `no field `x`` twice and
-/// `no field `y`` twice, one per read on the line. Nothing calls `manhattan`, so
-/// nothing ever says what `a` and `b` are, and lowering demanded a record
-/// definition that no call site exists to supply.
+/// Nothing calls `manhattan`, so nothing ever says what `a` and `b` are: an
+/// uncalled function whose parameters are only ever *read from* must not demand
+/// a record definition no call site exists to supply.
 #[test]
 fn section_4_9s_function_example_checks_and_runs() {
     let root = workspace_root();
@@ -107,17 +100,13 @@ fn section_4_9s_function_example_checks_and_runs() {
     }
 }
 
-/// **REP-58 / ADR-090.** §7.7's "repeated labeled blocks" fence, as the document
-/// writes it, runs against the input it describes.
+/// **ADR-090.** §7.7's "repeated labeled blocks" fence, as the document writes
+/// it, runs against the input it describes.
 ///
-/// It did not. `  Starting items: {items:csv(int)}` ends in its capture, so the
-/// capture was its template's last part, and `block` — the one sequencing
-/// construct that computed no window — handed `csv` the rest of the *section*.
-/// `csv` read `79` and `98` and then faulted on the following five lines.
-///
-/// **Observed red** on the unpatched binary: `praxis run` on the extracted fence
-/// exits 1 with `error: program faulted: input parse mismatch / at input offset
-/// 34..149: expected the rest of the field`. It exits 0 on the patched one.
+/// `  Starting items: {items:csv(int)}` ends in its capture, so the capture is
+/// its template's last part and `block` has to compute a window for it —
+/// otherwise `csv` is handed the rest of the *section* and faults on the lines
+/// that follow.
 ///
 /// `tests/aoc-corpus/rep58_section_7_7_monkeys.px` carries the same fence and
 /// asserts the values; this test carries the half a hand-copied fixture cannot —
@@ -181,24 +170,18 @@ fn section_7_7s_repeated_labeled_blocks_example_runs() {
     );
 }
 
-/// **REP-34.** Every ```praxis fence in the design document **parses**.
+/// Every ```praxis fence in the design document **parses**.
 ///
-/// Four did not, all of them §7.5 parser-constructor calls with a labelled
-/// argument: `chars(one_of("^v<>"), skip: whitespace)`, `sections(block(ranges:
-/// …))`, `choice(Number: …)` and `scan(choice(Multiply: …))`, each a `P001` at
-/// the `:`. The question the finding raised was which side was wrong, and the
-/// answer is the document's. A labelled argument *is* implemented — the parser
-/// emits `PARSER_NAMED_ARG` and `parser_lower` consumes it — but only inside the
-/// **parser-expression sublanguage**, which is entered by `read` or by
-/// `parse(text, …)` and nowhere else (§7.1). Written bare, those four fences were
-/// ordinary call expressions, where `skip:` is a syntax the language does not
-/// have. §7.5's own first four fences already wrote `read`; the rest did not, and
-/// three more of them parsed only by coincidence, as calls to undefined names.
-/// So every §7.5 fence says `read` now and §7.5 states why.
+/// A labelled parser argument written bare is one way a fence fails this:
+/// `chars(one_of("^v<>"), skip: whitespace)` outside `read` is an ordinary call
+/// expression, and `skip:` is not a syntax the language has there. A labelled
+/// argument *is* implemented — the parser emits `PARSER_NAMED_ARG` and
+/// `parser_lower` consumes it — but only inside the **parser-expression
+/// sublanguage**, which is entered by `read` or by `parse(text, …)` and nowhere
+/// else (§7.1).
 ///
-/// The sweep is the point, not the four. A per-fence assertion would have to be
-/// written once per fence and would cover the ones someone remembered; this
-/// covers the document, including fences added after it.
+/// The sweep is the point. A per-fence assertion covers the fences someone
+/// remembered; this covers the document, including fences added later.
 ///
 /// **Parse only.** A fence is a fragment — most of them name a `struct` declared
 /// three sections earlier, or a binding the surrounding prose supplies — so
@@ -262,23 +245,14 @@ fn every_praxis_fence_in_the_design_doc_parses() {
     );
 }
 
-/// **REP-33 / ADR-093.** Appendix D — the document's own "first end-to-end demo
-/// target" — checks clean, runs, and prints the answers it is a demo of.
+/// **ADR-093.** Appendix D — the document's own "first end-to-end demo target" —
+/// checks clean, runs, and prints the answers it is a demo of.
 ///
-/// It did neither. `praxis check` exited 0 with no output and `praxis run`
-/// exited 1 with **eight** `Y110`s: `sorted` twice, then `zip`, `map`, `sum`,
-/// `frequencies`, `map`, `sum`. Only two of the eight were real — `sorted` and
-/// `frequencies` had no catalog row — and the other six were cascade off the
-/// fresh type variable an unresolved call hands back. `zip`, `map`-on-a-pipeline
-/// and `sum` were registered and working all along.
-///
-/// Two halves landed to make this pass, and the intermediate state was measured
-/// rather than assumed: after ADR-093 moved `Y110` into inference, `check`
-/// reported **three** — two `sorted` and one `frequencies`, the cascade gone.
-/// The three §6.3 barrier rows then took it to zero.
-///
-/// The fence is extracted, not retyped: a test that quotes the doc can drift
-/// from it, which is this file's whole reason for existing.
+/// The guard below keeps it exercising the §6.3 barrier rows (`sorted`,
+/// `frequencies`) alongside the pipeline methods, so a missing catalog row for
+/// any of them is a `Y110` here. Both commands have to be silent, not just
+/// `run`: a method that cannot resolve is reported at `check`, not left to
+/// lowering.
 #[test]
 fn appendix_ds_demo_checks_runs_and_prints_its_answer() {
     let root = workspace_root();
@@ -335,14 +309,12 @@ fn appendix_ds_demo_checks_runs_and_prints_its_answer() {
 /// method that cannot resolve, and the thing they say is one `Y110`.
 ///
 /// This asserts the pair of values, not merely that they agree — agreement is
-/// also what "both silent" gives, and both silent is what the tree did.
-/// **Observed red**, all three programs: `codes(check_stderr)` was `[]` and
-/// `codes(run_stderr)` was `["Y110"]`.
+/// also what "both silent" gives.
 ///
-/// The three are the three ways a method call can fail to resolve, and each was
-/// silent at `check` for its own reason: a concrete receiver whose miss was left
-/// to lowering, a deferred receiver a call site pinned, and a deferred receiver
-/// nothing ever pinned, whose constraint sat in `pending_constraints` forever.
+/// The three programs are the three ways a method call can fail to resolve: a
+/// concrete receiver, a deferred receiver a call site pins, and a deferred
+/// receiver nothing ever pins, whose constraint would otherwise sit in
+/// `pending_constraints` forever.
 ///
 /// The final assertion is the strong one: the two commands' stderr is
 /// byte-identical, which is what "one emitter, before the fork" actually means.

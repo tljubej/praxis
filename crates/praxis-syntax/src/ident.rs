@@ -1,12 +1,8 @@
 //! The one identifier character class for the whole workspace (§4.1).
 //!
-//! §4.1 allows Unicode identifiers. Before this module there were three
-//! independent, mutually inconsistent rules: the lexer classified *bytes* and
-//! accepted every byte `>= 0x80` as an identifier continuation (so a stray
-//! UTF-8 continuation byte extended a name, and a leading Unicode scalar was
-//! split into "unexpected byte" diagnostics), the input parser's capture-name
-//! splitter used an ASCII-only rule, and the debugger rewrote names with a
-//! third rule.
+//! §4.1 allows Unicode identifiers, and the lexer, the input parser's
+//! capture-name splitter and the debugger all have to agree about which scalars
+//! they are — so the class is stated once, here, and never re-derived.
 //!
 //! `praxis-syntax` depends only on `praxis-source`, so every front-end crate
 //! can reach these predicates.
@@ -85,8 +81,7 @@ mod tests {
         assert!(!is_ident("9x"));
     }
 
-    /// §4.1: "Unicode identifiers are allowed". The lexer's old byte
-    /// classifier rejected these outright.
+    /// §4.1: "Unicode identifiers are allowed".
     #[test]
     fn unicode_scalars_may_start_and_continue_an_identifier() {
         assert!(is_ident("λ"));
@@ -95,8 +90,9 @@ mod tests {
         assert!(is_ident("日本語"));
     }
 
-    /// The old byte rule accepted every byte `>= 0x80`, which is every symbol,
-    /// emoji and UTF-8 continuation byte. None of those is an identifier.
+    /// A scalar outside the class is not an identifier, whatever its encoding:
+    /// an ASCII symbol, an arrow and an emoji are all outside XID-Start, and so
+    /// are the empty string and a name with a space in it.
     #[test]
     fn non_letter_scalars_are_not_identifiers() {
         assert!(!is_ident("+"));

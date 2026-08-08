@@ -1,4 +1,4 @@
-//! The capture-body parser (§7.3, D10).
+//! The capture-body parser (§7.3, ADR-072).
 //!
 //! A template capture's body is a **full parser expression**:
 //! `{items:csv(int)}`, `{x:optional(int)}`, `{s:sep("-", int)}`,
@@ -6,13 +6,8 @@
 //! one, so "atomics only" is not a smaller language — it is a language that
 //! cannot run the design document's text.
 //!
-//! Before this module the scanner **threw the body away** (IP-05). It stored a
-//! placeholder `Atomic { Int }` and left a comment saying the HIR would
-//! overwrite it; the HIR then rescanned the whole template from the beginning
-//! and returned the *first* recognizable atomic name for every capture, so
-//! `` `{name:word},{port:int}` `` typed both captures as `Text`. When it
-//! recognized nothing at all it answered `Int` (IP-06), so `{value:intr}`
-//! compiled.
+//! Each capture's body is parsed here, in its own right: no later pass rescans
+//! the template, and no unrecognized name has a default.
 //!
 //! **This is a hand-written parser and not a call back into `praxis-parser`.**
 //! ADR-023 fixes the dependency direction — `praxis-input-parser` must not
@@ -35,10 +30,8 @@ use crate::scan::{skip_string, Scan, ScanError};
 /// [`parse_expr`] and not re-checked here.
 ///
 /// **The bound is checked in one place**, `scan_template_at`, because that is
-/// the one place a template level is entered. This function used to check it
-/// too, against a `depth` that its caller had already incremented — two guards
-/// counting the same recursion twice, so the effective limit was half the one
-/// the message named.
+/// the one place a template level is entered. A second guard here would count
+/// the same recursion twice and halve the limit the message names.
 ///
 /// # Errors
 /// [`ScanError`] for an unknown parser name, an unknown constructor, a
@@ -79,18 +72,17 @@ fn parse_expr(cur: &mut Scan<'_>, base: usize, depth: usize) -> Result<ParserAst
     };
 
     if c == '`' {
-        // A nested backtick template (D10). Its own interior is scanned by the
-        // same scanner, one level deeper — and **in its own offsets**, which is
-        // the whole of the next three lines.
+        // A nested backtick template. Its own interior is scanned by the same
+        // scanner, one level deeper — and **in its own offsets**, which is the
+        // whole of the next three lines.
         //
         // `scan_template_at` is handed the text between the backticks and knows
         // nothing about where that text sits here, so every span and every
-        // error offset it returns is relative to the nested interior. The outer
-        // `Template` node's span was rebased and the parts underneath it were
-        // not, so a diagnostic inside `` `{a:sections(x: `{y:int}`)}` ``
-        // pointed at the wrong bytes and `convert_template`'s single uniform
-        // `shift_spans` could not repair it: that shift is right for one level
-        // and wrong for two.
+        // error offset it returns is relative to the nested interior. Both the
+        // outer `Template` node's span *and* the parts underneath it have to be
+        // rebased here: a single uniform shift applied later is right for one
+        // level and wrong for two, so a diagnostic inside
+        // `` `{a:sections(x: `{y:int}`)}` `` would name the wrong bytes.
         //
         // The nested interior begins one byte past the backtick at `start`.
         let inner_base = base + start + 1;
@@ -128,7 +120,7 @@ fn parse_expr(cur: &mut Scan<'_>, base: usize, depth: usize) -> Result<ParserAst
                 message: format!("`{name}` is a constructor and needs arguments (§7.5)"),
             });
         }
-        // **No `Int` default** (IP-06).
+        // **No `Int` default**: an unrecognized name is an error.
         return Err(ScanError::UnknownCaptureKind {
             byte_offset: base + start,
             name: name.to_string(),
@@ -236,10 +228,9 @@ fn parse_arg(
         let name = name.to_string();
 
         // `skip:` and `fill:` take a keyword, not a parser — but only for the
-        // constructor that has one (`chars` and `grid`). Asking the *name*
-        // instead of the constructor is what made a `block` item or a
-        // `sections` field called `fill` into a keyword argument that the
-        // builder then dropped.
+        // constructor that has one (`chars` and `grid`). The question goes to
+        // the constructor and not to the name, so a `block` item or a
+        // `sections` field called `fill` stays an ordinary named parser.
         if Some(name.as_str()) == ctor.keyword_arg() {
             let value = take_keyword_value(cur);
             return Ok(CallArg::Keyword { name, value });
@@ -247,8 +238,8 @@ fn parse_arg(
         // `name: repeated(P)` / `name: repeated(P, N)` is the named-sections
         // group marker (§7.5): the field's parser is the `P`, and `repeated`
         // says the field takes a group of sections rather than one.
-        // `build_call` refuses a bare `repeated(...)` outright (IP-09), so the
-        // marker goes through `build_repeated_tail` — the same function the HIR
+        // `build_call` refuses a bare `repeated(...)` outright, so the marker
+        // goes through `build_repeated_tail` — the same function the HIR
         // bridge calls, so the two front ends cannot disagree about the
         // marker's own shape, its count included.
         if peek_ident(cur) == Some(Constructor::Repeated.keyword()) {
@@ -270,11 +261,10 @@ fn parse_arg(
     }
 
     // A bare flag — today only `grid(P, ragged, fill: v)`'s `ragged`, and only
-    // for the constructor that has one. Asked of the *name* alone, as this was,
-    // `ragged` is a flag in **every** constructor's argument list: `lines(ragged)`
-    // was told it had written a flag where a parser belongs, and the word was
-    // reserved everywhere rather than in `grid`. That is `keyword_arg`'s bug one
-    // argument kind over, and `flag_arg` is the same answer to it.
+    // for the constructor that has one. Asked of the *name* alone, `ragged`
+    // would be a flag in **every** constructor's argument list and the word
+    // would be reserved everywhere rather than in `grid`; `flag_arg` asks the
+    // constructor, exactly as `keyword_arg` does one argument kind over.
     //
     // `is_some_and` and not `peek_ident(cur) == ctor.flag_arg()`: that also
     // holds when both are `None`, which is end-of-arguments, and would mint a
@@ -370,15 +360,13 @@ fn take_number<'a>(cur: &mut Scan<'a>) -> &'a str {
     &cur.src()[start..cur.pos()]
 }
 
-/// Consume a `"…"` literal and decode it with the workspace's one decoder
-/// (IP-08).
+/// Consume a `"…"` literal and decode it with the workspace's one decoder.
 ///
 /// The **extent** is [`skip_string`]'s — [`praxis_syntax::template::string_end`]'s
-/// — rather than the second copy of the backslash/quote loop this used to be.
-/// The rebasing is not optional: this `Scan` runs over the capture body alone,
-/// so the offset `skip_string` reports is relative to *that* text, and without
-/// the shift every unterminated-literal caret in a capture body lands `base`
-/// bytes short.
+/// — rather than a second copy of the backslash/quote loop. The rebasing is not
+/// optional: this `Scan` runs over the capture body alone, so the offset
+/// `skip_string` reports is relative to *that* text, and without the shift every
+/// unterminated-literal caret in a capture body lands `base` bytes short.
 fn take_string(cur: &mut Scan<'_>, base: usize) -> Result<String, ScanError> {
     let start = cur.pos();
     skip_string(cur).map_err(|err| err.shifted(base))?;
@@ -390,14 +378,14 @@ fn take_string(cur: &mut Scan<'_>, base: usize) -> Result<String, ScanError> {
 /// The value of a `skip:`/`fill:` keyword argument: everything up to the next
 /// `,` or `)` **outside a string literal**.
 ///
-/// The delimiter search used to be blind to quoting, so `fill: ","` ended at
-/// the comma *inside* the literal and left a lone `"` behind — the scanner then
-/// reported `unterminated string literal` for text that is not malformed, while
-/// the rowan front end accepted the very same call. A quoted value is returned
-/// with its quotes; `build_call` decodes it, so both front ends get one answer
-/// from one place. Which literal is "a string" is [`skip_string`]'s question,
-/// the same one the extent scan and the lexer ask, so a third inline copy of the
-/// backslash/quote loop cannot drift away from them.
+/// The delimiter search is quote-aware, or `fill: ","` would end at the comma
+/// *inside* the literal and leave a lone `"` behind — text that is not
+/// malformed reported as an unterminated literal, while the rowan front end
+/// accepts the very same call. A quoted value is returned with its quotes;
+/// `build_call` decodes it, so both front ends get one answer from one place.
+/// Which literal is "a string" is [`skip_string`]'s question, the same one the
+/// extent scan and the lexer ask, so a third inline copy of the backslash/quote
+/// loop cannot drift away from them.
 fn take_keyword_value(cur: &mut Scan<'_>) -> String {
     let start = cur.pos();
     while let Some(c) = cur.peek_char() {
@@ -407,9 +395,9 @@ fn take_keyword_value(cur: &mut Scan<'_>) -> String {
                 // A literal with no end has no end to skip to, and
                 // `skip_string` reports that **without moving the cursor** — so
                 // this arm must consume the rest itself, or the loop re-reads
-                // this same quote forever. Running to the end is what the copy
-                // this replaced did: `parse_args` then reports the unbalanced
-                // `(`, which is the malformed text's real complaint.
+                // this same quote forever. Running to the end leaves
+                // `parse_args` to report the unbalanced `(`, which is the
+                // malformed text's real complaint.
                 if skip_string(cur).is_err() {
                     cur.advance_to(cur.src().len());
                 }
@@ -449,9 +437,9 @@ mod tests {
         }
     }
 
-    /// **IP-06.** There is no default: an unknown name is reported, and it is
-    /// reported as `UnknownCaptureKind` (I012) rather than inheriting the
-    /// generic template-scan code.
+    /// There is no default: an unknown name is reported, and it is reported as
+    /// `UnknownCaptureKind` (I012) rather than inheriting the generic
+    /// template-scan code.
     #[test]
     fn an_unknown_parser_name_has_no_default() {
         match parse("intr") {
@@ -508,7 +496,7 @@ mod tests {
     }
 
     /// The tail rules are §7.5's, and they are the same rules the top-level
-    /// bridge applies — one `build_call` (IP-09).
+    /// bridge applies — one `build_call`.
     #[test]
     fn a_sections_tail_is_last_and_singular_here_too() {
         match parse("sections(draws: csv(int), boards: repeated(matrix(int)))") {

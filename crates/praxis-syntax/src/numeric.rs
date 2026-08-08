@@ -3,21 +3,20 @@
 //! `1_000_000` is one literal, and the `_`s in it are punctuation the *value*
 //! does not contain. Two places have to agree about that: the lexer, which
 //! decides how far a numeric literal runs, and lowering, which turns its text
-//! into an `i64` or an `f64`. They did not — lowering stripped separators the
-//! lexer never let through, so `1_000` was a `P002` at the `_` and
-//! `9_223_372_036_854_775_808` lexed as `9` followed by an identifier, while the
-//! strip on the other side was unreachable code (REP-11).
+//! into an `i64` or an `f64`. If the lexer refuses a separator the decoder
+//! strips, the literal is broken up before the decoder ever sees it and the
+//! strip is unreachable.
 //!
-//! Both halves live here so neither can drift again: [`separator_run_len`] is
-//! what the lexer consumes, [`strip_digit_separators`] is what the decoder
-//! removes, and the rule is stated once.
+//! Both halves live here so neither can drift: [`separator_run_len`] is what
+//! the lexer consumes, [`strip_digit_separators`] is what the decoder removes,
+//! and the rule is stated once.
 //!
 //! The rule: **a separator is one or more `_` with a digit on each side.** So
 //! `1_0`, `1_000_000` and `1__0` are literals; `_1` is an identifier (the lexer
 //! never reaches here — dispatch routes on the first byte) and `1_` is the
-//! literal `1` followed by the `_` token, which is what FE-02 made `_` into.
-//! Nothing here decides where digits may appear; the caller owns that, which is
-//! why a separator is legal in a fraction and an exponent too (`1_0.5_5e1_0`).
+//! literal `1` followed by the `_` token. Nothing here decides where digits may
+//! appear; the caller owns that, which is why a separator is legal in a fraction
+//! and an exponent too (`1_0.5_5e1_0`).
 
 use std::borrow::Cow;
 
@@ -27,8 +26,8 @@ use std::borrow::Cow;
 /// Total on any input: it checks *both* sides, so a caller cannot get a nonzero
 /// answer for a `_` that is not between digits. The lexer's three digit runs
 /// each ask only after consuming at least one digit, so the left-hand check is
-/// always satisfied there — it is written out anyway because a predicate whose
-/// correctness depends on the caller's position is the shape this finding had.
+/// always satisfied there — it is written out anyway rather than leaving this
+/// predicate's correctness dependent on where the caller stands.
 #[must_use]
 pub fn separator_run_len(bytes: &[u8], at: usize) -> usize {
     if at == 0 || !matches!(bytes.get(at - 1), Some(d) if d.is_ascii_digit()) {
@@ -117,8 +116,8 @@ mod tests {
         assert_eq!(parse_int_literal("1_000"), Some(1000));
         assert_eq!(parse_int_literal("9223372036854775807"), Some(i64::MAX));
         assert_eq!(parse_int_literal("9223372036854775808"), None);
-        // The separated spelling is the same literal and the same answer — the
-        // half of REP-11 that made this one function instead of three.
+        // The separated spelling is the same literal and the same answer, which
+        // is why the strip and the range test are one function.
         assert_eq!(parse_int_literal("9_223_372_036_854_775_808"), None);
         assert_eq!(parse_int_literal("99999999999999999999999"), None);
     }

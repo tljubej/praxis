@@ -1,8 +1,7 @@
 //! Record and enum fixtures shared by this crate's test modules.
 //!
-//! `record` and `enum_ty` were byte-for-byte copies in `fold.rs`'s inline test
-//! module and in `types_tests.rs`, so `FieldSet::from_pairs(..).expect(..)` and
-//! its `VariantSet` twin were each spelled three times over.
+//! One home for `FieldSet::from_pairs(..).expect(..)` and its `VariantSet`
+//! twin, so no test module spells them again.
 //!
 //! The nominal and anonymous forms stay as separate functions rather than
 //! collapsing into one `Option<&str>` parameter: that buys no invariant and
@@ -28,7 +27,7 @@ pub(crate) fn anon_record(db: &mut TypeDb, fields: Vec<(String, Type)>) -> Type 
 }
 
 /// A nominal enum from `(name, payload)` pairs. An empty payload is a
-/// payload-less variant (TY-05).
+/// payload-less variant.
 pub(crate) fn enum_ty(db: &mut TypeDb, name: &str, variants: Vec<(String, Vec<Type>)>) -> Type {
     let variants = VariantSet::from_pairs(variants).expect("distinct variant names");
     db.enum_(Some(name.to_string()), variants)

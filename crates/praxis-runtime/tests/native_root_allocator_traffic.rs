@@ -1,13 +1,11 @@
 //! The deterministic half of ADR-114's evidence: **a native root scope makes no
 //! call to the system allocator.**
 //!
-//! Handover 25 §4 found `NativeScope` doing two `malloc`s and two `free`s per
-//! rooting runtime wrapper — `Box::new(NativeRootFrame { … })`, then a
-//! zero-capacity `Vec` grown by the first `root()` — on the path of
-//! `praxis_vec_push`, `praxis_deque_push_back`, `praxis_bitset_insert`,
-//! `praxis_set_insert` and `praxis_map_insert`, which is every mutating
-//! collection primitive in the language. `bfs` spent ~24% of its time inside
-//! `libsystem_malloc` because of it.
+//! The rooting runtime wrappers sit on the path of `praxis_vec_push`,
+//! `praxis_deque_push_back`, `praxis_bitset_insert`, `praxis_set_insert` and
+//! `praxis_map_insert` — every mutating collection primitive in the language —
+//! so a per-scope heap allocation there is paid on every one of those calls.
+//! With one, `bfs` spent ~24% of its time inside `libsystem_malloc`.
 //!
 //! A wall-clock A/B can say the change is faster on this laptop this afternoon.
 //! **This says the allocations are gone**, which is the claim, and it does not
@@ -66,11 +64,10 @@ static GLOBAL: Counting = Counting;
 /// Open a scope, root a reference, drop the scope — ten thousand times, which is
 /// what a wrapper on the collection path does per call.
 ///
-/// Under ADR-012's boxed frame this is 20,000 `malloc`s and 20,000 `free`s.
-/// Under ADR-114 it is **zero of each**: the store was reserved once at
-/// `Runtime::new`, the scope is a `usize` read, `root` is a bounds-checked store
-/// into capacity that is already there, and `Drop` is a `truncate` on a `Copy`
-/// element type.
+/// Under ADR-114 that is **zero allocations and zero frees**: the store was
+/// reserved once at `Runtime::new`, the scope is a `usize` read, `root` is a
+/// bounds-checked store into capacity that is already there, and `Drop` is a
+/// `truncate` on a `Copy` element type.
 #[test]
 fn a_rooting_scope_does_not_call_the_allocator() {
     const ROUNDS: usize = 10_000;

@@ -211,8 +211,8 @@ mod tests {
         }
     }
 
-    /// The bug that is invisible in every English fixture: a two-byte character
-    /// is one UTF-16 unit, and a four-byte one is two.
+    /// Invisible in every English fixture: a two-byte character is one UTF-16
+    /// unit, and a four-byte one is two.
     #[test]
     fn a_multibyte_line_counts_differently_per_encoding() {
         // "é" is 2 bytes / 1 UTF-16 unit; "𝄞" is 4 bytes / 2 UTF-16 units.
@@ -227,7 +227,7 @@ mod tests {
             utf16.character, utf8.character,
             "a multi-byte line must not report the same column in both encodings"
         );
-        // 'l','e','t',' ' = 4, 'é' = 1, ' ','=',' ','"' = 4, '𝄞' = 2, '"' = 1.
+        // 'v','a','r',' ' = 4, 'é' = 1, ' ','=',' ','"' = 4, '𝄞' = 2, '"' = 1.
         assert_eq!(utf16.character, 12);
     }
 

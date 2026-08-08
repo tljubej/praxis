@@ -163,7 +163,7 @@ pub static RANGE: TypeDescriptor = TypeDescriptor::builtin::<RangeVal>(
     Some(range_compare),
 );
 
-/// `Range`'s payload handle (REP-02): the two-`i64` value, not a scalar.
+/// `Range`'s payload handle: the two-`i64` value, not a scalar.
 pub static RANGE_PAYLOAD: Payload<RangeVal> = Payload::new(&RANGE);
 
 #[cfg(test)]

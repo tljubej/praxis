@@ -1,8 +1,8 @@
-//! Hover query tests (§19-M2 criterion 5).
+//! Hover query tests: the hover query returns the inferred type and symbol
+//! identity for each shadowed occurrence (§19-M2 criterion 5).
 //!
-//! Criterion 5: "hover query returns the inferred type and symbol identity for
-//! each shadowed occurrence." The real LSP is M11; here we exercise the
-//! library-level [`Analysis::hover`] query directly.
+//! These drive the library-level [`Analysis::hover`] query directly, without
+//! the LSP.
 
 #![cfg(test)]
 
@@ -16,9 +16,9 @@ fn hover_over_shadowed_occurrences_returns_distinct_symbols() {
     // Two `a` bindings (Int then Text) and a use of the second.
     let src = "var a = 4\nvar a = \"Foo\"\nout(a)";
     let analysis = analyze(src);
-    // Find the reference ranges for the two `a` *declarations* are in decls, but
-    // hover works over references. The single `a` reference (in `out(a)`)
-    // resolves to the second binding (Text).
+    // The two `a` *declarations* are in `decls`; hover here works over
+    // references. The single `a` reference (in `out(a)`) resolves to the second
+    // binding (Text).
     let a_refs: Vec<(TextRange, HoverInfo)> = analysis
         .refs
         .keys()
@@ -42,7 +42,7 @@ fn hover_over_declaration_shows_its_scheme() {
     // Hover at the declaration site of a `var` shows its inferred type.
     let src = "var x = 1";
     let analysis = analyze(src);
-    // The declaration `x` is at range 4..5 ("let x").
+    // The declaration `x` is at range 4..5 (the `x` of `var x`).
     let decl_range = TextRange::new(4u32.into(), 5u32.into());
     let hover = analysis.hover_decl(decl_range).expect("decl hover");
     assert_eq!(hover.name, "x");
@@ -100,14 +100,11 @@ fn hover_at_empty_range_returns_none() {
         .is_none());
 }
 
-/// **HIR-02.** Hover over a method name reports what the method call produces.
+/// Hover over a method name reports what the method call produces — the
+/// *result* type, not the receiver's.
 ///
-/// It used to report nothing at all: [`Analysis::hover`] looks the range up in
-/// `refs` first, and a method name resolves to a catalog entry rather than to a
-/// symbol, so it is not in `refs` and never will be. The result inference had
-/// computed was written into `ref_types` at that same range — a map only
-/// reference consumers read, and one whose entry was the *receiver*'s type
-/// rather than the result's.
+/// A method name resolves to a catalog entry rather than to a symbol, so it is
+/// never in `refs`; [`Analysis::hover`] answers it from `method_refs` instead.
 #[test]
 fn hover_over_a_method_name_reports_its_result_type() {
     let src = "fn main(v: Vec[Int]) -> Int { v.len() }\n";

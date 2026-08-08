@@ -1,8 +1,8 @@
 //! The JIT module: owns the Cranelift `JITModule`, declares/defines functions,
 //! and hands back callable entry pointers (§10, §10.5).
 //!
-//! One [`Jit`] owns one generation of compiled code (§10.5). M4 uses a single
-//! generation per `run`. The `praxis_*` runtime symbols are registered through
+//! One [`Jit`] owns one generation of compiled code (§10.5), and a `run` uses a
+//! single generation. The `praxis_*` runtime symbols are registered through
 //! `JITBuilder::symbol` so the JIT resolves imported calls without a linker.
 
 use std::collections::HashMap;
@@ -24,11 +24,9 @@ use crate::symbols;
 /// A compiled, callable entry point: `fn(*mut RuntimeContext) -> GcRef`.
 ///
 /// This is exactly what `lower::abi_signature` emits for a zero-parameter
-/// function such as `main`: the hidden context pointer and nothing else. It
-/// previously declared a trailing `GcRef` the generated code never had, and
-/// every caller invented a value to fill it — an ABI mismatch that happened to
-/// be harmless on the supported host. A function *with* parameters is called
-/// through its own transmuted type (see the debugger's `call_with_arity`).
+/// function such as `main`: the hidden context pointer and nothing else. A
+/// function *with* parameters is called through its own transmuted type (see
+/// the debugger's `call_with_arity`).
 pub type RunnableFunction = unsafe extern "C" fn(*mut RuntimeContext) -> GcRef;
 
 /// Errors that can arise during JIT compilation. Variants box their payloads
@@ -46,7 +44,7 @@ pub enum JitError {
 /// Owns one JIT generation: the `JITModule` (code + data memory), the
 /// per-thread `FunctionBuilderContext` reused across lowered functions, and the
 /// [`Generation`] arena that owns every piece of metadata the generated code
-/// and the runtime reach by raw pointer (F13).
+/// and the runtime reach by raw pointer.
 ///
 /// **Field order is load-bearing.** Rust drops fields in declaration order, so
 /// `module` — the executable code holding arena addresses as immediates — is
@@ -63,45 +61,25 @@ pub struct Jit {
 /// than left to `JITBuilder::new`'s empty list, so the decision is visible at
 /// the point it takes effect.
 ///
-/// **`opt_level` is `"speed"`, on the fifth measurement, and the four before it
-/// were all looking in the wrong place.**
+/// **`opt_level` is `"speed"`.** Measured with `benchmarks/ab.py`, arms
+/// differing in this constant alone, two independent passes: `collatz` +16.5% ±
+/// 0.8%, `tree` +4.2% ± 0.3%, `primes` −1.0%, `bfs` −1.1%; suite geometric mean
+/// **1.025×**, the remaining rows inside the 2% floor. `primes` and `bfs` are a
+/// real if unresolved *cost* and are recorded rather than netted away. Compile
+/// time is +0.1 ms on a 6.9 ms floor.
 ///
-/// Handover 21 §3.7 and 22 §4 were negative and explained it with "the mid-end
-/// has nothing to work with when the loop body is a chain of opaque calls".
-/// ADR-113 removed one such call and the third measurement was the first
-/// non-null one (`collatz` −6.3%). Handover 25 §3 then closed the question
-/// *permanently* by comparing the code instead of the clock — same program, flag
-/// toggled, **216 instructions in the hot loop either way**, the same
-/// instructions — and concluded that what the lowering emits is simply not
-/// redundant to Cranelift, so redundancy in the loop is the lowering's to
-/// remove. That sentence ended "this is the last measurement the flag gets".
+/// **The win is not in the loop body**, so a per-iteration instruction count is
+/// the wrong instrument for re-measuring it: with `"speed"` the hot cycle is
+/// *two instructions longer* (`collatz` 123→125). What moves is the whole
+/// function — `collatz` goes 805→761 instructions, **3460→3208 bytes (−7%)**,
+/// and 38→34 cold blocks. The mid-end is cleaning up the out-of-line paths
+/// ADR-117's fold and ADR-119's three bail-outs put there, an I-cache and layout
+/// effect a loop-body count structurally cannot see.
 ///
-/// It was not. Re-run after handover 26's round, two independent passes,
-/// `benchmarks/ab.py`, arms differing in this constant alone:
-///
-/// | | pass 1 | pass 2 |
-/// |---|---:|---:|
-/// | `collatz` | +16.7% ± 0.7% | **+16.5% ± 0.8%** |
-/// | `tree` | +4.0% ± 0.6% | **+4.2% ± 0.3%** |
-/// | `primes` | −1.1% | −1.0% |
-/// | `bfs` | −1.2% | −1.1% |
-///
-/// Suite geometric mean **1.025×**; the other four rows are inside the 2% floor.
-/// `primes` and `bfs` are a real if unresolved *cost* and are recorded rather
-/// than netted away.
-///
-/// **Every previous measurement, including the one that closed it, looked at the
-/// loop body — and the win is not there.** With `"speed"` the hot cycle is *two
-/// instructions longer*, on handover 25 §3's own sample loop (115→117) and on
-/// `collatz` (123→125). What moves is the whole function: `collatz` goes 805→761
-/// instructions, **3460→3208 bytes (−7%)**, and 38→34 cold blocks. The mid-end
-/// is cleaning up the out-of-line paths ADR-117's fold and ADR-119's three
-/// bail-outs put there, which is an I-cache and layout effect that a
-/// per-iteration instruction count structurally cannot see. Handover 25 §3's
-/// reasoning was sound and its instrument was wrong — it proved the loop body
-/// unchanged, which was true, and inferred that nothing changed, which was not.
-///
-/// Compile time is +0.1 ms on a 6.9 ms floor, measured the same day.
+/// The corollary is a standing constraint on the lowering: toggling this flag
+/// leaves a hot loop's instructions the same ones, so what the lowering emits
+/// there is not redundant to Cranelift, and redundancy inside a loop is the
+/// lowering's to remove rather than the optimizer's.
 ///
 /// Cranelift's settings builder is stringly typed, so a name or a value it does
 /// not know is an error from `JITBuilder::with_flags` at run time and not a build
@@ -125,8 +103,8 @@ impl Jit {
     ///
     /// The debugger uses this: every `p EXPR` compiles a throwaway module, but
     /// they all share the session's one arena, so the metadata they mint is
-    /// interned instead of accumulating (DBG-05). The values a `p` leaves in
-    /// the heap keep pointing at schemas the shared generation still owns.
+    /// interned instead of accumulating. The values a `p` leaves in the heap
+    /// keep pointing at schemas the shared generation still owns.
     ///
     /// # Errors
     /// As [`Jit::new`].
@@ -135,10 +113,9 @@ impl Jit {
             JITBuilder::with_flags(CRANELIFT_FLAGS, cranelift_module::default_libcall_names())
                 .map_err(|e| JitError::UnsupportedTarget(format!("{e:?}")))?;
         // Resolve `praxis_*` imports through `symbols::resolve` — the one
-        // table. The previous code kept a second, hand-maintained list of 57
-        // names here; it had already drifted from the ~130 the resolver knows,
-        // and the omissions were invisible because the JIT falls back to
-        // `dlsym`, which finds the statically linked runtime anyway.
+        // table. A second registration list here would drift silently: the JIT
+        // falls back to `dlsym`, which finds the statically linked runtime and
+        // hides any omission.
         builder.symbol_lookup_fn(Box::new(symbols::resolve));
         let module = JITModule::new(builder);
         Self::check_target(module.isa().pointer_type(), module.isa().endianness())?;
@@ -158,10 +135,9 @@ impl Jit {
     /// Tear down this JIT and reclaim its generation's arena.
     ///
     /// Requires a [`HeapDrained`] because live `RecordPayload`s and
-    /// `TuplePayload`s hold raw pointers into that arena (hazard H15); only
+    /// `TuplePayload`s hold raw pointers into that arena (ADR-043); only
     /// [`Runtime::teardown`](praxis_runtime::Runtime::teardown) can mint one.
-    /// A `Jit` that is merely dropped leaks its arena, which is the pre-S8
-    /// behaviour.
+    /// A `Jit` that is merely dropped leaks its arena.
     pub fn retire(self, proof: HeapDrained) {
         let Jit {
             module,
@@ -311,9 +287,8 @@ mod tests {
         );
     }
 
-    /// Every runtime symbol the JIT may import must be in the one symbol table.
-    /// Registration used to be a second, hand-maintained list that had already
-    /// drifted; `dlsym` hid the drift by finding the statically linked runtime.
+    /// Every runtime symbol the JIT may import must be in the one symbol table,
+    /// and nothing else must resolve through it.
     #[test]
     fn an_unknown_runtime_symbol_is_not_resolvable() {
         assert!(symbols::resolve("praxis_alloc_int").is_some());

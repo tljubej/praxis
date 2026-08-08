@@ -9,10 +9,9 @@
 //! - **the coverage check** ([`crate::exhaustive`]), which runs at the end of
 //!   analysis so `praxis check` and the editor see `Y120`/`Y121` at all.
 //!
-//! Before ADR-130 the builder was a private method on the lowerer, so coverage
-//! could only be asked where MIR was being built — which is why a non-exhaustive
-//! match was clean under `praxis check` and an error under `praxis run`, and why
-//! §15.2's "exhaustiveness errors" never reached an editor.
+//! Keeping the builder out of the lowerer is what lets coverage be asked
+//! without building MIR (ADR-130): §15.2's exhaustiveness errors have to reach
+//! an editor, and the editor never lowers.
 //!
 //! # The diagnostics this emits
 //!
@@ -20,20 +19,14 @@
 //! has not (`Y122`), a payload the pattern does not fit (`Y124`) and an
 //! out-of-range literal (`Y013`).
 //!
-//! **They are analysis's answer**, which they were not until ADR-133. The
-//! coverage pass ran this builder with a sink it *threw away* — on the theory
-//! that inference had already reported the same mistakes from its own walk over
-//! the same patterns. That is true of `Y122` and `Y123` and false of the other
-//! two: inference never decodes a literal and never counts a payload, so a
-//! `Y013` or a `Y124` in a pattern was reachable only from lowering, and
-//! lowering is the one pass `praxis check` and the editor do not run. Both were
-//! "checks clean, refuses to run" — the exact failure ADR-130 was written to
-//! close, still open for the codes it did not move.
-//!
-//! So the sink is kept now, minus whatever inference has already said at the
-//! same caret ([`crate::exhaustive::check_matches`]), and the **binding**
-//! positions — a `for` header and a destructuring closure parameter — are walked
-//! here by [`check_binding_patterns`] for the same reason.
+//! **They are analysis's answer** (ADR-133). Inference decides `Y122` and
+//! `Y123` from its own walk over the same patterns, but it never decodes a
+//! literal and never counts a payload, so `Y013` and `Y124` are reachable from
+//! this builder alone — and lowering is the one pass `praxis check` and the
+//! editor do not run. So the sink is kept, minus whatever inference has already
+//! said at the same caret ([`crate::exhaustive::check_matches`]), and the
+//! **binding** positions — a `for` header and a destructuring closure parameter
+//! — are walked here by [`check_binding_patterns`] for the same reason.
 
 use std::collections::HashMap;
 
@@ -60,10 +53,9 @@ fn tok_span(tok: &praxis_syntax::SyntaxToken) -> (u32, u32) {
 
 /// Everything building a pattern needs, and nothing else.
 ///
-/// The list is short on purpose: it is what made the extraction from the lowerer
-/// possible at all. A field added here is a claim that pattern shape depends on
-/// something more than the scrutinee's type, the declarations resolution minted,
-/// and somewhere to report.
+/// The list is short on purpose: a field added here is a claim that pattern
+/// shape depends on something more than the scrutinee's type, the declarations
+/// resolution minted, and somewhere to report.
 pub(crate) struct PatternBuilder<'a> {
     pub file: FileId,
     pub db: &'a mut praxis_types::TypeDb,
@@ -79,26 +71,24 @@ impl PatternBuilder<'_> {
     /// Build a pattern into a recursive [`TypedPattern`].
     ///
     /// Nested sub-patterns are recursed into and literal patterns carry their
-    /// value — the two M7-Part-1 gaps that made `match n { 1 => a, 2 => b }`
-    /// always take the first arm.
+    /// value, so `match n { 1 => a, 2 => b }` tests each arm's literal.
     ///
     /// A bare `Name` is ambiguous (variable bind vs payload-less variant) and is
-    /// disambiguated against the scrutinee's enum type, as in WS5.
+    /// disambiguated against the scrutinee's enum type.
     pub(crate) fn build(&mut self, pat: &praxis_ast::Pattern, scrutinee_ty: Type) -> TypedPattern {
         use praxis_ast::PatternKind;
         match pat.kind() {
             PatternKind::Wildcard => TypedPattern::Wildcard,
             PatternKind::Literal => {
-                // Read the literal value from the pattern's token (the WS5 bug
-                // was that literals were dropped to a catch-all wildcard).
+                // Read the literal value from the pattern's token.
                 let Some(tok) = pat.literal_token() else {
                     return TypedPattern::Wildcard;
                 };
                 let value = match tok.kind() {
                     SyntaxKind::IntLit => {
                         // Out of range in a *pattern* is the same mistake as in
-                        // an expression (TY-28): a saturated literal would match
-                        // a value the program never named. Inference reports the
+                        // an expression: a saturated literal would match a value
+                        // the program never named. Inference reports the
                         // expression's; this one is the builder's, because
                         // inference never decodes a pattern's literal.
                         match praxis_syntax::numeric::parse_int_literal(tok.text()) {
@@ -138,12 +128,10 @@ impl PatternBuilder<'_> {
                     Lit::Float(_) => self.db.float(),
                     Lit::Bool(_) => self.db.bool(),
                     Lit::Text(_) => self.db.text(),
-                    // A `Char` pattern is a `Char`, and answering `scrutinee_ty`
-                    // here — which is what this arm did while no char literal
-                    // could be written — would have made `match n { 'a' => … }`
-                    // over an `Int` type-check by agreeing with whatever it was
-                    // asked about. Every other literal answers its own type; so
-                    // does this one.
+                    // A `Char` pattern is a `Char`: answering `scrutinee_ty` here
+                    // would make `match n { 'a' => … }` over an `Int` type-check
+                    // by agreeing with whatever it was asked about. Every literal
+                    // answers its own type.
                     Lit::Char(_) => self.db.char(),
                     // `Unit` literals are synthesized internally; the parser
                     // produces no Unit pattern, so this arm is defensive.
@@ -153,7 +141,7 @@ impl PatternBuilder<'_> {
             }
             PatternKind::Name(name) => {
                 // Disambiguate payload-less variant from variable bind by checking
-                // the scrutinee's enum type (the WS5 fix).
+                // the scrutinee's enum type.
                 let resolved = self.db.follow(scrutinee_ty);
                 if let praxis_types::TypeData::Enum { def, .. } = self.db.data(resolved) {
                     let def = *def;
@@ -161,9 +149,7 @@ impl PatternBuilder<'_> {
                     if let Some(idx) = edef.variant(&name) {
                         let arity = edef.variants[idx].payload.len();
                         // A bare name naming a variant that **carries** a payload
-                        // is `Y124` (ADR-134). It used to mean "any payload" — `Step`,
-                        // `Step(_)` and `Step(_, _)` were one test — and the cost
-                        // of that spelling is that the arm says nothing about the
+                        // is `Y124` (ADR-134): such an arm says nothing about the
                         // value the variant holds, and reads exactly like a
                         // payload-less variant to anyone who has not gone and
                         // looked at the declaration. `Step(_)` says it out loud
@@ -213,9 +199,9 @@ impl PatternBuilder<'_> {
             }
             PatternKind::Variant(vname) => {
                 // A pattern that names nothing the scrutinee has is **not** a
-                // wildcard (HIR-07). Lowering it as one made a typo cover every
-                // remaining case, so the match came out exhaustive and the arm
-                // it should have been silently ran for every value.
+                // wildcard: lowering it as one would let a typo cover every
+                // remaining case, so the match would come out exhaustive and the
+                // typo's arm would silently run for every value.
                 let at = pat
                     .name_token()
                     .map(|t| t.text_range())
@@ -246,12 +232,10 @@ impl PatternBuilder<'_> {
                     );
                     return TypedPattern::Wildcard;
                 };
-                // Recurse into sub-patterns against payload types — the WS5 bug
-                // was that only flat Name sub-patterns were collected and nested
-                // variant patterns were silently dropped. The payload comes from
-                // the scrutinee's *arguments*, so `Some(n)` against an
+                // Recurse into sub-patterns against payload types. The payload
+                // comes from the scrutinee's *arguments*, so `Some(n)` against an
                 // `Option[Int]` binds `n` at `Int` rather than at the def's own
-                // parameter (F12).
+                // parameter.
                 let payload_types: Vec<Type> =
                     self.db.variant_payload_of(enum_def_id, &enum_args, idx);
                 let sub_pats: Vec<_> = pat.sub_patterns().collect();
@@ -260,19 +244,17 @@ impl PatternBuilder<'_> {
                     let sub_ty = payload_types.get(i).copied().unwrap_or(scrutinee_ty);
                     subpatterns.push(self.build(sub, sub_ty));
                 }
-                // Exactly one sub-pattern per payload slot (HIR-06). A pattern
-                // written with parentheses that names fewer is padded with
-                // wildcards — `Some(_)` and `Some(n)` are the same test — and one
-                // that names *more* is reported and then truncated (REP-05): the
-                // extras are lowered above so anything wrong inside them still
-                // reports, truncating is what keeps MIR from reading a payload
-                // index past the object, and the report is what stops
-                // `Wrap(a, b)` on a one-slot variant from *compiling and
-                // running*.
+                // Exactly one sub-pattern per payload slot. A pattern written
+                // with parentheses that names fewer is padded with wildcards —
+                // `Some(_)` and `Some(n)` are the same test — and one that names
+                // *more* is reported and then truncated: the extras are lowered
+                // above so anything wrong inside them still reports, truncating
+                // is what keeps MIR from reading a payload index past the object,
+                // and the report is what stops `Wrap(a, b)` on a one-slot variant
+                // from *compiling and running*.
                 //
                 // The **bare** spelling is the other side of the same code, and
-                // it is handled at `PatternKind::Name` — see there for why it
-                // stopped being the third spelling of `Some(_)`.
+                // it is handled at `PatternKind::Name`.
                 if sub_pats.len() > payload_types.len() {
                     let rendered = self.db.render(resolved);
                     let want = payload_types.len();
@@ -288,10 +270,10 @@ impl PatternBuilder<'_> {
                     ty: scrutinee_ty,
                 }
             }
-            // `(a, b)` — one sub-pattern per element (REP-10, §4.4). Inference
-            // unified the scrutinee with a tuple of the pattern's own arity, so
-            // a shape that does not fit has already reported; this reads the
-            // element types and recurses.
+            // `(a, b)` — one sub-pattern per element (§4.4). Inference unified
+            // the scrutinee with a tuple of the pattern's own arity, so a shape
+            // that does not fit has already reported; this reads the element
+            // types and recurses.
             PatternKind::Tuple => {
                 let resolved = self.db.follow(scrutinee_ty);
                 let element_types = match self.db.data(resolved) {
@@ -313,10 +295,10 @@ impl PatternBuilder<'_> {
                     let sub_ty = element_types.get(i).copied().unwrap_or(scrutinee_ty);
                     subpatterns.push(self.build(sub, sub_ty));
                 }
-                // Exactly one sub-pattern per element, for the reason REP-05
-                // gives at a variant's payload: a row narrower or wider than the
-                // column list pairs the matrix's types off by one, and MIR would
-                // read an element the tuple does not have.
+                // Exactly one sub-pattern per element, for the reason given at a
+                // variant's payload: a row narrower or wider than the column list
+                // pairs the matrix's types off by one, and MIR would read an
+                // element the tuple does not have.
                 subpatterns.resize(element_types.len(), TypedPattern::Wildcard);
                 TypedPattern::Tuple {
                     subpatterns,
@@ -324,10 +306,9 @@ impl PatternBuilder<'_> {
                 }
             }
             // `P { x, y: p }` — one sub-pattern per *declared* field, in
-            // declaration order (REP-10, §4.5). A field the pattern does not
-            // name stays a wildcard. The head is optional (ADR-091), and this
-            // arm never needed it: the record has always come from the
-            // *scrutinee* here, which is exactly what inference now does too.
+            // declaration order (§4.5). A field the pattern does not name stays
+            // a wildcard. The head is optional (ADR-091): the record def comes
+            // from the *scrutinee*, never from the head.
             PatternKind::Record(rname) => {
                 let resolved = self.db.follow(scrutinee_ty);
                 let (record_def_id, record_args) = match self.db.data(resolved) {
@@ -445,14 +426,12 @@ pub(crate) fn merge_pattern_diagnostics(built: Vec<Diagnostic>, out: &mut Vec<Di
 }
 
 /// Check every **binding** pattern in the file — a `for` header and a
-/// destructuring closure parameter — at the end of analysis (REP-25, ADR-133).
+/// destructuring closure parameter — at the end of analysis (ADR-133).
 ///
 /// A binding has no second arm, so a pattern that can *fail* is `Y125`, and the
-/// pattern's own shape mistakes (`Y013`, `Y124`) are the builder's. Lowering
-/// asked both questions and lowering is the pass `praxis check` and the editor
-/// do not run, so `for Point { x: 0, y } in pts` checked clean and refused to
-/// run — ADR-130's own statement of the problem, at the two positions it did not
-/// move.
+/// pattern's own shape mistakes (`Y013`, `Y124`) are the builder's. Asking both
+/// questions here rather than in lowering is what puts them in front of
+/// `praxis check` and the editor, which never lower.
 ///
 /// Match arms are **not** here: [`crate::exhaustive::check_matches`] already
 /// builds those patterns for coverage, and building them twice would report

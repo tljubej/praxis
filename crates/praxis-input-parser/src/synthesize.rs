@@ -6,7 +6,7 @@
 //!
 //! The result type drives inference (`read` / `parse` expressions get this type
 //! directly — there is no callee scheme to unify against) and is what hover
-//! displays (acceptance criterion 4).
+//! displays.
 
 use crate::ast::{AtomicKind, ParserAst, TemplatePart};
 use praxis_source::Span;
@@ -18,7 +18,7 @@ use praxis_types::{
 ///
 /// Normally called on an AST that has already passed
 /// [`validate`](crate::validate::validate), but the error channel is real
-/// rather than an `expect` (F5): the shapes this builds — an anonymous record
+/// rather than an `expect`: the shapes this builds — an anonymous record
 /// per named-capture template, an anonymous enum per `choice` — are exactly the
 /// ones whose *names come from user source*, so a duplicate is user input, not
 /// an internal inconsistency. `validate` catches those cases today; threading
@@ -32,9 +32,8 @@ pub fn synthesize(ast: &ParserAst, db: &mut TypeDb) -> Result<Type, TypeCtorErro
 /// (ADR-098), not only the root's.
 ///
 /// §15.3 asks for the synthesized type of *a* parser expression, and an inner
-/// constructor is one. The recursion already computes every inner type and used
-/// to drop each on the way back up, so hover on `lines(…)` inside
-/// `sections(lines(…))` had nothing to read.
+/// constructor is one, so hover on `lines(…)` inside `sections(lines(…))` has
+/// something to read.
 ///
 /// The entries come out in **post-order** — a node is recorded after the
 /// children it was derived from — so where two nodes share a span the earlier
@@ -64,8 +63,8 @@ fn synth(
     let ty = synth_inner(ast, db, out)?;
     // Recorded **after** the recursion, so children precede their parent. A
     // `Type` has no forgeable value to reserve a slot with (it is a sealed arena
-    // index, F5), which is the other reason this is post-order and not a
-    // patched-in placeholder.
+    // index), which is the other reason this is post-order and not a patched-in
+    // placeholder.
     out.push((ast.span(), ty));
     Ok(ty)
 }
@@ -157,7 +156,7 @@ fn synth_inner(
             // Anonymous enum (§7.5): one variant per case, each carrying the
             // case's result type as a single-element payload (so the parsed
             // value is recoverable via match). Identity is name+signature-based
-            // via the M9 unify arm and the absent name.
+            // via the anonymous-enum unify arm and the absent name.
             let mut variants: Vec<EnumVariantDef> = Vec::with_capacity(cases.len());
             for (name, p) in cases {
                 let payload_ty = synth(p, db, out)?;
@@ -166,10 +165,8 @@ fn synth_inner(
             db.enum_(None, VariantSet::new(variants)?)
         }
         ParserAst::Optional { child, .. } => {
-            // `Option[result(P)]` (§7.5/§7.8): the prelude's one `Option` def
-            // (F12), applied to the child's result type. This used to spell the
-            // variant list out and register a *fresh nominal def* per site,
-            // which is one of TY-06's three copies of `Option`.
+            // `Option[result(P)]` (§7.5/§7.8): the prelude's one `Option` def,
+            // applied to the child's result type.
             let elem = synth(child, db, out)?;
             db.option_of(elem)
         }
@@ -183,16 +180,11 @@ fn synth_inner(
             db.char()
         }
         ParserAst::Characters { child, .. } => {
-            // `chars(P, skip:)` → `Vec[result(P)]` (§7.5, D-S20-A).
-            //
-            // This used to be `Vec[Char]` regardless of `P`, while the
-            // interpreter stored whatever `P` produced and tagged the payload
-            // `CHAR`. `chars(int, skip: none)` therefore advertised `Vec[Char]`
-            // statically, tagged the elements `Char`, and stored `Int` objects
-            // — a descriptor that disagrees with the values behind it, which is
-            // the class of defect P0-11 closed for collections generally.
-            // `chars(one_of("LR"))` is still `Vec[Char]`, because `one_of`
-            // synthesizes `Char`; it is derived now rather than assumed.
+            // `chars(P, skip:)` → `Vec[result(P)]` (§7.5, ADR-079). The element
+            // type is *derived* from `P` rather than assumed to be `Char`, so it
+            // cannot disagree with the values the parse stores:
+            // `chars(one_of("LR"))` is `Vec[Char]` because `one_of` synthesizes
+            // `Char`, and `chars(int, skip: none)` is `Vec[Int]`.
             let elem = synth(child, db, out)?;
             db.vec(elem)
         }
@@ -205,11 +197,10 @@ fn synth_inner(
 /// parser-planner/parser-executor boundary.** `atomic_type` turns a class
 /// into the static [`Type`]; `praxis-runtime`'s `atomic_descriptor` turns the
 /// same class into the runtime `TypeDescriptor` a collection carries for its
-/// elements. A descriptor that disagrees with the static type behind it is the
-/// defect class REP-54 and P0-11 closed, and exhaustiveness cannot prevent it:
-/// an eleventh atomic forces both sites to be *touched* (IP-11 records four
-/// landing at once) but not to make the same grouping decision. There is one
-/// decision now, and the two sides only choose how to spell its answer.
+/// elements. A descriptor that disagrees with the static type behind it is a
+/// defect, and exhaustiveness cannot prevent it: an eleventh atomic forces both
+/// sites to be *touched* but not to make the same grouping decision. There is
+/// one decision, and the two sides only choose how to spell its answer.
 ///
 /// Deliberately its own enum rather than a [`praxis_types::ScalarType`]:
 /// `praxis-runtime` does not depend on `praxis-types` (it already depends on
@@ -233,7 +224,7 @@ impl AtomicClass {
     /// Classify an atomic by the result it produces (§7.4).
     ///
     /// `uint` is `Int`, deliberately, in the static type and at runtime alike
-    /// (§7.4, IP-11): `ScalarType::UInt` is reserved and has no runtime object
+    /// (§7.4): `ScalarType::UInt` is reserved and has no runtime object
     /// (`praxis_repr::builtin_for_type` answers `NoRuntimeRepr`), so there is
     /// no descriptor for the runtime side to answer, and typing a `uint`
     /// capture as `UInt` would make every program containing one fail to
@@ -270,11 +261,9 @@ fn atomic_type(kind: AtomicKind, db: &mut TypeDb) -> Type {
 /// answers a `Type` where that one answers a runtime descriptor.
 ///
 /// The two are deliberately not one generic function: threading a trait across
-/// `TemplatePart`/`TemplatePartNode` would buy nothing, since this side has
-/// always been right. It was the descriptor side that drifted (REP-54,
-/// ADR-092) — `praxis check` typed ``lines(`{int},{int}`)`` as
-/// `Vec[(Int, Int)]` throughout, while the value it produced was tagged `Unit`.
-/// If a shape is ever added, it is added in both places.
+/// `TemplatePart`/`TemplatePartNode` would buy nothing (ADR-092). The two
+/// classifications must agree — a descriptor that disagrees with the static type
+/// is a defect — so if a shape is ever added, it is added in both places.
 fn template_type(
     parts: &[TemplatePart],
     db: &mut TypeDb,
@@ -295,7 +284,7 @@ fn template_type(
         .any(|p| matches!(p, TemplatePart::Capture { name: Some(_), .. }));
 
     if any_named {
-        // Named captures → anonymous structural record (§5.6, M7 ADR-025).
+        // Named captures → anonymous structural record (§5.6, ADR-025).
         return record_type(&captures, db, out);
     }
 
@@ -314,10 +303,10 @@ fn template_type(
     }
 }
 
-/// Build an anonymous record type from named captures (M7).
+/// Build an anonymous record type from named captures.
 ///
 /// Named-capture templates produce anonymous structural records (§5.6). The
-/// record type is a proper `TypeData::Record` variant (M7, ADR-025), with fields
+/// record type is a proper `TypeData::Record` variant (ADR-025), with fields
 /// keyed by name. Two records with the same field names (in any order) and
 /// structurally-equal types share one type.
 fn record_type(
@@ -356,8 +345,8 @@ mod tests {
         }
     }
 
-    /// **IP-11's type half.** Every one of §7.4's ten atomics has a result
-    /// type, and `uint`'s is `Int`.
+    /// Every one of §7.4's ten atomics has a result type, and `uint`'s is
+    /// `Int`.
     ///
     /// Not `ScalarType::UInt`: `praxis_repr::builtin_for_type` answers
     /// `NoRuntimeRepr` for `UInt` (it is reserved and has no runtime object,
@@ -609,8 +598,6 @@ mod tests {
     /// tail contributes the same `Vec[result(P)]`, but only ever at the end;
     /// the record's field order is the source order of the named arguments, so
     /// a fixed field after a counted group lands after it in the record too.
-    /// This is the whole type story of the counted form — `read`'s inference
-    /// takes whatever type comes back and needed no arm of its own.
     #[test]
     fn a_counted_group_is_a_vec_field_in_the_position_it_was_written() {
         use crate::ast::{RepeatCount, SectionItem};

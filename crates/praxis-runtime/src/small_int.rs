@@ -4,9 +4,9 @@
 //! small integers, use tagged pointers, or eliminate allocations through escape
 //! analysis" — provided such an optimization "preserves reference and aliasing
 //! semantics". For `Int` there are none to preserve, and the language already
-//! ships the existence proof: `Unit` and `Bool` have been interned singletons
-//! since ABI v10, so every `true` in every program is one object and always has
-//! been ([`crate::immortal::Immortals`]).
+//! ships the existence proof: `Unit` and `Bool` are interned singletons, so
+//! every `true` in every program is one object
+//! ([`crate::immortal::Immortals`]).
 //!
 //! **Why sharing an `Int` is unobservable.** There is no identity operator in
 //! the language — `praxis_hir`'s `BinOp` is arithmetic, comparison and the two
@@ -26,7 +26,7 @@
 //! map keys. `Text` fails a different test: `TextPayload::Owned(OwnedText)` is
 //! not `Copy`, and [`Heap::alloc_immortal`](crate::Heap) requires `Copy`
 //! *because* an immortal is invisible to `Heap`'s `Drop` — an immortal `Text`
-//! would leak its `Box<str>` at teardown (RT-02).
+//! would leak its `Box<str>` at teardown.
 //!
 //! `Char` passes every leg of the argument above, and [`crate::small_char`] is
 //! the second interned scalar range (ADR-107): `char_equals` is a reflexive
@@ -108,19 +108,15 @@ pub const fn index_of(v: i64) -> Option<usize> {
 /// mechanism.** `InlineInternSite::new` is `pub(crate)`, so the backend cannot
 /// assemble a site of its own; it can only name one this crate minted, and there
 /// is one, here, beside the bounds it describes. A future inline `Char` probe
-/// (handover 23's P-4a) mints its own next to [`crate::small_char`]'s range —
-/// which is what stops it from being written as a copy of the `Int` arm reading
-/// `small_chars` with `SMALL_INT_MIN`/`SMALL_INT_MAX`, a probe past the end of a
-/// table whose only bound is its length.
+/// mints its own next to [`crate::small_char`]'s range — which is what stops it
+/// from being written as a copy of the `Int` arm reading `small_chars` with
+/// `SMALL_INT_MIN`/`SMALL_INT_MAX`, a probe past the end of a table whose only
+/// bound is its length.
 ///
 /// The site also carries the pacing predicate's two offsets, which `new` fills
 /// from `Heap` rather than taking as arguments: permission to read this table
 /// inline and the obligation to test [`Heap::collection_is_due`] first are one
 /// value, because they are one decision (ADR-113 decision 1).
-///
-/// This is the module's fourth reader and the third to take the bounds from
-/// here rather than restate them — `praxis-mir` at compile time, the runtime's
-/// `int_ref` at run time, and now generated code between the two.
 pub const INLINE_INTERN_SITE: InlineInternSite = InlineInternSite::new(
     core::mem::offset_of!(crate::RuntimeContext, small_ints),
     SMALL_INT_MIN,

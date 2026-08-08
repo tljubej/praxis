@@ -1,8 +1,8 @@
-//! The transport and the message loop (WS1, ADR-095, §15.1).
+//! The transport and the message loop (ADR-095, §15.1).
 //!
 //! One synchronous loop on the main thread, over `lsp-server`'s framed stdio
 //! transport. No async runtime: the workspace has no async dependency, every
-//! M11 query is one file, and `rowan::SyntaxNode` is `!Send` so a worker thread
+//! query is one file, and `rowan::SyntaxNode` is `!Send` so a worker thread
 //! would pay a re-rooting cost to answer questions about a tree it cannot share.
 //!
 //! The loop owns the document store and the snapshot cache outright. There is no
@@ -33,9 +33,9 @@ use crate::query::Analyzer;
 /// diagnostics (§15.2: "diagnostics should update after a short debounce").
 ///
 /// Short enough to feel immediate and long enough that a `.` mid-word does not
-/// flash a report the next keystroke retracts — which is the concrete symptom
-/// §8's residual risk names: an unfinished `.` swallows the next line's first
-/// token and reports `Y110` on a line the user did not touch.
+/// flash a report the next keystroke retracts — the concrete symptom §8's
+/// residual risk names: an unfinished `.` swallows the next line's first token
+/// and reports `Y110` on a line the user did not touch.
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// The server's name and version, reported at `initialize`.
@@ -107,16 +107,15 @@ fn workspace_roots(params: &InitializeParams) -> Vec<std::path::PathBuf> {
 /// Exactly what this server implements, and no more.
 ///
 /// Advertising a capability the server does not implement is worse than not
-/// advertising it: the editor stops offering its own fallback. M12 adds find
-/// references, rename (with `prepareProvider`, so a position that cannot be
-/// renamed says so before the user types a new name), workspace symbols, inlay
-/// hints and code actions.
+/// advertising it: the editor stops offering its own fallback. Rename carries
+/// `prepareProvider`, so a position that cannot be renamed says so before the
+/// user types a new name.
 ///
 /// **`documentFormattingProvider` stays absent.** §19.12 lists a stable
-/// formatter and it is deliberately not part of this milestone — see the M12
-/// handover. An editor that is told this server formats would stop offering its
-/// own behaviour and then do nothing on `Format Document`, which is a worse
-/// state than the one where the feature is simply missing.
+/// formatter and this server does not implement one. An editor that is told
+/// this server formats would stop offering its own behaviour and then do
+/// nothing on `Format Document`, which is a worse state than the one where the
+/// feature is simply missing.
 fn capabilities(encoding: Encoding) -> ServerCapabilities {
     ServerCapabilities {
         position_encoding: Some(encoding.kind()),
@@ -588,8 +587,8 @@ impl Server {
 
     /// The report for one URI, or `None` if it is not open.
     ///
-    /// Public so the WS3 test can assert the code and the span without running
-    /// a transport.
+    /// Public so tests can assert the code and the span without running a
+    /// transport.
     pub fn diagnostics_for(&mut self, uri: &Uri) -> Option<PublishDiagnosticsParams> {
         let version = self.docs.get(uri)?.version();
         let snapshot = self.snapshot(uri)?;

@@ -39,7 +39,7 @@ fn uri() -> Uri {
 }
 
 // ---------------------------------------------------------------------------
-// WS3 — diagnostics
+// Diagnostics
 // ---------------------------------------------------------------------------
 
 /// **An edit introduces a `Y0xx`, and the fix retracts it.**
@@ -112,15 +112,15 @@ fn a_diagnostic_carries_its_notes_as_related_information() {
 }
 
 // ---------------------------------------------------------------------------
-// WS4 — hover (§19.11 criterion 3)
+// Hover (§19.11 criterion 3)
 // ---------------------------------------------------------------------------
 
 /// **Criterion 3, twice.** Hovering `read`'s body shows the synthesized result
 /// type, and hovering `lines(...)` *inside* it shows **that node's** type.
 ///
-/// The second half is what ADR-098 exists for: before the spanned index, the
-/// only type in reach was the root's, and an implementation that answered it at
-/// every offset inside the body passed the first half.
+/// The second half is what ADR-098's spanned index exists for: with only the
+/// root's type in reach, an implementation that answered it at every offset
+/// inside the body would still pass the first half.
 #[test]
 fn hover_shows_the_read_result_and_the_inner_constructors_own_type() {
     let src = "var v = read sections(lines(`{a:int},{b:int}`))\n";
@@ -181,7 +181,7 @@ fn hover_on_a_capture_type_answers_that_capture() {
 }
 
 // ---------------------------------------------------------------------------
-// WS5 — completion (§19.11 criterion 2)
+// Completion (§19.11 criterion 2)
 // ---------------------------------------------------------------------------
 
 /// **Criterion 2 exactly.** `grid.` offers the grid methods, each with its
@@ -244,22 +244,21 @@ fn typing_grid_dot_offers_grid_methods_with_signatures_and_nothing_else() {
 /// **ADR-127 decision 1, at the editor.** `set.` offers the whole pipeline, and
 /// `grid.` still does not.
 ///
-/// The rule dispatch applies and the rule completion applies are now the *same
-/// function*, `praxis_stdlib::pattern_matches`, rather than two copies with the
-/// LSP's own comment admitting it was "the same rule … restated". If they
-/// disagree the editor offers a method the compiler refuses; sharing the
-/// function is what makes that unrepresentable, and this is what checks that the
-/// generic receiver reached both sides.
+/// The rule dispatch applies and the rule completion applies are the *same
+/// function*, `praxis_stdlib::pattern_matches`. Two copies of it could disagree
+/// and let the editor offer a method the compiler refuses; sharing the function
+/// is what makes that unrepresentable, and this is what checks that the generic
+/// receiver reached both sides.
 #[test]
 fn typing_set_dot_offers_the_pipeline_and_a_grid_still_does_not() {
     let src = "fn main() -> Unit {\n  var s = Set()\n  s.insert(1)\n  s.\n}\n";
     let s = snap(src);
     let labels = labels_at(&s, at(src, "s.\n}") + 2);
 
-    // The twenty-three fused rows, the six barriers and the eight conversions
-    // all reach a `Set` now. A spread of them, including the ones a `Set` could
-    // never have offered before: it has no member accessor in the language at
-    // all, so `to_vec` is the first spelling that reads one.
+    // The twenty-three fused rows, the eight barriers and the eight
+    // conversions all reach a `Set`. A spread of them, including the ones that
+    // give a `Set` what the language does not: it has no member accessor at
+    // all, so `to_vec` is how a member is read out of one.
     //
     // `join` is offered on a `Set[Int]` on purpose. `pattern_matches`'s
     // `Iterable` arm looks at the receiver's *shape* and not at its item, so the
@@ -326,9 +325,9 @@ fn typing_set_dot_offers_the_pipeline_and_a_grid_still_does_not() {
     assert!(labels.contains(&"cells".to_string()), "{labels:?}");
 
     // A `Vec` offers `to_text`, which no `Iterable` row carries: it is a
-    // concrete `Vec[Char]` row, and `receiver_accepts` has to match a bounded
-    // element the same way `pattern_matches` does or the two have diverged
-    // (ADR-144).
+    // concrete `Vec[T where Is(Char)]` row (ADR-144), and `pattern_matches`
+    // treats a bounded element as a wildcard, so the bound is reported at the
+    // call rather than by the row failing to match.
     let vec_src = "fn main() -> Unit {\n  var v = [1, 2]\n  v.\n}\n";
     let s = snap(vec_src);
     let labels = labels_at(&s, at(vec_src, "v.\n}") + 2);
@@ -509,7 +508,7 @@ fn completion_in_a_record_literal_offers_its_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// WS6 — signature help
+// Signature help
 // ---------------------------------------------------------------------------
 
 /// **The active-parameter index advances across a comma**, asserted per
@@ -563,7 +562,7 @@ fn signature_help_on_a_method_names_the_receiver_and_result() {
 }
 
 // ---------------------------------------------------------------------------
-// WS7 — navigation
+// Navigation
 // ---------------------------------------------------------------------------
 
 /// **Definition from the second of two shadowed bindings lands on the second
@@ -619,7 +618,7 @@ fn document_symbols_list_the_top_level_declarations() {
 }
 
 // ---------------------------------------------------------------------------
-// WS8 — semantic tokens (§19.11 criterion 4)
+// Semantic tokens (§19.11 criterion 4)
 // ---------------------------------------------------------------------------
 
 /// **Criterion 4.** Over `` read lines(`{name:word} {n:int}`) `` the four
@@ -746,7 +745,7 @@ fn the_encoded_tokens_are_relative_to_their_predecessor() {
     assert_eq!(second_line.delta_start, 0, "and at its start");
 }
 
-/// The two new iteration surfaces answer in the editor the same way they do at
+/// The two iteration surfaces answer in the editor the same way they do at
 /// `praxis check` — which they do by construction (ADR-097), so what this pins
 /// is that each has a *type recorded on its own node*.
 ///

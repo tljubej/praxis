@@ -62,7 +62,7 @@ fn a_char_literal_is_a_literal_token() {
 /// **The `Pattern::kind` half, which is the one that fails silently.** Miss the
 /// `CharLit` row in the literal probe and a `'#'` pattern falls past every other
 /// probe onto the `Wildcard` tail — an irrefutable arm that matches everything
-/// and makes every arm below it unreachable (HIR-07's class).
+/// and makes every arm below it unreachable.
 #[test]
 fn a_char_pattern_is_a_literal_pattern_and_not_a_wildcard() {
     let tree = root("var r = match c { '#' => 1, _ => 2 }");
@@ -172,13 +172,12 @@ fn span_round_trips_via_bridge() {
     );
 }
 
-/// TY-08, at the level it lived at: every position that can carry a written
-/// type must *see* one, whichever of the three node kinds the parser chose.
-///
-/// `TypeRef::cast` used to accept only `TYPE_REF`, so a direct `TUPLE_TYPE` or
-/// `FN_TYPE` — which is what `(Int, Text)` and `(Int) -> Int` produce — made
-/// the accessor answer `None`. The annotation was not rejected; it was
-/// invisible, and inference invented a fresh variable in its place.
+/// Every position that can carry a written type must *see* one, whichever of
+/// the three node kinds the parser chose. `(Int, Text)` produces a direct
+/// `TUPLE_TYPE` and `(Int) -> Int` an `FN_TYPE`, so a `TypeRef::cast` that
+/// accepted only `TYPE_REF` would answer `None`: the annotation would not be
+/// rejected, it would be invisible, and inference would invent a fresh variable
+/// in its place.
 #[test]
 fn every_annotation_position_sees_a_tuple_or_function_type() {
     let src = "struct Boxed { f: (Int) -> Int }\n\
@@ -282,18 +281,15 @@ fn only_the_three_type_node_kinds_are_annotations() {
 
 /// A pattern is a **record** pattern because of its brace (ADR-091 Decision 3).
 ///
-/// `Pattern::kind()` used to decide the record shape from the presence of a
-/// `PATTERN_FIELD` child and, before that, from a direct `Ident` token. Both
-/// tests are silently wrong at one end each, and both failures are the *same*
-/// failure: the pattern becomes something that matches everything.
-///
-/// **Observed red with the brace test removed but the grammar kept**: a headless
+/// Not from a `PATTERN_FIELD` child and not from a direct `Ident` token: each of
+/// those is silently wrong at one end, and both failures are the *same* failure
+/// — the pattern becomes something that matches more than it should. A headless
 /// `{a, b}` has no direct `Ident` (its names are inside `PATTERN_FIELD` nodes),
-/// so `kind()` reaches the final `PatternKind::Wildcard` fallthrough and the arm
-/// becomes an irrefutable catch-all — HIR-07's defect, shipped by a grammar-only
-/// fix. `P {}` has no `PATTERN_FIELD` at all, so it read as
-/// `PatternKind::Name("P")`, a *binding*: `match q { P {} => 1 }` where `q` is a
-/// `Q` ran the arm and returned 1 (REP-66). This test is the gate on both.
+/// so it would reach the final `PatternKind::Wildcard` fallthrough and the arm
+/// would be an irrefutable catch-all. `P {}` has no `PATTERN_FIELD` at all, so
+/// it would read as `PatternKind::Name("P")` — a *binding*, making
+/// `match q { P {} => 1 }` run the arm for a `q` of some other type. This test
+/// is the gate on both.
 #[test]
 fn a_patterns_brace_is_what_makes_it_a_record_pattern() {
     use crate::{Pattern, PatternKind};
@@ -353,7 +349,7 @@ fn a_list_literals_elements_are_its_arg_lists() {
     assert_eq!(elements("var v = [1, 2, 3]"), ["1", "2", "3"]);
     assert_eq!(elements("var v = [1]"), ["1"]);
     assert!(elements("var v = []").is_empty());
-    // A trailing comma adds no element (REP-17).
+    // A trailing comma adds no element.
     assert_eq!(elements("var v = [1, 2,]"), ["1", "2"]);
     // Order is source order, and an element is a whole expression.
     assert_eq!(elements("var v = [a + 1, f(2)]"), ["a + 1", "f(2)"]);

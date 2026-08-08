@@ -1,17 +1,8 @@
-//! The parser interpreter's one position representation (F14, IPR-01, IPR-03).
+//! The parser interpreter's one position representation.
 //!
-//! Before this module the interpreter had two: `walk` returned
-//! `Result<(GcRef, usize), ParseFail>` whose `usize` was documented as "bytes
-//! consumed" and was produced as `bytes.len() - offset` by twelve helpers while
-//! four callers assigned it to an absolute cursor. Nesting at a non-zero offset
-//! therefore moved the cursor backwards. Separately, five sites re-sliced a
-//! sub-buffer and walked it at offset 0 while source-slice `Text`s were still
-//! allocated against the *whole* input, so a word in section 2 named bytes at
-//! the start of the file.
-//!
-//! Both defects are the same defect: a bare `usize` cannot say whether it is an
-//! absolute position, a length, or a position in some other buffer. The types
-//! here make the wrong answers unwritable rather than merely fixed:
+//! A bare `usize` cannot say whether it is an absolute position, a length, or a
+//! position in some other buffer. The types here make the wrong answers
+//! unwritable:
 //!
 //! * [`Cursor`] is an absolute offset into one [`Input`]. It has no `usize`
 //!   constructor, so `bytes.len() - offset` cannot become one; the only mints
@@ -19,16 +10,15 @@
 //!   position that is already absolute.
 //! * [`Input`] carries the `GcRef` its bytes belong to, so
 //!   `alloc_text_slice(input.owner(), …)` is right by construction and there is
-//!   no second opinion to disagree with (the deleted `rt_owner` read
-//!   `ctx.input_source`, which is the wrong buffer entirely for `parse(t, P)`).
+//!   no second opinion to disagree with. Reading the owner from `ctx` instead
+//!   would name the wrong buffer entirely for `parse(t, P)`.
 //! * [`ByteRegion`] is a pair of cursors whose only operation is
 //!   [narrowing](ByteRegion::subregion). A child parser is handed a *narrower
 //!   region of the same buffer*, never a fresh buffer starting at zero, so its
 //!   offsets are already absolute and nothing has to be rebased.
 //!
-//! [`Input`] holds a validated `&str`, which is what retires the three
-//! `str::from_utf8(..).unwrap_or("")` calls the interpreter used to make: a
-//! region that is not UTF-8 is now impossible rather than silently empty.
+//! [`Input`] holds a validated `&str`, so a region that is not UTF-8 is
+//! impossible rather than silently empty.
 //!
 //! # Whitespace is data when the parser offered it reads it
 //!
@@ -55,19 +45,10 @@
 //!   empty lines.* [`split_lines`] drops the trailing run of lines that hold no
 //!   bytes at all: the file's own `\n`, the `"\n\n"` an editor leaves behind.
 //!   There is nothing there to offer anyone, so no parser is being spoken for.
-//!   It is deliberately weaker than it was — see below.
+//!   It deliberately stops short of whitespace: a parser-independent half
+//!   cannot answer a parser-dependent question.
 //!
-//! The two halves used to answer the same question differently, and
-//! `grid(char)` showed it. The extent half deleted a trailing line of *spaces*
-//! without asking, while the bound half let `char` read a space as a cell: so
-//! `grid(char)` over `"ab\ncd \n"` was a ragged grid — one space, one cell —
-//! and `grid(char)` over `"ab\ncd\n  \n"` silently answered a 2x2 grid,
-//! deleting two cells `char` reads perfectly well. `"  \n  \n"` was an *empty*
-//! grid. `lines(rest)` lost a line the same way, which is the identity property
-//! of `rest` failing one level up. A parser-independent half cannot answer a
-//! parser-dependent question, so it stopped trying to.
-//!
-//! What is left is three facts a reader can apply without reading the code:
+//! Three facts a reader can apply without reading the code:
 //!
 //! * *Trailing* whitespace — at the end of the input, of a region, or of a line
 //!   — is **offered**, and belongs to nobody only if nobody reads it. `int`
@@ -76,23 +57,15 @@
 //!   `grid(char)` over `"ab\ncd \n"` is ragged *and* over `"ab\ncd\n  \n"` is
 //!   three rows. Those are one answer, not an answer and an exception.
 //! * An **interior** blank line is structure. Nobody drops one — not
-//!   [`split_sections`], which makes it a separator and says so, and no longer
-//!   `matrix`, which used to skip it.
+//!   [`split_sections`], which makes it a separator and says so, and not
+//!   `matrix`.
 //!
 //! Together they leave the file's terminator to nobody, so **the root region is
-//! the whole buffer** and there is no root special case to get the count wrong
-//! in. Two earlier attempts made one: the first applied the bound rule at the
-//! root with the terminator inside it, the second trimmed exactly one
-//! terminator off the buffer — and a file ending `"\n\n"` reproduced the first
-//! verbatim. A trim count is the wrong kind of answer. `read <parser>` and
-//! `parse(text, P)` reach this module through one function over one buffer, so
-//! `parse(t, rest)` is the identity on `t` again (ADR-078).
-
-// The substrate lands before the interpreter that consumes it, because the
-// conversion of `walk` and its seventeen helpers has to be one commit (IPR-01:
-// a half-converted interpreter mixes absolute and relative cursors with no type
-// telling them apart, which is the current bug and harder to see). The very
-// next commit adopts every item here and this allowance goes with it.
+//! the whole buffer**: nothing is trimmed off it and there is no root special
+//! case, because a trim count is the wrong kind of answer — one more newline
+//! defeats any fixed count. `read <parser>` and `parse(text, P)` reach this
+//! module through one function over one buffer, so `parse(t, rest)` is the
+//! identity on `t` (ADR-078).
 
 use crate::text::{text_bytes, text_root, TextPayload};
 use crate::GcRef;
@@ -101,8 +74,7 @@ use crate::GcRef;
 ///
 /// There is deliberately no `Cursor::new(usize)`. Every cursor descends from
 /// [`Input::whole`] by [`advance`](Cursor::advance), so a relative length can
-/// only become a position by being added to one that is already absolute —
-/// which is what the twelve `bytes.len() - offset` returns were not doing.
+/// only become a position by being added to one that is already absolute.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) struct Cursor(usize);
 
@@ -136,9 +108,8 @@ impl Cursor {
 ///
 /// The owner travels with the bytes on purpose. `run_plan` receives the input
 /// as a `GcRef` argument, and for `parse(text, P)` that reference is *not*
-/// `ctx.input_source`; reading the owner from the context, as the deleted
-/// `rt_owner` did, produced `Text` values that named bytes of the stdin buffer
-/// (IPR-03).
+/// `ctx.input_source`; reading the owner from the context would produce `Text`
+/// values that name bytes of the stdin buffer.
 #[derive(Clone, Copy)]
 pub(crate) struct Input<'a> {
     /// The **root owned** `Text`. Never a slice: see [`Input::new`].
@@ -152,17 +123,17 @@ impl<'a> Input<'a> {
     /// Read `owner`'s payload as the buffer to parse, or `None` if it is not
     /// UTF-8.
     ///
-    /// A `Text` is UTF-8 by construction (RT-06 validates every `SourceSlice`),
-    /// so `None` means the caller handed us something that is not a `Text`. It
-    /// is still a `None` and not an `expect`: this runs inside `extern "C"` and
-    /// a panic there is undefined behaviour (§10.4, D12).
+    /// A `Text` is UTF-8 by construction (every `SourceSlice` is validated), so
+    /// `None` means the caller handed us something that is not a `Text`. It is
+    /// still a `None` and not an `expect`: this runs inside `extern "C"` and a
+    /// panic there is undefined behaviour (§10.4, D12).
     ///
     /// **The owner chain is collapsed here, once.** `parse(t, P)` takes its
     /// owner from the argument, and that argument may itself be a slice — of a
     /// slice, of a slice. Naming it directly would make every `Text` the parse
-    /// produced one link longer than the last, and `text_bytes` walks the chain
-    /// on every read: `t = parse(t, rest)` in a loop went quadratic and then
-    /// overflowed the stack. Resolving to the root owned `Text` and carrying
+    /// produces one link longer than the last, and `text_bytes` walks the chain
+    /// on every read, so `t = parse(t, rest)` in a loop would go quadratic and
+    /// then overflow the stack. Resolving to the root owned `Text` and carrying
     /// the base offset keeps every slice the interpreter allocates exactly one
     /// level deep, whatever it was handed.
     ///
@@ -222,9 +193,9 @@ impl<'a> Input<'a> {
 ///
 /// The only way to make a new one from an existing one is
 /// [`subregion`](ByteRegion::subregion), which cannot widen. That single
-/// restriction is what closes IPR-02, IPR-04, IPR-05 and IPR-06 structurally: a
-/// child parser handed `region.subregion(token_start, token_end)` *cannot* read
-/// past its token, however the child is written.
+/// restriction is structural containment: a child parser handed
+/// `region.subregion(token_start, token_end)` *cannot* read past its token,
+/// however the child is written.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct ByteRegion {
     start: Cursor,
@@ -274,10 +245,9 @@ impl ByteRegion {
     /// The text this region spans, or `None` if its ends are not scalar
     /// boundaries.
     ///
-    /// Fallible rather than lossy: the predecessor wrote
-    /// `str::from_utf8(region).unwrap_or("")` in three places, which turned a
-    /// mis-computed region into a silently empty one — a zero-row `Grid`
-    /// instead of a parse failure (IPR-05).
+    /// Fallible rather than lossy: a lossy `unwrap_or("")` turns a mis-computed
+    /// region into a silently empty one — a zero-row `Grid` instead of a parse
+    /// failure.
     #[inline]
     pub(crate) fn str<'a>(self, i: &Input<'a>) -> Option<&'a str> {
         i.text().get(self.start.offset()..self.end.offset())
@@ -287,11 +257,10 @@ impl ByteRegion {
     /// holds nothing at all).
     ///
     /// This is the *bound* half of the module's rule, in one place so that no
-    /// two constructors can disagree about one byte — which is exactly what
-    /// happened when `grid` learned to forgive a row's trailing run and `lines`
-    /// did not. Unicode whitespace, not an ASCII subset: a region's leftovers
-    /// are leftovers whatever encodes them, and `char::is_whitespace` is the
-    /// same predicate [`super::whitespace_tokens`] splits on.
+    /// two constructors can disagree about one byte. Unicode whitespace, not an
+    /// ASCII subset: a region's leftovers are leftovers whatever encodes them,
+    /// and `char::is_whitespace` is the same predicate
+    /// [`super::whitespace_tokens`] splits on.
     #[inline]
     pub(crate) fn is_all_whitespace(self, i: &Input<'_>) -> bool {
         match self.str(i) {
@@ -332,11 +301,9 @@ impl ByteRegion {
 
     /// The position one Unicode scalar past `at`, or `None` at the region's end.
     ///
-    /// The interpreter used to step cells and scan positions one **byte** at a
-    /// time, so a non-ASCII row was both the wrong width and matched at
-    /// continuation bytes (IPR-06, IPR-08). Stepping is a scalar operation
-    /// because §7.5's grid is a grid of characters.
-    /// The position one Unicode scalar past `at`, or `None` at the region's end.
+    /// Stepping is a scalar and not a byte operation because §7.5's grid is a
+    /// grid of characters: a byte step gives a non-ASCII row the wrong width and
+    /// matches at continuation bytes.
     pub(crate) fn next_scalar(self, i: &Input<'_>, at: Cursor) -> Option<Cursor> {
         if at >= self.end {
             return None;
@@ -349,10 +316,9 @@ impl ByteRegion {
 
 /// A value and the absolute position parsing stopped at.
 ///
-/// This replaces `(GcRef, usize)`, whose second element four callers read as a
-/// position and twelve producers wrote as a length (IPR-01). `next` is a
-/// [`Cursor`], so neither reading is available: it is a position, and the only
-/// positions in existence descend from the region being walked.
+/// `next` is a [`Cursor`], so it can be neither a length nor an offset into
+/// some other buffer: it is a position, and the only positions in existence
+/// descend from the region being walked.
 #[derive(Clone, Copy)]
 pub(crate) struct Walked {
     pub(crate) value: GcRef,
@@ -365,19 +331,13 @@ pub(crate) struct Walked {
 /// **A region does not end in empty lines** — the *extent* half of the module's
 /// rule, and the whole of it. The trailing run of lines holding **no bytes at
 /// all** is dropped, however long it is: the file's own `\n`, the `"\n\n"` an
-/// editor leaves behind, `"\r\n\r\n"`. The predecessor dropped exactly one, as
-/// a side effect of consuming the `\n` that ended the one before it, and so
-/// `lines(int)` faulted on `"1\n2\n\n"` and `grid(char)` called `"ab\ncd\n\n"`
-/// ragged.
+/// editor leaves behind, `"\r\n\r\n"`.
 ///
 /// It is decided here, before any parser runs, so it may only remove what no
 /// parser could disagree about — and an empty line holds nothing to disagree
 /// about. A line holding whitespace is a different thing: it has bytes, and
-/// whether those bytes are data is the child's answer, not this function's.
-/// This routine used to drop those too, and that is the defect that made
-/// `grid(char)` self-contradictory (`"ab\ncd \n"` ragged because a space is a
-/// cell, `"ab\ncd\n  \n"` silently 2x2 because a line of spaces was not a
-/// line). The trailing run of *whitespace* lines is left in place and offered;
+/// whether those bytes are data is the child's answer, not this function's. The
+/// trailing run of *whitespace* lines is left in place and offered;
 /// [`trailing_blank_run`] marks it so the constructor can drop what its child
 /// makes nothing of.
 ///
@@ -469,7 +429,7 @@ pub(crate) fn line_window_end(
 /// Only the *trailing* run, because that is the only run the rule is about. An
 /// interior blank line is structure: `lines(int)` over `"1\n  \n2\n"` faults,
 /// `grid(digit)` over `"12\n  \n34\n"` is ragged, and `matrix(int)` over
-/// `"1 2\n  \n3 4\n"` is ragged too — it used to skip the line, which was a
+/// `"1 2\n  \n3 4\n"` is ragged too. Skipping such a line would be a
 /// per-constructor whitespace special case of exactly the kind ADR-078's
 /// corollary warns against.
 ///
@@ -489,7 +449,7 @@ pub(crate) fn line_window_end(
 /// element/cell/token above is the *constructor's own unit*, and an empty `Vec`
 /// is a legal one. §7.5 calls `matrix` "lines containing whitespace-separated
 /// elements", which reads like a definition of `lines(ws(...))`; it is not, and
-/// §7.5 says so now.
+/// §7.5 says so.
 ///
 /// The same difference at an *interior* blank line is louder and identical in
 /// kind: `lines(ws(int))` over `"1 2\n  \n3 4\n"` is three elements with an
@@ -505,14 +465,11 @@ pub(crate) fn trailing_blank_run(i: &Input<'_>, lines: &[ByteRegion]) -> usize {
 /// Split `region` on blank lines into sections, **excluding** each section's
 /// trailing line ending.
 ///
-/// The predecessor returned `"first\n"` for the first section of
-/// `"first\n\nsecond"`. That was invisible while a section's child parser was
-/// walked against the whole buffer and its cursor discarded; once a section's
-/// child must consume its region exactly (`walk_exact`, IPR-02), a trailing
-/// newline no `word` can eat would fail every `sections(word)`. A section is
-/// the span from its first non-blank line's start to its last non-blank line's
-/// content end, which is also what makes [`split_lines`] of a section agree
-/// with [`split_lines`] of the whole input.
+/// A section's child must consume its region exactly (`walk_exact`), so a
+/// trailing newline no `word` can eat would fail every `sections(word)`. A
+/// section is therefore the span from its first non-blank line's start to its
+/// last non-blank line's content end, which is also what makes [`split_lines`]
+/// of a section agree with [`split_lines`] of the whole input.
 ///
 /// **A blank line is this constructor's separator**, which is its own contract
 /// and not the module's trailing-whitespace rule: `sections` is *defined* on
@@ -527,8 +484,8 @@ pub(crate) fn split_sections(i: &Input<'_>, region: ByteRegion) -> Vec<ByteRegio
     for line in split_lines(i, region) {
         // "Blank" is the same word [`split_lines`] uses when it decides where
         // the region ends: a line holding nothing but whitespace holds nothing.
-        // Testing emptiness instead made a separator of spaces part of the
-        // section on either side of it.
+        // Testing emptiness instead would make a separator of spaces part of
+        // the section on either side of it.
         if line.is_all_whitespace(i) {
             if let Some((start, end)) = current.take() {
                 out.push(region.subregion(start, end));
@@ -581,8 +538,8 @@ mod tests {
         let i = unsafe { Input::new(owner) }.expect("a Text is UTF-8");
         let whole = i.whole();
         let inner = whole.subregion(whole.start().advance(6), whole.end());
-        // Reaching back before the parent's start is the shape every one of the
-        // five re-slice sites had: a child looking at bytes its parent excluded.
+        // Reaching back before the parent's start is a child looking at bytes
+        // its parent excluded.
         let _ = inner.subregion(whole.start(), inner.end());
     }
 
@@ -652,15 +609,15 @@ mod tests {
         // The two functions state one rule and this is what holds them to it.
         // Each case is `(text, cursor, extra, window)`.
         //
-        // **Observed red, one mutation per row.** Deleting the `\r` back-off
-        // makes the CRLF rows answer `"a\r"` — and a template's trailing
-        // literal then cannot match, so a CRLF input stops agreeing with the
-        // LF one. Deleting the `extra` loop (i.e. always one line) makes the
-        // `extra = 1` rows answer `"a"` instead of `"a\nb"`, which is the fault
-        // `at input offset 3..3: expected whitespace` end to end: the
-        // template's own `\n` part has no terminator left inside its window.
-        // Replacing the no-further-`\n` arm with `at` makes the last two rows
-        // answer `""` and every final line of a file unreadable.
+        // **One mutation per row.** Deleting the `\r` back-off makes the CRLF
+        // rows answer `"a\r"` — and a template's trailing literal then cannot
+        // match, so a CRLF input stops agreeing with the LF one. Deleting the
+        // `extra` loop (i.e. always one line) makes the `extra = 1` rows answer
+        // `"a"` instead of `"a\nb"`, which is the fault `at input offset 3..3:
+        // expected whitespace` end to end: the template's own `\n` part has no
+        // terminator left inside its window. Replacing the no-further-`\n` arm
+        // with `at` makes the last two rows answer `""` and every final line of
+        // a file unreadable.
         for (text, cursor, extra, want) in [
             // The ordinary case: the window is the line the cursor sits on.
             ("a\nb\nc\n", 0usize, 0usize, "a"),
@@ -696,12 +653,10 @@ mod tests {
 
     #[test]
     fn a_region_does_not_end_in_empty_lines_however_many_there_are() {
-        // The extent half of the rule, at the substrate level. Two earlier
-        // attempts wrote a *count* here — the bound rule applied to a region
-        // that still held the terminator, then a trim of exactly one terminator
-        // — and each was defeated by one more newline. There is no count now:
-        // the trailing run of EMPTY lines is not part of the region, however
-        // long it is.
+        // The extent half of the rule, at the substrate level. There is no
+        // count here — any fixed count is defeated by one more newline. The
+        // trailing run of EMPTY lines is not part of the region, however long
+        // it is.
         //
         // A line of spaces is not empty, and this is where it stops being
         // dropped: it has bytes, and whether bytes are data is the parser's
@@ -711,7 +666,7 @@ mod tests {
             ("1\n2\n", vec!["1", "2"]),
             ("1\n2", vec!["1", "2"]),
             ("1\r\n2\r\n", vec!["1", "2"]),
-            // The ending that reproduced the closed blocker verbatim.
+            // More than one trailing terminator, and any number of them.
             ("1\n2\n\n", vec!["1", "2"]),
             ("1\n2\n\n\n\n", vec!["1", "2"]),
             ("1\r\n2\r\n\r\n", vec!["1", "2"]),
@@ -770,11 +725,11 @@ mod tests {
     #[test]
     fn the_root_region_is_the_whole_buffer_and_no_terminator_is_trimmed() {
         // `read <parser>` and `parse(text, P)` are one function over one
-        // buffer. Trimming here made them differ: `parse("abc\n", rest)` and
-        // `parse("abc", rest)` answered the same Text, and the `\n` the program
-        // wrote into its own literal could not be recovered. Nothing needs the
-        // trim — `split_lines` above and `walk_exact`'s bound rule leave a
-        // terminator to nobody without one.
+        // buffer. Trimming here would make them differ: `parse("abc\n", rest)`
+        // and `parse("abc", rest)` would answer the same Text, and the `\n` the
+        // program wrote into its own literal could not be recovered. Nothing
+        // needs the trim — `split_lines` above and `walk_exact`'s bound rule
+        // leave a terminator to nobody without one.
         for text in ["1 2 3\n", "a -> b\r\n", "^v<>\n", "no terminator", "\n", ""] {
             let (_rt, owner) = input_over(text);
             let i = unsafe { Input::new(owner) }.expect("a Text is UTF-8");
@@ -784,12 +739,8 @@ mod tests {
 
     #[test]
     fn split_sections_on_blank_lines() {
-        // Restored from `parser.rs`, where the S20 conversion deleted it
-        // because `split_sections` changed signature: it took `&[u8]` and
-        // returned offsets into it, and it now takes `(&Input, ByteRegion)`.
-        // Same input, same claim, and it is the only one of the section tests
-        // whose sections are more than one line long — the assertion the
-        // siblings here do not make.
+        // The only section test whose sections are more than one line long —
+        // the assertion its siblings here do not make.
         let (_rt, owner) = input_over("a\nb\n\nc\nd");
         let i = unsafe { Input::new(owner) }.expect("a Text is UTF-8");
         let sections: Vec<&str> = split_sections(&i, i.whole())
@@ -815,8 +766,8 @@ mod tests {
 
     #[test]
     fn a_line_region_of_a_section_names_the_inputs_own_bytes() {
-        // The IPR-03 property at the substrate level: nothing is re-based, so a
-        // second section's line starts where it really starts.
+        // Nothing is re-based, so a second section's line starts where it
+        // really starts.
         let (_rt, owner) = input_over("alpha\n\nbeta\n");
         let i = unsafe { Input::new(owner) }.expect("a Text is UTF-8");
         let sections = split_sections(&i, i.whole());

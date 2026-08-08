@@ -1,8 +1,8 @@
 //! End-to-end JIT integration tests: source → typed HIR → MIR → Cranelift → run.
 //!
-//! These are the Milestone 4 acceptance tests (§19): execute boxed integer
-//! arithmetic, branches, loops, and recursive function calls through the JIT,
-//! and confirm faults return to the host without unwinding.
+//! The acceptance tests for §19: execute boxed integer arithmetic, branches,
+//! loops, and recursive function calls through the JIT, and confirm faults
+//! return to the host without unwinding.
 
 use praxis_ast::AstNode;
 use praxis_codegen_cranelift::{Jit, RunnableFunction};
@@ -31,7 +31,7 @@ fn compile(
         "lowering diagnostics: {:?}",
         module.diagnostics
     );
-    // Monomorphization (WS8): instantiate polymorphic callees per call site.
+    // Monomorphization: instantiate polymorphic callees per call site.
     let module = monomorphize(module, &analysis.names, &mut analysis.db);
     let mut funcs = lower_module(&module, &mut analysis.db);
     for f in &mut funcs {
@@ -48,10 +48,8 @@ fn compile(
 }
 
 /// Every `praxis_*` symbol the MIR builder emits must be in the runtime symbol
-/// table. Registration used to be a second hand-maintained list in `module.rs`,
-/// and `dlsym` found the statically linked runtime for anything it omitted — so
-/// the drift was invisible. This walks the MIR of a feature-broad program and
-/// checks each callee by name.
+/// table. This walks the MIR of a feature-broad program and checks each callee
+/// by name.
 #[test]
 fn every_runtime_symbol_mir_emits_is_registered() {
     let src = concat!(
@@ -72,8 +70,8 @@ fn every_runtime_symbol_mir_emits_is_registered() {
         "  var xh = MaxHeap()\n  xh.push(8)\n",
         "  var acc = 0\n",
         "  for x in v { acc = acc + f(x) }\n",
-        // Every snapshot symbol REP-15's `IterPlan` can select — a `for` is the
-        // only caller of four of them, so nothing else would reach them here.
+        // Every snapshot symbol `IterPlan` can select — a `for` is the only
+        // caller of four of them, so nothing else would reach them here.
         "  for x in s { acc = acc + x }\n",
         "  for x in b { acc = acc + x }\n",
         "  for x in mh { acc = acc + x }\n",
@@ -131,9 +129,7 @@ fn every_runtime_symbol_mir_emits_is_registered() {
         seen.len()
     );
 
-    // Every symbol codegen emits — named in MIR or not — must resolve;
-    // `runtime_funcref` now rejects an unregistered name instead of letting
-    // `dlsym` find it.
+    // Every symbol codegen emits — named in MIR or not — must resolve.
     let _ = compile(src);
 }
 
@@ -168,7 +164,7 @@ fn run_main_with_input(src: &str, input: &str) -> (Runtime, GcRef) {
 /// immortal Unit singleton) instead of installing a Text buffer. A `read`
 /// against the Unit source must fault cleanly (`ParseFailed`) rather than
 /// segfault — the parser interpreter would otherwise reinterpret Unit's payload
-/// as a Text buffer (§6.3 host-safety gap, now guarded in `praxis_get_input`).
+/// as a Text buffer (§6.3; guarded in `praxis_get_input`).
 fn run_main_no_input(src: &str) -> (Runtime, GcRef) {
     let (jit, ids) = compile(src);
     let main_id = *ids.get("main").expect("no `main` function");
@@ -211,13 +207,11 @@ fn runs_subtraction_and_division() {
     assert_eq!(result.as_int(), 3);
 }
 
-/// REP-11: a digit separator is punctuation, so it changes no value.
+/// A digit separator is punctuation, so it changes no value.
 ///
-/// The half no lexer test can see. Lowering strips the `_`s and parses what is
-/// left; before the lexer accepted them that strip was unreachable, and the
-/// float path had no strip at all — `3.141_592` would have parsed as nothing and
-/// become `0.0`. Both positions the exit criterion names are here: an expression
-/// and a pattern, which read the token through two different decoders.
+/// Lowering strips the `_`s and parses what is left. Both positions are covered:
+/// an expression and a pattern, which read the token through two different
+/// decoders.
 #[test]
 fn a_digit_separator_does_not_change_the_number() {
     for (src, want) in [
@@ -247,8 +241,7 @@ fn a_digit_separator_does_not_change_the_number() {
         assert_eq!(result.as_int(), want, "{src}");
     }
 
-    // A float's fraction and exponent are separated too, and 0.0 is what a
-    // missing strip would have produced.
+    // A float's fraction and exponent are separated too.
     let (rt, result) = run_main("fn main() -> Float { 1.234_567 }");
     assert!(!rt.has_pending_fault());
     assert!((result.as_float() - 1.234_567).abs() < 1e-12);
@@ -427,20 +420,17 @@ fn main() -> Int { count(4000) }
 
 #[test]
 fn adv_deep_recursion_over_limit_faults_cleanly() {
-    // PROBE (§6.2): unbounded recursion used to overflow the native stack and
-    // abort the host with SIGABRT ("fatal runtime error: stack overflow,
-    // aborting") rather than faulting gracefully — §9.2/§17.4 require the host
-    // to survive. Fixed: every generated function's prologue reads
-    // `ctx.stack_left` inline and branches to a stack-overflow fault epilogue
-    // when what is left of the native-stack budget will not cover this frame,
-    // raising FaultKind::StackOverflow and unwinding to the host; only if it
-    // passes does it spend the budget and push. count(100000) pre-fix killed the
-    // process; now it faults cleanly and the host stays alive.
+    // §6.2: unbounded recursion must fault gracefully instead of overflowing the
+    // native stack and aborting the host — §9.2/§17.4 require the host to
+    // survive. Every generated function's prologue reads `ctx.stack_left` inline
+    // and branches to a stack-overflow fault epilogue when what is left of the
+    // native-stack budget will not cover this frame, raising
+    // FaultKind::StackOverflow and unwinding to the host; only if it passes does
+    // it spend the budget and push.
     //
     // `count` is a minimum-width frame, so ADR-105's byte budget lets it recurse
-    // exactly MAX_RECURSION_DEPTH deep — the same 8000 the call count allowed.
-    // What ADR-105 changed is the *wide* frame; see
-    // `adr105_a_wide_frame_faults_before_it_exhausts_the_native_stack`.
+    // exactly MAX_RECURSION_DEPTH (8000) deep. For the *wide* frame see
+    // `adr105_a_wide_frame_faults_where_a_reference_frame_does_not`.
     let src = "\
 fn count(n: Int) -> Int { if n == 0 { 0 } else { 1 + count(n - 1) } }
 fn main() -> Int { count(100000) }
@@ -471,10 +461,9 @@ fn division_by_zero_returns_to_host_without_unwinding() {
 }
 
 // --- Adversarial arithmetic edges (§4.12) ----------------------------------
-// The classic integer corner cases. Only `i64::MAX + 1` and `1 / 0` were tested
-// before; these probe the asymmetry around MIN, the division-overflow trap
-// (MIN / -1 raises SIGFPE on x86 if not guarded), modulo sign/overflow, and
-// negation overflow.
+// The classic integer corner cases: the asymmetry around MIN, the
+// division-overflow trap (MIN / -1 raises SIGFPE on x86 if not guarded), modulo
+// sign/overflow, and negation overflow.
 
 #[test]
 fn adv_int_min_div_neg_one_overflows() {
@@ -498,15 +487,9 @@ fn adv_int_min_mod_neg_one_overflows() {
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
 }
 
-/// **REP-46.** §4.12's three explicit overflow alternatives exist and opt out
-/// of the fault.
-///
-/// "Integer arithmetic is checked by default. Overflow faults and enters the
-/// crash debugger. Explicit alternatives: `a.wrapping_add(b)`,
-/// `a.saturating_add(b)`, `a.checked_add(b) // returns Option[Int]`." All three
-/// were `Y110: no method \`wrapping_add\` on type \`Int\` taking 1 argument(s)`
-/// (the wording is ADR-093's), so
-/// the section described checked arithmetic with no way to opt out.
+/// §4.12's three explicit overflow alternatives exist and opt out of the fault:
+/// `a.wrapping_add(b)`, `a.saturating_add(b)`, and `a.checked_add(b)`, which
+/// returns `Option[Int]`.
 ///
 /// Every assertion is at `i64::MAX`, where the ordinary `+` faults: a test that
 /// added two small numbers would pass against `praxis_int_add` itself and prove
@@ -541,7 +524,7 @@ fn the_overflow_alternatives_answer_where_a_checked_add_faults() {
     assert_eq!(result.as_int(), 12, "a sum that fits is Some(sum)");
 }
 
-/// **REP-46's second half.** The `_sub` trio, at the boundary where `-` faults.
+/// The `_sub` trio, at the boundary where `-` faults.
 ///
 /// Like its `_add` sibling, every assertion is at `Int::MIN`, where the ordinary
 /// operator faults — two small numbers would pass against `praxis_int_sub`
@@ -550,11 +533,6 @@ fn the_overflow_alternatives_answer_where_a_checked_add_faults() {
 ///
 /// `Int::MIN` is spelled `-9223372036854775807 - 1`: `9223372036854775808` is
 /// not an `Int` literal, and unary minus binds after the literal.
-///
-/// Observed red before the rows existed: `error[Y110]: no method `wrapping_sub`
-/// on this type taking 1 argument(s)` — a clean `praxis check` and a lowering
-/// failure. REP-33 closed that shape (ADR-093): the same program reports at
-/// `check` now, and the message names the receiver type.
 #[test]
 fn the_sub_alternatives_answer_where_a_checked_sub_faults() {
     // MIN.wrapping_sub(1) is MAX, so subtracting MAX is 0.
@@ -582,10 +560,9 @@ fn the_sub_alternatives_answer_where_a_checked_sub_faults() {
     assert_eq!(result.as_int(), 5, "a difference that fits is Some(it)");
 }
 
-/// **REP-46's third half, and the row the family exists for.** `wrapping_mul`
-/// has *no in-language spelling*: every arithmetic operator is checked and there
-/// are no bitwise operators, so modular multiplication was unreachable — which
-/// is the measurement that decided REP-46 against closing the set at three.
+/// The `_mul` trio. `wrapping_mul` has *no in-language spelling*: every
+/// arithmetic operator is checked and there are no bitwise operators, so this
+/// method is the only way to reach modular multiplication.
 ///
 /// `2^62 * 4` is `2^64`, i.e. exactly 0 under two's-complement wraparound. That
 /// is a better probe than a near-boundary product because the wrapped answer is
@@ -615,16 +592,13 @@ fn the_mul_alternatives_answer_where_a_checked_mul_faults() {
     assert_eq!(result.as_int(), 42, "a product that fits is Some(it)");
 }
 
-/// **REP-43.** `Counter.inc` is arithmetic, and §4.12's arithmetic is checked.
+/// `Counter.inc` is arithmetic, and §4.12's arithmetic is checked.
 ///
-/// The wrapper's `cur + 1` was the one integer computation in the ABI file that
-/// was not: it panicked with "attempt to add with overflow" inside
-/// `#[no_mangle] extern "C"` in a debug build — the non-unwinding panic §10.4
-/// forbids, which aborts the host rather than reaching the fault epilogue — and
-/// wrapped silently to `i64::MIN` in release. A `Counter`'s values are ordinary
-/// `Int`s a program can store with `c[k] = n`, so the path is reachable from
-/// source; D12's answer (per-wrapper totality) is what makes faulting the only
-/// available behaviour.
+/// A `Counter`'s values are ordinary `Int`s a program can store with
+/// `c[k] = n`, so the ceiling is reachable from source. The wrapper's `cur + 1`
+/// must fault rather than panic inside `#[no_mangle] extern "C"` (the
+/// non-unwinding panic §10.4 forbids) or wrap silently: per-wrapper totality
+/// makes faulting the only available behaviour.
 ///
 /// The fault must be *observed*, which is why the assertion is `rt.fault()` and
 /// not merely "the program did not crash": marking the wrapper checked without
@@ -640,12 +614,9 @@ fn counter_inc_at_the_int_ceiling_faults_rather_than_wrapping() {
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
 }
 
-/// REP-43's **mutation companion, not a gate** — it passes unchanged on `main`,
-/// which is the point of it. An increment that fits is still an increment and a
-/// fresh key still starts at one, so a "fix" that faulted on every `inc` would
-/// pass the gate above and fail here. `grid_rotate_left_then_right_restores_the_contents`
-/// is the same role for REP-36. A companion is worth having and is not counted
-/// among the block's gates.
+/// The companion to the ceiling test above: an increment that fits is still an
+/// increment and a fresh key still starts at one, so a "fix" that faulted on
+/// every `inc` would pass that test and fail here.
 #[test]
 fn counter_inc_below_the_ceiling_still_counts() {
     let src = "fn main() -> Int {\n  var c = Counter()\n  c[\"k\"] = 9223372036854775806\n  \
@@ -657,7 +628,7 @@ fn counter_inc_below_the_ceiling_still_counts() {
 
 #[test]
 fn adv_modulo_by_zero_faults() {
-    // % 0 was untested. Must fault as DivByZero.
+    // % 0 must fault as DivByZero.
     let src = "fn main() -> Int { 10 % 0 }";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault(), "modulo by zero should fault");
@@ -770,8 +741,8 @@ fn adv_max_plus_zero_is_max() {
 
 #[test]
 fn adv_div_normal_case() {
-    // Sanity: ordinary division produces the right result (guards against a
-    // regression where the overflow check accidentally rejects valid divs).
+    // Sanity: ordinary division produces the right result — the overflow check
+    // must not reject a valid division.
     let src = "fn main() -> Int { 100 / 7 }";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -779,12 +750,12 @@ fn adv_div_normal_case() {
 }
 
 // ===========================================================================
-// Milestone 5: shadow-stack GC spill (ADR-019).
+// Shadow-stack GC spill (ADR-019).
 // ===========================================================================
 
 #[test]
 fn live_locals_survive_collection_during_a_loop() {
-    // The headline M5 spill test: a loop that allocates heavily (well past the
+    // The headline spill test: a loop that allocates heavily (well past the
     // 64 KiB initial collection threshold) while holding two live `Int` locals
     // (`sum` and `i`) across every allocation safepoint. If the shadow-stack
     // spill is wrong, a collection reclaims `sum`/`i` and the result corrupts.
@@ -814,12 +785,12 @@ fn main() -> Int { fib(20) }
 }
 
 // ===========================================================================
-// Milestone 5: Vec[T] method surface (§11, §16.2).
+// Vec[T] method surface (§11, §16.2).
 // ===========================================================================
 
 #[test]
 fn vec_push_and_len_end_to_end() {
-    // The headline M5 vertical slice: construct a Vec, push values, read len.
+    // The headline vertical slice: construct a Vec, push values, read len.
     let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "no fault expected");
@@ -866,16 +837,15 @@ fn vec_push_many_read_back_correct() {
     assert_eq!(result.as_int(), 499);
 }
 
-// --- M8-WS1: Vec[T]() construction honors the real element descriptor --------
+// --- Vec[T]() construction honors the real element descriptor ---------------
 
 #[test]
 fn vec_of_vec_equality_after_construction() {
     // Two `Vec()`-constructed vectors holding identical inner vectors must be
-    // structurally equal. This only works once `Vec[T]()` construction passes
+    // structurally equal. This only works when `Vec[T]()` construction passes
     // the *real* element descriptor (the outer Vec's element descriptor must be
     // `VEC`, not the null/INT default), so nested equality dispatches through
-    // `vec_equals` on the inner elements. This is the headline M7-carryover
-    // fix for M8-WS1.
+    // `vec_equals` on the inner elements.
     let src = "fn main() -> Int {\n  var outer_a = Vec()\n  var inner_a = Vec()\n  inner_a.push(1)\n  inner_a.push(2)\n  outer_a.push(inner_a)\n  var outer_b = Vec()\n  var inner_b = Vec()\n  inner_b.push(1)\n  inner_b.push(2)\n  outer_b.push(inner_b)\n  if outer_a == outer_b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -885,16 +855,16 @@ fn vec_of_vec_equality_after_construction() {
 #[test]
 fn vec_of_vec_inequality_after_construction() {
     // The complement: two `Vec()`-constructed vectors holding *different* inner
-    // vectors must be structurally unequal. Guards a regression where the
-    // element descriptor defaulted to INT (which would compare only lengths or
-    // mis-dispatch and could spuriously report equal).
+    // vectors must be structurally unequal. An element descriptor defaulting to
+    // INT would compare only lengths or mis-dispatch, and could spuriously
+    // report equal.
     let src = "fn main() -> Int {\n  var outer_a = Vec()\n  var inner_a = Vec()\n  inner_a.push(1)\n  inner_a.push(2)\n  outer_a.push(inner_a)\n  var outer_b = Vec()\n  var inner_b = Vec()\n  inner_b.push(1)\n  inner_b.push(9)\n  outer_b.push(inner_b)\n  if outer_a == outer_b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 0);
 }
 
-// --- M8-WS2: Deque[T] (§6.1) ------------------------------------------------
+// --- Deque[T] (§6.1) --------------------------------------------------------
 
 #[test]
 fn deque_push_back_and_len_end_to_end() {
@@ -986,7 +956,7 @@ fn deque_equality_is_structural() {
     assert_eq!(result.as_int(), 1);
 }
 
-// --- M8-WS3: Map[K,V] / Set[T] / Counter[T] (§6.1, §11.3) -------------------
+// --- Map[K,V] / Set[T] / Counter[T] (§6.1, §11.3) ---------------------------
 // These are the headline §19.7 tests: tuples/records/nested collections as
 // map/set keys, working end-to-end through the DynamicKey descriptor bridge.
 
@@ -1010,12 +980,8 @@ fn map_get_returns_inserted_value() {
 
 /// An absent `Map.get` answers `None`, and a present one answers `Some`.
 ///
-/// This test used to be `map_get_absent_returns_unit`, and it asserted only
-/// that no fault occurred — because there was nothing else it *could* assert:
-/// `get` handed back the Unit sentinel under a `V` static type (RT-14), so the
-/// program had no way to tell absence from a value and the test had no way to
-/// look. §5.7 spells the signature `Map[K,V].get(K) -> Option[V]` and §4.7 says
-/// absence is `Option`; D1 settled that the implementation follows.
+/// §5.7 spells the signature `Map[K,V].get(K) -> Option[V]` and §4.7 makes
+/// absence an `Option`, so the program can tell absence from a value.
 #[test]
 fn an_absent_map_get_answers_none_and_a_present_one_answers_some() {
     let unwrap = "fn unwrap(o: Option[Int]) -> Int {\n  match o {\n    Some(v) => v,\n    None => 0 - 1,\n  }\n}\n";
@@ -1139,10 +1105,7 @@ fn counter_distinct_keys_tracked_separately() {
 
 #[test]
 fn counter_vec_sourced_text_keys_accumulate() {
-    // M9 regression: the M8 handover listed "vec-sourced Text keys don't
-    // accumulate correctly" as a known bug; the M8 adversarial audit §6.4 said
-    // it was NOT reproduced. This test pins the working behavior: Text keys
-    // sourced from a Vec (distinct allocations) accumulate correctly in a
+    // Text keys sourced from a Vec (distinct allocations) accumulate in a
     // Counter via structural Text hashing.
     let src = "fn main() -> Int {\n  var words = Vec()\n  words.push(\"apple\")\n  words.push(\"apple\")\n  words.push(\"banana\")\n  var counts = Counter()\n  var i = 0\n  while i < words.len() {\n    counts.inc(words.get(i))\n    i = i + 1\n  }\n  counts.get(\"apple\")\n}\n";
     let (rt, result) = run_main(src);
@@ -1166,11 +1129,9 @@ fn counter_len_counts_distinct_keys() {
 
 #[test]
 fn adv_counter_text_keys_from_vec_accumulate() {
-    // KNOWN-BUG probe (M8 handover §6): "Text-as-Counter-key from parsed input
-    // ... vec-sourced Text keys don't accumulate correctly." Build a Vec of
-    // literal Texts, count each via a Counter; the second occurrence of the
-    // same *value* must hit the existing entry even though it's a distinct
-    // allocation (exercises DynamicKey structural eq, not pointer identity).
+    // Build a Vec of literal Texts and count each via a Counter: the second
+    // occurrence of the same *value* must hit the existing entry even though it
+    // is a distinct allocation (DynamicKey structural eq, not pointer identity).
     let src = "fn main() -> Int {\n  var words = Vec()\n  words.push(\"apple\")\n  words.push(\"apple\")\n  words.push(\"pear\")\n  var c = Counter()\n  var i = 0\n  while i < words.len() { c.inc(words.get(i)); i = i + 1 }\n  c.get(\"apple\")\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -1179,9 +1140,9 @@ fn adv_counter_text_keys_from_vec_accumulate() {
 
 #[test]
 fn adv_counter_text_keys_from_read_accumulate() {
-    // The strongest form of the known-bug probe: Text keys sourced from `read`
-    // (source-slice TextPayload, distinct from any literal). Count repeated
-    // words parsed from input; equal values must aggregate.
+    // The strongest form: Text keys sourced from `read` (source-slice
+    // TextPayload, distinct from any literal). Count repeated words parsed from
+    // input; equal values must aggregate.
     let src = "fn main() -> Int {\n  var words = read lines(word)\n  var c = Counter()\n  var i = 0\n  while i < words.len() { c.inc(words.get(i)); i = i + 1 }\n  c.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "apple\napple\npear\napple\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -1191,8 +1152,7 @@ fn adv_counter_text_keys_from_read_accumulate() {
 
 #[test]
 fn adv_counter_text_keys_from_read_get_count() {
-    // As above but read back the count for "apple" (3 occurrences). This is the
-    // exact scenario the handover flagged as broken.
+    // As above but read back the count for "apple" (3 occurrences).
     let src = "fn main() -> Int {\n  var words = read lines(word)\n  var c = Counter()\n  var i = 0\n  while i < words.len() { c.inc(words.get(i)); i = i + 1 }\n  c.get(\"apple\")\n}\n";
     let (rt, result) = run_main_with_input(src, "apple\napple\npear\napple\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -1288,15 +1248,9 @@ fn adv_map_overwrite_then_get() {
     assert_eq!(result.as_int(), 1);
 }
 
-/// `None` is a value the program can *name*, which the Unit sentinel was not.
-///
-/// This test used to be `adv_map_get_absent_returns_unit`, and it pinned the
-/// defect: its comment read "§4.7: indexing a missing map key faults, but
-/// `.get` returns Unit (absent sentinel)", and it checked absence by comparing
-/// the result against `Int 0` and expecting the comparison to be *false* —
-/// which is a test of the fact that two different runtime types are unequal,
-/// not of the map. §4.7 never said `.get` returns Unit; it said absence is
-/// `Option`. The rewrite matches on the answer instead of probing it.
+/// `None` is a value the program can *name*: §4.7 makes absence an `Option`, so
+/// a `match` reads the answer directly instead of probing it for
+/// not-being-a-value.
 #[test]
 fn an_absent_map_get_is_a_none_the_program_can_match_on() {
     let src = "fn main() -> Int {\n  var m = Map()\n  m.insert(\"a\", 1)\n  match m.get(\"missing\") {\n    Some(v) => v,\n    None => 7,\n  }\n}\n";
@@ -1315,13 +1269,7 @@ fn an_absent_map_get_is_a_none_the_program_can_match_on() {
 fn adv_map_index_of_a_missing_key_faults_where_get_answers() {
     // §4.7's own sentence, both halves in one test: "indexing a missing map key
     // faults instead of returning an option… the user chooses between explicit
-    // absence with `.get` and assertion-like access with indexing" (REP-16).
-    //
-    // This test used to assert the opposite — that `m[key]` does *not* fault —
-    // and it passed for a reason that had nothing to do with maps: there was no
-    // subscript grammar at all, so `var v = m["missing"]` parsed as `var v = m`
-    // followed by a recovered statement, and the `v` it compared was the map.
-    // The two spellings really are two operations now.
+    // absence with `.get` and assertion-like access with indexing".
     let src = "fn main() -> Int {\n  var m = Map()\n  m.insert(\"a\", 1)\n  var v = m[\"missing\"]\n  if v == 0 { 1 } else { 0 }\n}\n";
     let (rt, _) = run_main(src);
     assert!(
@@ -1330,12 +1278,8 @@ fn adv_map_index_of_a_missing_key_faults_where_get_answers() {
     );
 
     // …and `.get` on the same absent key does not, so the fault is the
-    // subscript's choice and not the map's.
-    //
-    // This half used to end `assert_eq!(result.as_int(), 0, "Unit is not Int
-    // 0")` — it asserted that the sentinel `.get` handed back was not an `Int`,
-    // which pinned RT-14 rather than stating §4.7's rule. What §4.7 actually
-    // says is that `.get` answers `Option`, so the arm is what the test reads.
+    // subscript's choice and not the map's. §4.7 says `.get` answers an
+    // `Option`, so the arm is what the test reads.
     let src = "fn main() -> Int {\n  var m = Map()\n  m.insert(\"a\", 1)\n  match m.get(\"missing\") {\n    Some(v) => v,\n    None => 0,\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -1348,7 +1292,7 @@ fn adv_map_index_of_a_missing_key_faults_where_get_answers() {
     assert_eq!(result.as_int(), 7);
 }
 
-// --- M8-WS4: MinHeap[T] / MaxHeap[T] (§6.1, §11.2) --------------------------
+// --- MinHeap[T] / MaxHeap[T] (§6.1, §11.2) ----------------------------------
 
 #[test]
 fn max_heap_pop_returns_largest() {
@@ -1434,7 +1378,7 @@ fn min_heap_pop_empty_faults() {
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyCollection);
 }
 
-// --- M8-WS5: BitSet (§6.1) --------------------------------------------------
+// --- BitSet (§6.1) ----------------------------------------------------------
 
 #[test]
 fn bitset_insert_contains_len() {
@@ -1476,7 +1420,7 @@ fn bitset_is_empty_true_then_false() {
     assert_eq!(result.as_int(), 10);
 }
 
-// --- M8-WS5: Grid[T] methods (§6.4) ----------------------------------------
+// --- Grid[T] methods (§6.4) -------------------------------------------------
 
 #[test]
 fn grid_width_height_from_parsed_grid() {
@@ -1490,8 +1434,7 @@ fn grid_width_height_from_parsed_grid() {
 #[test]
 fn grid_get_reads_cell() {
     // Grid "ab/cd": get(1, 0) returns the Char 'b'. Compare via find_all: the
-    // count of cells equal to the (1,0) cell should be 1. Intermediate `var`
-    // bindings avoid the method-chain-after-args parser limitation.
+    // count of cells equal to the (1,0) cell should be 1.
     let src = "fn main() -> Int {\n  var g = read grid(char)\n  var cell = g.get(1, 0)\n  var matches = g.find_all(cell)\n  matches.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "ab\ncd\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -1535,8 +1478,7 @@ fn grid_neighbors8_center() {
 
 #[test]
 fn grid_positions_count() {
-    // A 2×3 grid has 6 positions. (Intermediate `var` avoids the method-chain
-    // parser limitation for chains after a no-arg method returning a collection.)
+    // A 2×3 grid has 6 positions.
     let src =
         "fn main() -> Int {\n  var g = read grid(char)\n  var ps = g.positions()\n  ps.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "abc\ndef\n");
@@ -1616,10 +1558,10 @@ fn grid_rotate_right_changes_dimensions() {
     assert_eq!(result.as_int(), 23);
 }
 
-/// REP-36's gate. The two `*_changes_dimensions` tests above cannot tell the
-/// two rotations apart — a left and a right rotation of a 3×2 grid are both
-/// 2×3 — and neither can `grid_rotate_four_times_is_identity`, which is the
-/// identity whichever direction it turns. So this reads a **cell**.
+/// The two `*_changes_dimensions` tests above cannot tell the two rotations
+/// apart — a left and a right rotation of a 3×2 grid are both 2×3 — and neither
+/// can `grid_rotate_four_times_is_identity`, which is the identity whichever
+/// direction it turns. So this reads a **cell**.
 ///
 /// `abc / def` is asymmetric in both axes, so no transpose, flip or 180° turn
 /// answers the same pair. With §6.4's convention (x rightward, y downward),
@@ -1627,8 +1569,8 @@ fn grid_rotate_right_changes_dimensions() {
 /// `rotate_left()` is `cf / be / ad`, so its (0, 0) is the original (2, 0).
 /// Turning clockwise carries the leftmost column to the top row reversed:
 /// `rotate_right()` is `da / eb / fc`, so its (0, 0) is the original (0, 1).
-/// Both halves are asserted in one answer, because a fix that swapped the two
-/// bodies *again* would pass either half alone.
+/// Both halves are asserted in one answer, because an implementation that
+/// swapped the two bodies would pass either half alone.
 #[test]
 fn grid_rotate_left_and_right_turn_in_opposite_directions() {
     let src = "fn main() -> Int {\n  var g = read grid(char)\n  var l = g.rotate_left()\n  var r = g.rotate_right()\n  var n = 0\n  if l.get(0, 0) == g.get(2, 0) { n = n + 1 }\n  if r.get(0, 0) == g.get(0, 1) { n = n + 10 }\n  n\n}\n";
@@ -1639,7 +1581,7 @@ fn grid_rotate_left_and_right_turn_in_opposite_directions() {
 
 /// The composition half: turning left then right restores the *contents*, not
 /// merely the dimensions. This holds even when both directions are wrong in
-/// the same way, so it is a companion to the test above rather than a gate.
+/// the same way, so it complements the test above rather than replacing it.
 #[test]
 fn grid_rotate_left_then_right_restores_the_contents() {
     let src = "fn main() -> Int {\n  var g = read grid(char)\n  var back = g.rotate_left().rotate_right()\n  if g == back { 1 } else { 0 }\n}\n";
@@ -1657,7 +1599,7 @@ fn grid_rotate_four_times_is_identity() {
     assert_eq!(result.as_int(), 32); // back to 3-wide × 2-tall
 }
 
-// --- M8-WS6: Control flow §4.11 (for/loop/break/continue/return) ------------
+// --- Control flow §4.11 (for/loop/break/continue/return) --------------------
 
 #[test]
 fn for_loop_sums_vec_elements() {
@@ -1683,10 +1625,10 @@ fn for_loop_counts_iterations() {
     assert_eq!(result.as_int(), 4);
 }
 
-/// HIR-08 end to end: a closure that is *itself the callee* of a call captures
-/// its `var` by cell like any other, so the mutation outlives the call. Escape
-/// analysis never visited `Call.callee_expr`, so `count` was not boxed and each
-/// increment went to a copy — the program returned `0`.
+/// A closure that is *itself the callee* of a call captures its `var` by cell
+/// like any other, so the mutation outlives the call. Escape analysis has to
+/// visit `Call.callee_expr` for that: an unboxed `count` would give each
+/// increment its own copy.
 #[test]
 fn an_immediately_invoked_closure_mutates_the_var_it_captured() {
     let src = concat!(
@@ -1710,11 +1652,8 @@ fn loop_break_exits() {
     assert_eq!(result.as_int(), 5);
 }
 
-/// TY-21 end to end: a `loop`'s value is the one its `break` carried, and it
-/// has to survive HIR lowering, MIR and codegen — inference agreeing is not
-/// enough. Before the fix the MIR builder discarded the `break` value and
-/// yielded a `Unit` literal, so this returned `Unit` where an `Int` was
-/// declared.
+/// A `loop`'s value is the one its `break` carried, and it has to survive HIR
+/// lowering, MIR and codegen — inference agreeing is not enough.
 #[test]
 fn expression_loop_returns_the_value_its_break_carried() {
     // The loop is the function's tail: nothing else can supply the answer.
@@ -1731,9 +1670,9 @@ fn expression_loop_returns_the_value_its_break_carried() {
     assert_eq!(result.as_int(), 106, "6 * 6 = 36 is the first over 30");
 }
 
-/// A `loop` no `break` leaves is `Never` (D2), and `Never` has no runtime
+/// A `loop` no `break` leaves is `Never`, and `Never` has no runtime
 /// representation — so such a loop must not ask for a result slot, whose
-/// descriptor site would fail the compile (D9). Compiling and running the other
+/// descriptor site would fail the compile. Compiling and running the other
 /// branch is the assertion; the loop itself is never entered.
 #[test]
 fn a_loop_that_never_breaks_compiles_as_a_diverging_branch() {
@@ -1785,8 +1724,8 @@ fn continue_skips_rest_of_body() {
     assert_eq!(result.as_int(), 25);
 }
 
-/// `continue` inside a `for` must advance the index. Targeting the loop header
-/// skipped the increment, so this program never terminated.
+/// `continue` inside a `for` must advance the index: it targets the increment
+/// block, not the loop header, or the loop never terminates.
 #[test]
 fn continue_in_a_for_loop_still_advances_the_index() {
     let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var seen = 0\n  for x in v { if x == 2 { continue } seen = seen + x }\n  seen\n}\n";
@@ -1820,7 +1759,7 @@ fn for_loop_over_deque() {
     assert_eq!(result.as_int(), 30);
 }
 
-// --- M8-WS8: pipeline combinators (§6.3) -----------------------------------
+// --- Pipeline combinators (§6.3) --------------------------------------------
 
 #[test]
 fn pipeline_sum_sums_elements() {
@@ -1859,11 +1798,8 @@ fn pipeline_filter_keeps_matching() {
 /// **ADR-126.** A chain that ends on a stage materializes with nothing written
 /// to say so — the `Collect` sink the recognizer appends is the whole of it.
 ///
-/// This was `pipeline_collect_materializes`, and it read `var copy = v.collect()`
-/// on a bare `Vec`: zero stages, so the sink's loop copied `v` element by element
-/// and the method's one observable effect was a shallow copy nobody asked it for.
-/// The sink is unchanged; what is gone is the spelling. A stage is what puts the
-/// binding on the sink's path, so a stage is what this binds through.
+/// A stage is what puts the binding on the sink's path, so a stage is what this
+/// binds through.
 #[test]
 fn pipeline_materializes_without_a_written_sink() {
     let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var doubled = v.map(|x| x * 2)\n  doubled.len() * 1000 + doubled.sum()\n}\n";
@@ -1876,14 +1812,14 @@ fn pipeline_materializes_without_a_written_sink() {
 
 #[test]
 fn pipeline_map_then_len_chains() {
-    // map then .len() (method chain after a method-with-args, fixed in WS6).
+    // map then .len(): a method chain after a method-with-args.
     let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.map(|x| x * 2).len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
 }
 
-// --- M8-WS11: cross-combinator fusion (§6.3) -------------------------------
+// --- Cross-combinator fusion (§6.3) -----------------------------------------
 // These exercise the single-fused-loop path: every multi-stage chain must
 // produce the same value as the eager equivalent, with zero intermediate Vecs.
 
@@ -1935,7 +1871,7 @@ fn pipeline_three_stage_map_filter_map_sum() {
 
 #[test]
 fn pipeline_chain_with_capturing_closure() {
-    // Capturing closure in a fused chain (untested combination pre-WS11).
+    // Capturing closure in a fused chain.
     // var k = 10; [1..5].map(+k)=[11..14].filter(>13)=[14].sum()=14.
     let src = "fn main() -> Int {\n  var k = 10\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.map(|x| x + k).filter(|x| x > 13).sum()\n}\n";
     let (rt, result) = run_main(src);
@@ -1964,8 +1900,7 @@ fn pipeline_map_filter_collect_len() {
 #[test]
 fn pipeline_fused_chain_survives_gc_stress() {
     // 300 elements through a fused map+filter+sum. Verifies every fused stage
-    // roots its live GcRefs across the collections the loop triggers (the
-    // GC-rooting risk flagged in the M8 handover §7).
+    // roots its live GcRefs across the collections the loop triggers.
     let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  v.map(|x| x * 2).filter(|x| x > 100).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -1974,11 +1909,11 @@ fn pipeline_fused_chain_survives_gc_stress() {
     // = 2 * (44850 - 1275) = 2 * 43575 = 87150.
     assert_eq!(result.as_int(), 87150);
 
-    // The same stress over stages that own a *dense counter* (MIR-04). Each
-    // counter is a `Gc` Int slot live across every `praxis_vec_get` safepoint in
-    // the loop, exactly like the source cursor, so a root set that did not cover
-    // them would hand the collector a stale word — and after MIR-01/MIR-02, a
-    // slot the liveness pass misses is nulled rather than merely stale.
+    // The same stress over stages that own a *dense counter*. Each counter is a
+    // `Gc` Int slot live across every `praxis_vec_get` safepoint in the loop,
+    // exactly like the source cursor, so a root set that did not cover them
+    // would hand the collector a stale word — and a slot the liveness pass
+    // misses is nulled rather than merely stale.
     let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 300 { v.push(i); i = i + 1 }\n  var t = 0\n  for p in v.filter(|x| x > 100).enumerate().take(3) { t = t + p.0 * 1000 + p.1 }\n  t\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -1989,7 +1924,7 @@ fn pipeline_fused_chain_survives_gc_stress() {
 
 #[test]
 fn pipeline_fold_threads_accumulator() {
-    // Closes the M8 fold stub. [1..4].fold(100, |a,x| a - x) = 100-1-2-3 = 94.
+    // [1..4].fold(100, |a,x| a - x) = 100-1-2-3 = 94.
     let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.fold(100, |a, x| a - x)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -2097,16 +2032,12 @@ fn pipeline_all_false_short_circuits() {
     assert_eq!(result.as_int(), 0);
 }
 
-/// **Rewritten** (plan §8.2, REP-39). It was `pipeline_find_returns_index_on_hit`
-/// and asserted `[10,20,30].find(|x| x == 20) == 1` — the *index*, which is what
-/// `position` answers. §6.3 lists `find` and `position` as two operations, and
-/// they were one: the same MIR arm, the same accumulator, the same result type.
-/// The old assertion was a true statement about the implementation and a false
-/// one about the language.
+/// §6.3 lists `find` and `position` as two operations: `find` answers the
+/// matching *element*, `position` its index.
 ///
-/// **This is REP-39's gate**, and the vector is chosen so that only the right
-/// answer passes: `20` is at index `1`, so a `find` that still answers an index
-/// answers `Some(1)`, which is not `Some(20)`.
+/// The vector is chosen so that only the right answer passes: `20` is at index
+/// `1`, so a `find` that answered an index would answer `Some(1)`, which is not
+/// `Some(20)`.
 #[test]
 fn find_answers_the_matching_element_not_its_index() {
     let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  match v.find(|x| x == 20) { Some(n) => n, None => 0 }\n}\n";
@@ -2115,11 +2046,9 @@ fn find_answers_the_matching_element_not_its_index() {
     assert_eq!(result.as_int(), 20);
 }
 
-/// **Rewritten** (§8.2, REP-39). It was `pipeline_find_returns_neg1_on_miss` and
-/// asserted the `-1` miss sentinel. ADR-029 decision 5 chose that sentinel, and
-/// ADR-082 retires it: `-1` is a legal element of a `Vec[Int]` and a legal `Int`
-/// besides, so a `Vec[Int]` containing `-1` could not tell a hit from a miss.
-/// §4.7 already says absence is `Option`.
+/// A miss is `None`, not a `-1` sentinel (ADR-082): `-1` is a legal element of a
+/// `Vec[Int]` and a legal `Int` besides, so a sentinel could not tell a hit from
+/// a miss. §4.7 says absence is `Option`.
 #[test]
 fn a_find_that_matches_nothing_answers_none() {
     // The miss arm answers 7, a number no element could produce, so a `Some`
@@ -2130,10 +2059,9 @@ fn a_find_that_matches_nothing_answers_none() {
     assert_eq!(result.as_int(), 7);
 }
 
-/// **Rewritten** (§8.2, REP-39). It was `pipeline_position_is_alias_of_find`,
-/// and its *name* was the finding: an alias is exactly what §6.3 does not
-/// describe. `position` keeps the index — that is its question — and answers it
-/// as an `Option[Int]` for the same in-band-sentinel reason `find` does.
+/// `position` is not an alias of `find`: §6.3 describes two operations.
+/// `position` keeps the index — that is its question — and answers it as an
+/// `Option[Int]` for the same in-band-sentinel reason `find` does.
 #[test]
 fn position_answers_the_index_and_find_answers_the_element() {
     // `[10,20,30]`: `position(== 30)` is 2 and `find(== 30)` is 30. Summing the
@@ -2145,10 +2073,8 @@ fn position_answers_the_index_and_find_answers_the_element() {
     assert_eq!(result.as_int(), 302);
 }
 
-/// `find` reaches an element its old `Int` result could not name at all. This is
-/// the half of REP-39 that no arithmetic can express: the receiver's element
-/// type is `Text`, so before ADR-082 no program could get the answer out of
-/// `find` — the row's result was `Int` whatever the receiver held.
+/// `find` answers the receiver's element type, not `Int` (ADR-082): here the
+/// elements are `Text`, so the result is an `Option[Text]`.
 #[test]
 fn find_reaches_a_non_int_element() {
     let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(\"alpha\")\n  v.push(\"beta\")\n  match v.find(|s| s == \"beta\") { Some(s) => s.len(), None => 0 }\n}\n";
@@ -2193,11 +2119,9 @@ fn pipeline_take_then_map_then_sum() {
     assert_eq!(result.as_int(), 60);
 }
 
-/// **MIR-03.** The bound of a `take`/`skip` is an `Int` expression, not an `Int`
-/// literal. The catalog types the parameter `Int` and says nothing about
-/// literals; a chain whose bound was anything else used to be declined by the
-/// recognizer, fall through to a combinator lowerer with no `take` arm, and
-/// answer the Unit singleton — which the enclosing chain then read as a Vec.
+/// The bound of a `take`/`skip` is an `Int` expression, not an `Int` literal:
+/// the catalog types the parameter `Int` and says nothing about literals, so the
+/// recognizer must accept any expression there.
 #[test]
 fn a_take_or_skip_bound_is_any_int_expression() {
     let five = "  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n";
@@ -2207,7 +2131,7 @@ fn a_take_or_skip_bound_is_any_int_expression() {
         result.as_int()
     };
 
-    // A binding, the shape the ignored regressions used.
+    // A binding.
     assert_eq!(answer("var n = 3\n  v.take(n).sum()"), 6);
     assert_eq!(answer("var n = 2\n  v.skip(n).sum()"), 12);
     // An arithmetic expression, and one that calls back into the receiver.
@@ -2216,9 +2140,9 @@ fn a_take_or_skip_bound_is_any_int_expression() {
     // The bound still composes with the stages around it.
     assert_eq!(answer("var n = 4\n  v.take(n).map(|x| x * 10).sum()"), 100);
     assert_eq!(answer("var n = 4\n  v.take(n).filter(|x| x > 2).sum()"), 7);
-    // Degenerate bounds keep the meaning the literal spelling had: `take` of
-    // nothing is empty, `skip` of nothing drops nothing, and a negative bound is
-    // the same comparison rather than a special case.
+    // Degenerate bounds: `take` of nothing is empty, `skip` of nothing drops
+    // nothing, and a negative bound is the same comparison rather than a special
+    // case.
     assert_eq!(answer("var n = 0\n  v.take(n).sum()"), 0);
     assert_eq!(answer("var n = 0\n  v.skip(n).sum()"), 15);
     assert_eq!(answer("var n = 0 - 1\n  v.take(n).sum()"), 0);
@@ -2248,19 +2172,13 @@ fn pipeline_take_while_then_count() {
 
 #[test]
 fn pipeline_enumerate_count() {
-    // enumerate produces (i, item) pairs but we only count them → 3.
-    // (Tuple field access .0/.1 is deferred per ADR-026, so we only count here.)
+    // enumerate produces (i, item) pairs; here we only count them → 3.
     let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(10)\n  v.push(20)\n  v.push(30)\n  v.enumerate().count()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 3);
 }
 
-/// **MIR-04's `enumerate` half.** The audit's row named take/skip/zip/find/
-/// position and omitted `enumerate`, and the one test that reads an enumerate
-/// pair's payloads has no `filter` in front of it — so nothing covered the
-/// numbering itself.
-///
 /// `enumerate` numbers the sequence that reaches it. After a `filter` that is a
 /// dense 0, 1, 2 …, not the surviving source positions.
 #[test]
@@ -2282,14 +2200,12 @@ fn enumerate_after_filter_numbers_the_filtered_sequence() {
     assert_eq!(result.as_int(), 107);
 }
 
-/// **The rule S21 is named for.** Every stage that asks "which element is this?"
-/// is asking about *its own* input sequence — the one that reaches it — not
-/// about the source.
+/// Every stage that asks "which element is this?" is asking about *its own*
+/// input sequence — the one that reaches it — not about the source.
 ///
-/// One shared counter answers all the single-stage cases correctly, which is
-/// why the audit's per-stage regressions do not force the general rule. These
-/// are the shapes that do: two position-consuming stages with a `filter`
-/// between them, where one counter and two counters disagree.
+/// One shared counter answers all the single-stage cases correctly, so the
+/// shapes that force the general rule are these: two position-consuming stages
+/// with a `filter` between them, where one counter and two counters disagree.
 #[test]
 fn each_stage_counts_the_sequence_that_reaches_it() {
     // [1..6].skip(1) = [2,3,4,5,6]; filter(even) = [2,4,6]; take(2) = [2,4].
@@ -2320,8 +2236,6 @@ fn each_stage_counts_the_sequence_that_reaches_it() {
     // hit inside a `flat_map` ends only the inner loop. The inner Vecs here are
     // [0, 5] and [10]: flattened, the first element over 4 is at index 1;
     // per-inner, the first Vec answers 1 and the second overwrites it with 0.
-    // (The `match` is REP-39: the index arrives inside a `Some` now. What this
-    // measures — *which* index — is unchanged.)
     let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  match v.flat_map(|x| {\n    var r = Vec()\n    if x == 1 { r.push(0) }\n    r.push(x * 5)\n    r\n  }).position(|p| p > 4) { Some(i) => i, None => -1 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -2356,15 +2270,14 @@ fn pipeline_flat_map_sum() {
     assert_eq!(result.as_int(), 66);
 }
 
-/// **MIR-06's semantics.** A `flat_map` inside a `flat_map` flattens *both*
-/// levels, in order, with everything between them applied once per element of
-/// the level it sits in.
+/// A `flat_map` inside a `flat_map` flattens *both* levels, in order, with
+/// everything between them applied once per element of the level it sits in.
 ///
-/// The exit-criterion test (`two_flat_map_stages_compose_without_a_compiler_panic`)
-/// only asserts that the compiler survives, and it asserts a count — which a
-/// wrong-but-non-panicking nesting could also produce. These weight every level
-/// so that dropping one, running one at the wrong depth, or ordering the two
-/// backwards all answer a different number.
+/// `two_flat_map_stages_compose_without_a_compiler_panic` asserts only that the
+/// compiler survives, plus a count — which a wrong-but-non-panicking nesting
+/// could also produce. These weight every level so that dropping one, running
+/// one at the wrong depth, or ordering the two backwards all answer a different
+/// number.
 #[test]
 fn a_flat_map_inside_a_flat_map_flattens_both_levels() {
     // [1,2] -flat_map(x -> [x, x*10])-> [1,10,2,20]
@@ -2399,13 +2312,11 @@ fn a_flat_map_inside_a_flat_map_flattens_both_levels() {
     );
 }
 
-/// **MIR-08's `take_while` half.** A stage that stops the stream stops the
-/// *stream*, not the inner Vec it happened to be looking at.
+/// A stage that stops the stream stops the *stream*, not the inner Vec it
+/// happened to be looking at.
 ///
-/// The exit-criterion test covers `any`; nothing covered `take_while`, and its
-/// failure mode inside a splice is worse than an early stop: applied per inner
-/// Vec, `take_while` silently becomes a `filter`, so elements after the stop
-/// point are processed and can fault.
+/// Applied per inner Vec instead, `take_while` silently becomes a `filter`, so
+/// elements after the stop point are processed and can fault.
 #[test]
 fn take_while_after_flat_map_stops_the_whole_stream() {
     // [3,1,5] -flat_map(x -> [x])-> [3,1,5] -take_while(> 2)-> [3], and
@@ -2430,25 +2341,16 @@ fn take_while_after_flat_map_stops_the_whole_stream() {
     assert_eq!(result.as_int(), 1, "the stream stops at the first 10");
 }
 
-/// **Rewritten** (plan §8.2, REP-38). It used to be
-/// `pipeline_filter_map_keeps_results` and assert that
-/// `[1,2,3].filter_map(|x| x * 2).sum()` is `12` — which is `map`'s answer, and
-/// it passed because `filter_map` *was* `map`. It cannot even compile now: the
-/// closure is `(Int) -> Int` and the row asks for `(Int) -> Option[U]`. What was
-/// wrong with it is not the number but the premise, which the comment stated
-/// outright — "no Unit to filter" — and which S18's `Option` retired.
+/// `filter_map`'s closure is `(Int) -> Option[U]`, and the `None`s it answers
+/// must not survive into the sink.
 ///
-/// **This is REP-38's gate.** The `None`s must not survive, and asserting a
-/// *sum* is what makes that measurable in one integer: keeping them would not
-/// merely change the number, it would fail to type-check at `sum`, which is
-/// exactly the second-order symptom the finding describes (`error[Y001]:
-/// expected Int, found Option[Int]` — the user is told their sum is wrong and
-/// never that `filter_map` did not filter).
+/// Asserting a *sum* is what makes that measurable in one integer: surviving
+/// `None`s would not merely change the number, they would fail to type-check at
+/// `sum` (`error[Y001]: expected Int, found Option[Int]` — the user is told
+/// their sum is wrong and never that `filter_map` did not filter).
 #[test]
 fn filter_map_drops_the_nones_rather_than_carrying_them() {
-    // [1,2,3,4,5] |> Some(x*2) when x > 2 → [6, 8, 10], summing to 24. Under
-    // the old map-keep lowering the chain is [None, None, Some(6), Some(8),
-    // Some(10)] and `sum` has nothing to add.
+    // [1,2,3,4,5] |> Some(x*2) when x > 2 → [6, 8, 10], summing to 24.
     let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.push(4)\n  v.push(5)\n  v.filter_map(|x| if x > 2 { Some(x * 2) } else { None }).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -2467,10 +2369,8 @@ fn a_filter_map_that_matches_nothing_yields_nothing() {
     assert_eq!(result.as_int(), 0);
 }
 
-/// `filter_map` composes with the stages either side of it — a `None` has to
-/// leave by the *innermost* continue edge, not end the chain (MIR-08's
-/// distinction). Under the old lowering this answers `2 + 4 + 6 = 12` scaled
-/// through the later stages; under the fix only the two survivors reach them.
+/// `filter_map` composes with the stages either side of it — a `None` leaves by
+/// the *innermost* continue edge, and does not end the chain.
 #[test]
 fn filter_map_in_the_middle_of_a_chain_drops_only_its_own_element() {
     // [1..6] .map(+1) = [2,3,4,5,6]
@@ -2512,11 +2412,9 @@ fn pipeline_empty_vec_sum_is_zero() {
     assert_eq!(result.as_int(), 0);
 }
 
-/// **Rewritten** (§8.2, REP-39). It was `pipeline_empty_vec_find_is_neg1`. An
-/// empty source is a miss like any other, and a miss is `None` — the same
-/// answer, now spelled so that a caller can act on it. Note this is *not* the
-/// `EmptyCollection` fault: `find` has an answer for an empty sequence, which is
-/// exactly what distinguishes it from `min`/`reduce` (D1).
+/// An empty source is a miss like any other, and a miss is `None`. Note this is
+/// *not* the `EmptyCollection` fault: `find` has an answer for an empty
+/// sequence, which is exactly what distinguishes it from `min`/`reduce`.
 #[test]
 fn an_empty_source_makes_find_answer_none() {
     let src = "fn main() -> Int {\n  var v = Vec()\n  match v.find(|x| x == 0) { Some(n) => n, None => 7 }\n}\n";
@@ -2526,17 +2424,13 @@ fn an_empty_source_makes_find_answer_none() {
 }
 
 // ===========================================================================
-// Milestone 5: Text methods (§4.3) and `out(...)` (§16.1).
+// Text methods (§4.3) and `out(...)` (§16.1).
 // ===========================================================================
 
 #[test]
 fn text_len_and_get_end_to_end() {
     // Text literals allocate; .len() counts chars; .get(i) answers the `Char`
-    // there. **This test pinned REP-65** (§8.2: rewritten, not deleted): it
-    // asserted `101` off `s.get(1)` directly, which was the right *value* under
-    // the wrong *type* — the row answered an `Int` because M5 reserved `Char`.
-    // The scalar value is still 101; naming it now takes the `.to_int()` that
-    // ADR-086 added for exactly this.
+    // there, whose scalar value is named with `.to_int()` (ADR-086).
     let src = "fn main() -> Int {\n  var s = \"hello\"\n  s.get(1).to_int()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault());
@@ -2557,14 +2451,9 @@ fn text_len_counts_unicode_scalars() {
 fn text_get_indexes_by_scalar_not_byte() {
     // `praxis_text_get` must index by Unicode scalar value, not by byte: in
     // "héllo" the char at index 1 is é (scalar 233), but é is encoded as two
-    // bytes (0xC3 0xA9), so byte indexing would return 0xC3 (195) instead. This
-    // distinguishes the two implementations and guards a regression toward
-    // byte indexing — load-bearing for M6, where input parsing produces Text
-    // values that get indexed into.
-    //
-    // The subject is unchanged by ADR-086 and is why this test was rewritten
-    // rather than deleted (§8.2): scalar-not-byte indexing is the property, and
-    // it is now observed through the `Char` the row answers.
+    // bytes (0xC3 0xA9), so byte indexing would return 0xC3 (195) instead. Input
+    // parsing produces Text values that get indexed into, so the distinction is
+    // load-bearing.
     let src = "fn main() -> Int {\n  var s = \"héllo\"\n  s.get(1).to_int()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault());
@@ -2572,9 +2461,9 @@ fn text_get_indexes_by_scalar_not_byte() {
 }
 
 /// **ADR-086 end to end.** The two halves — the catalog row's type and the
-/// runtime's descriptor — are one change, and this is the test that proves it.
+/// runtime's descriptor — must agree, and this is the test that proves it.
 ///
-/// Each case is red for its own reason, which is the point of having four:
+/// Each case is red for its own reason, which is the point of having three:
 /// - (a) and (b) are `Y110 no method` without the conversion rows.
 /// - (b) and (c) *abort* with the runtime half reverted and the catalog half in
 ///   place: a `Char`-typed comparison lowers through `praxis_char_load`, whose
@@ -2584,8 +2473,8 @@ fn text_get_indexes_by_scalar_not_byte() {
 ///   the runtime half in place.
 #[test]
 fn a_char_and_its_code_point_convert_both_ways() {
-    // (a) Non-ASCII on purpose: this also re-pins scalar-not-byte indexing
-    // through the new type.
+    // (a) Non-ASCII on purpose: this also pins scalar-not-byte indexing through
+    // the `Char` type.
     let (rt, result) = run_main("fn main() -> Int {\n  \"héllo\"[1].to_int()\n}\n");
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 233);
@@ -2598,11 +2487,8 @@ fn a_char_and_its_code_point_convert_both_ways() {
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 1);
 
-    // (c) The capability the change unlocks: `"#"[0]` is how a program names a
-    // particular character while there is no char literal (D19), so a
-    // `Grid[Char]` cell is finally comparable to one. Before ADR-086 this was
-    // `Y001`, and the corpus worked around it by comparing a cell to another
-    // cell through `find_all`.
+    // (c) `"#"[0]` is how a program names a particular character while there is
+    // no char literal, so a `Grid[Char]` cell is comparable to one.
     let src = "fn main() -> Int {\n  var g = read grid(char)\n  if g[1, 0] == \"#\"[0] { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main_with_input(src, "a#\ncd\n");
     assert!(!rt.has_pending_fault());
@@ -2652,7 +2538,7 @@ fn out_writes_to_stdout_and_returns_unit() {
 }
 
 // ===========================================================================
-// Milestone 5: reassignment and object mutation through a binding, under GC (§4.2).
+// Reassignment and object mutation through a binding, under GC (§4.2).
 // ===========================================================================
 
 #[test]
@@ -2676,16 +2562,15 @@ fn let_vec_mutation_visible_after_gc() {
 }
 
 // ===========================================================================
-// Milestone 6: Char wired end-to-end (§4.3). The runtime descriptor exists;
-// M6 connects inference → HIR → MIR → codegen → runtime. The input parser
-// produces Char values (`char` atom, `grid(char)`); these tests exercise the
-// runtime allocation path that path will use.
+// Char wired end-to-end (§4.3): inference → HIR → MIR → codegen → runtime. The
+// input parser produces Char values (`char` atom, `grid(char)`); these tests
+// exercise the runtime allocation path it uses.
 // ===========================================================================
 
 #[test]
 fn char_type_annotation_is_accepted() {
-    // `Char` must now type-check (M6: reserved → wired). This compiles through
-    // the whole pipeline (resolve → infer → lower → MIR → JIT) without error.
+    // `Char` must type-check. This compiles through the whole pipeline
+    // (resolve → infer → lower → MIR → JIT) without error.
     let src = "fn main() -> Char {\n  out(0)\n}\n";
     let (_jit, ids) = compile(src);
     assert!(ids.contains_key("main"), "Char return type compiles");
@@ -2693,7 +2578,7 @@ fn char_type_annotation_is_accepted() {
 
 #[test]
 fn char_runtime_roundtrip() {
-    // The descriptor + allocator path the input parser will call: alloc_char
+    // The descriptor + allocator path the input parser calls: alloc_char
     // stores a u32 scalar; as_char recovers it. Exercises scalars::CHAR.
     let rt = Runtime::new();
     let c = rt.alloc_char('€' as u32);
@@ -2704,8 +2589,8 @@ fn char_runtime_roundtrip() {
 }
 
 // ===========================================================================
-// Milestone 6: `read` input parser (§7). End-to-end tests for the headline
-// feature: source → parse → infer → lower → MIR → JIT → run the parser plan.
+// The `read` input parser (§7), end to end: source → parse → infer → lower →
+// MIR → JIT → run the parser plan.
 // ===========================================================================
 
 #[test]
@@ -2729,7 +2614,7 @@ fn read_lines_of_int_first_element() {
 
 #[test]
 fn read_with_var_binding() {
-    // Acceptance criterion 2: bind read results with `var`.
+    // Bind read results with `var`.
     let src = "fn main() -> Int {\n  var v = read lines(int)\n  v.get(1)\n}\n";
     let (rt, result) = run_main_with_input(src, "10\n20\n30\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -2738,8 +2623,8 @@ fn read_with_var_binding() {
 
 #[test]
 fn multiple_reads_parse_same_buffer() {
-    // Acceptance criterion 3: multiple `read` expressions deterministically
-    // parse the same complete source buffer.
+    // Multiple `read` expressions deterministically parse the same complete
+    // source buffer.
     let src = "fn main() -> Int {\n  var a = read lines(int)\n  var b = read lines(int)\n  a.get(0) + b.get(1)\n}\n";
     let (rt, result) = run_main_with_input(src, "100\n200\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -2748,12 +2633,9 @@ fn multiple_reads_parse_same_buffer() {
 
 #[test]
 fn read_sections_lines_csv_int_nested() {
-    // `read sections(lines(csv(int)))` — the §7.6 nested example. This exercises
-    // deeply nested collection parsing. The parser correctly produces
-    // Vec[Vec[Vec[Int]]]; reading back the first element of each level works
-    // for the leaf (Int) but nested Vec element descriptors need the child
-    // descriptor to resolve recursively (an M6 follow-up). For now we verify
-    // the outer structure is correct (non-faulting, returns a Vec).
+    // `read sections(lines(csv(int)))` — the §7.6 nested example, producing
+    // Vec[Vec[Vec[Int]]]. The assertion is the outer structure: non-faulting,
+    // and a Vec of the right length.
     let src =
         "fn main() -> Int {\n  var groups = read sections(lines(csv(int)))\n  groups.len()\n}\n";
     let input = "1,2,3\n4,5,6\n\n7,8,9\n";
@@ -2762,7 +2644,7 @@ fn read_sections_lines_csv_int_nested() {
     assert_eq!(result.as_int(), 2); // two sections
 }
 
-// --- M7-WS9: input-parser carryovers (§7.2 templates, nested descriptors) --
+// --- Input-parser templates and nested descriptors (§7.2) ------------------
 
 #[test]
 fn read_lines_of_named_capture_template_parses_records() {
@@ -2807,8 +2689,8 @@ fn read_standalone_named_capture_template_parses_one_record() {
 
 #[test]
 fn read_nested_collections_descriptor_is_composite() {
-    // `read sections(lines(csv(int)))` now tags the outer Vec's element
-    // descriptor as a Vec (not the leaf Int), so formatting/equality on nested
+    // `read sections(lines(csv(int)))` tags the outer Vec's element descriptor
+    // as a Vec (not the leaf Int), so formatting/equality on nested
     // collections dispatches correctly. Compare two identical nested parses for
     // structural equality → true (1).
     let src = "fn main() -> Int {\n  var a = read sections(lines(csv(int)))\n  var b = read sections(lines(csv(int)))\n  if a == b { 1 } else { 0 }\n}\n";
@@ -2819,12 +2701,10 @@ fn read_nested_collections_descriptor_is_composite() {
 
 #[test]
 fn adv_parser_record_with_text_field_equal_to_literal_record() {
-    // PROBE: parser-built records used to hardcode every field's descriptor to
-    // INT (parser.rs alloc_record), but record_equals/format/hash dispatch
-    // through the SCHEMA's field descriptor (records.rs). A parser record with
-    // a Text field compared to a structurally-equal one must still be equal —
-    // with the INT descriptor it SEGFAULTED (INT.equals reinterpreting a
-    // TextPayload as i64). Fixed: alloc_record now uses value.descriptor().
+    // Parser-built records take each field's descriptor from the value
+    // (`alloc_record` uses `value.descriptor()`), because record_equals/format/
+    // hash dispatch through the SCHEMA's field descriptor (records.rs): an INT
+    // descriptor over a Text field would reinterpret a TextPayload as i64.
     // Two identical parses → equal (1).
     let src = "fn main() -> Int {\n  var a = read lines(`{name:word},{port:int}`)\n  var b = read lines(`{name:word},{port:int}`)\n  if a == b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main_with_input(src, "alpha,80\nbeta,443\n");
@@ -2848,9 +2728,9 @@ fn adv_parser_record_with_text_field_unequal_when_differs() {
 #[test]
 fn adv_parser_record_text_field_as_map_key() {
     // Parser record with a Text field used as a Set key. The record's hash must
-    // dispatch through the field descriptor; with the old INT-descriptor bug
-    // this SEGFAULTED (INT.hash reinterpreting a TextPayload). Insert the same
-    // parser record twice; the set must dedupe to 1.
+    // dispatch through the field descriptor — an INT descriptor would
+    // reinterpret a TextPayload. Insert the same parser record twice; the set
+    // must dedupe to 1.
     let src = "fn main() -> Int {\n  var recs = read lines(`{name:word},{port:int}`)\n  var s = Set()\n  s.insert(recs.get(0))\n  s.insert(recs.get(0))\n  s.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "alpha,80\nbeta,443\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -2868,27 +2748,23 @@ fn adv_parser_record_with_text_field_survives_gc() {
     assert_eq!(result.as_int(), 2);
 }
 
-// --- Adversarial: parser-record schema cache (§6.1 residual) ----------------
+// --- Adversarial: parser-record schema cache (§6.1) -------------------------
 //
-// `leak_record_schema` cached record schemas by field-NAME sequence only, so two
-// templates with identical field names but different capture types (e.g.
-// `{x:word}` vs `{x:int}`) collided and shared the first-seen schema's
-// descriptors. record_equals/format/hash dispatch through schema.fields[i]
-// .descriptor, so the second template's fields were compared/formatted through
-// the WRONG callback — the same class of segfault the §6.1 alloc_record fix
-// closed. Fixed: the cache is now keyed on (names, descriptors). Mirrors the
-// sibling leak_tuple_schema, which was already descriptor-keyed.
+// `record_schema_for` keys its cache on the (field-name, descriptor) sequence,
+// not on the names alone: two templates with identical field names but different
+// capture types (e.g. `{x:word}` vs `{x:int}`) must not share a schema.
+// record_equals/format/hash dispatch through `schema.fields[i].descriptor`, so a
+// name-only cache would compare/format the second template's fields through the
+// wrong callback. `tuple_schema_for` is descriptor-keyed for the same reason.
 
 #[test]
 fn adv_parser_record_same_name_diff_type_no_schema_collision() {
     // Two record templates with the SAME field name `v` but DIFFERENT capture
-    // types (`word` → Text vs `int` → Int) must not share a schema. Pre-fix,
-    // whichever template was parsed first won the cache and the second's fields
-    // were compared/formatted through the wrong descriptor. We parse each into a
-    // Vec, then compare a record to itself (forces record_equals through the
-    // schema descriptor) and use it as a Set key (forces record_hash). Both must
-    // succeed without faulting — pre-fix the Int-then-Text order segfaulted on
-    // the equality of the Text record (INT.equals reinterpreting a TextPayload).
+    // types (`word` → Text vs `int` → Int) must not share a schema. We parse
+    // each into a Vec, then compare a record to itself (forces record_equals
+    // through the schema descriptor) and use it as a Set key (forces
+    // record_hash). Both must succeed without faulting; a shared schema would
+    // reinterpret a TextPayload through `INT.equals`.
     let src = String::from("fn main() -> Int {\n")
         // First template seen: {v:word} → v is Text. Parse, compare, key it.
         + "  var ws = read lines(`{v:word}`)\n"
@@ -2897,8 +2773,8 @@ fn adv_parser_record_same_name_diff_type_no_schema_collision() {
         + "  ws_set.insert(ws.get(0))\n"
         // Second template seen: {v:char} → v is Char, SAME field name `v`.
         // Both parse the single char `a`, but the field descriptor differs
-        // (TEXT vs CHAR). Pre-fix this got the word-template's schema (Text
-        // descriptor), which would miscompare/mishash the Char field.
+        // (TEXT vs CHAR). A name-only cache would hand this the word template's
+        // Text descriptor, miscomparing/mishashing the Char field.
         + "  var cs = read lines(`{v:char}`)\n"
         + "  var c_ok = if cs.get(0) == cs.get(0) { 1 } else { 0 }\n"
         + "  var cs_set = Set()\n"
@@ -2931,14 +2807,13 @@ fn adv_parser_record_same_name_diff_type_survives_gc() {
 
 #[test]
 fn adv_read_against_non_text_input_faults_cleanly() {
-    // PROBE (§6.3): `read` against a non-Text input_source used to segfault —
-    // run_plan reinterprets input.payload as TextPayload and derefs a garbage
-    // pointer when input_source is the default Unit singleton. Fixed:
-    // praxis_get_input now checks the descriptor and, for a non-Text source,
-    // raises ParseFailed and returns the Unit sentinel instead of handing the
-    // parser garbage. This program reads against the UNSET (Unit) input_source;
-    // pre-fix it killed the host (SIGSEGV). Now it must return with a clean
-    // ParseFailed fault and the host stays alive.
+    // §6.3: `read` against a non-Text input_source must fault cleanly, because
+    // run_plan would otherwise reinterpret input.payload as a TextPayload and
+    // deref a garbage pointer. `praxis_get_input` checks the descriptor and, for
+    // a non-Text source, raises ParseFailed and returns the Unit sentinel
+    // instead of handing the parser garbage. This program reads against the
+    // UNSET (Unit) input_source, so it must return with a clean ParseFailed
+    // fault and the host must stay alive.
     let src = "fn main() -> Int {\n  var v = read lines(`{x:word}`)\n  v.len()\n}\n";
     let (rt, result) = run_main_no_input(src);
     assert!(
@@ -2954,35 +2829,20 @@ fn adv_read_against_non_text_input_faults_cleanly() {
 
 #[test]
 fn adv_csv_inside_sections_nonzero_offset() {
-    // PROBE (parser.rs walk_csv): a CSV inside a section starts at a non-zero
-    // byte offset. The predecessor re-sliced the section and walked its child
-    // at offset 0, and recovered each field's offset by *searching* the region
-    // for the field's text (`region_offset_of`) rather than computing it, which
-    // also called `slice::windows(0)` — a panic inside `extern "C"` — for an
-    // empty field.
+    // A CSV inside a section starts at a non-zero byte offset (parser.rs
+    // walk_csv): each field's offset must be computed from the section's base
+    // rather than recovered by re-slicing the section and walking its child at
+    // offset 0.
     //
-    // REWRITTEN (S20/IPR-03, IPR-04). It used to read `sections(csv(int))` over
-    // `"1,2,3\n4,5,6\n\n7,8\n9,10\n"` and assert only that there were two
-    // sections. That input gives `csv` a region containing a newline, so one of
-    // its fields is the text `"3\n4"` — and the count passed only because `csv`
-    // walked its child against the whole remaining buffer and threw the cursor
-    // away, so `int` read the `3` and the `\n4` was silently nobody's. Under
-    // §7.5's full-consumption rule that region is a parse failure, correctly.
-    // `csv` describes one line; a section of several lines is
-    // `lines(csv(...))`, which is what day05 writes.
+    // `csv` describes one line; a section of several lines is `lines(csv(...))`.
+    // Under §7.5's full-consumption rule a `csv` region containing a newline is
+    // a parse failure.
     //
     // **What this test can and cannot distinguish.** The `Int` assertion below
-    // is not a differential and is not claimed as one: the search finds text
-    // equal to the field's text, so a misresolved duplicate still parses to the
-    // same number, and the pre-S20 tree answers `8` too. The two halves that
-    // *are* observable follow it, and both were re-run against `b2184c8`:
-    //
-    //   * a `Text` read out of the *second* section — b2184c8 answers `"cc"`,
-    //     the FIRST section's second line's first field, because it re-sliced
-    //     the section and walked the child at offset 0 while allocating slices
-    //     against the whole input (IPR-03, the stage's P0);
-    //   * a field that trims to nothing — b2184c8 does not answer at all, it
-    //     panics with "window size must be non-zero" inside `extern "C"`.
+    // is not a differential and is not claimed as one: a misresolved duplicate
+    // field still parses to the same number. The two halves that *are*
+    // observable follow it: a `Text` read out of the *second* section, and a
+    // field that trims to nothing.
     //
     // §7.5's full-consumption half is carried by
     // `a_csv_field_the_child_does_not_consume_is_a_parse_failure` and
@@ -3011,10 +2871,9 @@ fn adv_csv_inside_sections_nonzero_offset() {
         "the second section's second line's first field, at byte 19 — not `aa`"
     );
 
-    // A field that trims to nothing, which is where `region_offset_of` reached
-    // `windows(0)`. `"10,20,"` was enough. The assertion is the empty field's
-    // own length: a panic here is not a failed assertion, it is undefined
-    // behaviour across the ABI (D12).
+    // A field that trims to nothing. The assertion is the empty field's own
+    // length: a panic here is not a failed assertion, it is undefined behaviour
+    // across the ABI.
     let src = "fn main() -> Int {\n  var s = read sections(lines(csv(rest)))\n  \
                s.get(1).get(0).get(2).len()\n}\n";
     let (rt, result) = run_main_with_input(src, "1,2,3\n\n10,20,\n");
@@ -3022,13 +2881,9 @@ fn adv_csv_inside_sections_nonzero_offset() {
     assert_eq!(result.as_int(), 0, "a field that trims to nothing is empty");
 }
 
-/// **IPR-04.** A `csv` field whose region contains anything the child parser
-/// does not consume is a parse failure, not a silent truncation.
-///
-/// The predecessor computed each field's bounds and then walked the child
-/// against everything from the field's start to the end of the buffer, with the
-/// end explicitly discarded (`var _ = token_end;`). So `csv(int)` over a region
-/// with a stray newline in it "worked" by reading the digits it liked.
+/// A `csv` field whose region contains anything the child parser does not
+/// consume is a parse failure, not a silent truncation: the child is walked
+/// against the field's bounds, not against everything to the end of the buffer.
 #[test]
 fn a_csv_field_the_child_does_not_consume_is_a_parse_failure() {
     let (rt, _result) = run_main_with_input(
@@ -3109,9 +2964,9 @@ fn adv_grid_large_under_gc_pressure() {
 
 #[test]
 fn adv_bitset_remove_high_bit_then_equals_untouched() {
-    // PROBE (bitset.rs): removing a high bit leaves a trailing zero word;
-    // equals/hash must still treat it as distinct from a never-touched bitset
-    // of the same low bits. Guards the equals⇒hash-equal invariant for the
+    // Removing a high bit leaves a trailing zero word (bitset.rs); equals/hash
+    // must still treat it as distinct from a never-touched bitset of the same
+    // low bits. Guards the equals⇒hash-equal invariant for the
     // trailing-zero-word case.
     let src = "fn main() -> Int {\n  var a = BitSet()\n  a.insert(100)\n  a.remove(100)\n  var b = BitSet()\n  var ea = a.contains(1)\n  var eb = b.contains(1)\n  if ea == eb { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
@@ -3136,8 +2991,7 @@ fn adv_min_heap_ordering_under_gc_pressure() {
     let src = "fn main() -> Int {\n  var h = MinHeap()\n  var i = 0\n  while i < 200 { h.push((i * 37 + 11) - 100); i = i + 1 }\n  var garbage = Vec()\n  var j = 0\n  while j < 300 { garbage.push(j); j = j + 1 }\n  h.pop()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
-    // The min of (i*37+11)-100 for i in 0..200: i=0 → -89; i=1 → -52; ... i=0 gives -89
-    // Actually i=0 → 0*37+11-100 = -89. Is there smaller? i*37+11-100, minimum at i=0 → -89.
+    // (i*37+11)-100 increases with i, so the minimum is at i=0: -89.
     assert_eq!(result.as_int(), -89);
 }
 
@@ -3201,7 +3055,7 @@ fn adv_out_of_bounds_vec_negative_index_faults() {
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IndexOutOfBounds);
 }
 
-// --- short-circuit || and ! (M7-WS2 carryover) ------------------------------
+// --- short-circuit || and ! -------------------------------------------------
 
 #[test]
 fn logical_or_returns_true_when_lhs_true() {
@@ -3232,8 +3086,8 @@ fn logical_or_returns_false_when_both_false() {
 
 #[test]
 fn logical_or_short_circuits_skipping_rhs_side_effect() {
-    // The acceptance test for short-circuit: when lhs is true, the rhs division
-    // by zero must NOT execute (no fault). If || were eager, this would fault.
+    // Short-circuit: when lhs is true, the rhs division by zero must NOT
+    // execute (no fault). If || were eager, this would fault.
     let src = "fn main() -> Int {\n  var b = true || (1 / 0 == 0)\n  if b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(
@@ -3273,7 +3127,7 @@ fn double_not_is_identity() {
     assert_eq!(result.as_int(), 1);
 }
 
-// --- nominal records (M7-WS3, §4.5) -----------------------------------------
+// --- nominal records (§4.5) -------------------------------------------------
 
 #[test]
 fn record_construction_and_field_access() {
@@ -3321,12 +3175,11 @@ fn record_field_punning() {
     assert_eq!(result.as_int(), 35);
 }
 
-// --- tuples (M7-WS6, §4.5 structural tuples) --------------------------------
+// --- tuples (§4.5 structural tuples) ----------------------------------------
 
 #[test]
 fn tuple_construction_does_not_fault() {
-    // M7 Part 2: tuples now materialize as real objects. Constructing one must
-    // not fault (previously this was a Unit stub).
+    // Tuples materialize as real objects; constructing one must not fault.
     let src = "fn main() -> Int {\n  var t = (1, 2, 3)\n  7\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -3353,12 +3206,12 @@ fn tuple_of_mixed_types() {
     assert_eq!(result.as_int(), 5);
 }
 
-// --- structural equality (M7-WS6, §5.5) -------------------------------------
+// --- structural equality (§5.5) ---------------------------------------------
 
 #[test]
 fn record_equality_true() {
     // `Point{1,2} == Point{1,2}` → true (1). Bind to `var` first because record
-    // literals are blocked in `if` conditions (`no_struct_literal`).
+    // literals are blocked in `if` conditions (`parse_expr_no_struct_lit`).
     let src = "struct Point { x: Int, y: Int }\nfn main() -> Int {\n  var a = Point { x: 1, y: 2 }\n  var b = Point { x: 1, y: 2 }\n  if a == b { 1 } else { 0 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -3439,7 +3292,7 @@ fn scalar_equality_still_works() {
     assert_eq!(result.as_int(), 1);
 }
 
-// --- enums (M7-WS4, §4.6) ---------------------------------------------------
+// --- enums (§4.6) -----------------------------------------------------------
 
 #[test]
 fn enum_payload_variant_construction() {
@@ -3478,7 +3331,7 @@ fn enum_survives_gc() {
     assert_eq!(result.as_int(), 456);
 }
 
-// --- pattern matching (M7-WS5, §4.6) ----------------------------------------
+// --- pattern matching (§4.6) ------------------------------------------------
 
 #[test]
 fn match_enum_wall_arm() {
@@ -3512,12 +3365,12 @@ fn match_enum_payload_binding() {
     assert_eq!(result.as_int(), 42);
 }
 
-// --- M7-WSP: pattern-matching completeness (nested + literal patterns) -------
+// --- pattern-matching completeness (nested + literal patterns) --------------
 
 #[test]
 fn match_literal_int() {
-    // Literal Int patterns — the WS5 bug always took the first arm; this now
-    // tests each value. `match n { 1 => 10, 2 => 20, _ => 0 }`.
+    // Literal Int patterns test each value:
+    // `match n { 1 => 10, 2 => 20, _ => 0 }`.
     let src = "fn main() -> Int {\n  var n = 2\n  match n {\n    1 => 10\n    2 => 20\n    _ => 0\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -3554,8 +3407,8 @@ fn match_bool() {
 
 #[test]
 fn match_nested_variant_pattern() {
-    // Nested pattern: `Wrapped(Some(n))` extracts through two layers of variant.
-    // The WS5 bug silently dropped nested sub-patterns; this now recurses.
+    // Nested pattern: `Wrapped(Some(n))` extracts through two layers of variant,
+    // so lowering must recurse into sub-patterns.
     let src = "enum Inner { None, Some(Int) }\nenum Outer { Wrapped(Inner), Bare }\nfn main() -> Int {\n  var v = Wrapped(Some(7))\n  match v {\n    Wrapped(Some(n)) => n\n    Wrapped(None) => 0\n    Bare => 1\n  }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -3571,11 +3424,9 @@ fn match_nested_variant_none_branch() {
     assert_eq!(result.as_int(), 0);
 }
 
-/// **HIR-06's runtime half.** The usefulness matrix pairs each pattern column
-/// with a type, so lowering pads a variant pattern to its payload arity — which
-/// puts a `TypedPattern::Wildcard` in a *payload slot* from source for the first
-/// time. Before, one only ever reached MIR's decision tree from a synthesized
-/// fallback at the top level.
+/// The usefulness matrix pairs each pattern column with a type, so lowering pads
+/// a variant pattern to its payload arity — which puts a
+/// `TypedPattern::Wildcard` in a *payload slot* of MIR's decision tree.
 ///
 /// Each spelling below selects the same arm and must read the same value: a
 /// padded slot is extracted and discarded, not skipped and not read off the end.
@@ -3594,9 +3445,8 @@ fn a_padded_payload_wildcard_selects_its_arm_at_runtime() {
 
     // A wildcard in a *nested* payload slot emits a payload read the arm never
     // uses. The value it selects must be unchanged, and the discarded slot must
-    // not fault. (This was written `Wrapped(Val)` until ADR-134 made the bare
-    // spelling `Y124`; `Val(_)` is the same pattern and the same padding, said
-    // out loud.)
+    // not fault. (ADR-134 makes the bare spelling `Wrapped(Val)` a `Y124`;
+    // `Val(_)` is the same pattern and the same padding, said out loud.)
     let src = format!(
         "{enums}fn main() -> Int {{\n  var v = Wrapped(Val(7))\n  \
          match v {{\n    Wrapped(Nil) => 1\n    Wrapped(Val(_)) => 2\n    Bare => 3\n  }}\n}}\n"
@@ -3638,11 +3488,11 @@ fn match_variable_bind_whole_scrutinee() {
     assert_eq!(result.as_int(), 99);
 }
 
-// --- M7-WS7: closures (§4.10) ---------------------------------------------
+// --- closures (§4.10) -------------------------------------------------------
 //
 // Closures capture outer `var`/`param` values by copying them into the closure's
-// runtime environment; the synthetic function loads them at entry (Approach B).
-// Calling a closure value is an indirect call through its `fn_ptr`.
+// runtime environment; the synthetic function loads them at entry. Calling a
+// closure value is an indirect call through its `fn_ptr`.
 
 #[test]
 fn closure_no_captures() {
@@ -3695,31 +3545,29 @@ fn closure_curried() {
     // A closure returning a closure: |x| |y| x + y. The inner closure captures
     // the outer's param `x`.
     //
-    // This test passed throughout the transitive-capture bug below, and is kept
-    // beside it as the record of what was actually covered: `x` is the *outer's
-    // param*, so the outer closure captures nothing and there is no environment
-    // to hand down. The bug needed a name declared outside **both**.
+    // `x` is the *outer's param*, so the outer closure captures nothing and
+    // there is no environment to hand down. The transitive case below is the one
+    // that needs a name declared outside **both**.
     let (rt, result) =
         run_main("fn main() -> Int { var add = |x| |y| x + y; var inc = add(1); inc(41) }");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
 }
 
-// --- Transitive captures (handover 31 item 1) -----------------------------
+// --- Transitive captures ----------------------------------------------------
 //
 // A closure whose body *is* a closure must capture whatever the returned one
 // names from outside them both: the returned closure's environment is filled
 // from the returning closure's frame, so the returning closure has to be
-// holding the value. `capture.rs`'s walker used to return early when the body it
-// was handed was itself a closure, recording nothing — and the inner env slot
-// was then filled from an empty environment with `Unit`. Three failure modes
-// fell out of that one slot, and each gets a test here because they fail
-// differently: a panic, a SIGSEGV, and a silently wrong answer.
+// holding the value. `capture.rs`'s walker therefore descends into a body that
+// is itself a closure; recording nothing there fills the inner env slot from an
+// empty environment with `Unit`. That one slot fails three ways — a panic, a
+// SIGSEGV, and a silently wrong answer — so each gets its own test.
 
 #[test]
 fn closure_curried_captures_transitively() {
-    // `base` is declared outside both closures. Before the fix: `<closure:0>`
-    // and a panic out of `praxis_int_load` reading a `Unit` as an `Int`.
+    // `base` is declared outside both closures. The panic mode: an empty
+    // environment makes `praxis_int_load` read a `Unit` as an `Int`.
     let (rt, result) = run_main(
         "fn main() -> Int {\n  var base = 10\n  var mk = |a| |b| b + base\n  mk(5)(1)\n}\n",
     );
@@ -3740,8 +3588,7 @@ fn closure_curried_three_levels_captures_transitively() {
 fn a_transitively_captured_text_is_the_text_and_not_unit() {
     // The silent mode, and the reason this needs a value assertion rather than a
     // `has_pending_fault` check: a captured `Text` read back as `Unit` neither
-    // panics nor faults. `got` was `Text` at check time and `Unit` at run time,
-    // and `got.len()` answered 0 with nothing in the output to say so.
+    // panics nor faults — `.len()` simply answers 0, with nothing to say so.
     let (rt, result) = run_main(
         "fn main() -> Int {\n  var base = \"hello\"\n  var mk = |a| |b| base\n  mk(0)(0).len()\n}\n",
     );
@@ -3751,8 +3598,7 @@ fn a_transitively_captured_text_is_the_text_and_not_unit() {
 
 #[test]
 fn a_bare_and_a_braced_curried_body_agree() {
-    // The two spellings differ by one pair of braces; the braced one was always
-    // on the working side, which is what made the bug survive.
+    // The two spellings differ by one pair of braces, and must agree.
     let (rt_bare, bare) = run_main(
         "fn main() -> Int {\n  var base = 10\n  var mk = |a| |b| b + base\n  mk(5)(1)\n}\n",
     );
@@ -3769,7 +3615,7 @@ fn a_bare_and_a_braced_curried_body_agree() {
     assert_eq!(bare.as_int(), 11);
 }
 
-// --- M7-WS7b: mutable captures via VarCell (§4.10) ------------------------
+// --- mutable captures via VarCell (§4.10) -----------------------------------
 //
 // A `var` captured by a closure is boxed into a GC'd VarCell at its binding
 // site. The binding function and every capturing closure share the cell, so a
@@ -3819,11 +3665,11 @@ fn mutable_capture_survives_returned_closure() {
 
 #[test]
 fn transitive_mutable_capture_shares_one_cell_across_frames() {
-    // The SIGSEGV mode: a reassigned `var` is a `ByCell` capture, so the empty
-    // environment handed the inner closure a `Unit` where a `VarCell` pointer
-    // was expected, and the write dereferenced it. What must hold now is
-    // stronger than "no crash": the *same* cell is threaded through every
-    // environment, so a write two levels down is visible at the top.
+    // The SIGSEGV mode: a reassigned `var` is a `ByCell` capture, and an empty
+    // environment hands the inner closure a `Unit` where a `VarCell` pointer is
+    // expected, which the write dereferences. What must hold is stronger than
+    // "no crash": the *same* cell is threaded through every environment, so a
+    // write two levels down is visible at the top.
     let (rt, result) = run_main(
         "fn main() -> Int {\n  var n = 0\n  var mk = |a| |b| { n = n + a + b; n }\n  mk(1)(2)\n  n = n + 50\n  mk(3)(4)\n  n\n}\n",
     );
@@ -3841,7 +3687,7 @@ fn transitive_mutable_capture_shares_one_cell_across_three_frames() {
     assert_eq!(result.as_int(), 62);
 }
 
-// --- M7-WS8: monomorphization (§13.6) -------------------------------------
+// --- monomorphization (§13.6) -----------------------------------------------
 //
 // Polymorphic user fns are instantiated per concrete call site. The mono pass
 // runs between typed HIR and MIR; the JIT then compiles one clone per
@@ -3864,13 +3710,11 @@ fn monomorphization_two_clones_of_same_generic_fn() {
     assert_eq!(result.as_int(), 42);
 }
 
-/// MONO-03, end to end. One generic function applied to `Option[Int]` and to
-/// `Option[Text]` needs **two** specializations.
+/// One generic function applied to `Option[Int]` and to `Option[Text]` needs
+/// **two** specializations.
 ///
-/// The mono cache keyed on `db.render`, and `Option` rendered as a bare name
-/// because its element type lived in a fresh nominal def rather than in the
-/// type (TY-06). Both call sites therefore hashed to `id__Option`, and the
-/// second one ran the first's `Int` clone over a `Text` payload.
+/// The mono cache key has to carry the element type: if both call sites hash to
+/// `id__Option`, the second runs the first's `Int` clone over a `Text` payload.
 #[test]
 fn monomorphization_distinguishes_option_element_types() {
     let src = "fn id(x) { x }\n\
@@ -3917,12 +3761,11 @@ fn monomorphization_generic_fn_called_from_closure_body() {
 // ===========================================================================
 // Adversarial edge-case tests — pipeline fusion, closures, GC interactions.
 //
-// These tests probe combinations the M8-WS11 suite did not cover: mutable
-// captures mutated inside fused loops, GC pressure mid-pipeline, nested
-// closure allocation during fusion, fold/reduce over GC-object accumulators,
-// take(0)/negative-literal edges, and object-valued (non-Int) pipeline
-// elements. Written from an adversary's perspective: try to break it even
-// when it "should" work.
+// These tests probe combinations: mutable captures mutated inside fused loops,
+// GC pressure mid-pipeline, nested closure allocation during fusion,
+// fold/reduce over GC-object accumulators, take(0)/negative-literal edges, and
+// object-valued (non-Int) pipeline elements. Written from an adversary's
+// perspective: try to break it even when it "should" work.
 // ===========================================================================
 
 /// Helper: build Praxis source that constructs a Vec of `n` sequential ints
@@ -4044,8 +3887,7 @@ fn adv_pipeline_skip_zero_is_identity() {
 fn adv_pipeline_fold_accumulator_is_gc_int_under_pressure() {
     // fold whose accumulator is a GC Int object threaded across many
     // iterations under GC pressure. The accumulator GcRef must stay rooted
-    // across every iteration's GC. (fold into a Vec is blocked by inference —
-    // see handover — so this tests the GC-rooting of the fold acc with Int.)
+    // across every iteration's GC.
     let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 500 { v.push(i); i = i + 1 }\n  v.fold(0, |a, x| a + x)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4055,12 +3897,11 @@ fn adv_pipeline_fold_accumulator_is_gc_int_under_pressure() {
 
 #[test]
 fn adv_pipeline_fold_into_vec_now_supported() {
-    // FIXED (§3 Gap A): fold into a Vec accumulator now type-checks and runs.
-    // The closure param `a` is inferred as Vec[Int] from the init `Vec()`:
-    // bidirectional inference threads the combinator's accumulator type
-    // (the name-shared `Acc` in fold's signature) into the closure's params
-    // before the body is inferred, so `a.push(x)` resolves. Pre-fix this was
-    // rejected with Y110; now it collects [1,2] → len 2.
+    // Fold into a Vec accumulator. The closure param `a` is inferred as Vec[Int]
+    // from the init `Vec()`: bidirectional inference threads the combinator's
+    // accumulator type (the name-shared `Acc` in fold's signature) into the
+    // closure's params before the body is inferred, so `a.push(x)` resolves.
+    // Collects [1,2] → len 2.
     let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  var acc = v.fold(Vec(), |a, x| { a.push(x); a })\n  acc.len()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4093,9 +3934,9 @@ fn adv_pipeline_nested_closure_allocation_in_fused_map() {
 #[test]
 fn adv_pipeline_curried_closure_captures_transitively() {
     // The shape above allocates a nested closure per iteration but captures
-    // nothing from outside the pipeline, so it never exercised the transitive
-    // path. `base` is declared outside both closures *and* outside the fused
-    // loop — this is `[1,2,3].map(|x| |y| x + y + base)`, which was broken.
+    // nothing from outside the pipeline, so it does not exercise the transitive
+    // path. Here `base` is declared outside both closures *and* outside the
+    // fused loop: `[1,2,3].map(|x| |y| x + y + base)`.
     let src = "fn main() -> Int {\n  var base = 100\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var fs = v.map(|x| |y| x + y + base)\n  fs[0](1) + fs[2](1)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4120,9 +3961,7 @@ fn adv_pipeline_nested_vec_elements_survive_fused_count() {
     // count the collected inner Vecs. Verifies non-Int elements (nested Vec
     // GcRefs) survive the fused loop and that the closure receives the right
     // GcRef. Under GC pressure the inner Vecs must stay rooted while the loop
-    // runs. (We can't call .len() on the closure param — inference limitation,
-    // see adv_pipeline_method_on_closure_param_from_collection_rejected — so we
-    // count the collected Vecs instead.)
+    // runs.
     let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 200 {\n    var inner = Vec()\n    inner.push(i)\n    inner.push(i)\n    v.push(inner)\n    i = i + 1\n  }\n  v.map(|inner| inner).count()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4132,19 +3971,18 @@ fn adv_pipeline_nested_vec_elements_survive_fused_count() {
 
 #[test]
 fn adv_pipeline_method_on_closure_param_from_collection_now_supported() {
-    // FIXED (§3 Gap B): a method call on a closure parameter whose type is the
-    // element type of a collection now resolves. `v.map(|i| i.len())` over a
-    // Vec[Vec[Int]] failed with T110 pre-fix — two root causes, both closed:
+    // A method call on a closure parameter whose type is the element type of a
+    // collection — `v.map(|i| i.len())` over a Vec[Vec[Int]] — resolves through
+    // two mechanisms:
     //
     // 1. Bidirectional inference threads the receiver's element type into the
     //    closure param before the body is inferred, so `.len()` resolves once
     //    the element type is known.
-    // 2. The HM value restriction: `var v = Vec()` no longer generalizes to
+    // 2. The HM value restriction: `var v = Vec()` does not generalize to
     //    `forall T. Vec[T]` (an expansive RHS is left monomorphic), so the
     //    element-type pinning from `v.push(inner)` propagates to the later
     //    `v.map(...)` instead of each call instantiating a fresh element type.
     //
-    // The idiomatic build-then-map pattern now type-checks and runs.
     // inner = [1] → len 1 → sum = 1.
     let src = "fn main() -> Int {\n  var v = Vec()\n  var inner = Vec()\n  inner.push(1)\n  v.push(inner)\n  v.map(|i| i.len()).sum()\n}\n";
     let (rt, result) = run_main(src);
@@ -4154,11 +3992,11 @@ fn adv_pipeline_method_on_closure_param_from_collection_now_supported() {
 
 #[test]
 fn adv_pipeline_min_by_on_nested_collection_lengths() {
-    // The Gap B fix unblocks the `.len()`-based min_by/max_by comparators over
-    // nested collections: find the inner Vec with the fewest elements. The
-    // comparator closure's params `a`/`b` are the element type Vec[Int], pinned
-    // by bidirectional inference + the value restriction so `a.len()`/`b.len()`
-    // resolve. min_by takes a (T,T)->Bool comparator; "shorter" is
+    // `.len()`-based min_by/max_by comparators over nested collections: find the
+    // inner Vec with the fewest elements. The comparator closure's params `a`/`b`
+    // are the element type Vec[Int], pinned by bidirectional inference + the
+    // value restriction so `a.len()`/`b.len()` resolve. min_by takes a
+    // (T,T)->Bool comparator; "shorter" is
     // `a.len() < b.len()`. inner lengths [3,1,2] → shortest = b → len 1.
     let src = String::from("fn main() -> Int {\n")
         + "  var v = Vec()\n"
@@ -4190,9 +4028,9 @@ fn adv_pipeline_collect_nested_vecs_then_count() {
 fn adv_pipeline_find_with_allocating_predicate() {
     // find's predicate allocates (creates an Int) before returning its bool.
     // If the fused loop doesn't root the current element across the predicate's
-    // allocation, find matches the wrong element or faults. REP-39 makes this
-    // stronger rather than weaker: the answer is now the *element*, which the
-    // loop has to have kept alive across that allocation to hand back at all.
+    // allocation, find matches the wrong element or faults. The answer is the
+    // *element*, which the loop has to keep alive across that allocation to
+    // hand back at all.
     let src = "fn main() -> Int {\n  var v = Vec()\n  var i = 0\n  while i < 100 { v.push(i); i = i + 1 }\n  match v.find(|x| x + 0 == 50) { Some(n) => n, None => -1 }\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4289,20 +4127,15 @@ fn adv_pipeline_empty_source_collect_is_empty_vec() {
     assert_eq!(result.as_int(), 0);
 }
 
-/// **D1.** An empty `min`/`max` faults; it does not answer `0`.
+/// An empty `min`/`max` faults; it does not answer `0`.
 ///
-/// This test used to be `adv_pipeline_empty_source_min_is_zero`, and its
-/// comment called the behaviour "a known edge — document current behavior".
-/// Documenting it is what made it a defect-pinning test: `0` is not a *missing*
-/// answer, it is a **wrong** one. It is below every element of `[3, 4]` and
-/// above every element of `[-3, -4]`, so nothing at the call site can tell it
-/// from a real minimum, and the accumulator was seeded rather than derived from
-/// the data at all.
+/// `0` is not a *missing* answer, it is a **wrong** one: it is below every
+/// element of `[3, 4]` and above every element of `[-3, -4]`, so nothing at the
+/// call site can tell a seeded accumulator from a real minimum.
 ///
-/// `reduce`, `min_by` and `max_by` already faulted here (MIR-09); D1 settled
-/// that `min`/`max` join them rather than becoming `Option`, because an empty
-/// `min` is a mistake in the program and not the domain-level absence §4.7
-/// reserves `Option` for.
+/// `reduce`, `min_by` and `max_by` fault here too, rather than answering
+/// `Option`: an empty `min` is a mistake in the program and not the
+/// domain-level absence §4.7 reserves `Option` for.
 #[test]
 fn an_empty_min_or_max_faults_rather_than_answering_zero() {
     for sink in ["min", "max"] {
@@ -4358,8 +4191,7 @@ fn adv_pipeline_empty_source_all_is_true() {
 fn adv_pipeline_empty_source_reduce() {
     // Empty source → reduce. `reduce` seeds from the first element, and there
     // is none — so the answer is a fault, not whatever the unseeded Gc slot
-    // happened to hold (MIR-09). This test used to assert only that the host
-    // survived, because there was no contract to assert; now there is.
+    // happened to hold.
     let src = "fn main() -> Int {\n  var v = Vec()\n  v.reduce(|a, x| a + x)\n}\n";
     let (rt, _result) = run_main(src);
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyCollection);
@@ -4576,10 +4408,10 @@ fn adv_for_loop_over_vec_under_gc_pressure() {
 #[test]
 fn adv_pipeline_chain_after_pipeline_chain_nested() {
     // A pipeline whose source is itself a pipeline result that was collected:
-    // `(v.map(f)).filter(p).sum()`. Already covered, but this variant uses a
-    // capturing closure in the inner map AND a predicate in the outer filter,
-    // both reading the same captured `var`. Verifies two closures + a shared
-    // cell all root correctly in one fused loop.
+    // `(v.map(f)).filter(p).sum()`. This variant uses a capturing closure in the
+    // inner map AND a predicate in the outer filter, both reading the same
+    // captured `var`. Verifies two closures + a shared cell all root correctly
+    // in one fused loop.
     let src = "fn main() -> Int {\n  var threshold = 5\n  var v = Vec()\n  var i = 0\n  while i < 20 { v.push(i); i = i + 1 }\n  v.map(|x| x + threshold).filter(|x| x > threshold).sum()\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4648,10 +4480,9 @@ fn adv_pipeline_flat_map_with_filter_then_sum() {
 
 #[test]
 fn adv_indirect_call_on_local_closure_works() {
-    // The SUPPORTED path: a closure bound to a local, then called. This works
-    // (the callee resolves to a local). The closures-from-collections case is
-    // now ALSO supported — see adv_call_closure_retrieved_from_collection and
-    // siblings below.
+    // A closure bound to a local, then called: the callee resolves to a local.
+    // The closure-from-a-collection case is
+    // `adv_call_closure_retrieved_from_collection` below.
     let src = "fn main() -> Int {\n  var f = |x| x + 7\n  f(100)\n}\n";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -4660,15 +4491,11 @@ fn adv_indirect_call_on_local_closure_works() {
 
 #[test]
 fn adv_call_closure_retrieved_from_collection() {
-    // PROBE (§2): invoking a closure retrieved from a collection used to
-    // miscompile and SIGSEGV — `fs.get(0)(100)` resolved its callee to no symbol
-    // (SymbolId(u32::MAX), empty callee_name) and fell through to a nonsense
-    // direct call (CallTarget::User("")), which does not read the closure's
-    // fn_ptr. Fixed: a postfix `expr(args)` parse production wraps the preceding
-    // expression as the call's callee; the HIR lowerer stores it as `callee_expr`
-    // and inference unifies it against a Func; the MIR builder lowers it to
-    // Inst::CallIndirect (reads the closure's fn_ptr and calls through it).
-    // Pre-fix this segfaulted; now it returns 101.
+    // Invoking a closure retrieved from a collection — `fs.get(0)(100)`. A
+    // postfix `expr(args)` parse production wraps the preceding expression as
+    // the call's callee; the HIR lowerer stores it as `callee_expr` and
+    // inference unifies it against a Func; the MIR builder lowers it to
+    // Inst::CallIndirect, which reads the closure's fn_ptr and calls through it.
     let src = String::from("fn main() -> Int {\n")
         + "  var fs = Vec()\n"
         + "  fs.push(|x| x + 1)\n"
@@ -4767,10 +4594,10 @@ fn adv_let_shadowing_changes_type() {
     assert_eq!(result.as_int(), 5);
 }
 
-// --- M9: Option[T] prelude enum --------------------------------------------
+// --- Option[T] prelude enum -------------------------------------------------
 // Option is a polymorphic prelude enum (forall T. Option[T]) with variants
 // Some(T) and None. These tests exercise construction, matching, equality, and
-// cross-site unification (the M9 structural-same-named-enum unify fix).
+// cross-site unification (structural same-named-enum unification).
 
 #[test]
 fn m9_option_some_construction_and_match() {
@@ -4847,7 +4674,7 @@ fn m9_option_returned_none_from_function() {
     assert_eq!(result.as_int(), 99);
 }
 
-// --- M9 WS2: named heterogeneous sections + repeated tail (§7.5) ------------
+// --- named heterogeneous sections + repeated tail (§7.5) --------------------
 
 #[test]
 fn m9_named_sections_two_fields() {
@@ -4903,7 +4730,7 @@ fn m9_named_sections_too_few_sections_faults() {
     );
 }
 
-// --- M9 WS3: block (§7.5, §7.7) ---------------------------------------------
+// --- block (§7.5, §7.7) -----------------------------------------------------
 
 #[test]
 fn m9_block_template_plus_named_field() {
@@ -4945,11 +4772,10 @@ fn m9_block_template_that_writes_a_newline_spans_the_lines_it_writes() {
     // template writes buys it a second line, and the final `{w:rest}` is
     // bounded to its own line.
     //
-    // **Observed red two ways.** Without `block_item_window`: 11, because the
-    // unbounded `{w:rest}` takes `"abcd\n"` (5) instead of `"abcd"` (4) — a
-    // silent wrong answer, not a fault, which is why this test is worth having.
-    // With `extra` forced to 0 (a window of exactly one line, always):
-    // `at input offset 3..3: expected whitespace`, because the template's own
+    // Both failure modes are silent or misplaced. Without `block_item_window`
+    // the answer is 11, because the unbounded `{w:rest}` takes `"abcd\n"` (5)
+    // instead of `"abcd"` (4) — a wrong answer, not a fault, which is why this
+    // test is worth having. With a window of exactly one line the template's own
     // `\n` part has no terminator left inside its window.
     let src =
         "fn main() -> Int {\n  var b = read block(`{x:int},{y:int}\\n{z:int}`, `{w:rest}`)\n  \
@@ -4960,7 +4786,7 @@ fn m9_block_template_that_writes_a_newline_spans_the_lines_it_writes() {
     assert_eq!(result.as_int(), 10);
 }
 
-// --- M9 WS4: choice generated enums (§7.5) ----------------------------------
+// --- choice generated enums (§7.5) ------------------------------------------
 
 #[test]
 fn m9_choice_first_alternative_matches() {
@@ -4975,8 +4801,8 @@ fn m9_choice_first_alternative_matches() {
 #[test]
 fn m9_choice_second_alternative_via_backtrack() {
     // choice(A: int, B: word) on "hello" — A fails (not an int), B wins via
-    // backtracking. Scalar payloads keep this test about *backtracking*; the
-    // record-payload field access it used to avoid is covered by
+    // backtracking. Scalar payloads keep this test about *backtracking*;
+    // record-payload field access is covered by
     // `a_choice_payload_records_fields_are_readable`.
     let src = "fn main() -> Int {\n  var v = read choice(A: int, B: word)\n  match v {\n    A(n) => n\n    B(w) => 99\n  }\n}\n";
     let (rt, result) = run_main_with_input(src, "hello");
@@ -5003,21 +4829,15 @@ fn m9_choice_equality() {
     assert_eq!(result.as_int(), 1);
 }
 
-/// **REP-56 end to end.** A `choice(...)` payload record's fields are readable
-/// from a match-bound variant payload.
+/// A `choice(...)` payload record's fields are readable from a match-bound
+/// variant payload.
 ///
-/// This replaces a NOTE that called it "a known gap … tracked as an M9
-/// follow-up". It was neither: the payload record type was already real end to
-/// end (ADR-024/ADR-025), and inference simply reached the enum through the
+/// The payload record type is real end to end (ADR-024/ADR-025), and
+/// `infer_variant_pattern` must reach the enum without going through the
 /// constructor *symbol*, which an anonymous enum does not have (ADR-091
-/// Decision 1).
-///
-/// **Observed red with ADR-091 Decision 1 reverted** (`infer_variant_pattern`
-/// back to `ctor.and_then(lookup_enum_variant)`): `p` keeps an unbound variable,
-/// `p.a` lowers to `Unit` because `lower_field_get` takes REP-28's tolerance
-/// arm, and the multiply that follows aborts the test process —
-/// ``int_payload wants a `Int` payload; this value is a `Unit` (REP-56)``,
-/// rc=134. An aborting test is a failing test.
+/// Decision 1). Otherwise `p` keeps an unbound variable, `p.a` lowers to `Unit`,
+/// and the multiply that follows aborts the process rather than failing an
+/// assertion.
 #[test]
 fn a_choice_payload_records_fields_are_readable() {
     // Through a binding: the payload record reaches the field read.
@@ -5027,9 +4847,9 @@ fn a_choice_payload_records_fields_are_readable() {
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 42);
 
-    // …and through the headless record pattern (REP-57), which is the only
-    // spelling available: the payload record is anonymous, so there is no name
-    // a head could write.
+    // …and through the headless record pattern, which is the only spelling
+    // available: the payload record is anonymous, so there is no name a head
+    // could write.
     let src = "fn main() -> Int {\n  var v = read choice(A: `{a:int},{b:int}`)\n  \
                match v {\n    A({a, b}) => a * b\n  }\n}\n";
     let (rt, result) = run_main_with_input(src, "6,7");
@@ -5037,7 +4857,7 @@ fn a_choice_payload_records_fields_are_readable() {
     assert_eq!(result.as_int(), 42);
 }
 
-// --- M9 WS5: optional + Option[T] integration (§7.5) -----------------------
+// --- optional + Option[T] integration (§7.5) --------------------------------
 
 #[test]
 fn m9_optional_present_returns_some() {
@@ -5076,7 +4896,7 @@ fn m9_optional_present_and_absent_differ() {
     assert_eq!(result.as_int(), 5);
 }
 
-// --- M9 WS6: scan (§7.5, C.9) -----------------------------------------------
+// --- scan (§7.5, C.9) -------------------------------------------------------
 
 #[test]
 fn m9_scan_extracts_matches_in_order() {
@@ -5110,7 +4930,7 @@ fn m9_scan_no_matches_returns_empty_vec() {
     assert_eq!(result.as_int(), 0);
 }
 
-// --- M9 WS7: matrix, ragged grids, chars, one_of (§7.5) --------------------
+// --- matrix, ragged grids, chars, one_of (§7.5) -----------------------------
 
 #[test]
 fn m9_one_of_matches_a_char() {
@@ -5142,21 +4962,16 @@ fn m9_matrix_rectangular_int() {
     assert_eq!(result.as_int(), 5);
 }
 
-/// **REP-55, end to end.** matrix requires a uniform token count, and the fault
-/// names the row that broke it.
+/// `matrix` requires a uniform token count, and the fault names the row that
+/// broke it.
 ///
-/// This test **asserted an acceptance, not a value**: it checked only that a
-/// ragged matrix faulted, which stayed true while the fault named the whole
-/// input instead of the short row. That is the shape handover 17 warns about,
-/// so it gains the span assertion rather than a sibling.
+/// The assertion is the span, not merely that a ragged matrix faults: a fault
+/// naming the whole input would satisfy the weaker check.
 ///
 /// It is the half `a_ragged_row_fault_names_the_row_in_grid_and_in_matrix`
 /// (praxis-runtime's `parser.rs`) cannot cover: it drives the real JIT, so it
-/// goes through `ParseDetail::consider`'s deepest-wins filter and gates that
-/// the new span actually *surfaces* rather than merely that `walk_matrix`
-/// returned it.
-///
-/// Observed red with the fix removed: the span is `(0, 9)`, the whole input.
+/// goes through `ParseDetail::consider`'s deepest-wins filter and gates that the
+/// span actually *surfaces* rather than merely that `walk_matrix` returned it.
 #[test]
 fn m9_matrix_uniformity_faults_on_ragged() {
     let src = "fn main() -> Int {\n  var m = read matrix(int)\n  42\n}\n";
@@ -5181,23 +4996,14 @@ fn m9_matrix_uniformity_faults_on_ragged() {
     );
 }
 
-// NOTE: ragged `grid(P, ragged, fill: value)` — the runtime walk_grid_ragged
-// is complete (parses lines, pads to max width with the fill value), but the
-// `fill:` value grammar currently requires a parser-parseable token. A bare
-// scalar value like `.` or `0` isn't recognized by parse_parser_expr, so the
-// named arg is dropped and the constructor falls back to the uniform grid
-// (which then faults on ragged input). The grammar fix (accepting a wider
-// token set for `fill:` values) is a small follow-up; the runtime is ready.
-// Regular `grid(P)` and `matrix(P)` (the acceptance-critical forms) work fully.
-
 // ===========================================================================
-// M10 WS1 — §7.11 rich parse diagnostics (the on-ramp).
+// §7.11 rich parse diagnostics.
 //
-// A `ParseFailed` fault now records structured detail (input span, expected
+// A `ParseFailed` fault records structured detail (input span, expected
 // description, actual preview) into the runtime's `ParseDetail` slot. These
 // tests assert the detail is populated after a parse fault — the foundation the
-// noninteractive fallback (WS4) and the crash REPL's `input`/`parser` commands
-// (M10b) render.
+// noninteractive fallback and the crash REPL's `input`/`parser` commands
+// render.
 // ===========================================================================
 
 #[test]
@@ -5274,7 +5080,7 @@ fn m10ws1_parse_failed_preview_is_single_line() {
 }
 
 // ===========================================================================
-// M10 WS2 — debug-frame codegen wiring (§9.3, ADR-021, ADR-104).
+// Debug-frame codegen wiring (§9.3, ADR-021, ADR-104).
 //
 // Every generated function claims a debug frame in lockstep with its shadow
 // frame — one `DebugFrameEntry` and one value slot per `Gc` local, both
@@ -5283,7 +5089,7 @@ fn m10ws1_parse_failed_preview_is_single_line() {
 // non-corrupting: GC rooting stays sound (the run-pass suite guards this), the
 // stacks come back empty, and the deepest claim/release sequence — the
 // stack-overflow fault path — unwinds cleanly back to the host. The frames'
-// *content* (locals at fault time) is made observable by WS3's crash snapshot.
+// *content* (locals at fault time) is made observable by the crash snapshot.
 // ===========================================================================
 
 #[test]
@@ -5319,10 +5125,8 @@ fn m10ws2_debug_frame_unwinds_cleanly_on_stack_overflow() {
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::StackOverflow);
-    // Every frame's fault epilogue restored the tops its prologue saved. This
-    // used to be unassertable — `debug_top` lived on a context the harness had
-    // already dropped — and is now a property of the runtime, which outlives
-    // the run.
+    // Every frame's fault epilogue restored the tops its prologue saved. The
+    // stacks live on the runtime, which outlives the run.
     assert!(
         rt.debug_frame_stack().is_empty(),
         "every claim was released"
@@ -5347,7 +5151,7 @@ fn m10ws2_debug_frame_locals_survive_gc_during_recursion() {
 }
 
 // ===========================================================================
-// M10 WS3 — crash snapshot + GC rooting (§9.3, §19.10 acceptance).
+// Crash snapshot + GC rooting (§9.3, §19.10 acceptance).
 //
 // The first fault epilogue deep-copies the debug-frame chain into the runtime's
 // SnapshotSlot before unwinding. These tests assert the snapshot is populated
@@ -5359,7 +5163,8 @@ fn m10ws2_debug_frame_locals_survive_gc_during_recursion() {
 fn m10ws3_snapshot_captured_on_index_fault() {
     // An index-out-of-bounds fault drops into the snapshot. The chain must be
     // non-empty and carry the function name. The faulting frame is `main` here
-    // (the OOB access is inline); a deeper chain is exercised by the WS3 GC test.
+    // (the OOB access is inline); a deeper chain is exercised by the GC test
+    // below.
     let src = "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.get(5)\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
@@ -5405,12 +5210,12 @@ fn m10ws3_snapshot_retains_reachable_objects_across_gc() {
         !roots.is_empty(),
         "snapshot must root at least one GcRef (the Vec locals)"
     );
-    // Force a collection through the runtime's own root set — the host no
-    // longer names one, and the runtime-owned snapshot is an arm of it (P0-06),
-    // so this is now a test that the snapshot is rooted *automatically* rather
-    // than because this test remembered to pass it. If retention is broken, the
-    // referenced objects are reclaimed and dereferencing a root would be
-    // use-after-free. Collect several times to stress the mark/sweep.
+    // Force a collection through the runtime's own root set: the runtime-owned
+    // snapshot is an arm of it, so this tests that the snapshot is rooted
+    // *automatically* rather than because this test remembered to pass it. If
+    // retention is broken, the referenced objects are reclaimed and
+    // dereferencing a root would be use-after-free. Collect several times to
+    // stress the mark/sweep.
     for _ in 0..3 {
         rt.collect_now();
     }
@@ -5432,12 +5237,11 @@ fn m10ws3_snapshot_retains_reachable_objects_across_gc() {
 }
 
 // ===========================================================================
-// M10 WS1 (Part 2) — full static `Type` id + source span threaded into the
-// debug frame (§9.3). WS1 of Part 2 carries the per-local `type_id` (so the
-// `p EXPR` evaluator can reconstruct `Vec[Int]` / record shapes the runtime
-// `descriptor` loses) and the per-function source span (so the `source`
-// command can render the faulting function). These assert both survive into
-// the crash snapshot.
+// Full static `Type` id + source span threaded into the debug frame (§9.3).
+// The per-local `type_id` lets the `p EXPR` evaluator reconstruct `Vec[Int]` /
+// record shapes the runtime `descriptor` loses; the per-function source span
+// lets the `source` command render the faulting function. These assert both
+// survive into the crash snapshot.
 // ===========================================================================
 
 #[test]
@@ -5472,8 +5276,8 @@ fn m10b_ws1_snapshot_locals_carry_distinct_type_ids() {
     // Two locals of distinct static types — `Int` (`n`) and `Vec[Int]` (`xs`) —
     // must carry distinct `type_id`s in the snapshot. This proves the full
     // static `Type` (not just the runtime descriptor, which collapses all
-    // collections to `VEC`) is threaded through, so the M10b `p EXPR` evaluator
-    // can reconstruct `Vec[Int]` element types for type-checking.
+    // collections to `VEC`) is threaded through, so the `p EXPR` evaluator can
+    // reconstruct `Vec[Int]` element types for type-checking.
     let src = "fn main() -> Int {\n  var n = 42\n  var xs = Vec()\n  xs.push(n)\n  xs.get(9)\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
@@ -5537,16 +5341,15 @@ fn snapshot_local_vec(snap: &praxis_runtime::CrashSnapshot, name: &str) -> Optio
 
 #[test]
 fn a_local_the_root_set_dropped_is_still_renderable() {
-    // MIR-16 / ADR-044 decision 1, stated at the snapshot level. `xs` is dead
-    // for the collector from its last `push` onward, so `RootSlots::dead` nulls
-    // its shadow slot at the very next safepoint — the `Vec()` that makes `ys`
-    // — and `a_dead_local_stops_being_reachable_from_its_frame` is the test
-    // that insists it does. The debugger must show it anyway: the user is
-    // asking what the program's state *is*, not what the collector still needs.
+    // ADR-044 decision 1, stated at the snapshot level. `xs` is dead for the
+    // collector from its last `push` onward, so `RootSlots::dead` nulls its
+    // shadow slot at the very next safepoint — the `Vec()` that makes `ys` —
+    // and `a_dead_local_stops_being_reachable_from_its_frame` is the test that
+    // insists it does. The debugger must show it anyway: the user is asking what
+    // the program's state *is*, not what the collector still needs.
     //
-    // This is the property store-at-def could plausibly have broken, because
-    // `xs`'s definition is now the only point that writes its debug slot. It
-    // does not break it, because the debug slot is never cleared.
+    // `xs`'s definition is the only point that writes its debug slot, and the
+    // debug slot is never cleared, so the value stays renderable.
     let src = "fn main() -> Int {\n  var xs = Vec()\n  xs.push(11)\n  var ys = Vec()\n  \
                ys.push(22)\n  ys.get(99)\n}\n";
     let (rt, _result) = run_main(src);
@@ -5567,15 +5370,11 @@ fn a_local_the_root_set_dropped_is_still_renderable() {
 
 #[test]
 fn a_fault_between_a_definition_and_the_next_safepoint_shows_the_value() {
-    // The case the deleted `CheckFault` spill existed for. `d` is boxed by an
-    // `Inst::ConstGc`/`Inst::Alloc`, then read back as a scalar and divided
-    // into — and the division faults before any GC safepoint runs. Nothing
-    // between `d`'s definition and the fault would have written its debug slot
-    // under the old scheme except the spill at the `CheckFault` itself; under
-    // store-at-def the value arrived at the definition.
-    //
-    // The comment the spill carried named this exact program: "a snapshot taken
-    // on the fault path sees `<uninit>` for the `0` divisor in `x / 0`".
+    // `d` is boxed by an `Inst::ConstGc`/`Inst::Alloc`, then read back as a
+    // scalar and divided into — and the division faults before any GC safepoint
+    // runs. Store-at-def is what puts the value in the debug slot: without a
+    // write at the definition, a snapshot taken on the fault path sees
+    // `<uninit>` for the `0` divisor in `n / d`.
     let src = "fn main() -> Int {\n  var n = 10\n  var d = 0\n  n / d\n}\n";
     let (rt, _result) = run_main(src);
     assert!(rt.has_pending_fault());
@@ -5634,9 +5433,9 @@ fn a_temp_that_never_reached_a_shadow_slot_is_still_renderable() {
 /// **`Float` is the one to test rather than `Int`**, because the scalar channel
 /// carries `f64::to_bits()` and the slot carries what the channel carries. An
 /// `Int` slot round-trips even if every decode were the identity; this one does
-/// not. It is also the shape handover 26 §4 names as the risk — "the collector
-/// dereferences an f64 bit pattern as a `GcHeader`" — so it is the shape whose
-/// slot the collector must be shown not to follow.
+/// not. It is also the risky shape — a collector that followed the slot would
+/// dereference an f64 bit pattern as a `GcHeader` — so it is the one whose slot
+/// the collector must be shown not to follow.
 #[test]
 fn an_elided_float_box_renders_its_value_and_not_its_bit_pattern() {
     let src = "fn main() -> Int {\n  var a = 2.5\n  var b = 4.0\n  \
@@ -5738,7 +5537,7 @@ fn an_overflowing_temp_is_not_given_the_wrapped_value_it_never_produced() {
 
 #[test]
 fn a_snapshot_orders_its_frames_innermost_first_with_each_functions_own_locals() {
-    // The debug frames are a *stack* now, not a `parent`-linked chain, so the
+    // The debug frames are a *stack*, not a `parent`-linked chain, so the
     // innermost-first order the host renders (`#0` is the faulting function)
     // comes from walking `[base, top)` backwards rather than from following
     // pointers. This is the test for that reversal, and for the rejoin: each
@@ -5772,8 +5571,7 @@ fn a_snapshot_orders_its_frames_innermost_first_with_each_functions_own_locals()
     assert_eq!(named(1, "deep"), None, "`deep` belongs to `inner` alone");
     assert_eq!(named(0, "outer"), None, "`outer` belongs to `main` alone");
 
-    // Each frame's span is its own function's, which is the field
-    // `praxis_set_frame_source_span` used to write at runtime.
+    // Each frame's span is its own function's.
     let (s0, e0) = snap.frames[0].source_span;
     let (s1, e1) = snap.frames[1].source_span;
     assert!(src[s0 as usize..e0 as usize].starts_with("fn inner"));
@@ -5794,18 +5592,18 @@ fn a_snapshot_orders_its_frames_innermost_first_with_each_functions_own_locals()
 // `adversarial_audit.rs` is the third leg, saying the arm stayed weak.
 // ===========================================================================
 
-/// The defect ADR-106 closes, in a real compiled program.
+/// ADR-106 in a real compiled program.
 ///
 /// `xs` is dead for the collector from its last read onward, so `RootSlots::dead`
-/// nulls its shadow slot (MIR-01) while its debug slot keeps naming the `Vec`
-/// (MIR-16). The loop after it allocates well past `INITIAL_COLLECT_THRESHOLD`,
-/// so a paced collection runs *inside that window* and reclaims `xs` — and then
-/// keeps allocating, so the block comes back as something else.
+/// nulls its shadow slot while its debug slot keeps naming the `Vec`. The loop
+/// after it allocates well past `INITIAL_COLLECT_THRESHOLD`, so a paced
+/// collection runs *inside that window* and reclaims `xs` — and then keeps
+/// allocating, so the block comes back as something else.
 ///
-/// Before the weak arm, the snapshot copied that reference and the debugger read
-/// a reissued block through `xs`'s static `Vec` descriptor. After it, `xs` is an
-/// absence: `snapshot_local_vec` finds the local and finds no value, which is
-/// the `<uninit>` decision 4 chose.
+/// Without the weak arm the snapshot would copy that reference and the debugger
+/// would read a reissued block through `xs`'s static `Vec` descriptor. With it,
+/// `xs` is an absence: `snapshot_local_vec` finds the local and finds no value,
+/// which is the `<uninit>` decision 4 chose.
 ///
 /// The `+ 2000` offsets every element past the interned small-`Int` range, for
 /// the reason `a_dead_local_stops_being_reachable_from_its_frame` gives: an
@@ -5852,8 +5650,8 @@ fn main() -> Int {
          reference into storage the allocator has since handed back out"
     );
     // And it is the *collected* absence, not the unwritten one — the slot says
-    // which, so the debugger can render `<collected>` where it used to have to
-    // say `<uninit>` about a `var` the program plainly ran.
+    // which, so the debugger can render `<collected>` rather than `<uninit>` for
+    // a `var` the program plainly ran.
     let xs = snap
         .frames
         .iter()
@@ -5909,11 +5707,8 @@ fn main() -> Int {
     );
 }
 
-/// TY-33's first unit end to end. `panic` typechecked before this stage and
-/// then failed the *compile* — "unresolved user function `panic`" — so the one
-/// thing that could not be observed about it was what it does. It raises its
-/// own fault kind, carries the words the program wrote, and stops the program
-/// where it stands.
+/// `panic` raises its own fault kind, carries the words the program wrote, and
+/// stops the program where it stands.
 #[test]
 fn a_panic_stops_the_program_with_the_message_it_was_given() {
     let (rt, _result) = run_main("fn main() -> Int {\n  panic(\"no route\")\n  1\n}\n");
@@ -5966,11 +5761,12 @@ fn dbg_hands_back_the_value_it_was_given() {
     assert_eq!(result.as_int(), 2);
 }
 
-/// TY-33's second unit end to end: each of the seven numeric helpers computes
-/// the number it names. Inference can only say the type is `Int` — that the
-/// wrapper behind the name is the *right* wrapper is a fact only a run can
-/// establish, and a table that named the wrong symbol would typecheck
-/// identically (which is why `each_helper_has_its_own_wrapper` exists too).
+/// Each of the seven numeric helpers computes the number it names.
+///
+/// Inference can only say the type is `Int` — that the wrapper behind the name
+/// is the *right* wrapper is a fact only a run can establish, and a table that
+/// named the wrong symbol would typecheck identically (which is why
+/// `each_helper_has_its_own_wrapper` exists too).
 #[test]
 fn each_numeric_helper_computes_what_it_names() {
     for (src, want) in [
@@ -6010,10 +5806,9 @@ fn each_numeric_helper_computes_what_it_names() {
 }
 
 /// The three helpers that can leave the `Int` range **fault** rather than
-/// wrapping, which is the same answer `+`/`-`/`*` already give (§4.12) and the
-/// same answer TY-28 gave for a literal: a number nobody wrote is worse than a
-/// stop. `sign`, `min` and `max` are total and are here to show the fault is not
-/// blanket caution.
+/// wrapping, which is the same answer `+`/`-`/`*` give (§4.12): a number nobody
+/// wrote is worse than a stop. `sign`, `min` and `max` are total and are here to
+/// show the fault is not blanket caution.
 #[test]
 fn a_numeric_helper_faults_rather_than_wrapping() {
     // `abs(Int::MIN)` has no positive counterpart — `praxis_int_neg`'s edge.
@@ -6027,9 +5822,8 @@ fn a_numeric_helper_faults_rather_than_wrapping() {
     assert!(rt.has_pending_fault());
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::IntOverflow);
 
-    // An inverted `clamp` range is empty, so there is no value to return.
-    // ADR-058 borrowed `InvalidSize` for it and recorded a dedicated kind as
-    // owed; S18 spent a bump and paid it (ADR-075).
+    // An inverted `clamp` range is empty, so there is no value to return; the
+    // fault kind is its own (`EmptyRange`, ADR-075).
     let (rt, _r) = run_main("fn main() -> Int { clamp(5, 10, 0) }");
     assert!(rt.has_pending_fault());
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::EmptyRange);
@@ -6046,7 +5840,7 @@ fn a_numeric_helper_faults_rather_than_wrapping() {
     assert_eq!(result.as_int(), i64::MAX);
 }
 
-// --- §6.5's graph helpers (TY-33 unit 3, ADR-060) ---------------------------
+// --- §6.5's graph helpers (ADR-060) -----------------------------------------
 
 /// A graph as a `steps` function, for the tests below. `1 -> {2, 3}`, `2 -> {4}`,
 /// `3 -> {4}`, `4 -> {}` — the diamond, which is the smallest graph that tells
@@ -6059,14 +5853,13 @@ const DIAMOND: &str = "fn steps(n: Int) -> Vec[Int] {\n\
                        \x20 v\n\
                        }\n";
 
-/// TY-33's third unit end to end: the two traversals visit every reachable
-/// state, once, in the order their names promise.
+/// The two traversals visit every reachable state, once, in the order their
+/// names promise.
 ///
 /// The half no type test can see. Inference says the result is `Vec[Int]`; that
 /// the wrapper behind the name walks the graph *at all* — that it calls the
 /// closure, reads the `Vec` it hands back, and recognizes a state it has already
-/// seen — is a fact only a run establishes. Before this the call reached the
-/// backend as `CallTarget::User("bfs")` and the compile failed.
+/// seen — is a fact only a run establishes.
 ///
 /// The order is encoded as decimal digits, so a walk that visited the right
 /// states in the wrong order fails rather than passing on a length check.
@@ -6359,10 +6152,10 @@ fn a_state_may_be_any_value_that_can_be_remembered() {
 }
 
 /// A walk holds every state it has seen in Rust structures the collector cannot
-/// scan, so each one has to be rooted in the native frame (P0-07). A graph big
-/// enough to collect several times over, whose neighbour function allocates on
-/// every call, is what makes the rooting observable: without it the visited set
-/// holds reclaimed objects and the answer is wrong or the host dies.
+/// scan, so each one has to be rooted in the native frame. A graph big enough to
+/// collect several times over, whose neighbour function allocates on every call,
+/// is what makes the rooting observable: without it the visited set holds
+/// reclaimed objects and the answer is wrong or the host dies.
 #[test]
 fn a_walk_roots_the_states_it_is_holding_across_its_own_allocations() {
     let (rt, result) = run_main(
@@ -6419,10 +6212,10 @@ fn a_fault_inside_a_closure_stops_the_walk() {
     assert_eq!(rt.fault(), praxis_runtime::FaultKind::Panic);
 }
 
-/// TY-34 end to end (ADR-059): a `for` over a range runs the iterations the
-/// range names. This is the half no type test can see — the loop reads
-/// `praxis_range_len` and `praxis_range_get`, so a wrong `len`/`get` symbol
-/// selection typechecks identically and then iterates the wrong collection.
+/// ADR-059: a `for` over a range runs the iterations the range names. This is
+/// the half no type test can see — the loop reads `praxis_range_len` and
+/// `praxis_range_get`, so a wrong `len`/`get` symbol selection typechecks
+/// identically and then iterates the wrong collection.
 #[test]
 fn a_for_over_a_range_runs_its_integers_in_order() {
     // Half-open: 0,1,2,3,4 — five iterations, and the last is 4 rather than 5.
@@ -6437,7 +6230,7 @@ fn a_for_over_a_range_runs_its_integers_in_order() {
     assert!(!rt.has_pending_fault());
     assert_eq!(result.as_int(), 10);
 
-    // A descending range is empty, not a countdown (D3) — the body never runs.
+    // A descending range is empty, not a countdown — the body never runs.
     let (rt, result) =
         run_main("fn main() -> Int {\n  var t = 7\n  for i in 5..0 { t = t + 100 }\n  t\n}\n");
     assert!(!rt.has_pending_fault());
@@ -6461,7 +6254,7 @@ fn a_for_over_a_range_runs_its_integers_in_order() {
     assert_eq!(result.as_int(), -2);
 }
 
-/// A range is a **value** (D6), not only a `for`-header form: it survives being
+/// A range is a **value**, not only a `for`-header form: it survives being
 /// bound to a name, passed through a function, stored in a collection and used as
 /// a `Map` key — and it renders as the half-open interval it is.
 #[test]
@@ -6501,8 +6294,7 @@ fn a_range_is_a_value_that_outlives_its_expression() {
 /// §3.3's representative program computes `sign` and `abs` on values it read,
 /// and `max(abs(dx), abs(dy))` over them. A helper has to survive being nested
 /// in an expression, called with computed operands, and used as another
-/// function's argument — the shapes a fresh type variable accepted and then
-/// could not compile.
+/// function's argument.
 #[test]
 fn numeric_helpers_nest_and_carry_computed_operands() {
     let (rt, result) = run_main(
@@ -6527,14 +6319,11 @@ fn numeric_helpers_nest_and_carry_computed_operands() {
     assert_eq!(result.as_int(), 10);
 }
 
-/// TY-30 end to end: the §5.2 program the design doc promises needs no
-/// annotations. `total`'s parameter has no type until `main` calls it, and the
-/// `.sum()` inside it had no catalog entry when inference walked past it — the
-/// entry is selected later, when the receiver resolves, and this is where that
-/// shows: the method has to *lower*, which is the half a type test cannot see.
-///
-/// Before this, the program typechecked and then failed the compile with "no
-/// method `sum` on this type" — a clean program that could not run.
+/// The §5.2 program the design doc promises needs no annotations. `total`'s
+/// parameter has no type until `main` calls it, and the `.sum()` inside it has
+/// no catalog entry when inference walks past it — the entry is selected later,
+/// when the receiver resolves, and this is where that shows: the method has to
+/// *lower*, which is the half a type test cannot see.
 #[test]
 fn a_method_on_an_unannotated_parameter_runs() {
     let (rt, result) = run_main(
@@ -6569,25 +6358,21 @@ fn a_deferred_method_with_arguments_runs() {
     assert_eq!(result.as_int(), 42);
 }
 
-// ---- Function values (REP-01, ADR-061) ----
+// ---- Function values (ADR-061) ----
 
-/// **REP-01, the only P0 left in the repair.** A top-level `fn` used as a value
-/// is a callable closure.
+/// A top-level `fn` used as a value is a callable closure.
 ///
-/// `var f = double` lowered to `Unit` and `Inst::CallIndirect` then read that
-/// Unit's payload as a function pointer, so this program — which `praxis check`
-/// accepts, because a `fn`'s type *is* a `Func` — took the host down with a
-/// SIGBUS. **This test aborting the test process is the failure mode**, not a
-/// wrong answer.
+/// `praxis check` accepts such a program either way, because a `fn`'s type *is*
+/// a `Func`, so a value that lowered to `Unit` would be read as a function
+/// pointer and take the host down: **this test aborting the test process is the
+/// failure mode**, not a wrong answer.
 ///
-/// All three routes the stage names are here: a `var`, a parameter of declared
-/// function type, and a graph helper's closure argument (§6.5's helpers were the
-/// new way to reach the bug, and their descriptor check is containment, not a
-/// fix). A `Vec` element is a fourth, and is the one that also exercises the
-/// postfix call form.
+/// Three routes are here: a `var`, a parameter of declared function type, and a
+/// graph helper's closure argument. A `Vec` element is a fourth, and is the one
+/// that also exercises the postfix call form.
 #[test]
 fn a_top_level_fn_is_a_callable_value() {
-    // Through a `var`, then called by name — the finding's own reproduction.
+    // Through a `var`, then called by name.
     let (rt, result) = run_main(
         "fn double(n: Int) -> Int { n * 2 }\n\
          fn main() -> Int {\n  var f = double\n  f(3)\n}\n",
@@ -6626,8 +6411,8 @@ fn a_top_level_fn_is_a_callable_value() {
 
 /// …and through a graph helper, where `praxis-runtime` calls *back* into
 /// generated code. The helper receives the adapter's closure and calls it once
-/// per state; a `Unit` here is what its descriptor check used to turn into a
-/// `TypeMismatch` fault.
+/// per state; a `Unit` here would fail its descriptor check as a `TypeMismatch`
+/// fault.
 #[test]
 fn a_fn_value_is_callable_from_the_runtime_side() {
     let (rt, result) = run_main(
@@ -6658,8 +6443,8 @@ fn a_fault_inside_a_fn_value_is_not_swallowed_by_its_adapter() {
     assert!(rt.has_pending_fault(), "the DivByZero has to arrive");
 }
 
-/// **REP-03.** A `for` over an unannotated parameter runs, and runs against the
-/// iterable each call site chose.
+/// A `for` over an unannotated parameter runs, and runs against the iterable
+/// each call site chose.
 ///
 /// The half no type test can see, and the one that says the *iterator* is still
 /// quantified. MIR picks the `len`/`get` runtime symbols from the iterator's
@@ -6671,10 +6456,10 @@ fn a_fault_inside_a_fn_value_is_not_swallowed_by_its_adapter() {
 /// way to make the item resolvable — would have made this program a signature
 /// disagreement and never reached codegen at all.
 ///
-/// The **element** is the other half: `copy` recorded the loop variable's type as
-/// the *collection's* before the fix, so it inferred `Vec[Vec[Int]]` and faulted
-/// with "value does not have the declared type" out of a program `praxis check`
-/// accepted.
+/// The **element** is the other half: the loop variable's type is the
+/// collection's *element* type, not the collection's — recording the collection
+/// makes `copy` infer `Vec[Vec[Int]]` and fault with "value does not have the
+/// declared type" out of a program `praxis check` accepts.
 #[test]
 fn a_for_over_an_unannotated_parameter_runs_against_each_iterable_it_is_given() {
     const TOTAL: &str = "fn total(r) { var t = 0\n for i in r { t = t + i }\n t }\n";
@@ -6706,7 +6491,7 @@ fn a_for_over_an_unannotated_parameter_runs_against_each_iterable_it_is_given() 
     }
 
     // The element half: a `Vec` built out of an unannotated iterable holds the
-    // *elements*, and this is the program that faulted at run time before.
+    // *elements*.
     const COPY: &str = "fn copy(vs) { var o = Vec()\n for v in vs { o.push(v) }\n o }\n";
     let (rt, result) = run_main(&format!(
         "{COPY}fn main() -> Int {{ var s = Vec()\n s.push(7)\n s.push(9)\n \
@@ -6723,8 +6508,8 @@ fn a_for_over_an_unannotated_parameter_runs_against_each_iterable_it_is_given() 
     assert_eq!(result.as_int(), 6);
 }
 
-/// **REP-07.** `&&` and `||` short-circuit: the right operand is not evaluated
-/// on the path that cannot need it.
+/// `&&` and `||` short-circuit: the right operand is not evaluated on the path
+/// that cannot need it.
 ///
 /// The half no parse test can see, and the point of the operators. `false &&
 /// panic("x")` must produce `false`, not a fault — MIR lowers `rhs` into exactly
@@ -6791,14 +6576,13 @@ fn the_logical_operators_short_circuit_and_answer_their_truth_table() {
     assert_eq!(result.as_int(), 8);
 }
 
-/// **REP-08.** A tuple element read at run time is the element the position
-/// names, at every arity and through every shape that holds one.
+/// A tuple element read at run time is the element the position names, at every
+/// arity and through every shape that holds one.
 ///
-/// The half no type test can see: `praxis_tuple_get` had **no MIR caller** before
-/// this — the symbol existed and nothing reached it, because `Inst::LoadField`
-/// hard-codes `praxis_record_field` and a tuple index had no instruction of its
-/// own. A `LoadField` reused here would read a record's field table out of a
-/// tuple's payload.
+/// The half no type test can see: a tuple index needs an instruction of its own,
+/// reaching `praxis_tuple_get`. `Inst::LoadField` hard-codes
+/// `praxis_record_field`, so a `LoadField` reused here would read a record's
+/// field table out of a tuple's payload.
 #[test]
 fn a_tuple_element_reads_the_value_at_that_position() {
     for (src, want) in [
@@ -6846,8 +6630,8 @@ fn a_tuple_element_reads_the_value_at_that_position() {
     assert!((result.as_float() - 3.0).abs() < 1e-12);
 }
 
-/// **REP-16 end to end.** A subscript reads and writes the collection it names,
-/// through every receiver that has the operation.
+/// A subscript reads and writes the collection it names, through every receiver
+/// that has the operation.
 ///
 /// The half no type test can see: which runtime wrapper each row selects. A
 /// `Counter` read that reached `praxis_map_get` would answer Unit where §6.2
@@ -6922,28 +6706,16 @@ fn a_subscript_reads_and_writes_through_the_wrapper_its_receiver_needs() {
     assert_eq!(result.as_int(), 31, "one key, counted three times");
 }
 
-/// **REP-16's two-coordinate subscript** (§6.4): `grid[x, y]` reads and writes the
-/// cell at (x, y), and the coordinate order is x-then-y.
+/// The two-coordinate subscript (§6.4): `grid[x, y]` reads and writes the cell
+/// at (x, y), and the coordinate order is x-then-y.
 #[test]
 fn a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names() {
     // A 2×2 grid read from input (a `Grid()` is 0×0, so it has no cell to name).
     // The written cell is deliberately **off the diagonal**: a store that reached
     // `praxis_grid_set(g, y, x, v)` would pass on a diagonal cell.
     //
-    // ADAPTED (S20/D11) — the **input**, and this is not a gate for D11. It
-    // used to read `"12\n34\n"` and expect `g[0, 0] == 12`, which says a
-    // `grid(int)` cell is a whole token *and* that `"12"` is one such token per
-    // row. The first half is right and D11 confirms it; the second was an
-    // accident of the predecessor's behaviour, which measured width in bytes
-    // and answered the four cells `[12, 2, 34, 4]` — the token, and then the
-    // token's tail. `"1 2\n3 4\n"` is the input that stays legal under D11 and
-    // still gives this test a 2x2 grid; the subject is untouched, so the
-    // written cell is still off the diagonal and a store that reached
-    // `praxis_grid_set(g, y, x, v)` still fails.
-    //
-    // The change is an adaptation, not a differential: this test passes on the
-    // pre-S20 tree with the new input too, because its subject is subscript
-    // argument order and not grid cell semantics. D11 is gated by
+    // The subject here is subscript argument order, not grid cell semantics:
+    // that a `grid(int)` cell is a whole token is gated by
     // `a_grid_cell_is_whatever_its_cell_parser_reads` (parser.rs) and
     // `a_grid_of_char_is_positional_so_a_space_is_a_cell`
     // (adversarial_audit.rs).
@@ -6978,8 +6750,8 @@ fn a_grid_subscript_takes_both_coordinates_in_the_order_the_design_names() {
     assert!(rt.has_pending_fault(), "an out-of-range store faults");
 }
 
-/// **REP-16's evaluation rule.** A compound assignment through a subscript
-/// evaluates its receiver and indices **once**.
+/// A compound assignment through a subscript evaluates its receiver and indices
+/// **once**.
 ///
 /// The desugaring `m[k] += v` → `m[k] = m[k] + v` names the place twice, and MIR
 /// lowers each `TypedExpr` where it stands, so an index with a side effect would
@@ -7007,15 +6779,14 @@ fn a_compound_assignment_through_a_subscript_evaluates_its_place_once() {
     assert_eq!(result.as_int(), 12, "one call to `pick`, one increment");
 }
 
-/// **A `Vec`/`Deque` element store.** `v[0] = 100` writes the slot `v[0]` reads,
-/// where ADR-064 left the two readers with no store at all.
+/// **A `Vec`/`Deque` element store.** `v[0] = 100` writes the slot `v[0]` reads.
 ///
 /// The assertions are the ones a plausible-but-wrong wrapper would fail. A store
 /// that reached for `praxis_vec_push` would *append*, so the length is checked
 /// alongside the element; an index the vector does not hold must fault rather
 /// than grow it, which is the same wrong answer from the other side; and the
 /// element descriptor has to be reconciled, or a `Vec[Int]` retagged by one bad
-/// store would read every remaining payload through the new type (P0-11).
+/// store would read every remaining payload through the new type.
 #[test]
 fn a_sequence_stores_the_element_its_subscript_reads() {
     // Replace, not append: the length is unchanged and the neighbours are not.
@@ -7136,8 +6907,8 @@ fn a_compound_assignment_through_a_field_evaluates_its_receiver_once() {
     assert_eq!(result.as_int(), 15, "one call to `pick`, one increment");
 }
 
-/// **REP-09 end to end.** A constructor with written type arguments runs, and it
-/// builds the collection the annotation names.
+/// A constructor with written type arguments runs, and it builds the collection
+/// the annotation names.
 ///
 /// The half a type test cannot see: the ctor's runtime call carries a *descriptor*
 /// chosen from the element type, and the descriptor selects hash and equality for
@@ -7172,15 +6943,13 @@ fn a_constructor_with_written_type_arguments_builds_what_it_names() {
     }
 }
 
-/// **REP-18.** A keyed collection can be enumerated, in a deterministic order, and
-/// `count` takes a predicate.
+/// A keyed collection can be enumerated, in a deterministic order, and `count`
+/// takes a predicate.
 ///
-/// §3.3's representative program ends `counts.values().count(|n| n >= 2)`, and
-/// neither half existed: `values` was in no catalog row, and `count` was defined
-/// only at arity zero. The order is asserted because a `HashMap`'s own iteration
-/// order is randomized per process — without a fixed order the *answer* of a
-/// program like `m.keys()[0]` would change between runs, which is RT-16 in a place
-/// where printing is not the only thing affected.
+/// §3.3's representative program ends `counts.values().count(|n| n >= 2)`. The
+/// order is asserted because a `HashMap`'s own iteration order is randomized per
+/// process — without a fixed order the *answer* of a program like `m.keys()[0]`
+/// would change between runs, not merely its rendering.
 #[test]
 fn a_keyed_collection_enumerates_in_a_deterministic_order() {
     // `values()` on a Counter, which is what §3.3 needs.
@@ -7244,16 +7013,16 @@ fn a_keyed_collection_enumerates_in_a_deterministic_order() {
     assert_eq!(result.as_int(), 0);
 }
 
-/// **REP-20.** A template literal that begins with a space matches.
+/// A template literal that begins with a space matches.
 ///
 /// The interpreter honours a literal's whitespace policy *before* matching its
-/// bytes, and the scanner left the leading space run in the text as well — so the
-/// space was consumed twice and the literal could never match. §3.3's own template
-/// is `` `{x1:int},{y1:int} -> {x2:int},{y2:int}` ``, which failed at the `-` of
-/// `->` on every input.
+/// bytes, so the scanner strips the leading space run out of the literal's text:
+/// left in both places the space is consumed twice and the literal can never
+/// match. §3.3's own template is
+/// `` `{x1:int},{y1:int} -> {x2:int},{y2:int}` ``.
 #[test]
 fn a_template_literal_that_begins_with_a_space_matches() {
-    // The finding's own shape, and §3.3's.
+    // §3.3's own shape.
     let (rt, result) = run_main_with_input(
         "fn main() -> Int {\n  var rs = read lines(`{a:int} -> {b:int}`)\n  \
          var t = 0\n  for r in rs { t = t + r.a * r.b }\n  t\n}\n",
@@ -7275,17 +7044,10 @@ fn a_template_literal_that_begins_with_a_space_matches() {
     // The policy is still flexible, which is what stripping the run *into* it
     // preserves: one space or many, tabs or spaces, all match.
     //
-    // AMENDED (S20/IPR-12). `"1->2\n"` used to be in this list, asserting that
-    // a template written with a space run also matches an input with **no**
-    // whitespace at all. That is the contradiction IPR-12 names: `SpaceRun` is
-    // defined as "one or more spaces or tabs" and was implemented as
-    // zero-or-more, with a comment in `consume_ws` admitting it. The reason it
-    // had to be zero-or-more was that the scanner tagged *every* literal
-    // `SpaceRun`, including literals with no run in front of them, so requiring
-    // one would have broken `{a:int},{b:int}`. The scanner distinguishes them
-    // now (`WsPolicy::None`), so the policy can mean what it says — and
-    // `"1->2"` against a template that wrote ` -> ` is a mismatch, asserted
-    // just below.
+    // `SpaceRun` means "one or more spaces or tabs". The scanner tags a literal
+    // with no run in front of it `WsPolicy::None`, so the policy can require one
+    // without breaking `{a:int},{b:int}` — and `"1->2"` against a template that
+    // wrote ` -> ` is a mismatch, asserted just below.
     for input in ["1 -> 2\n", "1    ->    2\n", "1\t->\t2\n"] {
         let (rt, result) = run_main_with_input(
             "fn main() -> Int {\n  var rs = read lines(`{a:int} -> {b:int}`)\n  \
@@ -7330,21 +7092,18 @@ fn a_template_literal_that_begins_with_a_space_matches() {
     assert_eq!(result.as_int(), 3);
 }
 
-/// **REP-20's trailing half.** A space/tab run at the *end* of a template
-/// literal is the whitespace policy too — required, and consumed by the policy
-/// rather than by the capture that follows.
+/// A space/tab run at the *end* of a template literal is the whitespace policy
+/// too — required, and consumed by the policy rather than by the capture that
+/// follows.
 ///
-/// The leading half landed and the trailing half did not: `flush` stripped both
-/// ends with one `trim_matches` and emitted a policy only for the leading run,
-/// so the trailing run was scanned away and belonged to nobody. It was neither
-/// required (`` `x: {a:rest}` `` matched `x:hello`) nor consumed (`a` was
-/// `" hello"`, with the space the template wrote). That is a silent wrong
-/// answer, and every assertion below is one the tree gave the wrong answer to.
+/// `flush` emits a policy for the trailing run as well as the leading one. A
+/// trailing run that belonged to nobody would be neither required
+/// (`` `x: {a:rest}` `` would match `x:hello`) nor consumed (`a` would be
+/// `" hello"`, with the space the template wrote) — a silent wrong answer.
 ///
-/// The premise the old code cited for the strip — "every capture consumes
-/// leading whitespace before it walks" — is one S20 deleted: a capture is
-/// offered the bytes at the cursor, whitespace and all, and `walk_atomic`
-/// decides. So `rest`, `text` and `char` keep a space the policy did not take.
+/// A capture is offered the bytes at the cursor, whitespace and all, and
+/// `walk_atomic` decides. So `rest`, `text` and `char` keep a space the policy
+/// did not take.
 #[test]
 fn a_template_literals_trailing_space_run_is_its_policy_too() {
     // (1) The run is CONSUMED by the policy, not by the capture: `a` is the
@@ -7386,7 +7145,7 @@ fn a_template_literals_trailing_space_run_is_its_policy_too() {
     assert_eq!(result.as_int(), 5, "`a` is `hello`, not `\" hello\"`");
 
     // (2) The run is REQUIRED — §7.2's ordinary run "matches one or more spaces
-    // or tabs", and that is the same one-or-more the leading half now enforces.
+    // or tabs", and that is the same one-or-more the leading half enforces.
     let (rt, _result) = run_main_with_input(
         "fn main() -> Int {\n  var rs = read lines(`x: {a:rest}`)\n  rs.len()\n}\n",
         "x:hello\n",
@@ -7423,10 +7182,9 @@ fn a_template_literals_trailing_space_run_is_its_policy_too() {
         assert_eq!(result.as_int(), 3, "{input:?}");
     }
 
-    // (3) D10's flagship construct. A `choice` behind a literal with a trailing
-    // run could not match at all: the space was in the literal's text, the
-    // capture was offered it, and the alternative's own literal `plus` was
-    // looked for at the space.
+    // (3) A `choice` behind a literal with a trailing run. If the space stayed
+    // in the literal's text the capture would be offered it, and the
+    // alternative's own literal `plus` would be looked for at the space.
     let (rt, result) = run_main_with_input(
         "fn main() -> Int {\n  \
          var rs = read lines(`op: {g:choice(Plus: `plus {n:int}`, Times: `times {n:int}`)}`)\n  \
@@ -7453,8 +7211,8 @@ fn a_template_literals_trailing_space_run_is_its_policy_too() {
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 1, "`char` is handed `A`, not `\" A\"`");
 
-    // (4) The interaction with S20's rule — *whitespace the parser offered it
-    // does not read is nobody's*. A trailing run that is POLICY is required and
+    // (4) The interaction with the rule that *whitespace the parser was offered
+    // and did not read is nobody's*. A trailing run that is POLICY is required and
     // consumed; a trailing run that is INPUT, past the last part, is still
     // forgiven by `walk_exact`. `{a:int} ` has one policy part, not two, and it
     // is satisfied by the line's own trailing space.
@@ -7482,23 +7240,21 @@ fn a_template_literals_trailing_space_run_is_its_policy_too() {
 }
 
 // ===========================================================================
-// REP-15: every iterable has a `for` lowering (ADR-066)
+// Every iterable has a `for` lowering (ADR-066)
 // ===========================================================================
 
-/// **REP-15's headline.** `capability::iter_item` has said all ten collections
-/// are iterable since M8, and **six of them had no lowering at all**: MIR's
-/// symbol pickers had arms for `Vec`, `Deque` and `Range` and defaulted the rest
-/// to `praxis_vec_get`, so a `Set`'s payload was read as a `Vec`'s.
+/// `capability::iter_item` says all ten collections are iterable, and each needs
+/// its own lowering: MIR's symbol pickers need an arm per collection, or a
+/// defaulted `praxis_vec_get` reads a `Set`'s payload as a `Vec`'s.
 ///
-/// So this is the test the defect existed for lack of: one `for` per iterable,
-/// each answering something a wrong read could not produce. Two of the failure
-/// modes are not assertions — **hanging and dying are**: `for x in s` over a
-/// `Set` used to kill the test process, and a `MinHeap` over `[3, 1, 2]` summed
-/// to `4349199564`, which is the worse one because nothing reported it.
+/// So: one `for` per iterable, each answering something a wrong read could not
+/// produce. Two of the failure modes are not assertions — **hanging and dying
+/// are**: a mis-lowered `for x in s` over a `Set` kills the test process, and a
+/// `MinHeap` over `[3, 1, 2]` sums to `4349199564`, which is the worse one
+/// because nothing reports it.
 #[test]
 fn a_for_reaches_every_member_of_every_iterable() {
-    // The three that already worked, so a regression here fails loudly rather
-    // than quietly turning into a snapshot.
+    // The three simplest iterables first, so a regression here fails loudly.
     for (src, want, what) in [
         (
             "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  \
@@ -7517,8 +7273,8 @@ fn a_for_reaches_every_member_of_every_iterable() {
             123,
             "Range, ascending and half-open",
         ),
-        // A `Set` is the one that killed the process. Two members, so a
-        // one-member answer is a different number from a two-member one.
+        // A `Set` is the one a wrong read kills the process on. Two members, so
+        // a one-member answer is a different number from a two-member one.
         (
             "fn main() -> Int {\n  var s = Set()\n  s.insert(3)\n  s.insert(1)\n  \
              var t = 0\n  for x in s { t = t * 10 + x }\n  t\n}\n",
@@ -7654,10 +7410,10 @@ fn a_for_iterates_a_snapshot_of_what_it_was_given() {
 /// A `for`'s order is the order the collection's own accessors already promise,
 /// which is what makes an iterating program's answer reproducible.
 ///
-/// A `HashSet`'s iteration order is randomized **per process**, so this is RT-16
-/// with teeth again (REP-18): the same program would sum the same numbers but
-/// concatenate them differently on two runs. The three orders are each pinned
-/// against the accessor that shares them.
+/// A `HashSet`'s iteration order is randomized **per process**: without a fixed
+/// order the same program would sum the same numbers but concatenate them
+/// differently on two runs. The three orders are each pinned against the
+/// accessor that shares them.
 #[test]
 fn an_iterables_order_is_the_one_its_own_accessors_promise() {
     // A `Map`'s `for` visits exactly what `keys()`/`values()` list, in step.
@@ -7708,15 +7464,14 @@ fn an_iterables_order_is_the_one_its_own_accessors_promise() {
     assert_eq!(forward.as_int(), 123);
 }
 
-/// **The AoC defect, end to end.** A hashed collection walks its `Int` keys in
-/// numeric order, not in the order they print.
+/// A hashed collection walks its `Int` keys in numeric order, not in the order
+/// they print.
 ///
-/// The order used to be the *rendered* member's, so a `Set` holding 9, 10, 100
-/// and 2 was walked `10, 100, 2, 9`. Nothing faulted and nothing printed
-/// suspiciously — a solve that folded its members simply computed a different
-/// number, which is the worst shape a defect comes in. The single-digit gates
-/// above cannot see it, because for one digit the two orders agree; these keys
-/// are chosen so they do not.
+/// Ordering by the *rendered* member walks a `Set` holding 9, 10, 100 and 2 as
+/// `10, 100, 2, 9` — nothing faults and nothing prints suspiciously, and a solve
+/// that folds its members simply computes a different number. The single-digit
+/// cases above cannot see it, because for one digit the two orders agree; these
+/// keys are chosen so they do not.
 #[test]
 fn a_hashed_collection_orders_its_int_keys_numerically() {
     for inserts in [
@@ -7746,15 +7501,13 @@ fn a_hashed_collection_orders_its_int_keys_numerically() {
     assert_eq!(result.as_int(), 20910, "2, 9, 10");
 }
 
-/// The handover's own assertable property: a `Set` and the `Vec` its members
-/// sort into are **one** sequence.
+/// A `Set` and the `Vec` its members sort into are **one** sequence.
 ///
-/// `sorted()` always went through the element descriptor's `compare` and the
-/// container always went through the rendered form, so the two disagreed for
-/// any `Set[Int]` with keys of different digit counts — and a reader comparing
-/// `out(s)` with `out(s.sorted())` was the only thing that could catch it. A fix
-/// that reordered only the *printing* would still fail this, because both sides
-/// here are folded by a `for`.
+/// `sorted()` goes through the element descriptor's `compare`, and the container
+/// has to use the same order: a container ordered by the rendered form disagrees
+/// with `sorted()` for any `Set[Int]` whose keys have different digit counts. An
+/// order that fixed only the *printing* would still fail this, because both
+/// sides here are folded by a `for`.
 #[test]
 fn a_set_and_its_sorted_vec_agree() {
     let (rt, result) = run_main(
@@ -7772,13 +7525,13 @@ fn a_set_and_its_sorted_vec_agree() {
     );
 }
 
-/// ADR-062's asymmetry, extended to the seven iterables that had no lowering:
-/// **one `for` body serves every iterable it is given**, because the iterator
-/// stays quantified and monomorphization makes one clone per iterable kind —
-/// and each clone picks its own [`IterPlan`] from a concrete ctor.
+/// ADR-062's asymmetry: **one `for` body serves every iterable it is given**,
+/// because the iterator stays quantified and monomorphization makes one clone
+/// per iterable kind — and each clone picks its own [`IterPlan`] from a concrete
+/// ctor.
 ///
-/// REP-03's gate proves this for `Vec`, `BitSet` and `Range`. Those three were
-/// the three that *worked*; this is the half of the property REP-15 was hiding.
+/// `a_for_over_an_unannotated_parameter_runs_against_each_iterable_it_is_given`
+/// covers `Vec`, `Deque` and `Range`; this covers the rest.
 #[test]
 fn a_for_over_an_unannotated_parameter_reaches_each_iterable_it_is_given() {
     // One source function, four ctors, all four in one program — so the clones
@@ -7807,18 +7560,17 @@ fn a_for_over_an_unannotated_parameter_reaches_each_iterable_it_is_given() {
     assert_eq!(result.as_int(), 51);
 }
 
-/// **REP-23.** A fused `enumerate()`/`zip()` pair holds both of its halves.
+/// A fused `enumerate()`/`zip()` pair holds both of its halves.
 ///
-/// It held **neither**: MIR emits `AllocKind::Tuple { ty: MirType::Opaque, … }`
-/// for the fused pipelines — their item types arrive with MIR-05 — the codegen
-/// degraded `Opaque` to a *zero-element* schema, and `praxis_alloc_tuple` sizes
-/// the payload from the schema. So both `praxis_tuple_set` calls wrote into a
-/// zero-length `items` and `[10, 20].enumerate()` answered `[(), ()]`, out of a
-/// documented §6.3 combinator and with nothing reported.
+/// MIR emits `AllocKind::Tuple { ty: MirType::Opaque, … }` for the fused
+/// pipelines, and `praxis_alloc_tuple` sizes the payload from the schema — so a
+/// codegen that degraded `Opaque` to a *zero-element* schema would have both
+/// `praxis_tuple_set` calls write into a zero-length `items`, and
+/// `[10, 20].enumerate()` would answer `[(), ()]` out of a documented §6.3
+/// combinator with nothing reported.
 ///
-/// The static types are still MIR-05's to supply (S21). What this pins is that
-/// the *values* survive — the schema keeps its arity and says "no static type"
-/// per slot, which ADR-066 made a thing a slot can say.
+/// What this pins is that the *values* survive — the schema keeps its arity and
+/// says "no static type" per slot, which ADR-066 made a thing a slot can say.
 #[test]
 fn a_fused_pair_carries_both_of_its_halves() {
     // `enumerate` pairs an index with an element, so reading `.0` and `.1` with
@@ -7853,10 +7605,10 @@ fn a_fused_pair_carries_both_of_its_halves() {
     assert_eq!(result.as_int(), 10, "equal to itself, unequal to the other");
 }
 
-/// **REP-10.** A record pattern reads *fields* and a tuple pattern reads
-/// *elements* — the half no type test can see, because the two are different
-/// runtime symbols (`praxis_record_field` and `praxis_tuple_get`) and a pattern
-/// that picked the wrong one would type-check identically.
+/// A record pattern reads *fields* and a tuple pattern reads *elements* — the
+/// half no type test can see, because the two are different runtime symbols
+/// (`praxis_record_field` and `praxis_tuple_get`) and a pattern that picked the
+/// wrong one would type-check identically.
 ///
 /// Every component is weighted differently, so reading the right slots in the
 /// wrong order fails as loudly as dropping one.
@@ -7933,10 +7685,8 @@ fn a_record_and_a_tuple_pattern_read_the_components_they_name() {
     assert_eq!(result.as_int(), 37);
 }
 
-/// **REP-21.** `min=` keeps the smaller value, `max=` the larger, and an absent
-/// entry accepts the first — which is the half no type test can see, and the
-/// half the runtime wrappers had been waiting for since they were written with
-/// no caller.
+/// `min=` keeps the smaller value, `max=` the larger, and an absent entry
+/// accepts the first — the half no type test can see.
 #[test]
 fn an_updating_store_keeps_the_better_value_and_accepts_the_first() {
     // `min=` on a key that already has a value: the smaller wins, whichever
@@ -8005,8 +7755,8 @@ fn an_updating_store_keeps_the_better_value_and_accepts_the_first() {
     assert_eq!(result.as_int(), 1);
 }
 
-/// **REP-25.** A destructuring `for` binding reads the components it names, once
-/// per step — the half no type test can see.
+/// A destructuring `for` binding reads the components it names, once per step —
+/// the half no type test can see.
 #[test]
 fn a_destructuring_for_binding_reads_each_item_apart() {
     // `for (k, v) in m` — §6.2's shape for walking a map, weighted so a swapped
@@ -8067,18 +7817,17 @@ fn a_destructuring_for_binding_reads_each_item_apart() {
 }
 
 // ---------------------------------------------------------------------------
-// S18: the `Option` contract, end to end (D1, RT-14/RT-15).
+// The `Option` contract, end to end.
 // ---------------------------------------------------------------------------
 
-/// D1's headline gate. `Map.get` answers `Option[V]` (§5.7 writes that
-/// signature literally), so a program tells absence from a value by *matching*
-/// rather than by comparing the answer against something it is not.
+/// `Map.get` answers `Option[V]` (§5.7 writes that signature literally), so a
+/// program tells absence from a value by *matching* rather than by comparing the
+/// answer against something it is not.
 ///
-/// The runtime builds the `Option` through its own `option_schema`, whose
-/// `Some` slot is unknown, and the program's arms were compiled against the
-/// codegen's `Option[Int]` schema. That the two meet at all is
-/// `EnumSchema::same_type`'s null-slot rule (RT-13); this is where it earns its
-/// keep.
+/// The runtime builds the `Option` through its own `option_schema`, whose `Some`
+/// slot is unknown, while the program's arms are compiled against the codegen's
+/// `Option[Int]` schema. That the two meet at all is `EnumSchema::same_type`'s
+/// null-slot rule; this is where it earns its keep.
 #[test]
 fn an_absent_map_get_matches_none_and_a_present_one_matches_some() {
     let (rt, result) = run_main(
@@ -8130,8 +7879,8 @@ fn an_absent_grid_find_is_none_and_a_hit_is_some_of_the_point() {
     assert_eq!(result.as_int(), -1);
 }
 
-/// RT-13 from source, at the one place a program can observe an enum's identity:
-/// **equality against a value the two producers built independently**.
+/// Enum identity at the one place a program can observe it: **equality against a
+/// value the two producers built independently**.
 ///
 /// The static type system already keeps two *declared* enum types apart, so
 /// `Colour == Light` never reaches the runtime. What does reach it is one
@@ -8180,13 +7929,11 @@ fn an_option_from_the_runtime_and_one_from_the_program_are_one_type() {
     assert_eq!(result.as_int(), 1);
 }
 
-/// **REP-28.** A field read on an unannotated parameter reads the field, and the
-/// call site is what says which record it is.
+/// A field read on an unannotated parameter reads the field, and the call site
+/// is what says which record it is.
 ///
-/// The half no type test can see: §4.9's own example did not merely fail to
-/// typecheck — it passed `praxis check` and then failed at lowering, so what has
-/// to be shown is that the *index* is right, at each field, through each shape a
-/// record can be reached in.
+/// The half no type test can see: that the *index* is right, at each field,
+/// through each shape a record can be reached in.
 #[test]
 fn a_field_read_on_an_unannotated_parameter_reads_that_records_field() {
     // §4.9's example, verbatim in shape: both fields, weighted so a swapped index
@@ -8255,8 +8002,8 @@ fn a_field_read_on_an_unannotated_parameter_reads_that_records_field() {
     assert_eq!(result.as_int(), 33);
 }
 
-/// **REP-29.** A destructuring closure parameter reads the components it names,
-/// once per call — the half no type test can see.
+/// A destructuring closure parameter reads the components it names, once per
+/// call — the half no type test can see.
 ///
 /// The parameter still arrives as one value; the pattern takes it apart inside the
 /// closure, through a one-arm `match` on the parameter's own slot. Everything here
@@ -8328,10 +8075,9 @@ fn a_destructuring_closure_parameter_reads_each_argument_apart() {
     assert_eq!(result.as_int(), 120);
 }
 
-/// **REP-30.** A zero-parameter closure runs, captures, and `||` still
-/// short-circuits.
+/// A zero-parameter closure runs, captures, and `||` still short-circuits.
 ///
-/// The grammar change is one arm, but it moves a token that already had a meaning,
+/// A zero-parameter closure is spelled with a token that already had a meaning,
 /// so the half that matters is the half that must not change: `a || b` evaluates
 /// `b` only when `a` is false, and a program that observes the difference is the
 /// only thing that can say so.
@@ -8389,31 +8135,28 @@ fn a_zero_parameter_closure_runs_and_the_or_it_is_spelled_like_still_short_circu
     assert_eq!(result.as_int(), 42);
 }
 
-/// **REP-32.** A `_` parameter keeps its slot, so the parameter after it gets the
-/// argument the call actually passed.
+/// A `_` parameter keeps its slot, so the parameter after it gets the argument
+/// the call actually passed.
 ///
-/// `_` binds no name — ADR-049 D7 — and `lower_param` read that as "there is no
-/// parameter": `Param::name()` answered `None`, the resolver had minted no symbol
-/// to find, and the caller is a `filter_map`, so the parameter vanished from the
-/// slot list while the function's *type* still had it. The arity of the lowered
-/// body and the arity of its signature disagreed, and the two halves failed
-/// differently. A closure gave a **silently wrong answer** — `|_, b| b + 1`
-/// applied to `(9, 5)` printed `10`, because `b` was reading argument one. A `fn`
-/// died in the Cranelift verifier, which is the backend catching what the front
-/// end should never have emitted.
+/// `_` binds no name (ADR-049 D7), and `lower_param` must not read that as
+/// "there is no parameter": dropping it from the slot list while the function's
+/// *type* still has it makes the lowered body's arity and its signature's
+/// disagree. The two halves fail differently — a closure gives a **silently
+/// wrong answer** (`|_, b| b + 1` applied to `(9, 5)` answers `10`, because `b`
+/// reads argument one), and a `fn` dies in the Cranelift verifier.
 ///
 /// Every assertion below is a *value*, not a "does not crash": a shifted argument
-/// list has to come out as the wrong number, or the gate would pass on the very
-/// defect it is for. The digit-place encodings (`a * 100 + c`) are there so a
-/// swap, a drop and a duplication are three different failures.
+/// list has to come out as the wrong number. The digit-place encodings
+/// (`a * 100 + c`) are there so a swap, a drop and a duplication are three
+/// different failures.
 #[test]
 fn a_wildcard_parameter_keeps_its_slot_so_later_parameters_do_not_shift() {
-    // The reviewer's closure repro: `10` before the fix, `6` after.
+    // The closure case.
     let (rt, result) = run_main("fn main() -> Int {\n  var f = |_, b| b + 1\n  f(9, 5)\n}\n");
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 6, "`b` must be the *second* argument");
 
-    // The reviewer's `fn` repro: a Cranelift verifier error before the fix.
+    // The same shape as a `fn`.
     let (rt, result) = run_main("fn g(_, b) -> Int { b + 1 }\nfn main() -> Int { g(9, 5) }\n");
     assert!(!rt.has_pending_fault(), "faulted: {:?}", rt.fault());
     assert_eq!(result.as_int(), 6);
@@ -8445,7 +8188,7 @@ fn a_wildcard_parameter_keeps_its_slot_so_later_parameters_do_not_shift() {
     assert_eq!(result.as_int(), 42);
 
     // ADR-049 D7's own spelling, `|_| 0`, through the pipeline the doc writes it
-    // for — the shape REP-29's gates covered only at the parse-tree level.
+    // for.
     let (rt, result) = run_main(
         "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  \
          v.map(|_| 7).sum()\n}\n",
@@ -8477,11 +8220,10 @@ fn a_wildcard_parameter_keeps_its_slot_so_later_parameters_do_not_shift() {
     assert_eq!(result.as_int(), 51);
 }
 
-// --- §7.4's atomic parsers, end to end (IP-11) ------------------------------
+// --- §7.4's atomic parsers, end to end --------------------------------------
 
-/// **IP-11.** Four of §7.4's ten atomic parsers did not exist: `uint`, `float`,
-/// `byte`, `identifier`. A program that wrote one got "unknown atomic parser"
-/// for a name the design document requires.
+/// Every one of §7.4's ten atomic parsers runs, `uint`, `float`, `byte` and
+/// `identifier` included.
 ///
 /// This is the half neither the type test nor the runtime unit test can see: a
 /// compiled program reading real input through the real ABI, so the value's
@@ -8628,17 +8370,18 @@ fn text_concatenation_joins_two_texts() {
 /// still round-trips through the JIT.
 ///
 /// Two things this catches that no MIR-shape test can. First, the cold refusal:
-/// `praxis_alloc_text` now *aborts* on bytes that are not UTF-8, so a botched
-/// edit to its `from_utf8` — one that read the wrong length, say, or measured
-/// chars where it wanted bytes — turns every literal in every program into a
-/// process abort rather than a wrong answer. Multi-byte literals are where that
+/// `praxis_alloc_text` *aborts* on bytes that are not UTF-8, so a botched edit
+/// to its `from_utf8` — one that read the wrong length, say, or measured chars
+/// where it wanted bytes — turns every literal in every program into a process
+/// abort rather than a wrong answer. Multi-byte literals are where that
 /// distinction lives; an ASCII-only test cannot tell a byte length from a char
-/// count. Second, the ADR-108 hoist now applies to `Text`, so the literals below
+/// count. Second, the ADR-108 hoist applies to `Text`, so the literals below
 /// are allocated **once, in the preheader**, and the loop compares the same
 /// object on every iteration. That sharing is sound because a `Text` payload is
 /// immutable and `text_equals` is a structural byte comparison — this is the
-/// test that says so end to end, where `a_text_literal_in_a_loop_is_hoisted_now_that_its_alloc_cannot_fault`
-/// only says the instruction moved.
+/// test that says so end to end, where
+/// `a_text_literal_in_a_loop_is_hoisted_now_that_its_alloc_cannot_fault`
+/// (`praxis-mir`'s `build.rs`) only says the instruction moved.
 ///
 /// The assertion is on the *count* rather than on a `Bool`: a hoist that shared
 /// the wrong object, or a comparison that answered identity, would still make
@@ -8668,18 +8411,15 @@ fn a_multibyte_text_literal_still_round_trips_through_the_jit() {
     assert_eq!(result.as_int(), 27, "a shared Text key hashes structurally");
 }
 
-/// **REP-33 half (a).** `sorted` orders through the element descriptor, and the
-/// receiver keeps its own order.
+/// `sorted` orders through the element descriptor, and the receiver keeps its
+/// own order.
 ///
 /// The `Vec[Text]` case is why this cannot be written with integers alone. A
 /// `Text` is a pointer-and-length structure, so a sort that reads the first
-/// eight payload bytes compares *addresses* (P0-12) — which passes on
-/// `Vec[Int]` and answers allocation order on `Vec[Text]`. The three texts are
-/// pushed in an order whose allocations ascend `"b"`, `"a"`, `"c"`, so a payload
-/// sort answers `"b"` here and this fails.
-///
-/// Observed red before the row existed: `error[Y110]: no method `sorted` on
-/// type `Vec[Int]` taking 0 argument(s)`, from `praxis check`.
+/// eight payload bytes compares *addresses* — which passes on `Vec[Int]` and
+/// answers allocation order on `Vec[Text]`. The three texts are pushed in an
+/// order whose allocations ascend `"b"`, `"a"`, `"c"`, so a payload sort answers
+/// `"b"` here and this fails.
 #[test]
 fn a_sorted_vec_is_ordered_by_the_descriptor_and_the_source_is_untouched() {
     // Integers: the easy half, and the one a wrong implementation also passes.
@@ -8716,15 +8456,12 @@ fn a_sorted_vec_is_ordered_by_the_descriptor_and_the_source_is_untouched() {
     assert_eq!(result.as_int(), 51, "the source Vec is not mutated");
 }
 
-/// **REP-33 half (a).** `frequencies` counts every element, an absent key reads
-/// zero, and `unique` keeps first occurrences.
+/// `frequencies` counts every element, an absent key reads zero, and `unique`
+/// keeps first occurrences.
 ///
 /// The zero-default is what proves the result is a real `Counter` and not a
 /// `Map` wearing the type (§6.2: "absent values read as zero"). `310` is three
 /// 3s, one 4, and an absent 7.
-///
-/// Observed red before the rows existed: `error[Y110]: no method `frequencies`
-/// on type `Vec[Int]` taking 0 argument(s)`.
 #[test]
 fn frequencies_counts_every_element_and_an_absent_key_reads_zero() {
     let src = "fn main() -> Int {\n  var v = Vec[Int]()\n  v.push(3)\n  v.push(3)\n  \
@@ -8870,8 +8607,7 @@ fn a_for_over_a_list_literal_reaches_every_element() {
 
 /// **A `for` over a `Text` yields its characters** (§4.13, ADR-086).
 ///
-/// `for c in t` was `Y005`, recorded in `praxis-stdlib`'s own comment as a
-/// standing gap. The loop indexes the `Text` in place through the
+/// The loop indexes the `Text` in place through the
 /// `praxis_text_len`/`praxis_text_get` pair that `t.len()` and `t[i]` already
 /// call, so the two spellings cannot disagree — which is what the second case
 /// asserts by comparing the loop's answer to the subscript's.
@@ -8982,7 +8718,7 @@ fn a_parsed_text_reads_the_same_as_the_literal_it_came_from() {
 
 // ===========================================================================
 // §3.5 — an interned `Int` literal is two loads, not a call and an allocation
-// (docs/handovers/21-where-the-time-goes.md; `praxis_runtime::small_int`).
+// (`praxis_runtime::small_int`).
 // ===========================================================================
 
 /// An in-range literal evaluated a hundred times allocates nothing, and an
@@ -9115,11 +8851,10 @@ fn an_inline_interned_box_is_the_object_the_wrapper_would_have_answered() {
 /// pass every other test in this file: the answers are identical, and the
 /// collector's absence shows up only as a heap that keeps growing.
 ///
-/// Deliberately **not** the `after < before + 1` shape handover 22 §6 found four
-/// tests using wrongly. The loop allocates something like 40,000 objects that
-/// nothing retains; asserting the live count ends up below the *iteration* count
-/// cannot be satisfied without a collection having run, whatever the pacer's
-/// ladder happens to be on this machine.
+/// Deliberately **not** an `after < before + 1` shape. The loop allocates
+/// something like 40,000 objects that nothing retains; asserting the live count
+/// ends up below the *iteration* count cannot be satisfied without a collection
+/// having run, whatever the pacer's ladder happens to be on this machine.
 #[test]
 fn a_loop_that_boxes_only_large_ints_still_collects() {
     const ITERATIONS: i64 = 20_000;
@@ -9202,7 +8937,7 @@ fn the_inline_claim_counts_every_block_it_takes() {
 /// The object the inline claim builds is the object the wrapper would have
 /// built: same value, same type, and it survives a collection.
 ///
-/// The header is three words generated code now writes itself, and each has a
+/// The header is three words generated code writes itself, and each has a
 /// distinct failure. A wrong descriptor makes `ExtractScalar`'s inline proof
 /// fail and route to `praxis_int_load`, which aborts. A wrong recorded payload
 /// displacement reads the wrong eight bytes. A wrong `heap_id` is the quiet one:
@@ -9236,12 +8971,9 @@ fn an_inline_claimed_object_is_what_the_wrapper_would_have_answered() {
 /// A loop that boxes only `Float`s still collects.
 ///
 /// `a_loop_that_boxes_only_large_ints_still_collects` is ADR-113's version of
-/// this, and it covers a path that already had a pacing test. **`Float` did
-/// not.** Before ADR-119 the arm was an unconditional `call_symbol` and the
-/// wrapper paced; now the pacing compare is emitted here, and if it were
-/// dropped this loop would allocate 40,000 blocks and never offer the collector
-/// a turn — which is exactly what ADR-040's token exists to make unwritable and
-/// what a `Safepoint` no longer stands in the way of.
+/// this. For `Float` the pacing compare is emitted inline (ADR-119); dropping it
+/// would let this loop allocate 40,000 blocks and never offer the collector a
+/// turn — which is exactly what ADR-040's token exists to make unwritable.
 #[test]
 fn a_loop_that_boxes_only_floats_still_collects() {
     const ITERATIONS: i64 = 20_000;
@@ -9267,13 +8999,12 @@ fn a_loop_that_boxes_only_floats_still_collects() {
 /// A `Bool` or `Unit` literal answers the runtime's own singleton, and does so
 /// without a call or an allocation.
 ///
-/// Both have been immortals since M3 — `praxis_alloc_bool` and
-/// `praxis_alloc_unit` return the cached references and their manifest rows say
-/// `Effect::Pure` — but lowering still went through `Inst::Alloc`, which
-/// `liveness::is_gc_safepoint` treats as a safepoint whatever the manifest says,
-/// so every literal `true` in a loop paid an extern call *and* a full
-/// shadow-frame spill at a point no collection can happen. This pins the object
-/// identity that makes folding them into `Inst::ConstGc` a no-op semantically.
+/// Both are immortals — `praxis_alloc_bool` and `praxis_alloc_unit` return the
+/// cached references and their manifest rows say `Effect::Pure` — so lowering
+/// them as `Inst::ConstGc` rather than `Inst::Alloc` costs neither an extern
+/// call nor the full shadow-frame spill `liveness::is_gc_safepoint` forces at an
+/// `Alloc`, at a point where no collection can happen. This pins the object
+/// identity that makes that folding a no-op semantically.
 #[test]
 fn a_bool_or_unit_literal_is_the_runtime_singleton_and_allocates_nothing() {
     let (control, _) = run_main("fn main() -> Int {\n  0\n}\n");
@@ -9313,7 +9044,7 @@ fn a_bool_or_unit_literal_is_the_runtime_singleton_and_allocates_nothing() {
     );
 }
 
-/// **The MIR-16 discharge, as a test rather than an argument.**
+/// An interned literal bound to a local is still renderable at a fault.
 ///
 /// `Inst::ConstGc` is not a debug point, so the temp holding an interned literal
 /// is *not* spilled into the debug frame at the instruction that defines it. It
@@ -9347,9 +9078,9 @@ fn a_crash_snapshot_still_shows_an_interned_literal_bound_to_a_local() {
 // ADR-101 — the shadow stack is one contiguous region.
 //
 // A frame is a run of slots claimed by bumping a pointer, not an allocation, so
-// the property that used to be "every push has a matching free" is now "every
-// epilogue restores the `top` its prologue saved". That one is observable: the
-// stack is empty again when a run ends. These tests assert it on the three ways
+// the property is "every epilogue restores the `top` its prologue saved" rather
+// than "every push has a matching free". That one is observable: the stack is
+// empty again when a run ends. These tests assert it on the three ways
 // a run can end — a normal return, a fault, and the recursion-depth guard —
 // because an unbalanced prologue would otherwise be a slow leak that surfaces
 // only as a wrong root set thousands of calls later.
@@ -9414,37 +9145,30 @@ fn adr100_a_stack_overflow_restores_the_shadow_stack() {
 #[test]
 fn adr100_a_wide_frame_recursing_deep_claims_and_gives_back_every_slot() {
     // The empirical half of the capacity argument, as far as it can be taken.
-    // `SHADOW_STACK_SLOTS` is sized from MAX_RECURSION_DEPTH × MAX_SHADOW_SLOTS
-    // on the strength of two premises — every prologue guards before it pushes,
-    // and every frame is a `SlotCount` — and nothing checks the limit at run
-    // time because of it. The failure mode that argument rules out is therefore
-    // silent: a frame wide enough and a recursion deep enough to walk `top` past
-    // the end of the reservation.
+    // `SHADOW_STACK_SLOTS` is sized from the *byte* budget, on the strength of
+    // two premises — every prologue guards before it pushes, and every frame is
+    // a `SlotCount` — and nothing checks the limit at run time because of it.
+    // The failure mode that argument rules out is therefore silent: a frame
+    // wide enough and a recursion deep enough to walk `top` past the end of the
+    // reservation.
     //
-    // No test can reach that corner, and since ADR-105 the reason is that the
-    // corner does not exist rather than that it is unreachable. A frame spends
-    // `FRAME_BYTES_PER_SLOT` of the budget on every slot it claims, so the
-    // claimed slots of all live frames sum to at most
-    // `STACK_BUDGET_BYTES / FRAME_BYTES_PER_SLOT`, which is what the reservation
-    // is. The old argument multiplied the deepest recursion by the widest frame
-    // as if a program could have both at once — it cannot, and the guard is now
-    // what says so. This comment used to read "MAX_RECURSION_DEPTH is a call
-    // count, not a byte budget", which was an accurate statement of defect D-1
-    // sitting in the test suite; it is a byte budget now.
+    // No test can reach that corner. A frame spends `FRAME_BYTES_PER_SLOT` on
+    // every slot past `REFERENCE_FRAME_SLOTS`, so the claimed slots of all live
+    // frames sum to at most `STACK_BUDGET_BYTES / FRAME_BYTES_PER_SLOT +
+    // MAX_RECURSION_DEPTH × REFERENCE_FRAME_SLOTS`, which is what the
+    // reservation covers (ADR-105). Sizing it as MAX_RECURSION_DEPTH ×
+    // MAX_SHADOW_SLOTS instead would multiply the deepest recursion by the
+    // widest frame as if a program could have both at once: it cannot, and the
+    // guard is what says so.
     //
     // What this test shows is the mechanism working at a width and depth an
     // actual program could reach. 600 frames of twenty collections is well
-    // inside the budget (which covers roughly 1990 of them), so ADR-105 does not
-    // move it.
+    // inside the budget (which covers roughly 1990 of them).
     //
-    // This frame used to be the one place in the suite wide enough to take the
-    // prologue's zeroing off the unrolled path and onto the `memset` one. There
-    // is no `memset` path any more (ADR-128 decision 1) and the unrolled ceiling
-    // is 256, so both claims here are straight runs of stores. What the width
-    // still buys is the other half of this test: twenty collections live across
-    // the recursive call is twenty *co-live* roots, so ADR-128 decision 2's
-    // colouring cannot fold them into fewer slots, and the frame is genuinely
-    // wide on both stacks rather than only on the debugger's.
+    // What the width buys is the other half of this test: twenty collections
+    // live across the recursive call is twenty *co-live* roots, so ADR-128
+    // decision 2's colouring cannot fold them into fewer slots, and the frame is
+    // genuinely wide on both stacks rather than only on the debugger's.
     let mut body = String::from("fn wide(n: Int) -> Int {\n  if n == 0 { return 0 }\n");
     for i in 0..20 {
         body.push_str(&format!("  var v{i} = Vec()\n  v{i}.push(n)\n"));
@@ -9472,24 +9196,18 @@ fn adr100_a_wide_frame_recursing_deep_claims_and_gives_back_every_slot() {
     );
 }
 
-/// ADR-105 / defect D-1: the guard charges bytes, so a wide frame runs out of
-/// budget at a depth a reference frame sails past.
+/// ADR-105: the guard charges bytes, so a wide frame runs out of budget at a
+/// depth a reference frame sails past.
 ///
-/// This is the defect stated as a differential, which is the only way to state
-/// it without asserting a number about the host's stack. Both halves recurse to
-/// the *same* depth. They differ only in how wide their frames are, and that is
-/// exactly the difference a call count could not see: before ADR-105 the
-/// prologue stopped both at 8000 calls, a figure calibrated for the narrow one.
+/// Stated as a differential, which is the only way to state it without asserting
+/// a number about the host's stack. Both halves recurse to the *same* depth and
+/// differ only in how wide their frames are — exactly the difference a call
+/// count cannot see.
 ///
-/// What the wide half did instead of faulting is recorded rather than asserted,
-/// because asserting it means deliberately overflowing this process: a
-/// twenty-two-collection frame measures 294 bytes, so the 8000 calls the old
-/// guard allowed want 2.35 MiB. `praxis run` gets an 8 MiB main thread and
-/// survived. `cargo test` does not — libtest passes no `stack_size`, so every
-/// test here runs on std's 2 MiB default. Reproduced directly on the release
-/// binaries either side of this change, under `ulimit -s 2048`: `54d2d9a` exits
-/// 134 with "thread 'main' has overflowed its stack"; the same program on the
-/// same stack now exits 1 with a clean `StackOverflow`.
+/// The wide half's overflow is not asserted directly, because asserting it means
+/// deliberately overflowing this process: a twenty-two-collection frame measures
+/// 294 bytes, so 8000 such calls want 2.35 MiB, and every test here runs on
+/// std's 2 MiB default (libtest passes no `stack_size`).
 #[test]
 fn adr105_a_wide_frame_faults_where_a_reference_frame_does_not() {
     const DEPTH: u32 = 5000;
@@ -9539,10 +9257,9 @@ fn adr105_a_wide_frame_faults_where_a_reference_frame_does_not() {
 /// function of its frames — and an ordinary one is unaffected by this change.
 ///
 /// The pair is the point. Both programs recurse deep; they differ only in how
-/// wide their frames are. Before ADR-105 both succeeded (and the wide one was
-/// one `ulimit` away from SIGABRT); after it, this one still succeeds and the
-/// wide one faults. A call count cannot tell them apart, which is precisely why
-/// it was the wrong quantity.
+/// wide their frames are. This one succeeds and the wide one faults — a call
+/// count cannot tell them apart, which is precisely why it is the wrong
+/// quantity.
 ///
 /// **This is also the gate on `REFERENCE_FRAME_SLOTS`.** `count` is the exact
 /// program `MAX_RECURSION_DEPTH` was chosen for, and the budget is derived so
@@ -9552,9 +9269,7 @@ fn adr105_a_wide_frame_faults_where_a_reference_frame_does_not() {
 #[test]
 fn adr105_a_reference_frame_still_recurses_as_deep_as_the_call_count_allowed() {
     // `count(d)` makes `d + 1` frames of its own, under `main`'s. Two off the
-    // constant is the arithmetic of the call chain, not slack in the budget:
-    // the pre-ADR-105 binary faults at exactly the same depth for exactly the
-    // same reason, which is what "unchanged" means here.
+    // constant is the arithmetic of the call chain, not slack in the budget.
     let deep = praxis_runtime::MAX_RECURSION_DEPTH - 2;
     let src = format!(
         "\
@@ -9602,12 +9317,11 @@ fn adr100_a_praxis_closure_called_from_a_graph_helper_balances_the_shadow_stack(
 // ===========================================================================
 // ADR-125: every binding is a binding, and the compiler decides its storage.
 //
-// Removing the `let`/`var` split made a parameter, a `for` variable and a name
-// a pattern introduces assignable. Each of those had a binding site the MIR
-// builder gave a plain slot — or, for a match arm, no slot at all — so each one
-// is a distinct way for a write to land in the wrong place. These four tests
-// are one per site, and they run rather than type-check because what is being
-// asserted is where the value went.
+// Every binding is assignable: a parameter, a `for` variable, a match arm's
+// binding and a name a pattern introduces. Each has its own binding site in the
+// MIR builder, so each is a distinct way for a write to land in the wrong place.
+// These tests are one per site, and they run rather than type-check because what
+// is being asserted is where the value went.
 // ===========================================================================
 
 #[test]
@@ -9656,10 +9370,9 @@ fn each_step_of_a_for_captures_its_own_cell() {
 
 #[test]
 fn assigning_a_match_binding_does_not_write_the_scrutinee() {
-    // A match arm's binding used to *alias* the scrutinee's local outright, and
-    // for a plain `match v` that local is `v`'s own — so the write would have
-    // landed in `v`. The arm binds a slot of its own precisely when something
-    // writes it.
+    // A match arm's binding must not *alias* the scrutinee's local: for a plain
+    // `match v` that local is `v`'s own, so the write would land in `v`. The arm
+    // binds a slot of its own precisely when something writes it.
     let src = "fn main() -> Int {\n  \
                var v = 7\n  \
                var got = match v { n => { n = 99\n n } }\n  \
@@ -9684,8 +9397,7 @@ fn a_captured_and_assigned_destructured_name_shares_one_cell() {
 #[test]
 fn a_binding_nothing_writes_is_captured_by_value() {
     // The complement of the four above, and the reason `reassigned` is a fact
-    // and not a keyword: a capture nothing writes still needs no cell, so the
-    // old `let`'s representation survives the keyword's removal.
+    // and not a keyword: a capture nothing writes needs no cell.
     let src = "fn main() -> Int {\n  \
                var base = 10\n  \
                var f = |k| k + base\n  \
@@ -9698,16 +9410,14 @@ fn a_binding_nothing_writes_is_captured_by_value() {
 /// **ADR-136, the runtime half.** `Text.int()` answers the number the text
 /// spells, and `None` for every text that spells none.
 ///
-/// `Y001`'s help has named `.int()` since it was written and `Text` did not have
-/// it, so the second half of the help for the most common mistake in a puzzle
-/// program reported `Y110`. The signature is `Option[Int]` and not `Int` for
-/// §4.7's reason — a text that is not a number is absence, not a fault — so the
-/// rejections below are values the program can take apart, not crashes.
+/// The signature is `Option[Int]` and not `Int` for §4.7's reason — a text that
+/// is not a number is absence, not a fault — so the rejections below are values
+/// the program can take apart, not crashes.
 ///
 /// **The accepted set is §7.4's `int` atomic** over the whole trimmed text, so
 /// `t.int()` and `parse(t, int)` cannot disagree. `"+5"` is in the rejected list
 /// for that reason and no other: `i64::from_str` takes it and the atomic does
-/// not, and the first cut of this method used `from_str`.
+/// not.
 #[test]
 fn text_int_parses_a_number_or_answers_none() {
     // The accepted spelling, including the surrounding space a line read off
@@ -9805,9 +9515,6 @@ fn text_float_parses_a_number_or_answers_none() {
 /// **ADR-143.** `Int.to_text()` is the digits `out` prints, through the real
 /// JIT and the real wrapper.
 ///
-/// Observed red before the row existed: `error[Y110]: no method `to_text` on
-/// type `Int` taking 0 argument(s)`.
-///
 /// `i64::MIN` is spelled `-9223372036854775807 - 1` because `-9223372036854775808`
 /// is a negation of a literal one past `i64::MAX`. It is in the list because a
 /// renderer that negates before formatting overflows on exactly that value.
@@ -9827,14 +9534,11 @@ fn int_to_text_is_the_digits_out_prints() {
     }
 }
 
-/// **ADR-143, and the handover's own complaint.** A labelled debug line is one
-/// call.
+/// **ADR-143.** A labelled debug line is one call.
 ///
-/// Three AoC solves wrote `out("splits:")` and `out(splits)` on two lines
-/// because there was no third thing to write. The row composing with ADR-085's
-/// `+` is what closes that, and composing is a separate claim from existing —
-/// `+` refuses to stringify, so the conversion has to be explicit and has to
-/// land on a `Text`.
+/// The row composes with ADR-085's `+`, and composing is a separate claim from
+/// existing — `+` refuses to stringify, so the conversion has to be explicit and
+/// has to land on a `Text`.
 #[test]
 fn a_labelled_line_is_one_call() {
     let src = "fn main() -> Text {\n  \"splits: \" + (1660).to_text()\n}";
@@ -9853,9 +9557,9 @@ fn a_labelled_line_is_one_call() {
 /// **ADR-143.** `Char.to_text()` is the character `out` prints, including one
 /// that does not fit a byte.
 ///
-/// The multi-byte case is the four-byte payload read (REP-37) observed from a
-/// program: `"héllo"[1]` is `é`, and a wrapper that took eight bytes for it
-/// would answer something else entirely.
+/// The multi-byte case is the four-byte payload read observed from a program:
+/// `"héllo"[1]` is `é`, and a wrapper that took eight bytes for it would answer
+/// something else entirely.
 #[test]
 fn char_to_text_is_the_character_out_prints() {
     for (expr, want) in [
@@ -9873,9 +9577,6 @@ fn char_to_text_is_the_character_out_prints() {
 
 /// **ADR-144.** `join` puts the separator between the elements and nowhere
 /// else, over a `Vec` and over a receiver that is not one.
-///
-/// Observed red before the row existed: `error[Y110]: no method `join` on type
-/// `Vec[Text]` taking 1 argument(s)`.
 ///
 /// The `Set` case is the generic receiver earning its keep: `join` is one row on
 /// `Iterable`, so the materializing walk in front of the wrapper is what makes a
@@ -9917,12 +9618,12 @@ fn join_puts_the_separator_between_the_items() {
     assert_eq!(result.as_text(), "1-2-3");
 }
 
-/// **ADR-144, and the handover's grid-drawing case.** A `Grid` row renders back
-/// as the line it was read from.
+/// **ADR-144.** A `Grid` row renders back as the line it was read from.
 ///
-/// `out(g.row(y))` prints `[., ., |]`; drawing the grid is how a grid puzzle is
-/// debugged, and `..|` had no spelling at all. The round trip is the assertion:
-/// the text goes in through `read grid(char)` and comes back out unchanged.
+/// `out(g.row(y))` prints `[., ., |]`; `to_text()` is what spells the line
+/// itself, which is how a grid puzzle is debugged. The round trip is the
+/// assertion: the text goes in through `read grid(char)` and comes back out
+/// unchanged.
 #[test]
 fn a_grid_row_renders_back_as_a_line() {
     let src = "fn main() -> Text {\n  var g = read grid(char)\n  g.row(1).to_text()\n}";
@@ -9943,14 +9644,8 @@ fn a_grid_row_renders_back_as_a_line() {
     assert_eq!(result.as_text(), "é☃");
 }
 
-/// **ADR-145, and the handover's own gate.** A countdown is a reversed range.
-///
-/// `43210` is the shape day 7's manual `while y >= sy { … ; y = y - 1 }` loop
-/// existed to work around — the one place in that program where the mechanism
-/// was visible instead of the puzzle.
-///
-/// Observed red before the row existed: `error[Y110]: no method `rev` on type
-/// `Range` taking 0 argument(s)`.
+/// **ADR-145.** A countdown is a reversed range: `43210` is what a manual
+/// `while y >= sy { … ; y = y - 1 }` loop would otherwise have to spell.
 #[test]
 fn a_countdown_is_a_reversed_range() {
     let src =
@@ -9959,9 +9654,8 @@ fn a_countdown_is_a_reversed_range() {
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 43210);
 
-    // **The negative gate beside it (ADR-059 decision 3).** `5..0` is still an
-    // empty range and still says nothing: the countdown got a spelling, the
-    // descending literal did not become an error.
+    // ADR-059 decision 3: `5..0` is an empty range and says nothing. The
+    // countdown has a spelling; the descending literal is not an error.
     let src = "fn main() -> Int {\n  var t = 0\n  for y in 5..0 { t = t + 1 }\n  t\n}";
     let (rt, result) = run_main(src);
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -10155,8 +9849,8 @@ fn a_grouping_takes_every_iterable_and_a_chain_starts_again_from_it() {
 }
 
 /// **ADR-149.** A grouping reads no descriptor callback, so a `Vec` of closures
-/// groups where `sorted()` and `unique()` are refused at check time — the claim
-/// `reversed` makes, at the two rows that were added beside it.
+/// groups where `sorted()` and `unique()` are refused at check time — the same
+/// claim `reversed` makes.
 ///
 /// The other half is that a group is a *view*: the overlapping element of two
 /// windows is one object, which is the language's reference semantics rather
@@ -10210,9 +9904,8 @@ fn a_sized_vec_runs() {
     assert!(result.as_bool());
 }
 
-/// `Grid(w, h, fill)` end to end — the working board handover 31 item 8 asked
-/// for. Its extents, its cells, its bounds check and a store that touches one
-/// cell and not its neighbour.
+/// `Grid(w, h, fill)` end to end: its extents, its cells, its bounds check and a
+/// store that touches one cell and not its neighbour.
 #[test]
 fn a_sized_grid_runs() {
     let (rt, result) =
@@ -10242,8 +9935,7 @@ fn a_sized_grid_runs() {
 }
 
 /// **ADR-146 decision 5.** A size the runtime cannot serve is a fault the
-/// program can see, not an abort — ADR-041's answer, now reachable from source
-/// for the first time since `Grid()` went nullary.
+/// program can see, not an abort (ADR-041).
 #[test]
 fn a_negative_or_absurd_size_is_an_invalid_size_fault() {
     for src in [
@@ -10353,8 +10045,7 @@ fn a_hole_renders_what_out_renders() {
 
         // `out`'s own path: build the value and render it through `GcRef::format`.
         // Bound to a `var` first so every row takes one shape — a bare `()` as a
-        // function body is a degenerate case with its own history, and this test
-        // is not about it.
+        // function body is a degenerate case this test is not about.
         let value_src = format!("fn main() {{\n  var probe = {expr}\n  probe\n}}\n");
         let (rt2, value) = run_main(&value_src);
         assert!(
@@ -10434,9 +10125,9 @@ fn main() -> Text {
     assert_eq!(result.as_text(), "outer + n = 42");
 }
 
-/// **ADR-147's consequence, measured.** The handover's `out(label); out(value)`
-/// pair is one call for *every* type, not just the four with a `to_text()` row —
-/// which is the difference between this and `a_labelled_line_is_one_call`.
+/// **ADR-147's consequence, measured.** An `out(label); out(value)` pair is one
+/// call for *every* type, not just the four with a `to_text()` row — which is
+/// the difference between this and `a_labelled_line_is_one_call`.
 #[test]
 fn a_labelled_line_is_one_call_for_any_type() {
     let src = "fn main() -> Text {\n  var splits = [1, 2, 3]\n  \"splits: {splits}\"\n}\n";

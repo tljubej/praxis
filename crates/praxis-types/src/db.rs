@@ -21,9 +21,9 @@ use crate::error::TypeCtorError;
 use crate::type_id::{Type, VarId};
 use crate::CollectionCtor;
 
-/// One arena entry. A slot is either a concrete type shape ([`TypeData`]) or — for
-/// the historical reason that `Type` and `VarId` share an index space — a variable
-/// in one of its lifecycle states. Because [`TypeData::Var`] already carries the
+/// One arena entry. A slot is either a concrete type shape ([`TypeData`]) or —
+/// because `Type` and `VarId` share an index space — a variable in one of its
+/// lifecycle states. Because [`TypeData::Var`] already carries the
 /// [`VarState`], a `Slot` is just a `TypeData`; the newtype exists so the arena is
 /// self-documenting and so we can later add provenance (e.g. a span) without a
 /// second parallel array.
@@ -35,8 +35,8 @@ pub struct Slot {
 /// The interned type store. Create one at the start of inference and mint/follow
 /// types through it.
 ///
-/// M7 adds two side-tables for record/enum definitions (ADR-025): the heavy
-/// field/variant data lives here rather than inline in [`TypeData`] (which would
+/// Record and enum definitions live in two side-tables (ADR-025): the heavy
+/// field/variant data is there rather than inline in [`TypeData`] (which would
 /// make `Type` recursive and expensive). A [`TypeData::Record`] /
 /// [`TypeData::Enum`] variant carries only a def-id index into these tables.
 #[derive(Clone, Debug)]
@@ -47,18 +47,18 @@ pub struct TypeDb {
     /// The current binding level, raised on each `var`/`fn` and lowered on exit.
     /// See ADR-008.
     level: Level,
-    /// Record definitions, indexed by [`RecordDefId`] (M7, ADR-025). Each
+    /// Record definitions, indexed by [`RecordDefId`] (ADR-025). Each
     /// `register_record` call mints a fresh def; identity for anonymous records
     /// is established through unification (not construction), mirroring how
     /// tuples/funcs work.
     pub(crate) record_defs: Vec<RecordDef>,
-    /// Enum definitions, indexed by [`EnumDefId`] (M7, ADR-025).
+    /// Enum definitions, indexed by [`EnumDefId`] (ADR-025).
     pub(crate) enum_defs: Vec<EnumDef>,
-    /// The prelude `Option`'s def (F12), seeded at construction so there is
-    /// exactly one and every `Option[T]` in the program names it.
+    /// The prelude `Option`'s def, seeded at construction so there is exactly
+    /// one and every `Option[T]` in the program names it.
     option_def: EnumDefId,
     /// Capability requirements that could not be decided when they were
-    /// discovered, because the type they are about is still a variable (F10).
+    /// discovered, because the type they are about is still a variable.
     ///
     /// Inference pushes one per use it cannot answer, drains the *dischargeable*
     /// ones — those whose variable has since resolved — after each unification,
@@ -77,12 +77,12 @@ impl Default for TypeDb {
 impl TypeDb {
     /// A fresh arena, holding only the prelude's own definitions.
     ///
-    /// The single canonical `Option` def is registered here (F12). Registering
-    /// it per annotation site and per instantiation is what TY-06 was: each use
-    /// minted a *fresh nominal def*, so `unify` needed a same-name-and-signature
-    /// arm to put the copies back together, the monomorphizer's display-string
-    /// cache key could not tell `Option[Int]` from `Option[Text]`, and a runtime
-    /// enum had no stable identity to record.
+    /// The single canonical `Option` def is registered here, and every
+    /// `Option[T]` in the program names it. Registering one per annotation site
+    /// would mint a *fresh nominal def* per use: `unify` would need a
+    /// same-name-and-signature arm to put the copies back together, the
+    /// monomorphizer's display-string cache key could not tell `Option[Int]`
+    /// from `Option[Text]`, and a runtime enum would have no stable identity.
     #[must_use]
     pub fn new() -> Self {
         let mut db = TypeDb {
@@ -173,9 +173,9 @@ impl TypeDb {
 
     /// Intern an arbitrary type shape, returning its handle.
     ///
-    /// `pub(crate)` since F5: an arbitrary [`TypeData`] is exactly the shape the
-    /// validated constructors exist to check, so the back door had to close with
-    /// them. Reach a composite through [`tuple`](Self::tuple) /
+    /// `pub(crate)` deliberately: an arbitrary [`TypeData`] is exactly the shape
+    /// the validated constructors exist to check, so the back door is closed
+    /// with them. Reach a composite through [`tuple`](Self::tuple) /
     /// [`collection`](Self::collection) / [`func`](Self::func) /
     /// [`register_record`](Self::register_record) / [`register_enum`](Self::register_enum).
     #[must_use]
@@ -185,18 +185,17 @@ impl TypeDb {
         id
     }
 
-    /// A tuple type from already-validated elements (F5).
+    /// A tuple type from already-validated elements.
     #[must_use]
     pub fn tuple(&mut self, elements: TupleElems) -> Type {
         self.intern(TypeData::Tuple(elements.into_vec()))
     }
 
-    /// A collection type `Ctor[args]`, e.g. `Vec[elem]` (§4.4, §11.2, M5).
+    /// A collection type `Ctor[args]`, e.g. `Vec[elem]` (§4.4, §11.2).
     ///
     /// # Errors
     /// [`TypeCtorError::CollectionArity`] if `args`'s shape is not the arity
-    /// `ctor` declares — `Map[T]`, `Vec[K, V]`, `BitSet[T]`. The check existed
-    /// as [`CollectionCtor::arity`] and had no caller.
+    /// `ctor` declares — `Map[T]`, `Vec[K, V]`, `BitSet[T]`.
     pub fn collection(
         &mut self,
         ctor: CollectionCtor,
@@ -219,8 +218,8 @@ impl TypeDb {
     ///
     /// The one checked route back in for a caller that stored a
     /// [`Type::to_u32`] outside the arena — the debugger's `DebugLocalMeta`
-    /// does, and used to rehydrate it as a bare `Type(id)` whether or not this
-    /// `TypeDb` had ever minted that many slots.
+    /// does. Rehydrating it as a bare `Type(id)` would not check that this
+    /// `TypeDb` ever minted that many slots.
     #[inline]
     #[must_use]
     pub fn type_from_raw(&self, raw: u32) -> Option<Type> {
@@ -259,7 +258,7 @@ impl TypeDb {
         }
     }
 
-    // --- the constraint channel (F10) ---------------------------------------
+    // --- the constraint channel ---------------------------------------------
 
     /// Record a capability requirement that cannot be decided yet.
     ///
@@ -279,7 +278,7 @@ impl TypeDb {
     ///
     /// Inference calls this after unification and checks what comes back. A
     /// constraint whose variable is still unbound stays: it is not wrong yet,
-    /// and answering it now is the optimism TY-29 is about.
+    /// and answering it now would be optimism.
     ///
     /// **One call answers one round, not the whole channel.** A capability that
     /// discharges by *producing* a type — `HasMethod`, `Iterable`, `HasField` —
@@ -287,8 +286,8 @@ impl TypeDb {
     /// still-pending constraint is waiting on. Those constraints were left
     /// behind by the call that is returning now, so the caller is required to
     /// iterate until this returns empty; `Inferer::discharge_constraints` is
-    /// that loop, and ADR-137 records what one missing round cost. The fixpoint
-    /// lives there rather than here because resolution needs the catalog and the
+    /// that loop, and ADR-137 records why the fixpoint is required. It lives
+    /// there rather than here because resolution needs the catalog and the
     /// diagnostic sink, neither of which this crate has.
     #[must_use]
     pub fn take_dischargeable(&mut self) -> Vec<Constraint> {
@@ -331,27 +330,26 @@ impl TypeDb {
     /// quantifying it *wrong* even though no link says so.
     ///
     /// All three callers are the same fact about lowering, from three doors:
-    /// **there is
-    /// one lowered body per source function**, and monomorphization substitutes a
-    /// clone's types from the call site's *argument types* — it does not run the
-    /// constraint channel. So a variable only the channel can resolve must not be
-    /// quantified, or it reaches MIR unbound.
+    /// **there is one lowered body per source function**, and monomorphization
+    /// substitutes a clone's types from the call site's *argument types* — it
+    /// does not run the constraint channel. So a variable only the channel can
+    /// resolve must not be quantified, or it reaches MIR unbound.
     ///
-    /// - **TY-30** — a variable a method was called on. A method call lowers to
-    ///   exactly one catalog entry, and pinning the receiver is what makes
+    /// - A variable a **method** was called on. A method call lowers to exactly
+    ///   one catalog entry, and pinning the receiver is what makes
     ///   `fn total(values) { values.sum() }` come out `Vec[Int] -> Int`, the
     ///   answer §5.2 states, rather than a scheme whose body no call site can
     ///   lower.
-    /// - **REP-03** (ADR-062) — the fresh item variable a `for` over an
-    ///   *unresolved* iterator mints. The deferred `Iterable { item }` is the only
-    ///   thing that ever says what it holds, and MIR reads it to type the loop
-    ///   variable's slot. The **iterator** is deliberately *not* pinned: MIR picks
-    ///   `len`/`get` from its static ctor, so one clone per iterable kind is what
-    ///   makes those symbols right.
-    /// - **REP-28** — a variable a *field* was read from, and the field's own
-    ///   type. `lower_field_get` reads the receiver's record **definition** to get
-    ///   the field's index, so one field-read site carries one record type, for
-    ///   TY-30's reason at TY-30's door number three.
+    /// - The fresh item variable a **`for`** over an *unresolved* iterator mints
+    ///   (ADR-062). The deferred `Iterable { item }` is the only thing that ever
+    ///   says what it holds, and MIR reads it to type the loop variable's slot.
+    ///   The **iterator** is deliberately *not* pinned: MIR picks `len`/`get`
+    ///   from its static ctor, so one clone per iterable kind is what makes those
+    ///   symbols right.
+    /// - A variable a **field** was read from, and the field's own type.
+    ///   `lower_field_get` reads the receiver's record **definition** to get the
+    ///   field's index, so one field-read site carries one record type — the
+    ///   method case's reason at a third door.
     pub fn pin_to_level(&mut self, t: Type, site: Level) {
         self.lower_levels(t, site);
     }
@@ -535,9 +533,9 @@ impl TypeDb {
     /// representative). Allocates new slots for any resolved composite so the
     /// returned `Type` is fully concrete to its leaves (or genuinely `Unbound`).
     ///
-    /// Used by the crash debugger (M10b-WS4) to capture a local's exact static
-    /// type — e.g. turning `Vec[?T]` (an element var that a later `push(11)`
-    /// linked to `Int`) into `Vec[Int]` so `p EXPR` can type-check against it.
+    /// Used by the crash debugger to capture a local's exact static type — e.g.
+    /// turning `Vec[?T]` (an element var that a later `push(11)` linked to
+    /// `Int`) into `Vec[Int]` so `p EXPR` can type-check against it.
     #[must_use]
     pub fn deep_resolve(&mut self, t: Type) -> Type {
         let mut folder = DeepResolver {
@@ -561,7 +559,7 @@ impl TypeDb {
         self.slots[v.to_u32() as usize].data = TypeData::Var(VarState::Linked { target });
     }
 
-    // --- record / enum definitions (M7, ADR-025) ----------------------------
+    // --- record / enum definitions (ADR-025) --------------------------------
 
     /// Borrow a record definition by id (read-only).
     #[must_use]
@@ -581,7 +579,7 @@ impl TypeDb {
     /// for the compiler: a def is only interesting when something has that type.
     /// The crash debugger asks the other direction — "does this program declare
     /// a `Pt`?", for an expression that names one without any local having that
-    /// type — and answering it by hand meant reaching into `record_defs`.
+    /// type — so the arena exposes the walk rather than the field.
     pub fn record_defs(&self) -> impl Iterator<Item = (RecordDefId, &RecordDef)> {
         self.record_defs
             .iter()
@@ -609,7 +607,7 @@ impl TypeDb {
     /// Takes a validated [`FieldSet`] — the one place a duplicate field name is
     /// rejected, rather than at whichever syntax caller happened to remember.
     ///
-    /// `params` are the def's own type parameters (F12); field types written in
+    /// `params` are the def's own type parameters; field types written in
     /// terms of them are substituted at each instance. Every caller passes an
     /// empty list today — the language has no `struct P[T]` syntax.
     pub fn register_record(
@@ -704,7 +702,7 @@ impl TypeDb {
         Ok(self.intern(TypeData::Enum { def, args }))
     }
 
-    // --- the prelude `Option` (F12) -----------------------------------------
+    // --- the prelude `Option` -----------------------------------------------
 
     /// The one `Option` def. Every `Option[T]` in a program instantiates it.
     #[inline]
@@ -721,7 +719,7 @@ impl TypeDb {
             .expect("Option takes one type argument")
     }
 
-    // --- reading a def through an instance's arguments (F12) -----------------
+    // --- reading a def through an instance's arguments -----------------------
 
     /// Substitute a def's `params` by an instance's `args` in `t`.
     ///
@@ -788,14 +786,14 @@ impl TypeDb {
     }
 }
 
-/// Deep resolution as a folder (F9): the identity fold, whose only effect is
-/// that [`fold`](crate::fold::fold) prunes every type it visits, so a composite
-/// whose child was linked comes back rebuilt around the child's representative.
+/// Deep resolution as a folder: the identity fold, whose only effect is that
+/// [`fold`](crate::fold::fold) prunes every type it visits, so a composite whose
+/// child was linked comes back rebuilt around the child's representative.
 ///
-/// The hand-written version ended in `_ => t`, which skipped `Record` and
-/// `Enum` — the crash debugger's static-type capture (ADR-035) therefore
-/// reported a record whose fields were still variables. It also had no cycle
-/// guard; the fold's memo is what supplies one.
+/// Going through the fold is what covers `Record` and `Enum` — a hand-written
+/// match that fell through on them would leave the crash debugger's static-type
+/// capture (ADR-035) reporting a record whose fields are still variables — and
+/// the fold's memo is the cycle guard.
 struct DeepResolver<'a> {
     db: &'a mut TypeDb,
     memo: crate::fold::FoldMemo,

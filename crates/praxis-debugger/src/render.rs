@@ -7,12 +7,12 @@
 //! 3. Print the top-frame locals up to a configured limit.
 //! 4. (The host then exits nonzero.)
 //!
-//! The interactive REPL (WS5) reuses [`render_backtrace`] and
-//! [`render_locals`] for its `bt` and `locals` commands, so the formatting lives
-//! here once. The TUI (M10b-WS4) lays its locals out as pane rows rather than
-//! text lines, but the *decisions* behind a row are this module's:
-//! [`split_locals`], [`type_str`] and [`provenance`] are shared, so the `locals`
-//! command and the locals pane cannot disagree about the same frame.
+//! The interactive REPL reuses [`render_backtrace`] and [`render_frame_locals`]
+//! for its `bt` and `locals` commands, so the formatting lives here once. The
+//! TUI lays its locals out as pane rows rather than text lines, but the
+//! *decisions* behind a row are this module's: [`split_locals`], [`type_str`]
+//! and [`provenance`] are shared, so the `locals` command and the locals pane
+//! cannot disagree about the same frame.
 
 use std::io::Write;
 
@@ -194,8 +194,8 @@ pub fn render_frame_locals<W: Write>(
 }
 
 /// Partition a frame's locals into user bindings (first) and compiler temps
-/// (second), preserving declaration order within each. This replaces the old
-/// flat list where temps (`<tmp>`) buried the variables the programmer wrote.
+/// (second), preserving declaration order within each, so temps never bury the
+/// variables the programmer wrote.
 ///
 /// Dead scratch temps — ones with neither a current value nor any source
 /// provenance — are dropped: they hold nothing and explain nothing (e.g. a
@@ -241,10 +241,9 @@ fn render_local_line<W: Write>(
         if name.is_empty() {
             // Defensive, and unreachable from compiled code:
             // `VerifyError::UserLocalHasNoName` rejects a function that
-            // classifies a nameless slot as a binding, which is what used to
-            // put a `? = 3` where a `for` variable should be. Hand-built frames
-            // (this crate's own tests, the runtime's) still reach it, so it
-            // prints the type it does know rather than dropping that too.
+            // classifies a nameless slot as a binding. Hand-built frames (this
+            // crate's own tests, the runtime's) still reach it, so it prints
+            // the type it does know rather than dropping that too.
             if ty_str.is_empty() {
                 writeln!(out, "    ? = {value_display}")?;
             } else {
@@ -273,12 +272,11 @@ fn render_local_line<W: Write>(
 
 /// The local's type as a string, when `db` is the live `TypeDb` and the local's
 /// `type_id` resolves within it. Returns an empty string (caller omits the
-/// type) when the db is absent, the local has no threaded type (a null
-/// descriptor marks a frame constructed before type threading), or the id is
-/// out of range. The `type_id` is positional in the program's own `TypeDb`, so
-/// it must pair with that same db — never a fresh one (evaluate.rs:184). We do
-/// *not* treat `type_id == 0` as "unknown": slot 0 is a legitimate type, and
-/// the codegen always threads a valid id for real frames.
+/// type) when the db is absent, the descriptor is null, or the id is out of
+/// range. The `type_id` is positional in the program's own `TypeDb`, so it must
+/// pair with that same db — never a fresh one (see `evaluate::evaluate`).
+/// `type_id == 0` is *not* read as "unknown": slot 0 is a legitimate type, and
+/// a local with no static type carries `NO_STATIC_TYPE`, which no arena mints.
 ///
 /// Takes the `Option` rather than a [`RenderCtx`] so the TUI, which holds the
 /// db and source text as loose values, resolves types through this same route.
@@ -286,8 +284,12 @@ pub fn type_str(local: &DebugLocal, db: Option<&praxis_types::TypeDb>) -> String
     let Some(db) = db else {
         return String::new();
     };
-    // A null descriptor marks a frame from before type threading (the M5 unit
-    // tests) — its `type_id` is not meaningful, so omit the type.
+    // A null descriptor is the backend's "no type column" (see
+    // `debug_descriptor_for_type`): the local has no static type at all
+    // (`MirType::Opaque`, and `NO_STATIC_TYPE` in `type_id`), or its type has
+    // no runtime descriptor (`Never`, an unresolved inference variable), where
+    // `type_id` is real but the column is still omitted. Hand-built frames
+    // leave it null too.
     if local.descriptor.is_null() {
         return String::new();
     }
@@ -336,7 +338,7 @@ fn format_value(value: praxis_runtime::DebugValue) -> String {
     crate::value::format_bounded(value, crate::value::DEFAULT_BUDGET)
 }
 
-/// Render the selected frame's source extent (§9.4 `source`, M10b-WS3).
+/// Render the selected frame's source extent (§9.4 `source`).
 ///
 /// Prints the lines of `source_text` the frame's `source_span` covers, each
 /// prefixed with its 1-based line number, then a clamped caret underline
@@ -346,8 +348,7 @@ fn format_value(value: praxis_runtime::DebugValue) -> String {
 ///
 /// The caret logic is shared with the compiler via
 /// [`praxis_source::snippet::render_span_snippet`], so a multi-line span is
-/// underlined on each line and never overruns the visible line (the earlier
-/// implementation drew `end − start` carets all on one line).
+/// underlined on each line and never overruns the visible line.
 pub fn render_source_span<W: Write>(
     out: &mut W,
     source_text: &str,
@@ -399,7 +400,7 @@ pub fn render_source_span<W: Write>(
     Ok(())
 }
 
-/// Render the input near the active parser cursor (§9.4 `input`, M10b-WS3).
+/// Render the input near the active parser cursor (§9.4 `input`).
 ///
 /// For a `ParseFailed` fault, prints the input bytes around the recorded
 /// mismatch offset with a caret under the span. For other fault kinds, prints
@@ -435,7 +436,7 @@ pub fn render_input_context<W: Write>(
     Ok(())
 }
 
-/// Render the active input-parser context (§9.4 `parser`, M10b-WS3).
+/// Render the active input-parser context (§9.4 `parser`).
 ///
 /// For a `ParseFailed` fault, prints what the parser expected, the parser
 /// expression's source span (if threaded), and the actual preview. For other
@@ -510,8 +511,7 @@ mod tests {
     /// A `DebugLocal` slot no value was ever spilled into — `value: None`.
     /// `kind` selects user vs temp; `span` is the optional provenance span;
     /// `type_id` pairs with a TypeDb. `descriptor` is non-null so the type path
-    /// is exercised (a null descriptor marks a pre-type-threading frame and
-    /// suppresses type rendering).
+    /// is exercised (a null descriptor suppresses type rendering).
     fn local(
         name: &'static str,
         symbol_id: u32,
@@ -648,8 +648,7 @@ mod tests {
     }
 
     /// The shape ADR-139 makes every binding form reach: a name and a type on
-    /// one line. Pattern bindings arrived here nameless, and the nameless
-    /// branch below is what they hit.
+    /// one line.
     #[test]
     fn a_named_binding_renders_its_name_and_type() {
         let mut db = praxis_types::TypeDb::new();
@@ -674,11 +673,10 @@ mod tests {
         assert!(text.contains("item: Int ="), "{text}");
     }
 
-    /// The defensive branch, which `VerifyError::UserLocalHasNoName` now makes
-    /// unreachable from compiled code but which hand-built frames still reach.
-    /// It used to drop the type column as well as the name, so a `for` variable
-    /// lost both at once; a frame that cannot say *which* binding a row is
-    /// should at least say what it holds.
+    /// The defensive branch, which `VerifyError::UserLocalHasNoName` makes
+    /// unreachable from compiled code but which hand-built frames still reach:
+    /// a frame that cannot say *which* binding a row is should at least say
+    /// what it holds.
     #[test]
     fn a_nameless_binding_still_renders_its_type() {
         let mut db = praxis_types::TypeDb::new();
@@ -908,8 +906,6 @@ mod tests {
     /// expression, most usefully — and `<collected>` is one it wrote and
     /// finished with, whose object a later collection took (ADR-044 decision 2
     /// stops rooting a binding at its last *use*, not at the end of its scope).
-    /// Reading the second as the first is how `var b = "asdf"` came to render as
-    /// though the line had never run.
     #[test]
     fn a_collected_local_is_not_reported_as_uninitialized() {
         let mut collected = local("b", 0, praxis_runtime::LOCAL_KIND_USER, Some((0, 9)), 0);
@@ -966,7 +962,7 @@ mod tests {
         assert!(!text.contains("locals:"), "no empty locals header: {text}");
     }
 
-    // ---- M10b-WS3: source/input/parser context rendering ----
+    // ---- source/input/parser context rendering ----
 
     #[test]
     fn source_span_renders_lines_with_caret() {
@@ -990,8 +986,7 @@ mod tests {
     #[test]
     fn source_span_multiline_does_not_overflow() {
         // A span covering the whole `fn` (3 lines): each line is underlined to
-        // its end and the caret never runs past the visible line. The earlier
-        // implementation drew `end - start` carets all on line 1.
+        // its end and the caret never runs past the visible line.
         let src = "fn f() {\n  a = b + c\n}\n";
         let span = (0, src.len() as u32);
         let mut out = Vec::new();

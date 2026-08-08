@@ -27,8 +27,9 @@ env:
 jobs:
   asan:
     runs-on: ubuntu-latest
-    # An instrumented build plus 1911 tests is long but not unbounded. Failing at
-    # 90 minutes says "something hung" rather than burning the default six hours.
+    # An instrumented build plus the whole suite is long but not unbounded.
+    # Failing at 90 minutes says "something hung" rather than burning the
+    # default six hours.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4

@@ -1,16 +1,11 @@
 //! The built-in method catalog (§16.2): one structured table of every built-in
-//! method, filled in incrementally per milestone.
+//! method.
 //!
 //! This is the **single source of truth** the type checker, HIR lowering, and
 //! code generator consume (rule 20.3). [`builtin_catalog`] returns a finalized,
 //! duplicate-free [`MethodCatalog`]; the builder rejects any duplicate
 //! `(receiver, name, arity)` triple so an accidental overload is impossible
 //! ("make illegal states unrepresentable").
-//!
-//! M5 populates the `Vec[T]` method surface (`push`, `len`, `get`,
-//! `is_empty`). M8-WS2 adds `Deque[T]`. The rest of the collection set
-//! (Map/Set/Counter/Heap) lands in later M8 workstreams; Text methods and
-//! `out(...)` arrive with the features that exercise them.
 
 use crate::abi;
 use crate::catalog::MethodCatalog;
@@ -25,7 +20,7 @@ fn vec_of_t() -> TypePattern {
     }
 }
 
-/// Build the finalized built-in method catalog for this milestone.
+/// Build the finalized built-in method catalog.
 ///
 /// # Panics
 /// Panics if two entries share a `(receiver, name, arity)` triple — that is a
@@ -91,13 +86,12 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(grid_transpose())
         .entry(grid_rotate_left())
         .entry(grid_rotate_right())
-        // Pipeline combinators (M8-WS8, §6.3, ADR-127). Intrinsics the compiler
-        // fuses into a single loop over the source. **One row apiece**, on the
-        // generic `Iterable` receiver: the language already had a complete answer
-        // to "what can I iterate and what does it yield" — `capability::iter_item`
-        // for eleven collections plus `Text` — and this is the pipeline reading
-        // it instead of keeping a second, much smaller one. The `Vec`/`Seq` pair
-        // these replace was forty-nine rows of which twenty-three were dead.
+        // Pipeline combinators (§6.3, ADR-127). Intrinsics the compiler fuses
+        // into a single loop over the source. **One row apiece**, on the generic
+        // `Iterable` receiver: `capability::iter_item` already answers "what can
+        // I iterate and what does it yield" for eleven collections plus `Text`,
+        // and the pipeline reads that rather than keeping a second, smaller
+        // answer of its own.
         .entry(seq_map())
         .entry(seq_filter())
         .entry(seq_fold())
@@ -116,8 +110,8 @@ pub fn builtin_catalog() -> MethodCatalog {
         // result nests a collection inside a collection.
         .entry(seq_chunks())
         .entry(seq_windows())
-        // M8-WS11: the remaining non-barrier combinators. Each is an intrinsic
-        // fused by the MIR pipeline recognizer.
+        // The remaining non-barrier combinators. Each is an intrinsic fused by
+        // the MIR pipeline recognizer.
         .entry(seq_take())
         .entry(seq_skip())
         .entry(seq_take_while())
@@ -165,8 +159,7 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(float_is_infinite())
         .entry(float_min())
         .entry(float_max())
-        // The explicit Int→Float widening method (§4.12). The first Int-receiver
-        // method; establishes the pattern for scalar-receiver methods.
+        // The explicit Int→Float widening method (§4.12).
         .entry(int_to_float())
         // The Char/Int conversion pair (ADR-086), written as a pair for the
         // reason §4.12 writes Float.to_int/Int.to_float as one.
@@ -185,9 +178,9 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(int_wrapping_mul())
         .entry(int_saturating_mul())
         .entry(int_checked_mul())
-        // Subscripts (REP-16, §4.7/§6.2/§6.4). Six collections read; five of
-        // those six also store — every one but the immutable `Text`. See the
-        // block comment above `vec_index` for why these are catalog rows.
+        // Subscripts (§4.7/§6.2/§6.4). Six collections read; five of those six
+        // also store — every one but the immutable `Text`. See the block comment
+        // above `vec_index` for why these are catalog rows.
         .entry(vec_index())
         .entry(vec_index_set())
         .entry(deque_index())
@@ -199,14 +192,13 @@ pub fn builtin_catalog() -> MethodCatalog {
         .entry(counter_index_set())
         .entry(grid_index())
         .entry(grid_index_set())
-        // …and the two updating stores §6.2 writes (REP-21). Map only: they are
-        // the two wrappers that exist, and an absent entry accepting the first
-        // value is a semantics no read-modify-write over the rows above can
-        // express, because a subscript read of an absent key faults (§4.7).
+        // …and the two updating stores §6.2 writes. Map only: they are the two
+        // wrappers that exist, and an absent entry accepting the first value is
+        // a semantics no read-modify-write over the rows above can express,
+        // because a subscript read of an absent key faults (§4.7).
         .entry(map_index_min())
         .entry(map_index_max())
-        // Keyed enumeration (REP-18). §3.3's `counts.values()`, plus the `Map`
-        // siblings — the only way to enumerate a `Map` while REP-15 stands.
+        // Keyed enumeration: §3.3's `counts.values()`, plus the `Map` siblings.
         .entry(counter_keys())
         .entry(counter_values())
         .entry(map_keys())
@@ -215,13 +207,7 @@ pub fn builtin_catalog() -> MethodCatalog {
         .expect("built-in catalog must be duplicate-free")
 }
 
-// --- Keyed enumeration (REP-18) ----------------------------------------------
-//
-// §3.3's representative program ends in `counts.values().count(|n| n >= 2)`, and
-// `values` existed nowhere: not in the catalog, and nowhere else in the design doc
-// either. These four rows are it, plus the `Map` siblings — which are also the only
-// way to enumerate a `Map` today, because `for kv in m` has no lowering at all
-// (REP-15).
+// --- Keyed enumeration -------------------------------------------------------
 //
 // Each answers a `Vec`, so every §6.3 pipeline combinator applies to the result.
 // The order is fixed and deterministic (by the key's rendered form), so `keys()`
@@ -288,7 +274,7 @@ fn map_values() -> MethodEntry {
     }
 }
 
-// --- Subscript rows (REP-16, §4.7/§6.2/§6.4) ---------------------------------
+// --- Subscript rows (§4.7/§6.2/§6.4) -----------------------------------------
 //
 // `m[key]`, `counts[key] += 1` and `grid[x, y]` dispatch through the catalog on
 // the receiver's shape and the index count, which is what a method call already
@@ -300,11 +286,10 @@ fn map_values() -> MethodEntry {
 // store** — every reader but `Text`, which is immutable (§4.3), so `t[0] = c` is
 // still the report `not_index_assignable` gives.
 //
-// `Vec` and `Deque` were the two readers with no store, which ADR-064 recorded
-// as a feature owed rather than a gap it would smuggle in; they have one now,
-// through `praxis_vec_set`/`praxis_deque_set`. Their stores **replace** and never
-// append: `v[v.len()] = x` is `IndexOutOfBounds` rather than a push, so an
-// off-by-one is reported instead of growing the vector.
+// The `Vec` and `Deque` stores go through `praxis_vec_set`/`praxis_deque_set`,
+// and they **replace** and never append: `v[v.len()] = x` is `IndexOutOfBounds`
+// rather than a push, so an off-by-one is reported instead of growing the
+// vector (ADR-064).
 //
 // The read rows repeat their `get` sibling's symbol on purpose — except `Map`,
 // whose two answers differ by design: `.get` returns Unit for an absent key and
@@ -400,10 +385,10 @@ fn map_index_set() -> MethodEntry {
 
 /// The `Map[K, V]` receiver of `min=`/`max=`, whose value is bound to `Int`.
 ///
-/// A **bound** rather than a literal `Int` argument, for TY-31's reason: the
-/// bound *pins* an unresolved value type instead of merely permitting it, so
-/// `var d = Map()` followed by `d[k] min= 1` gives `d` an `Int` value type rather
-/// than reporting. The bound is what the wrapper needs — `praxis_map_update_min`
+/// A **bound** rather than a literal `Int` argument: the bound *pins* an
+/// unresolved value type instead of merely permitting it, so `var d = Map()`
+/// followed by `d[k] min= 1` gives `d` an `Int` value type rather than
+/// reporting. The bound is what the wrapper needs — `praxis_map_update_min`
 /// compares through `int_payload`, so a `Map[Text, Text]` would read its values
 /// as `i64`s.
 fn map_of_k_int_value() -> TypePattern {
@@ -517,11 +502,9 @@ fn text_len() -> MethodEntry {
 
 /// `Text.int() -> Option[Int]` — the one text-to-number conversion (ADR-136).
 ///
-/// `Y001`'s help on `var count: Int = raw` has read "this is `Text`; call
-/// `.int()` on it (or use `read lines(int)`)" since it was written, and only the
-/// parenthesized half was true: `Text`'s rows were `len`, `is_empty` and `get`,
-/// so `raw.int()` reported `Y110`. Half of the help for the most common mistake
-/// in a puzzle program pointed at nothing.
+/// It is what `Y001`'s help on `var count: Int = raw` points at ("this is
+/// `Text`; `.int()` answers `Option[Int]`, so take it apart with `match` (or
+/// use `read lines(int)`)").
 ///
 /// `Option[Int]` rather than `Int`, for §4.7's reason and `Map.get`'s: a text
 /// that is not a number is *absence*, not a fault. Input is routinely not what a
@@ -765,9 +748,9 @@ fn int_to_float() -> MethodEntry {
 // **Deliberately absent, each for its own reason**, in the convention the Char
 // conversion block below uses:
 //
-// - **`Bool.to_text()`.** No design-doc surface asks for one, which is what
-//   REP-46 refused to invent rows past. `if b { "true" } else { "false" }` says
-//   it, and says which spelling the program wanted.
+// - **`Bool.to_text()`.** No design-doc surface asks for one, and the catalog
+//   invents no rows past what one asks for. `if b { "true" } else { "false" }`
+//   says it, and says which spelling the program wanted.
 // - **A universal `T.to_text()`.** That is §8.1 interpolation's question, not
 //   this one: a hole that stringifies *any* value needs a rendering conversion
 //   defined on every type, which is the implicit conversion to `Text` that
@@ -798,35 +781,21 @@ fn int_to_text() -> MethodEntry {
 // so `Grid[Char]`, `Vec[Char]` and `Map[Char, _]` would stay write-only from the
 // language's side.
 //
-// `to_int` is required and not a nicety. Before ADR-086 a text index answered an
-// `Int`, so `t[i] - 48`, `t[i] >= 97` and a `Map[Int, _]` keyed on a character
-// were all ordinary; `capability::supports_numeric` excludes `Char` on purpose
-// ("a `Char` is a scalar value and not an arithmetic one"), so without this row
-// making the index a `Char` would be a straight regression. With it, every
-// program expressible before stays expressible by inserting `.to_int()`.
+// `to_int` is required and not a nicety. A text index answers a `Char`, and
+// `capability::supports_numeric` excludes `Char` on purpose ("a `Char` is a
+// scalar value and not an arithmetic one"), so `t[i] - 48`, `t[i] >= 97` and a
+// `Map[Int, _]` keyed on a character are all spelled by inserting `.to_int()`.
 //
 // **Deliberately absent, each for its own reason** — the same convention the
 // `_add` trio's comment below uses, so an omission is recorded where a reader
 // looks for it rather than only in a commit message:
 //
 // - **`is_digit`, `is_alpha`, `to_upper`, `to_lower`.** No design-doc surface
-//   asks for any of them and `to_int()` expresses every one. Four invented rows
-//   is exactly what REP-46 refused with `wrapping_sub`/`_mul`.
+//   asks for any of them and `to_int()` expresses every one.
 // - **`Text.chars()`.** `for c in text` **is** the spelling (ADR-099): a `Text`
 //   is iterable and yields the same `Char` `t[i]` answers, through the same
 //   `praxis_text_len`/`praxis_text_get` pair. A `chars()` row would be a second
-//   spelling for one question, which is what ADR-077 refused. This note used to
-//   record the `for` as a gap alongside it; that half is closed.
-//
-// **`Char.to_text()` used to be listed here and no longer is** (ADR-143). The
-// argument for its absence was that it gives a second spelling for "is this
-// character a `#`" — `t[i].to_text() == "#"` beside `t[i] == "#"[0]` — and that
-// ADR-077 refuses two spellings for one question. It does, but this is not one:
-// ADR-077 refused two *accessors*, and the comparison through `to_text` is not a
-// second way to ask the question so much as a worse one, allocating a `Text` to
-// answer what a scalar compare already answers. The question `to_text` is here
-// for is the other direction — producing output text — and that had no spelling
-// at all.
+//   spelling for one question, which is what ADR-077 refused.
 
 fn char_to_int() -> MethodEntry {
     MethodEntry {
@@ -868,28 +837,13 @@ fn int_to_char() -> MethodEntry {
     }
 }
 
-// §4.12's three explicit overflow alternatives (REP-46). The design document
-// writes exactly these three spellings, and until now none of them existed:
-// §4.12 said "integer arithmetic is checked by default … explicit alternatives"
-// and then named three methods a program could not call, so the section
-// described a language with no way to opt out of a fault.
+// §4.12's explicit overflow alternatives — the way out of the checked default.
 //
 // **The family is three modes over three operators** — `wrapping_`,
 // `saturating_`, `checked_` × `add`, `sub`, `mul`. §4.12 states that shape and
 // both of its closures (no `_div`/`_rem`, no `_neg`/`_abs`) and is the only
 // place the rule is written; `the_overflow_alternative_family_is_three_modes_over_three_operators`
 // below is what enforces it against this table.
-//
-// The `_sub`/`_mul` six were once deliberately absent, on the reading that
-// §4.12 "names only the three". That reading does not survive checking: the
-// sentence it rests on was written **by REP-46's own first half** as a note
-// deferring the question, so it cannot be the authority for the decision it was
-// written to defer. §4.12 closes a set in prose every time it means to — "The
-// stdlib Float methods **are** …", "Division by zero always faults" — and closes
-// nothing here. The measurement decided the rest: `wrapping_mul` cannot be
-// written in this language at all (every arithmetic operator faults and there
-// are no bitwise operators), so leaving it out was a hole with no reason
-// behind it.
 
 fn int_wrapping_add() -> MethodEntry {
     MethodEntry {
@@ -1088,7 +1042,7 @@ fn vec_to_text() -> MethodEntry {
     }
 }
 
-// --- Deque methods (M8-WS2, §6.1) ----------------------------------------
+// --- Deque methods (§6.1) ------------------------------------------------
 
 /// The `Deque[T]` receiver pattern, used by every Deque method entry.
 fn deque_of_t() -> TypePattern {
@@ -1182,7 +1136,7 @@ fn deque_is_empty() -> MethodEntry {
     }
 }
 
-// --- Map / Set / Counter methods (M8-WS3, §6.1, §11.3) -------------------
+// --- Map / Set / Counter methods (§6.1, §11.3) ---------------------------
 
 /// The `Map[K, V]` receiver pattern: two type args (key, value).
 fn map_of_k_v() -> TypePattern {
@@ -1226,10 +1180,8 @@ fn map_get() -> MethodEntry {
         name: "get",
         params: vec![TypePattern::var("K")],
         // §5.7 writes this signature literally: `Map[K,V].get(K) -> Option[V]`.
-        // The row said `V` and the wrapper answered the Unit sentinel on a miss
-        // (RT-14), which is a value whose static type is `V` and whose runtime
-        // descriptor is `Unit`. §4.7: absence is `Option`, and `map[key]` is
-        // the assertion-like half that faults.
+        // §4.7: absence is `Option`, and `map[key]` is the assertion-like half
+        // that faults.
         result: TypePattern::Option(Box::new(TypePattern::var("V"))),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapGet),
@@ -1393,7 +1345,7 @@ fn counter_is_empty() -> MethodEntry {
     }
 }
 
-// --- MinHeap[T] / MaxHeap[T] methods (M8-WS4, §6.1) ---------------------
+// --- MinHeap[T] / MaxHeap[T] methods (§6.1) -----------------------------
 
 fn min_heap_of_t() -> TypePattern {
     TypePattern::Collection {
@@ -1529,7 +1481,7 @@ fn min_heap_is_empty() -> MethodEntry {
     }
 }
 
-// --- BitSet methods (M8-WS5, §6.1) --------------------------------------
+// --- BitSet methods (§6.1) ----------------------------------------------
 
 /// The `BitSet` receiver pattern (nullary — no type args).
 fn bitset_receiver() -> TypePattern {
@@ -1602,7 +1554,7 @@ fn bitset_is_empty() -> MethodEntry {
     }
 }
 
-// --- Grid[T] methods (M8-WS5, §6.4) -------------------------------------
+// --- Grid[T] methods (§6.4) ---------------------------------------------
 
 /// The `Grid[T]` receiver pattern.
 fn grid_of_t() -> TypePattern {
@@ -1786,8 +1738,8 @@ fn grid_find() -> MethodEntry {
         name: "find",
         params: vec![TypePattern::var("T")],
         // Absence is `Option`, not the Unit sentinel under a `(Int, Int)`
-        // static type (RT-15, §4.7). `find_all` needs no such thing — a `Vec`
-        // already encodes "nothing matched" as emptiness.
+        // static type (§4.7). `find_all` needs no such thing — a `Vec` already
+        // encodes "nothing matched" as emptiness.
         result: TypePattern::Option(Box::new(point_pattern())),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridFind),
@@ -1846,7 +1798,7 @@ fn grid_rotate_right() -> MethodEntry {
     }
 }
 
-// --- Pipeline combinators (M8-WS8, §6.3, ADR-127) -------------------------
+// --- Pipeline combinators (§6.3, ADR-127) ---------------------------------
 // The functional-sequence pipeline: intrinsics the compiler fuses into a single
 // loop over the source. Sinks (sum/count/fold) terminate, and a chain that ends
 // without one materializes anyway (ADR-126).
@@ -1854,9 +1806,7 @@ fn grid_rotate_right() -> MethodEntry {
 // **A pipeline's receiver is anything a `for` loop can walk**, and it yields
 // what the `for` loop's variable would bind (ADR-127 decision 1). One row per
 // combinator, on `TypePattern::Iterable`, whose ten accepted receivers are
-// `PIPELINE_RECEIVERS` plus `Text`. What replaced: a `Vec[T]` row and a `Seq[T]`
-// twin apiece, of which every `Seq` twin was dead — no catalog row ever answered
-// a `Seq`, so nothing could reach one.
+// `PIPELINE_RECEIVERS` plus `Text`.
 //
 // The receiver generalizes; **two parameters deliberately do not.** `zip`'s
 // argument is a `Vec[U]` and `flat_map`'s closure answers one, because the fused
@@ -1887,15 +1837,12 @@ fn t_to_bool() -> TypePattern {
     }
 }
 
-/// `(T) -> Option[U]` — the shape of `filter_map`'s closure argument (REP-38).
+/// `(T) -> Option[U]` — the shape of `filter_map`'s closure argument.
 ///
-/// It was `(T) -> U`, which is `map`'s shape and is why `filter_map` lowered as
-/// `map`: with an unconstrained `U` there is nothing at runtime that says "this
-/// element mapped to nothing", so no filtering was possible and the row's own
-/// doc admitted it ("modeled as map-keep"). §6.3 lists `filter_map` with no
-/// deferral note, and nothing marked the row provisional. S18's `Option`
-/// (ADR-076) is what makes the distinction representable: absence is a variant,
-/// so the drop test is a tag compare.
+/// `Option[U]` and not `map`'s `(T) -> U`: with an unconstrained `U` there is
+/// nothing at runtime that says "this element mapped to nothing", so no
+/// filtering would be possible. `Option` (ADR-076) makes the distinction
+/// representable — absence is a variant, so the drop test is a tag compare.
 fn t_to_option_u() -> TypePattern {
     TypePattern::Function {
         params: vec![TypePattern::var("T")],
@@ -1914,14 +1861,11 @@ fn acc_t_to_acc() -> TypePattern {
 /// `(T, T) -> T` — the shape of `reduce`'s combining closure.
 ///
 /// **`reduce` is `fold` without the seed**, so its accumulator *is* the element
-/// type; there is no second variable for it to be. It shared
-/// [`acc_t_to_acc`] with `fold`, and the free `Acc` that made sense there was
-/// the defect here: nothing tied the closure's first parameter to the element,
-/// so `["ab", "c"].reduce(|a, b| a.len())` type-checked with `a` unpinned —
-/// `len` resolved against a variable, the closure answered `Int`, and `reduce`
-/// answered `Text` at the same time. The two disagreeing is what reached MIR
-/// and tripped `build.rs`'s pipeline-recognizer assertion, which was right to
-/// fire (REP-68).
+/// type; there is no second variable for it to be. Sharing [`acc_t_to_acc`]
+/// with `fold` would leave the closure's first parameter untied to the element,
+/// so `["ab", "c"].reduce(|a, b| a.len())` would type-check with `a` unpinned —
+/// the closure answering `Int` while `reduce` answers `Text`, a disagreement
+/// MIR's pipeline recognizer then asserts on.
 fn t_t_to_t() -> TypePattern {
     TypePattern::Function {
         params: vec![TypePattern::var("T"), TypePattern::var("T")],
@@ -1941,9 +1885,8 @@ fn seq_map() -> MethodEntry {
     }
 }
 
-/// `Vec[U]` — the result of a `map` (a fresh element variable U). The current
-/// implementation eagerly materializes to Vec; true lazy `Seq[U]` with cross-
-/// combinator fusion is the documented next refinement (M8-WS8 continuation).
+/// `Vec[U]` — the result of a `map` (a fresh element variable U). The pipeline
+/// is eager (ADR-028 decision 2): a stage materializes a `Vec`.
 fn vec_of_u() -> TypePattern {
     TypePattern::Collection {
         ctor: CollectionCtor::Vec,
@@ -1999,10 +1942,11 @@ fn seq_count() -> MethodEntry {
     }
 }
 
-/// `v.count(pred)` — §6.3's `count` with a predicate, which is what §3.3 writes
-/// (REP-18). A second *arity* of one name, which the catalog's
-/// `(receiver, name, arity)` key has always allowed: `count()` is the element
-/// count and `count(pred)` the matching-element count.
+/// `v.count(pred)` — §6.3's `count` with a predicate, which is what §3.3 writes.
+///
+/// A second *arity* of one name, which the catalog's `(receiver, name, arity)`
+/// key allows: `count()` is the element count and `count(pred)` the
+/// matching-element count.
 fn seq_count_if() -> MethodEntry {
     MethodEntry {
         receiver: iterable_of_t(),
@@ -2017,22 +1961,18 @@ fn seq_count_if() -> MethodEntry {
 
 // **There is no `collect` row, and ADR-126 is why.** A chain that ends on a
 // streaming stage already materializes: `recognize_pipeline` appends the
-// `Collect` sink itself, so `v.map(f)` *is* a `Vec[U]` and `v.map(f).collect()`
-// built the identical plan. The row was the lazy `Seq[T]` design's bridge, and
-// this pipeline is eager (ADR-028 decision 2) — it named a step the compiler
-// takes whether or not it is written.
+// `Collect` sink itself, so `v.map(f)` *is* a `Vec[U]`. This pipeline is eager
+// (ADR-028 decision 2), so a `collect` row would name a step the compiler takes
+// whether or not it is written.
 
 // --- the barrier combinators (§6.3) ---------------------------------------
 //
 // A barrier needs the whole sequence before it can answer anything, so it
 // cannot be fused into the loop feeding it. That makes it the opposite kind of
 // row from everything above: a `RuntimeSymbol`, not an `Intrinsic`. That is the
-// MIR fuser's guardrail talking and not a style preference — registering
-// `sorted` as `MethodLowering::Intrinsic("seq_sorted")` with no
-// `classify_link`/`classify_sink` arm was tried, and
-// `intrinsics_are_all_recognized_so_there_is_no_second_lowering` answers:
-// "`sorted` at arity 0 lowers as an intrinsic and no runtime symbol, but the
-// pipeline recognizer declines it — it has no lowering".
+// MIR fuser's guardrail and not a style preference — an `Intrinsic` with no
+// `classify_link`/`classify_sink` arm is a row with no lowering at all, which
+// `intrinsics_are_all_recognized_so_there_is_no_second_lowering` refuses.
 //
 // `recognize_pipeline` already ends a fused chain at an unclassified
 // `MethodCall` and starts a fresh one from its result, which is exactly what a
@@ -2042,10 +1982,9 @@ fn seq_count_if() -> MethodEntry {
 // **The receiver is `Iterable` like everything else (ADR-127 decision 3), and
 // the lowering materializes it first.** A wrapper needs a real `VecPayload`, so
 // `build::emit_iter_vec` puts the plan's snapshot — or, for a receiver with no
-// snapshot symbol, a materializing walk — in front of the call. Leaving the
-// three on `Vec[T]` was the alternative and it was rejected: it makes
-// `set.map(f).sorted()` legal and `set.sorted()` a `Y110`, which is a rule
-// nobody can hold in their head.
+// snapshot symbol, a materializing walk — in front of the call. A `Vec[T]`
+// receiver is the rejected alternative: it makes `set.map(f).sorted()` legal
+// and `set.sorted()` a `Y110`, which is a rule nobody can hold in their head.
 //
 // **`reversed` is a barrier for the definition's own reason** (ADR-145): it
 // cannot answer its first element until it has seen the last one. A
@@ -2067,19 +2006,12 @@ fn seq_count_if() -> MethodEntry {
 // row — `Vec[Char].to_text()`, defined beside `vec_is_empty` — and a
 // sequence-of-`Int` joins by rendering first: `ns.map(|n| n.to_text()).join(",")`.
 //
-// **`chunks` and `windows` answer `Vec[Vec[T]]`, and the descriptor question
-// this comment used to defer them over was already answered** (ADR-149). The
-// note said the wrappers "have to label the *outer* Vec with `collections::VEC`
-// while the inner ones keep the element descriptor", and that sentence is the
-// whole rule — there was nothing left to choose. `outer.push(inner)` already
-// builds a `Vec[Vec[T]]` and `adopt_or_reject` already labels it `VEC`, so a
-// wrapper answering anything else would disagree with `push`; and a wrapper
-// naming a label its receiver cannot supply is what `praxis_grid_positions` and
-// three siblings have done since M8, with `&tuples::TUPLE`.
-//
-// What the deferral was really protecting is worth keeping: *don't commit to
-// surface no program forces*. That is why these arrive with a program that
-// forces them rather than with the three barriers above.
+// **`chunks` and `windows` answer `Vec[Vec[T]]`** (ADR-149). Their wrappers
+// label the *outer* `Vec` with `collections::VEC` while the inner ones keep the
+// element descriptor: `outer.push(inner)` builds a `Vec[Vec[T]]` and
+// `adopt_or_reject` labels it `VEC`, so a wrapper answering anything else would
+// disagree with `push`. Naming a label its receiver cannot supply is what
+// `praxis_grid_positions` and three siblings do with `&tuples::TUPLE`.
 //
 // They are barriers for `reversed`'s reason and not for a new one: a grouping
 // is a fact about positions in the whole sequence, so neither can answer its
@@ -2111,7 +2043,7 @@ fn seq_sorted() -> MethodEntry {
 ///
 /// `HashStable` and not `Hash`: sameness is decided by the descriptor's `hash`
 /// and `equals`, so an element that can change after it has been seen would not
-/// be recognized the second time (D4, TY-32).
+/// be recognized the second time (D4).
 fn seq_unique() -> MethodEntry {
     MethodEntry {
         receiver: TypePattern::iterable(TypePattern::of_kind("T", crate::CapKind::HashStable)),
@@ -2270,10 +2202,10 @@ fn seq_frequencies() -> MethodEntry {
     }
 }
 
-// --- M8-WS11: the remaining non-barrier combinators (§6.3) ----------------
+// --- the remaining non-barrier combinators (§6.3) -------------------------
 // Each is an intrinsic lowered by the MIR fuser (`recognize_pipeline` +
-// `lower_pipeline`) into a single fused loop. Defined on both `Vec[T]` and
-// `Seq[T]` so chains can start on a concrete collection and continue on Seq.
+// `lower_pipeline`) into a single fused loop, on the generic `Iterable`
+// receiver like every other combinator (ADR-127 decision 1).
 
 /// `(T, T) -> Bool` — the shape of `min_by`/`max_by`'s comparator ("less-than").
 fn t_t_to_bool() -> TypePattern {
@@ -2329,13 +2261,7 @@ fn seq_take_while() -> MethodEntry {
     }
 }
 
-/// `Vec[(Int, T)]` — what `enumerate` actually yields.
-///
-/// The row used to declare `Vec[T]`, the receiver's own element type, so
-/// `v.enumerate()` on a `Vec[Int]` came out `Vec[Int]` and the tuple the fused
-/// loop really builds was invisible to the type system. Found by S15 and
-/// recorded there as a finding the register does not have; this stage is the one
-/// that touches the sequence rows, so it is fixed here.
+/// `Vec[(Int, T)]` — the index/element pairs `enumerate`'s fused loop builds.
 fn vec_of_index_and_t() -> TypePattern {
     TypePattern::Collection {
         ctor: CollectionCtor::Vec,
@@ -2347,12 +2273,7 @@ fn vec_of_index_and_t() -> TypePattern {
 }
 
 /// `Vec[(T, U)]` — what `zip` yields, pairing the receiver's element with the
-/// argument sequence's.
-///
-/// The row used to declare both the parameter and the result as `Vec[T]`, which
-/// said two wrong things at once: that the other sequence must have the *same*
-/// element type as the receiver, and that the result is a sequence of that type
-/// rather than of pairs.
+/// argument sequence's. The two element types are independent.
 fn vec_of_t_and_u() -> TypePattern {
     TypePattern::Collection {
         ctor: CollectionCtor::Vec,
@@ -2413,13 +2334,12 @@ fn seq_filter_map() -> MethodEntry {
 
 // Aggregating sinks (scalar result) ---------------------------------------
 //
-// `sum`, `product`, `min` and `max` are **Int** operations (TY-31). Each one
-// lowers to an `ExtractScalar` at `ScalarKind::Int` followed by an `IntBinOp` or
-// an `IntCmp`, and the row's own result says `Int`. The element bound therefore
-// has to be `Int` and not `Numeric`: a `Numeric` bound would bless `Float`, and
-// `Vec[Float].sum()` reinterprets each float's bits as an integer and returns
-// nonsense — the P0-12 class of bug, in a sink. `Bool` was accepted for the same
-// reason, which is the finding.
+// `sum`, `product`, `min` and `max` are **Int** operations. Each one lowers to
+// an `ExtractScalar` at `ScalarKind::Int` followed by an `IntBinOp` or an
+// `IntCmp`, and the row's own result says `Int`. The element bound therefore has
+// to be `Int` and not `Numeric`: a `Numeric` bound would bless `Float`, and
+// `Vec[Float].sum()` would reinterpret each float's bits as an integer and
+// return nonsense. `Bool` is excluded for the same reason.
 //
 // The bound is discharged by unification, so an element type that is *not yet
 // known* is pinned to `Int` rather than merely allowed: `v.map(f).sum()` pins the
@@ -2637,7 +2557,7 @@ fn seq_to_vec() -> MethodEntry {
 ///
 /// `HashStable` for the reason every key rule is: an element that can change
 /// after it is stored moves its own bucket without moving the entry, and cannot
-/// be found again (D4, TY-32). The bound is the row's own because
+/// be found again (D4). The bound is the row's own because
 /// `require_collection_invariants` asks about the *receiver*, and here it is the
 /// **result** that has the keys — the same shape `frequencies` established.
 ///
@@ -2816,10 +2736,9 @@ mod tests {
             .next()
             .expect("vec.get exists");
         assert!(get.can_fault());
-        // Derived, not restated — and the derivation corrects a row that had
-        // drifted: `bitset.insert` declared `can_fault: false` while
+        // Derived from the manifest, not restated on the row:
         // `praxis_bitset_insert` raises `InvalidSize` for a member outside
-        // `BitIndex`'s range.
+        // `BitIndex`'s range, so `bitset.insert` can fault.
         let bitset_pat = bitset_receiver();
         let insert = cat
             .by_receiver_and_name(&bitset_pat, "insert")
@@ -2828,14 +2747,12 @@ mod tests {
         assert!(insert.can_fault());
     }
 
-    /// **REP-18.** A keyed collection can be enumerated, `count` has two arities,
-    /// and every enumeration answers a `Vec` so §6.3 applies to it.
+    /// A keyed collection can be enumerated, `count` has two arities, and every
+    /// enumeration answers a `Vec` so §6.3 applies to it — which is what makes
+    /// §3.3's `counts.values().count(|n| n >= 2)` spellable.
     ///
-    /// §3.3's last line is `counts.values().count(|n| n >= 2)` and **neither half
-    /// existed**: `values` was in no row, and `count` only at arity zero. The
-    /// second arity is not a language decision — the catalog's key has always been
-    /// `(receiver, name, arity)` — but it is the first row to use it, so this is
-    /// where that is written down.
+    /// The second arity is not a language decision: the catalog's key is
+    /// `(receiver, name, arity)`, and `count` is the row that uses it.
     #[test]
     fn a_keyed_collection_enumerates_and_count_has_two_arities() {
         let cat = builtin_catalog();
@@ -2899,7 +2816,7 @@ mod tests {
             }
         );
 
-        // `count` at two arities — one pair of rows now, on the generic receiver
+        // `count` at two arities — one pair of rows, on the generic receiver
         // every pipeline starts from (ADR-127).
         let arities: Vec<usize> = cat
             .by_receiver_and_name(&iterable_of_t(), "count")
@@ -2912,18 +2829,16 @@ mod tests {
     /// **ADR-127 decision 1.** Every §6.3 combinator is **one** row, on the
     /// generic pipeline receiver.
     ///
-    /// The shape this replaces was forty-nine rows: a `Vec[T]` row and a `Seq[T]`
-    /// twin apiece, of which every `Seq` twin was dead — ADR-126 recorded that
-    /// "no catalog row answers a `Seq` … so all twenty `Seq`-receiver rows are
-    /// dead", and nothing answered one in three milestones. So the assertion is
-    /// two-sided: each name is on `Iterable` and on nothing else, and no
-    /// `Seq`-receiver row is left anywhere in the table.
+    /// The assertion is two-sided: each name is on `Iterable` and on nothing
+    /// else, and no `Seq`-receiver row exists anywhere in the table — nothing
+    /// produces or consumes a `Seq`, so a row on one would be unreachable.
     #[test]
     fn every_pipeline_combinator_is_one_row_on_the_generic_receiver() {
         let cat = builtin_catalog();
-        // The twenty-three fused stages and sinks, the six barriers, and the
-        // eight conversions. `count` is here once and checked at both arities
-        // by `a_keyed_collection_enumerates_and_count_has_two_arities`.
+        // The twenty-three fused stages and sinks, six of the eight barriers
+        // (`chunks` and `windows` are not listed), and the eight conversions.
+        // `count` is here once and checked at both arities by
+        // `a_keyed_collection_enumerates_and_count_has_two_arities`.
         //
         // `to_text` is deliberately *not* in this list: it has no generic row,
         // and the reason is written on `vec_to_text` (ADR-144).
@@ -2970,8 +2885,7 @@ mod tests {
             assert!(!rows.is_empty(), "`{name}` has no row at all");
             // One row per *arity*: `count()` is the element count and
             // `count(pred)` the matching-element count, which the catalog's key
-            // has always allowed. Two at one arity would be the duplication this
-            // decision deleted.
+            // allows. Two at one arity would be a duplicated surface.
             let mut generic: Vec<usize> = rows
                 .iter()
                 .filter(|e| matches!(e.receiver, TypePattern::Iterable { .. }))
@@ -3014,8 +2928,7 @@ mod tests {
             "a generic `map` would claim §6.4's name and answer a `Vec`"
         );
 
-        // Nothing is registered on a `Seq` any more, which is what makes
-        // retiring `CollectionCtor::Seq` a mechanical follow-up.
+        // Nothing is registered on a `Seq`, which has no values.
         for e in cat.entries() {
             assert!(
                 !matches!(
@@ -3084,8 +2997,8 @@ mod tests {
         }
     }
 
-    /// **REP-16.** The subscript rows are the closed set the language documents,
-    /// and their names cannot be written in source.
+    /// The subscript rows are the closed set the language documents, and their
+    /// names cannot be written in source.
     ///
     /// Two properties in one test because they are both about the same decision.
     /// Which collections index is a *language* answer (§4.7/§6.2/§6.4), so a row
@@ -3204,8 +3117,8 @@ mod tests {
             "indexing faults where `.get` answers"
         );
 
-        // The two **updating** stores (REP-21): `Map` only, at the same arity as
-        // its plain store, and pointing at wrappers of their own — a row that
+        // The two **updating** stores: `Map` only, at the same arity as its
+        // plain store, and pointing at wrappers of their own — a row that
         // reused `MapInsert` would spell `min=` and mean `=`.
         let map_int_value = map_of_k_int_value();
         let plain_store = cat
@@ -3271,7 +3184,7 @@ mod tests {
         }
     }
 
-    /// M8-WS7 closed-catalog check: every §6.1 collection has at least the
+    /// Closed-catalog check: every §6.1 collection has at least the
     /// `len`/`is_empty` pair, plus its type-specific methods. This guards against
     /// an accidental catalog gap where a collection ships without its methods.
     #[test]
@@ -3309,35 +3222,25 @@ mod tests {
         assert!(cat.by_receiver_and_name(&grid_pat, "neighbors4").count() >= 1);
     }
 
-    /// **S18's standing invariant.** Every catalog row that lowers to a runtime
+    /// **A standing invariant.** Every catalog row that lowers to a runtime
     /// wrapper declares a `Unit` result if and only if that wrapper's manifest
     /// return is `AbiRet::GcUnit`.
     ///
-    /// This is RT-14 and RT-15 stated as a rule instead of as two bugs.
-    /// `Map.get` declared `V` and `Grid.find` declared `(Int, Int)`; both were
-    /// non-faulting; both answered `unit_sentinel(ctx)` when the key or the cell
-    /// was not there. So a program held a value whose *static* type was `Int`
-    /// and whose *runtime descriptor* was `Unit`, with nothing in the workspace
-    /// able to notice — `allocates` and `can_fault` are derived from the
-    /// manifest, but "can this answer be Unit" had nowhere to live at all.
-    ///
-    /// It has somewhere now, and the **absence of a third `AbiRet` arm** is the
-    /// load-bearing part rather than this test. "May be Unit, may be a value" is
-    /// exactly the defect, and it cannot be spelled: an author restoring RT-14
+    /// A value whose *static* type is `V` and whose *runtime descriptor* is
+    /// `Unit` is the defect this rules out. The **absence of a third `AbiRet`
+    /// arm** is the load-bearing part rather than this test: "may be Unit, may
+    /// be a value" cannot be spelled, so an author reaching for a Unit sentinel
     /// has to write either `GcUnit` — which this test refuses beside a `V`
     /// result — or `Gc`, which is then a claim the wrapper must honour and which
     /// `absent_map_get_does_not_return_an_untyped_unit_sentinel` checks in the
-    /// runtime. Between the two there is nowhere for the old behaviour to live.
+    /// runtime.
     ///
     /// **What this does not prove**, stated plainly: the manifest row is
     /// hand-asserted, at exactly the trust level `Effect` already is, so what
     /// this catches is a *catalog row disagreeing with its manifest row*, not a
-    /// manifest row that lies about its wrapper. Reverting `map_get`'s result to
+    /// manifest row that lies about its wrapper. Setting `map_get`'s result to
     /// `TypePattern::var("V")` and leaving `MapGet` at `-> Gc` passes here, and
-    /// is caught in `praxis-runtime` instead. The precedent for trusting a
-    /// hand-written manifest row that far is `MethodEntry::can_fault`'s own doc:
-    /// the per-row `bool` it replaced had drifted, and one place to write the
-    /// fact is what fixed it.
+    /// is caught in `praxis-runtime` instead.
     ///
     /// The sweep runs over *every* such row, faulting ones included. A faulting
     /// wrapper's Unit is the ABI's universal unwind answer, which is a different
@@ -3387,11 +3290,11 @@ mod tests {
     /// the arm that made them skippable owes this test the day it is added.
     /// What it rules out is the state that would matter: a row marked
     /// `ScalarPrimitive` while its wrapper still returns a `GcRef`, which MIR
-    /// would take at its word and put a raw integer into a rootable slot
-    /// (P0-03). The complementary refusal is in `praxis-mir`'s
-    /// `lower_scalar_primitive`, whose fallthrough is an ICE naming the symbol:
-    /// a `-> RawI64` wrapper reachable from a method call with no instruction
-    /// to produce it is a compiler bug, not a program's.
+    /// would take at its word and put a raw integer into a rootable slot. The
+    /// complementary refusal is in `praxis-mir`'s `lower_scalar_primitive`,
+    /// whose fallthrough is an ICE naming the symbol: a `-> RawI64` wrapper
+    /// reachable from a method call with no instruction to produce it is a
+    /// compiler bug, not a program's.
     #[test]
     fn a_scalar_primitive_row_answers_the_scalar_channel_and_a_scalar_type() {
         let cat = builtin_catalog();
@@ -3436,8 +3339,9 @@ mod tests {
         );
     }
 
-    /// The two rows D1 answered, spelled out — so a future edit that quietly
-    /// puts `Map.get` back to `V` fails *by name* as well as through the sweep.
+    /// `Map.get` and `Grid.find` answer an `Option`, spelled out by name so an
+    /// edit that puts either back to a bare value type fails here as well as
+    /// through the sweep above.
     #[test]
     fn map_get_and_grid_find_answer_an_option() {
         let cat = builtin_catalog();
@@ -3476,10 +3380,9 @@ mod tests {
     /// **ADR-136, the catalog half.** `Text.int()` and `Text.float()` exist and
     /// each answers an `Option`.
     ///
-    /// `Y001`'s help has promised `.int()` since it was written, and `Text`'s
-    /// rows were `len`, `is_empty` and `get` — so half of the help for the most
-    /// common mistake in a puzzle program sent the reader to a `Y110`. Pure
-    /// data, so this goes red on the catalog edit alone.
+    /// `Y001`'s help on the most common mistake in a puzzle program points at
+    /// `.int()`, so the row has to be here. Pure data, so this goes red on the
+    /// catalog edit alone.
     ///
     /// The two are asserted together because the pair is the decision: a
     /// language with a text-to-`Int` conversion and no text-to-`Float` one is a
@@ -3509,9 +3412,6 @@ mod tests {
     /// whatever the runtime does — which is what makes it the *catalog's* gate.
     /// Its runtime twin is `text_get_answers_a_char_object` in
     /// `praxis-runtime`'s `abi.rs`, and neither can see the other's half.
-    ///
-    /// Observed red with the fix removed: with `result` back at
-    /// `Scalar(Int)` both assertions fail, naming the row.
     #[test]
     fn the_two_text_reads_answer_a_char() {
         let cat = builtin_catalog();
@@ -3541,9 +3441,6 @@ mod tests {
     /// `Grid[Char]`, `Vec[Char]` and `Map[Char, _]` write-only from the
     /// language's side, so the pair is asserted as a pair — the same shape
     /// §4.12 gives `Float.to_int`/`Int.to_float`.
-    ///
-    /// Observed red with the fix removed: neither row resolves, and both
-    /// `expect`s fire.
     #[test]
     fn char_and_int_convert_both_ways() {
         let cat = builtin_catalog();
@@ -3577,11 +3474,9 @@ mod tests {
     /// **ADR-143.** The `to_text` family is `Int`, `Float` and `Char`, and it is
     /// closed at three.
     ///
-    /// The closure is the half worth asserting: two thirds of this family were
-    /// absent for two milestones on the argument that it "wants taking whole",
-    /// and the next reader to arrive with a `Bool.to_text()` or a universal one
-    /// should meet a failing test rather than an empty space. Adding either is a
-    /// decision, not a completion.
+    /// The closure is the half worth asserting: a reader arriving with a
+    /// `Bool.to_text()` or a universal one should meet a failing test rather
+    /// than an empty space. Adding either is a decision, not a completion.
     #[test]
     fn the_to_text_family_is_int_float_and_char() {
         let cat = builtin_catalog();
@@ -3617,8 +3512,8 @@ mod tests {
     /// The two negatives are the point. A concrete `Vec[Char].join/1` beside the
     /// generic row is refused by `finish` as `AmbiguousWithIterable`, and a
     /// second `Iterable` row differing only in its item bound would resolve by
-    /// insertion order — so the surface had to be one `join` plus a different
-    /// name, and this says the shape was chosen rather than settled for.
+    /// insertion order — so the surface has to be one `join` plus a different
+    /// name.
     #[test]
     fn join_is_one_row_and_a_sequence_of_chars_has_its_own_name() {
         let cat = builtin_catalog();
@@ -3732,8 +3627,8 @@ mod tests {
         }
     }
 
-    /// **REP-46.** §4.12's overflow alternatives are three modes over three
-    /// operators, and the table says exactly that — no more and no fewer.
+    /// §4.12's overflow alternatives are three modes over three operators, and
+    /// the table says exactly that — no more and no fewer.
     ///
     /// This is the enforcement of a rule §4.12 states and nothing else should
     /// restate. It asserts the closures as well as the members, because the
@@ -3741,12 +3636,9 @@ mod tests {
     /// "obviously missing" `checked_div` — which would contradict §4.12's own
     /// next sentence, "Division by zero always faults".
     ///
-    /// **Not a gate for the six new rows** — `a_missing_row_is_a_missing_row`
-    /// would not be red for them either, since a catalog test can only assert
-    /// what is there. The gates for the behaviour are in `jit.rs`, at the
-    /// boundaries where the ordinary operator faults. This one is red on a
-    /// *later* edit that widens or narrows the family, which is the thing worth
-    /// pinning once nine rows exist and a tenth looks natural.
+    /// It pins the *shape* of the family, not the behaviour of any row: the
+    /// gates for the behaviour are in `jit.rs`, at the boundaries where the
+    /// ordinary operator faults.
     #[test]
     fn the_overflow_alternative_family_is_three_modes_over_three_operators() {
         let cat = builtin_catalog();

@@ -5,10 +5,7 @@
 //! inside a private `RawVec`, so `offset_of!` cannot name them and the field
 //! order is not stable across compiler versions. That is fine for Rust code and
 //! fatal for generated code: a backend that wants to read a `Vec[T]`'s length
-//! inline has nothing it is allowed to read. Handover 25 §5 F-2 asserted the
-//! opposite ("the payload layouts are `#[repr(C)]` and their offsets are already
-//! exported"); handover 26 §1 correction 4 refuted it, and this module is the
-//! repair.
+//! inline has nothing it is allowed to read.
 //!
 //! `ReprCVec` is a `#[repr(C)]` triple — pointer, length, capacity — that
 //! *never holds anything a `Vec` did not hand it*. Every construction goes
@@ -25,9 +22,9 @@
 //! `#[repr(transparent)]` newtype over `std::Vec<T>`, leaving every caller in
 //! the tree byte-for-byte unchanged. That is the arm A / arm B pair ADR-118 is
 //! measured with: the only thing that differs between the two binaries is the
-//! representation of this one struct. W4a is expected to be **performance
-//! neutral** — it changes a container's layout, not an algorithm — so the
-//! comparison is a regression check, not a win.
+//! representation of this one struct. The change is expected to be
+//! **performance neutral** — it changes a container's layout, not an algorithm
+//! — so the comparison is a regression check, not a win.
 
 use std::fmt;
 use std::ops::{Deref, DerefMut};
@@ -50,7 +47,7 @@ use std::{marker::PhantomData, mem::ManuallyDrop, ptr::NonNull};
 /// [`VecPayload`](crate::collections::VecPayload). `cap` is last because no
 /// generated code has a reason to read it: capacity is the allocator's
 /// business, reached only from Rust through
-/// [`capacity`](ReprCVec::capacity) for GC pacing (RT-04).
+/// [`capacity`](ReprCVec::capacity) for GC pacing.
 ///
 /// The order is pinned by `const _` assertions below rather than by a sentence,
 /// per the house rule for `#[repr(C)]` layout claims.
@@ -85,12 +82,9 @@ pub struct ReprCVec<T> {
     inner: Vec<T>,
 }
 
-// The layout claims, in the tree rather than in a comment.
-//
-// Handover 26 §9 lists the size equality as "asserted from reading and never
-// checked". It is checked here, in both arms, and it is what makes
-// `VecPayload`'s block size class unchanged by this ADR: 8 bytes of element
-// descriptor plus 24 bytes of vector is the same 32 it was.
+// The layout claims, in the tree rather than in a comment. The size equality is
+// checked in both arms, and it is what keeps `VecPayload` in its block size
+// class: 8 bytes of element descriptor plus 24 bytes of vector is 32.
 const _: () = assert!(
     std::mem::size_of::<ReprCVec<crate::GcRef>>() == std::mem::size_of::<Vec<crate::GcRef>>()
 );
@@ -105,8 +99,8 @@ mod layout {
     use crate::GcRef;
     use std::mem::offset_of;
 
-    // The field order W4b bakes into generated code. Changing any of these
-    // three numbers is an ABI change even though no ABI constant names them,
+    // The field order generated code bakes in. Changing any of these three
+    // numbers is an ABI change even though no ABI constant names them,
     // because the moment the backend emits a load at a displacement, the
     // displacement is the contract (ABI v20, ADR-118 part 2).
     const _: () = assert!(offset_of!(ReprCVec<GcRef>, ptr) == 0);
@@ -133,8 +127,7 @@ mod layout {
 /// backend that emitted a load at this displacement against that arm would read
 /// a capacity where it wanted a length. Naming these two constants
 /// unconditionally in `praxis-codegen-cranelift` makes the combination a
-/// **build failure** rather than a miscompile, which retires part 1's toggle
-/// now that its measurement has been taken and recorded.
+/// **build failure** rather than a miscompile.
 #[cfg(not(feature = "std-vec-payload"))]
 pub const REPR_C_VEC_ELEMENTS_OFFSET: usize = std::mem::offset_of!(ReprCVec<crate::GcRef>, ptr);
 
@@ -290,7 +283,7 @@ impl<T> ReprCVec<T> {
     }
 
     /// The allocated capacity, in elements. Read by `vec_owned_bytes` for GC
-    /// pacing (RT-04): the buffer's real footprint, not its occupancy.
+    /// pacing: the buffer's real footprint, not its occupancy.
     #[inline]
     #[must_use]
     pub fn capacity(&self) -> usize {
@@ -565,8 +558,8 @@ impl<T> DerefMut for ReprCVec<T> {
 
 // `for x in &items` and `for x in &mut items` do not go through `Deref`:
 // trait selection for `IntoIterator` does not autoderef. These two impls are
-// what keeps the ~200 reading `.items` sites in `praxis-runtime` compiling
-// untouched.
+// what lets the runtime's reading sites iterate a `ReprCVec` exactly as they
+// would a `Vec`.
 impl<'a, T> IntoIterator for &'a ReprCVec<T> {
     type Item = &'a T;
     type IntoIter = std::slice::Iter<'a, T>;
@@ -713,8 +706,8 @@ mod tests {
     #[test]
     fn the_length_word_is_readable_at_its_declared_offset() {
         // The whole point of the type: a reader that knows only the offsets can
-        // find the length. This is the Rust-side rehearsal of what W4b will
-        // emit as a `load` at displacement 8.
+        // find the length. This is the Rust-side rehearsal of the `load`
+        // generated code emits at displacement 8.
         let v = ReprCVec::from_vec(vec![1_u64, 2, 3, 4, 5]);
         let base = std::ptr::addr_of!(v).cast::<u8>();
         // SAFETY: `base` points at a live `ReprCVec<u64>`, whose layout the

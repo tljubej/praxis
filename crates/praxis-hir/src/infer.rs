@@ -4,10 +4,10 @@
 //! a [`Scheme`] to every binding. Uses the level-based let-generalization from
 //! `praxis-types` (ADR-008):
 //!
-//! - `var` RHS is inferred at an inner level, then **generalized** at the outer
-//!   level (so `var id = fn(x){x}` becomes `forall T. (T) -> T`).
-//! - `var` RHS is inferred but **never generalized** (§5.3 soundness — a `var`
-//!   could be reassigned to a differently-shaped value).
+//! - A `var` RHS is inferred at an inner level and **generalized** at the outer
+//!   level (so `var id = |x| x` becomes `forall T. (T) -> T`), under the two
+//!   restrictions of §5.3: only a syntactic value generalizes, and a binding
+//!   something reassigns stays monomorphic (ADR-125).
 //! - A `fn` is given a monomorphic placeholder var first (so the body can refer
 //!   to it for recursion), its body is inferred, the placeholder is unified
 //!   with the body-derived function type, and the result is generalized after.
@@ -49,20 +49,20 @@ pub struct Inference {
     pub names: NameTable,
     /// The resolver's scope tree, carried through untouched. Inference does not
     /// read it: every binding question it has is answered by the range-keyed
-    /// `refs`/`decls`/`type_refs` maps, which is the whole of TY-13.
+    /// `refs`/`decls`/`type_refs` maps.
     pub scopes: ScopeTree,
     pub refs: HashMap<TextRange, ResolvedRef>,
     pub ref_types: HashMap<TextRange, Type>,
     /// Declaration-site ranges → SymbolId. Carried from resolution so downstream
-    /// passes (M4 lowering) can map a `var`/`fn`/param name to its symbol
-    /// via the declaration range (unambiguous under shadowing).
+    /// passes (lowering) can map a `var`/`fn`/param name to its symbol via the
+    /// declaration range (unambiguous under shadowing).
     pub decls: HashMap<TextRange, SymbolId>,
     /// Each call site, keyed by the callee name token's range → the callee
-    /// symbol and concrete arg types (the monomorphization witness, WS8 §13.6).
+    /// symbol and concrete arg types (the monomorphization witness, §13.6).
     pub call_sites: HashMap<TextRange, crate::CallSite>,
-    /// Every inferred expression's type, keyed by its node (F15).
+    /// Every inferred expression's type, keyed by its node.
     pub expr_types: HashMap<crate::NodeKey, Type>,
-    /// Each method call, keyed by the method-name token's range (F15/HIR-02).
+    /// Each method call, keyed by the method-name token's range.
     pub method_refs: HashMap<TextRange, crate::MethodRef>,
     /// The retained parser AST and per-node types of each `read`/`parse` body
     /// (ADR-098), in the order inference reached them.
@@ -125,8 +125,7 @@ pub(crate) fn infer_with_tree(
     }
 }
 
-/// How a catalog dispatch reports a **concrete** receiver with no matching row
-/// (REP-16).
+/// How a catalog dispatch reports a **concrete** receiver with no matching row.
 ///
 /// The count is carried beside the builder because it is not the argument count:
 /// a subscript store's arguments are the indices *and* the value, and it is the
@@ -156,8 +155,8 @@ fn subscript_unresolved_report(name: &str, args: usize) -> Option<UnresolvedRepo
             indices: args.saturating_sub(1),
         });
     }
-    // The updating stores (REP-21). Their own message, because a receiver that
-    // has a plain store and no `min=` is the case worth being exact about.
+    // The updating stores get their own message, because a receiver that has a
+    // plain store and no `min=` is the case worth being exact about.
     if name == praxis_stdlib::catalog::INDEX_STORE_MIN {
         return Some(UnresolvedReport {
             build: crate::diagnostics::not_index_min_updatable,
@@ -175,13 +174,8 @@ fn subscript_unresolved_report(name: &str, args: usize) -> Option<UnresolvedRepo
 
 /// The inference state.
 ///
-/// There is **no scope tree here**. Inference used to own one — the resolver's,
-/// moved in — and then push empty child scopes onto it that mirrored nothing:
-/// no binding was ever added, so a lookup through them walked straight out to
-/// the root. `infer_assign` was the only caller, and it therefore either found
-/// nothing (a local, so the assignment went unchecked) or a same-named
-/// top-level binding (whose type it constrained instead). Every binding
-/// question is answered by the range-keyed maps resolution produced (TY-13).
+/// There is **no scope tree here**. Every binding question is answered by the
+/// range-keyed maps resolution produced.
 struct Inferer {
     file: FileId,
     db: TypeDb,
@@ -195,21 +189,23 @@ struct Inferer {
     /// never through a scope lookup of the inferer's own.
     type_refs: HashMap<TextRange, SymbolId>,
     /// Every type name's [`Type`] and every function's signature placeholder,
-    /// sealed by the declaration pass before any expression is inferred (F19).
+    /// sealed by the declaration pass before any expression is inferred.
     type_env: crate::decl::TypeEnv,
     ref_types: HashMap<TextRange, Type>,
     /// Call sites keyed by the callee name token's range. Populated in
-    /// `infer_call`; consumed by the monomorphization pass (WS8, §13.6).
+    /// `infer_call`; consumed by the monomorphization pass (§13.6).
     call_sites: HashMap<TextRange, crate::CallSite>,
-    /// Every inferred expression's type, keyed by its node (F15). There is
-    /// exactly one insertion point — [`Inferer::infer_expr`] — so a visited
-    /// expression with no recorded type is unrepresentable, and lowering can
-    /// *read* what inference decided rather than deriving its own answer.
+    /// Every inferred expression's type, keyed by its node.
+    /// [`Inferer::infer_expr`] records every expression it infers, and the three
+    /// nodes it never reaches — a block, a call's callee name, a record
+    /// literal's head — record themselves. So a visited expression with no
+    /// recorded type is unrepresentable, and lowering can *read* what inference
+    /// decided rather than deriving its own answer.
     expr_types: HashMap<crate::NodeKey, Type>,
-    /// Each method call, keyed by the method-name token's range (HIR-02). A
-    /// method name is not a name reference, so it does not belong in
-    /// `ref_types` — everything that walks references had to know to skip it,
-    /// and hover, which asks `refs` first, never saw it at all.
+    /// Each method call, keyed by the method-name token's range. A method name
+    /// is not a name reference, so it does not belong in `ref_types`: everything
+    /// that walks references would have to know to skip it, and hover, which
+    /// asks `refs` first, would never see it.
     method_refs: HashMap<TextRange, crate::MethodRef>,
     /// ADR-098's spanned parser index, appended to by `synthesize_parser_type`.
     parser_exprs: Vec<crate::ParserIndex>,
@@ -218,36 +214,36 @@ struct Inferer {
     /// Immutable; shared via a process-wide `OnceLock`.
     catalog: &'static praxis_stdlib::MethodCatalog,
     /// The level the declaration group was entered from — where a function's
-    /// signature generalizes (TY-01).
+    /// signature generalizes.
     decl_site: Level,
     /// The result type of each function whose body is being inferred, innermost
-    /// last. A `return` is checked against the top of this stack (TY-18); a
-    /// closure pushes its own, because `return` inside one leaves the closure,
-    /// not the function that contains it. Empty means "not inside a function",
-    /// which is what makes a top-level `return` reportable (TY-20).
+    /// last. A `return` is checked against the top of this stack; a closure
+    /// pushes its own, because `return` inside one leaves the closure, not the
+    /// function that contains it. Empty means "not inside a function", which is
+    /// what makes a top-level `return` reportable.
     fn_results: Vec<Type>,
     /// The loops enclosing the expression being inferred, innermost last. A
-    /// `break` or `continue` with none is `Y012` (TY-20); a `break` reads the
-    /// top to learn which loop it leaves and what that loop has produced so far
-    /// (TY-21). A closure body clears it and restores it afterwards: a closure
-    /// is a function boundary, so a loop outside it is not one a `break` inside
-    /// it can leave.
+    /// `break` or `continue` with none is `Y012`; a `break` reads the top to
+    /// learn which loop it leaves and what that loop has produced so far. A
+    /// closure body clears it and restores it afterwards: a closure is a
+    /// function boundary, so a loop outside it is not one a `break` inside it
+    /// can leave.
     loops: Vec<LoopCtx>,
 }
 
-/// One enclosing loop, while its body is being inferred (TY-21).
+/// One enclosing loop, while its body is being inferred.
 #[derive(Clone, Copy)]
 struct LoopCtx {
     /// Which loop form this is — only a `loop` may produce a value.
     flavour: LoopFlavour,
     /// The join of every `break` value seen in this loop so far, seeded with
-    /// `Never`: a loop no `break` leaves produces no value (D2). A bare `break`
+    /// `Never`: a loop no `break` leaves produces no value. A bare `break`
     /// contributes `Unit`, so `loop { break }` is `Unit` and
     /// `loop { if c { break }\n break 1 }` is the `Y001` it should be.
     result: Type,
 }
 
-/// Which loop form a [`LoopCtx`] describes (D2, ADR-053).
+/// Which loop form a [`LoopCtx`] describes (ADR-053).
 ///
 /// `loop` is the only expression loop. A `while`/`for` also leaves by its
 /// condition failing or its sequence running out, and the compiler has no value
@@ -285,16 +281,15 @@ impl Inferer {
         FileSpan::new(self.file, range_to_span(range))
     }
 
-    // --- the constraint channel (F10, TY-29) --------------------------------
+    // --- the constraint channel (ADR-057) -----------------------------------
 
     /// Require `t` to have `cap`, at `at`.
     ///
     /// Two cases, and the split is the whole design. A **concrete** type is
-    /// decided here and now — that is what every capability check did before,
-    /// and it is right. A **variable** cannot be: it may be generalized and then
-    /// instantiated at a type that does not have the capability at all, which is
-    /// what TY-29 is. That one is deferred onto the channel and discharged when
-    /// the variable resolves, or claimed by the scheme that quantifies it.
+    /// decided here and now. A **variable** cannot be: it may be generalized and
+    /// then instantiated at a type that does not have the capability at all. That
+    /// one is deferred onto the channel and discharged when the variable
+    /// resolves, or claimed by the scheme that quantifies it.
     fn require_cap(&mut self, t: Type, cap: Capability, at: TextRange) {
         self.require_cap_as(t, cap, at, None);
     }
@@ -306,7 +301,7 @@ impl Inferer {
     /// cost table keyed on the state — so a state has to be a `Set` element and
     /// a `Map` key, which is [`CapKind::HashStable`]. A state that can change
     /// after the walk has stored it cannot be found again, and the walk revisits
-    /// it forever: exactly D4's rule, at a different door.
+    /// it forever: the collection-key rule, at a different door.
     ///
     /// The requirement is emitted **here** rather than claimed by the helper's
     /// scheme in `seed_builtin_schemes`, and the reason is the diagnostic. A
@@ -315,7 +310,7 @@ impl Inferer {
     /// it reports at the call and needs no note. It still rides the channel: a
     /// state type that is a *variable* here — `fn walk(s) { bfs(s, step) }` — is
     /// deferred, claimed by `walk`'s own scheme, and re-checked at each call to
-    /// `walk`, which is the whole point of F10.
+    /// `walk`, which is the whole point of the channel.
     fn require_graph_state(&mut self, callee: SymbolId, state: Option<Type>, at: TextRange) {
         let is_helper = self.names.get(callee).is_some_and(|s| {
             s.kind == SymbolKind::Builtin && praxis_stdlib::graph_helper(&s.name).is_some()
@@ -367,15 +362,13 @@ impl Inferer {
     }
 
     /// Require `receiver` to have a method `name` taking `params` and returning
-    /// `result` — the deferred half of method resolution (TY-30).
+    /// `result` — the deferred half of method resolution.
     ///
-    /// A method call whose receiver is still a variable used to constrain
-    /// nothing at all: `crate::catalog::lookup` needs a catalog-representable
-    /// receiver, so `fn total(values) { values.sum() }` gave up, returned a
-    /// fresh variable, and lowering later reported a method it could not find on
-    /// a type nobody had named. The requirement goes on the channel instead, and
-    /// [`Inferer::resolve_deferred_method`] answers it when the program says what
-    /// the receiver is.
+    /// `crate::catalog::lookup` needs a catalog-representable receiver, so a
+    /// method call whose receiver is still a variable — `fn total(values)
+    /// { values.sum() }` — cannot select an entry here. The requirement goes on
+    /// the channel instead, and [`Inferer::resolve_deferred_method`] answers it
+    /// when the program says what the receiver is.
     ///
     /// **The receiver is pinned to the declaration group's level**, so
     /// generalization cannot quantify it. That is not an optimization, it is the
@@ -417,21 +410,18 @@ impl Inferer {
 
     /// Answer a `HasMethod` requirement whose receiver has since resolved: look
     /// the method up, unify the entry's signature with the types the call site
-    /// holds, and record the [`crate::MethodRef`] lowering reads (TY-30).
+    /// holds, and record the [`crate::MethodRef`] lowering reads.
     ///
     /// This is why `HasMethod` is a *resolution* rather than a veto. The other
     /// capabilities answer yes or no and are done; this one has to hand back the
     /// entry, because the call site it came from produced no `method_refs` entry
     /// when it was made — the receiver had no type yet — and lowering reads that
-    /// map and nothing else (F15/HIR-02).
+    /// map and nothing else.
     ///
-    /// A receiver that turns out **not** to have the method is reported here
-    /// (ADR-093). It used to be left to lowering, on the argument that lowering
-    /// has the method-name span — but so does this pass, `c.at` *is* the name
-    /// token's range, and lowering is the one place `praxis check` never runs.
-    /// The consequence was `fn f(x) { x.nope() }` / `out(f(3))`: `check` exit 0
-    /// and silent, `run` exit 1 with a `Y110`. Reporting here is not "the same
-    /// mistake twice" because lowering no longer reports at all.
+    /// A receiver that turns out **not** to have the method is reported here and
+    /// not by lowering (ADR-093): `c.at` *is* the method-name token's range, and
+    /// lowering is the one place `praxis check` never runs — so a miss left to it
+    /// would be `check` exit 0 and silent, `run` exit 1 with a `Y110`.
     fn resolve_deferred_method(&mut self, c: &Constraint) {
         let Capability::HasMethod {
             name,
@@ -495,7 +485,7 @@ impl Inferer {
         // Now that the receiver is known, everything the entry and the receiver
         // demand applies: a deferred `m.insert(k, v)` on an unannotated parameter
         // is still an insert, and a deferred `values.sum()` still needs `Int`
-        // elements (TY-31).
+        // elements.
         let at = range_of(c.at);
         self.apply_bounds(entry, &names, at);
         self.require_collection_invariants(receiver_ty, at);
@@ -510,20 +500,18 @@ impl Inferer {
     }
 
     /// Require `receiver` to have a field `name` of type `ty` — the deferred half
-    /// of a field read (REP-28).
+    /// of a field read.
     ///
-    /// This is TY-30's shape at the third door. A field read whose receiver was
-    /// still a variable constrained **nothing**: `infer_field_get` answered a fresh
-    /// variable and recorded no requirement, so the parameter was generalized and
-    /// the read failed later. §4.9's own example is the reproduction —
-    /// `struct P { x: Int, y: Int }` / `fn dist(a) -> Int { a.x + a.y }` /
-    /// `out(dist(P { x: 1, y: 2 }))` passed `praxis check` and then failed under
-    /// `praxis run` with `Y112` "no field `x` on this type".
+    /// This is [`require_method`](Self::require_method)'s shape at the third
+    /// door: without it, `infer_field_get` would answer an unresolved receiver
+    /// with a fresh variable and record no requirement, so the parameter would be
+    /// generalized with nothing to re-ask at the call site. §4.9's own example is
+    /// what depends on it — `struct P { x: Int, y: Int }` /
+    /// `fn dist(a) -> Int { a.x + a.y }` / `out(dist(P { x: 1, y: 2 }))`.
     ///
     /// Going through [`require_cap`](Self::require_cap) rather than deciding here
-    /// is the discipline the progress doc names: a predicate called directly is
-    /// TY-29 by another name — the answer is thrown away at generalization and
-    /// never re-asked at the use site.
+    /// is the discipline: a predicate called directly has its answer thrown away
+    /// at generalization and never re-asked at the use site.
     ///
     /// **The receiver and the field's type are pinned to the declaration group's
     /// level**, for ADR-057 Decision 5's reason and ADR-062 Decision 2's: there is
@@ -542,21 +530,16 @@ impl Inferer {
 
     /// Answer a `HasField` requirement whose receiver has since resolved: ask that
     /// record what the field holds and **unify** it with the type the read handed
-    /// back (REP-28).
+    /// back.
     ///
     /// The third capability discharged by *producing* rather than by checking, and
     /// for the same reason as the other two: the deferred read returned a bare
     /// variable, and this is the only thing that ever says what it holds.
     ///
-    /// A receiver that turns out to have **no such field** is reported here, and
-    /// that is a correction rather than a design choice. Leaving it to lowering
-    /// is what `HasMethod` used to do with `Y110`, and it never really worked:
-    /// lowering runs at `run` and not at `check`, so `praxis check` passed and
-    /// `praxis run` failed — the exact divergence REP-28 exists to close, and
-    /// which ADR-093 has since closed at the method door too. Both capabilities
-    /// now report from this pass, which is the one both commands run.
-    ///
-    /// So the failure goes through `report_cap_failure`, exactly as
+    /// A receiver that turns out to have **no such field** is reported here and
+    /// not by lowering, for ADR-093's reason at the method door: lowering runs at
+    /// `run` and not at `check`, so a miss left to it diverges the two commands.
+    /// The failure goes through `report_cap_failure`, exactly as
     /// [`resolve_deferred_iterable`](Self::resolve_deferred_iterable)'s does, with
     /// the requirement's own span as the note.
     fn resolve_deferred_field(&mut self, c: &Constraint, name: &str, ty: Type) {
@@ -577,19 +560,18 @@ impl Inferer {
 
     /// Answer an `Iterable` requirement whose receiver has since resolved: get
     /// the item that receiver actually yields, and **unify** it with the one the
-    /// constraint carries (REP-04).
+    /// constraint carries.
     ///
-    /// This is the other end of REP-03. `capability::check` answers iterability
-    /// as a yes/no, which is all it can do — its failure shape is "the offending
-    /// type" and "iterates, but not at that element type" is a *mismatch*. So a
-    /// constraint that discharged at a differently-itemed iterable was silently
-    /// accepted:
+    /// Checking is not enough. `capability::check` answers iterability as a
+    /// yes/no, which is all it can do — its failure shape is "the offending type"
+    /// and "iterates, but not at that element type" is a *mismatch*. Unifying is
+    /// what rejects a constraint discharged at a differently-itemed iterable:
     ///
     /// ```praxis
     /// fn total(r) { var t = 0
     ///   for i in r { t = t + i }        // requires Iterable { item = Int }
     ///   t }
-    /// fn main() -> Int { total(names) } // names: Vec[Text] — accepted, before
+    /// fn main() -> Int { total(names) } // names: Vec[Text] — a mismatch
     /// ```
     ///
     /// Unifying is also what makes the requirement *productive* rather than
@@ -599,8 +581,8 @@ impl Inferer {
     /// `HasMethod`, and the reason both are discharged by resolving rather than by
     /// checking.
     ///
-    /// A receiver that is not iterable **at all** is still the channel's to
-    /// report, unchanged: `Y005` at the use site with the `for` as the note.
+    /// A receiver that is not iterable **at all** is the channel's to report:
+    /// `Y005` at the use site with the `for` as the note.
     fn resolve_deferred_iterable(&mut self, c: &Constraint, item: Type) {
         let receiver = self.db.follow(c.var_type());
         let Some(yielded) = crate::capability::iter_item(&mut self.db, receiver) else {
@@ -613,8 +595,7 @@ impl Inferer {
         self.diag_unify_for(c, item, yielded);
     }
 
-    /// Enforce what a catalog entry declares about its own type variables
-    /// (TY-31).
+    /// Enforce what a catalog entry declares about its own type variables.
     ///
     /// `names` is the map [`crate::lower::pattern_to_type_named`] filled while
     /// instantiating the entry's patterns, so a bound on `"T"` is a requirement
@@ -672,8 +653,8 @@ impl Inferer {
     /// **One function because there are two doors.** `infer_catalog_call`
     /// resolves at the call site and `resolve_deferred_method` resolves when the
     /// channel says what the receiver is — `fn top(v) { v.map(f) }` goes through
-    /// the second — and the eight lines this replaces were written twice. A
-    /// second copy is a second place for the `Iterable` path to be missing.
+    /// the second — and a second copy would be a second place for the `Iterable`
+    /// path to be missing.
     ///
     /// The two paths differ in what is unified:
     ///
@@ -713,10 +694,9 @@ impl Inferer {
         self.unify_at(item_param, item_ty, at);
     }
 
-    /// Require what a collection type demands of its own arguments (TY-32,
-    /// RT-08, D4).
+    /// Require what a collection type demands of its own arguments.
     ///
-    /// Two rules, and neither was enforced anywhere:
+    /// Two rules:
     ///
     /// - A `Map` key, a `Set` element and a `Counter` key must be **findable
     ///   after they are stored**. Hashing a `Vec` by its contents and then
@@ -764,11 +744,10 @@ impl Inferer {
     /// variable the call site is holding. That unification is the only thing
     /// that can resolve the receiver of the *next* link, and the next link is
     /// not in the batch [`praxis_types::TypeDb::take_dischargeable`] already
-    /// handed back. Draining one batch therefore resolved `t[i]` and dropped
-    /// `t[i][j]` on the floor: `check` said nothing and MIR met a method call
-    /// with no catalog entry (`internal compiler error: the pipeline recognizer
-    /// declined `[]``). The loop is the fix; nothing about *which* variables are
-    /// pinned changes, only when a constraint is looked at.
+    /// handed back. Draining a single batch would therefore resolve `t[i]` and
+    /// drop `t[i][j]` on the floor — `check` silent, and MIR meeting a method
+    /// call with no catalog entry. The loop decides only *when* a constraint is
+    /// looked at; which variables are pinned is unaffected.
     ///
     /// **Why this terminates.** A compiler that hangs is worse than one that
     /// ICEs, so the invariant is written down rather than papered over with an
@@ -805,14 +784,14 @@ impl Inferer {
                 }
                 // `Iterable` is the second: it *produces* the item type, so it
                 // is discharged by unifying that item rather than by asking
-                // whether the receiver iterates at all (REP-04).
+                // whether the receiver iterates at all.
                 if let Capability::Iterable { item } = c.cap {
                     self.resolve_deferred_iterable(&c, item);
                     continue;
                 }
                 // `HasField` is the third, and it produces the field's type: the
                 // deferred read handed back a bare variable and nothing else
-                // ever says what it holds (REP-28).
+                // ever says what it holds.
                 if let Capability::HasField { ref name, ty } = c.cap {
                     let name = name.clone();
                     self.resolve_deferred_field(&c, &name, ty);
@@ -847,18 +826,14 @@ impl Inferer {
             Capability::Kind(CapKind::HashStable) => not_hashable(at, &rendered),
             Capability::Kind(CapKind::Numeric) => not_numeric(at, &rendered),
             Capability::Iterable { .. } => crate::diagnostics::not_iterable(at, &rendered),
-            // Live, and from the deferred door (ADR-093). It used to be dead:
-            // `require_method` only ever defers a receiver that is a variable, so
-            // nothing failed here immediately, and
-            // [`Inferer::resolve_deferred_method`] returned silently on a miss
-            // because lowering was said to own `Y110`. Lowering runs at `run` and
-            // not at `check`, so that made every missing method a clean `praxis
-            // check` followed by a failing `praxis run` — the divergence REP-28
-            // closed at `HasField` and ADR-093 closes here.
+            // Reached only from the deferred door (ADR-093): `require_method`
+            // defers a receiver only when it is a variable, so nothing fails here
+            // immediately, and [`Inferer::resolve_deferred_method`] routes a miss
+            // through this arm once the receiver resolves.
             Capability::HasMethod { name, params, .. } => {
                 crate::diagnostics::unknown_method(at, name, Some(&rendered), params.len())
             }
-            // Live, and from both doors — unlike `HasMethod`'s arm above.
+            // Reached from both doors, unlike `HasMethod`'s arm above.
             // `infer_field_get` requires the field of *every* receiver it cannot
             // answer itself, so a concrete one fails in `require_cap_as` and is
             // reported at the read; a deferred one that resolves to a non-record,
@@ -896,9 +871,9 @@ impl Inferer {
     /// variable and points back at the `for` — or the field read — as the note
     /// (ADR-057 decision 2).
     ///
-    /// Argument order is `unify`'s and REP-61's: what the requirement wants
-    /// first, what the receiver provides second, so the diagnostic reads
-    /// "expected `Int`, found `Text`".
+    /// Argument order is `unify`'s: what the requirement wants first, what the
+    /// receiver provides second, so the diagnostic reads "expected `Int`, found
+    /// `Text`".
     fn diag_unify_for(&mut self, c: &Constraint, expected: Type, found: Type) {
         if let Err(e) = self.db.unify(expected, found) {
             let mut diag = self.unify_diagnostic(c.report_at(), e);
@@ -912,9 +887,9 @@ impl Inferer {
     /// Unify `expected` with `found`, reporting a mismatch at `at`.
     ///
     /// The overwhelmingly common shape: a syntax range, a plain mismatch, no
-    /// use for the `Ok`. Argument order is `unify`'s and REP-61's — what the
-    /// context *requires* first, what the program *wrote* second — so the
-    /// diagnostic reads "expected `Bool`, found `Int`". A site that already
+    /// use for the `Ok`. Argument order is `unify`'s — what the context
+    /// *requires* first, what the program *wrote* second — so the diagnostic
+    /// reads "expected `Bool`, found `Int`". A site that already
     /// holds a [`FileSpan`], needs the `Ok` value, or wants
     /// [`diag_unify_hinted`](Self::diag_unify_hinted) still spells it out.
     fn unify_at(&mut self, expected: Type, found: Type, at: TextRange) {
@@ -995,11 +970,10 @@ impl Inferer {
             (
                 TypeData::Scalar(praxis_types::ScalarType::Int),
                 TypeData::Scalar(praxis_types::ScalarType::Text),
-                // Both halves of this name something that exists, which the first
-                // half did not until ADR-136 added `Text.int()`. It answers an
-                // `Option[Int]` — a text that is not a number is absence, not a
-                // fault (§4.7) — so the help says how to get the `Int` out rather
-                // than implying the call is the whole fix.
+                // `Text.int()` (ADR-136) answers an `Option[Int]` — a text that
+                // is not a number is absence, not a fault (§4.7) — so the help
+                // says how to get the `Int` out rather than implying the call is
+                // the whole fix.
             ) => Some(
                 "this is `Text`; `.int()` answers `Option[Int]`, so take it apart \
                  with `match` (or use `read lines(int)`)"
@@ -1018,8 +992,7 @@ impl Inferer {
     ///
     /// A name that is **not** seeded here gets a fresh type variable, which
     /// unifies with anything and then lowers as a call to a function nobody
-    /// defined — the whole of TY-33. Every prelude name that denotes a value now
-    /// has a scheme here, so there are none left in that state.
+    /// defined. Every prelude name that denotes a value must have a scheme here.
     fn seed_builtin_schemes(&mut self) {
         // Collect the ids first to avoid borrowing `self.names` while mutating it.
         let to_seed: Vec<(SymbolId, String)> = self
@@ -1027,10 +1000,10 @@ impl Inferer {
             .all()
             .iter()
             .filter(|s| {
-                // `Some`/`None` are `SymbolKind::EnumVariant`, not `Builtin`
-                // (HIR-03): the prelude declares `Option`'s two variants, and
-                // they get the kind a user-declared variant gets. They still
-                // need their constructor schemes seeded here.
+                // `Some`/`None` are `SymbolKind::EnumVariant`, not `Builtin`:
+                // the prelude declares `Option`'s two variants, and they get
+                // the kind a user-declared variant gets. They still need their
+                // constructor schemes seeded here.
                 matches!(s.kind, SymbolKind::Builtin | SymbolKind::EnumVariant)
                     && (s.name == "out"
                         || s.name == "panic"
@@ -1051,9 +1024,9 @@ impl Inferer {
             // OUTSIDE the scope. Generalize quantifies vars whose level is
             // strictly greater than the current level; the fresh vars are
             // created at the inner level, so generalizing at the outer level
-            // (after scoped_return restores it) is what quantifies them. (Doing
-            // it inside the scope quantifies nothing — the bug that left `Vec`
-            // monomorphic, so every `Vec()` shared one element type.)
+            // (after scoped_return restores it) is what quantifies them. Doing
+            // it inside the scope quantifies nothing, which would leave `Vec`
+            // monomorphic and every `Vec()` sharing one element type.
             let mono = self.db.scoped_return(|db| match name.as_str() {
                 "out" | "panic" => {
                     // forall T. (T) -> Unit  (out)   /   forall T. (T) -> Never  (panic)
@@ -1074,7 +1047,7 @@ impl Inferer {
                 }
                 // `assert` takes a condition, not a value: `(Bool) -> Unit`,
                 // monomorphic. This is what makes `assert(1)` a type error
-                // rather than a fresh variable that accepts anything (TY-33).
+                // rather than a fresh variable that accepts anything.
                 "assert" => {
                     let bool_ty = db.bool();
                     let unit_ty = db.unit();
@@ -1110,14 +1083,12 @@ impl Inferer {
                         .expect("BitSet and Range are nullary");
                     db.func(vec![], coll)
                 }
-                // Optionality (M9). `Some : forall T. (T) -> Option[T]` and
+                // Optionality. `Some : forall T. (T) -> Option[T]` and
                 // `None : forall T. Option[T]`. `None` is a zero-payload variant,
                 // so its scheme is the enum type directly (mirroring how
                 // user-declared zero-payload variants get a monotype scheme in
                 // `infer_enum`, not a `() -> ...` function). Both name the *one*
-                // `Option` def (F12) and differ only in their type argument;
-                // they used to register a fresh nominal def each, which is what
-                // made `unify` need a same-name-and-signature arm (TY-06).
+                // `Option` def and differ only in their type argument.
                 "Some" => {
                     let t = db.fresh_var();
                     let opt = db.option_of(t);
@@ -1139,10 +1110,7 @@ impl Inferer {
                 // carry `Capability::Kind(CapKind::Numeric)` on its own binder
                 // and then choose a lowering per instantiation; `Float` already
                 // has `abs`/`sign`/`min`/`max` as *methods* (§4.12), so the
-                // free functions are the `Int` ones and say so. Before this
-                // every one of them got a fresh variable, which unified with
-                // anything and then lowered as a call to a function nobody
-                // defined (TY-33).
+                // free functions are the `Int` ones and say so.
                 name if praxis_stdlib::numeric_helper(name).is_some() => {
                     let helper = praxis_stdlib::numeric_helper(name).expect("just matched");
                     let int_ty = db.int();
@@ -1209,9 +1177,9 @@ impl Inferer {
             });
             // Generalize at the outer level (after scoped_return restored it) so
             // the inner-level fresh vars are quantified — yielding e.g.
-            // `forall T. () -> Vec[T]`. Doing this inside the scope quantified
-            // nothing (the bug that left constructors monomorphic, so every
-            // `Vec()` shared one element type).
+            // `forall T. () -> Vec[T]`. Doing this inside the scope quantifies
+            // nothing, which would leave constructors monomorphic and every
+            // `Vec()` sharing one element type.
             let scheme = self.db.generalize(mono);
             if let Some(sym) = self.names.get_mut(id) {
                 sym.scheme = Some(scheme);
@@ -1223,7 +1191,7 @@ impl Inferer {
 
     /// Infer one statement. `struct` and `enum` are deliberately absent: their
     /// types were registered by the declaration pass, before any expression was
-    /// inferred, which is the whole of TY-10.
+    /// inferred.
     fn infer_top_stmt(&mut self, node: &praxis_syntax::SyntaxNode) {
         if let Some(var_) = VarStmt::cast(node.clone()) {
             self.infer_var(&var_);
@@ -1247,9 +1215,9 @@ impl Inferer {
     /// and zero-payload variants (scheme is the enum type directly).
     ///
     /// Instantiating is what makes `Some(x)` in a pattern bind `x` at the
-    /// scrutinee's element type: `Option`'s payload is its def's parameter (F12),
-    /// so the payload of a *use* is only known once the use has its own
-    /// arguments and the scrutinee has unified against them.
+    /// scrutinee's element type: `Option`'s payload is its def's parameter, so
+    /// the payload of a *use* is only known once the use has its own arguments
+    /// and the scrutinee has unified against them.
     fn lookup_enum_variant(
         &mut self,
         symbol: SymbolId,
@@ -1301,20 +1269,18 @@ impl Inferer {
         // The first is the HM value restriction: only a syntactic value
         // generalizes. An expansive RHS (a call like `Vec()`, a method call, a
         // block, `read`, …) is left monomorphic so its type variables are shared
-        // across uses rather than instantiated fresh per reference. Without
-        // this, `var v = Vec(); v.push(inner); v.map(...)` gives
-        // `v : forall T. Vec[T]`, and the push's element-type pinning never
-        // reaches the map (Gap B). An explicit type annotation overrides it (the
-        // user has pinned the type by writing it).
+        // across uses rather than instantiated fresh per reference. Without this,
+        // `var v = Vec(); v.push(inner); v.map(...)` gives `v : forall T. Vec[T]`,
+        // and the push's element-type pinning never reaches the map. An explicit
+        // type annotation overrides it (the user has pinned the type by writing
+        // it).
         //
-        // The second is [`Symbol::reassigned`] (ADR-125), which is what the
-        // `var` split used to decide. Assignment *instantiates* a scheme
-        // and unifies the copy, so a generalized scheme is not constrained by
-        // being written: `var f = |x| x` is a syntactic value and generalizes to
-        // `forall T. T -> T`, and `f = |n| n + 1` would leave it there — so
-        // `f("s")` would type-check and call the `Int` closure. A binding
-        // nothing writes cannot reach that state, which is exactly the set the
-        // old `var` named.
+        // The second is [`Symbol::reassigned`] (ADR-125): a binding something
+        // writes stays monomorphic. Assignment *instantiates* a scheme and
+        // unifies the copy, so a generalized scheme is not constrained by being
+        // written — `var f = |x| x` is a syntactic value and generalizes to
+        // `forall T. T -> T`, and `f = |n| n + 1` would leave it there, so
+        // `f("s")` would type-check and call the `Int` closure.
         let expansive = rhs.as_ref().is_some_and(|e| !is_syntactic_value(e));
         let reassigned = self.binding_is_reassigned(stmt.name());
         let scheme = if reassigned || (expansive && annot.is_none()) {
@@ -1338,23 +1304,20 @@ impl Inferer {
 
     /// Infer one declaration group: every top-level statement in `root`.
     ///
-    /// # Two phases (F19)
+    /// # Two phases
     ///
     /// The [declaration pass](crate::decl) runs first and seals a
     /// [`TypeEnv`](crate::decl::TypeEnv): every `struct`/`enum` is registered
-    /// in dependency order (TY-10), and every `fn` gets a monomorphic
-    /// **signature placeholder** so a call to a function declared *later*
-    /// unifies against the same variable that declaration will resolve, and a
-    /// disagreement is a diagnostic instead of silence (TY-22). Name resolution
-    /// has been two-pass since M2; inference was not, so a forward reference
-    /// resolved and was then unchecked.
+    /// in dependency order, and every `fn` gets a monomorphic **signature
+    /// placeholder** so a call to a function declared *later* unifies against
+    /// the same variable that declaration will resolve, and a disagreement is a
+    /// diagnostic instead of silence.
     ///
     /// The pass runs *inside* the group level, which is one deeper than the
-    /// group's binding site (TY-01): unifying a placeholder with the derived
-    /// function type lowers that type's variables to the placeholder's level,
-    /// so a placeholder at the *outer* level would clamp every parameter and
-    /// result out to level zero and no signature could ever generalize. That
-    /// coupling is why the two are one change.
+    /// group's binding site: unifying a placeholder with the derived function
+    /// type lowers that type's variables to the placeholder's level, so a
+    /// placeholder at the *outer* level would clamp every parameter and result
+    /// out to level zero and no signature could ever generalize.
     fn infer_declaration_group(&mut self, root: &SourceFile) {
         self.decl_site = self.db.level();
         let group = self.db.enter_level();
@@ -1372,20 +1335,17 @@ impl Inferer {
         }
         // Whatever the per-function sweeps left: a requirement made at the top
         // level, and any a later declaration resolved. What is still pending
-        // after this fixpoint belongs to a variable *no call site ever pinned* —
-        // and that is safe to drop, which it was not before ADR-093. A
-        // `HasMethod` requirement is only ever *made* when the catalog holds
-        // that name at that arity (`infer_catalog_call` reports the ones it does
-        // not, on the spot), so a pending one means the program never said which
-        // of those receivers it meant — §5.2's uncalled
-        // `fn total(values) { values.sum() }`. Before, the pending set silently
-        // swallowed `x.nope()` and lowering met it at `run`.
+        // after this fixpoint belongs to a variable *no call site ever pinned*,
+        // and that is safe to drop. A `HasMethod` requirement is only ever
+        // *made* when the catalog holds that name at that arity
+        // (`infer_catalog_call` reports the ones it does not, on the spot), so a
+        // pending one means the program never said which of those receivers it
+        // meant — §5.2's uncalled `fn total(values) { values.sum() }`.
         //
-        // What such a body is *not* is dropped by monomorphization, which is
-        // what this comment used to claim. ADR-057 decision 5 pins the receiver
-        // to this level, so the function generalizes to a monotype,
-        // `Scheme::is_polymorphic` is false and `mono` keeps it — the body
-        // reaches MIR with a method call carrying no catalog entry. It is
+        // Such a body is *not* dropped by monomorphization: ADR-057 decision 5
+        // pins the receiver to this level, so the function generalizes to a
+        // monotype, `Scheme::is_polymorphic` is false and `mono` keeps it — the
+        // body reaches MIR with a method call carrying no catalog entry. It is
         // unreachable by construction (any call unifies the argument and pins
         // the receiver, so a body that got here is one nothing calls), and MIR
         // is where that is answered; see ADR-137 decision 3.
@@ -1401,10 +1361,9 @@ impl Inferer {
         // Resolution declares every `fn` it accepts, so a name with no
         // declaration is one it refused: a nested function, or the second of a
         // duplicate pair. Both are already reported (N005 / N004) and neither
-        // has a signature — inference used to `expect` here and panic, which
-        // broke `analyze`'s contract that malformed input becomes diagnostics
-        // (TY-23). The body is still inferred, so the rest of the file keeps
-        // reporting.
+        // has a signature, so a fresh variable stands in rather than a panic:
+        // `analyze`'s contract is that malformed input becomes diagnostics. The
+        // body is still inferred, so the rest of the file keeps reporting.
         let fn_symbol = item
             .name()
             .and_then(|name_tok| self.decls.get(&name_tok.text_range()).copied());
@@ -1426,18 +1385,15 @@ impl Inferer {
         // The declared return type, if any; else a fresh var the body and any
         // `return` both constrain. The result has to exist *before* the body is
         // inferred, because a `return` inside it has to be checked against
-        // something (TY-18) — that is what the context stack carries.
+        // something — that is what the context stack carries.
         let ret_annot = item.return_type().and_then(|t| self.resolve_type(&t));
         let result_ty = ret_annot.unwrap_or_else(|| self.db.fresh_var());
-        // Pin the placeholder to the signature **before** the body is inferred.
-        // It used to happen afterwards, so a recursive call inside the body
-        // unified a bare variable with `(args) -> ?r` and the result stayed
-        // unknown until the whole function was done: `fn build(n: Int) ->
-        // Vec[Int] { … var v = build(n - 1); v.push(n) … }` could not resolve
-        // `push`, because at that point `v` had no type but a variable. Lowering
-        // hid this by re-resolving the method later, against types inference had
-        // since pinned — the re-derivation F15 removes, so the ordering has to
-        // be right here instead.
+        // Pin the placeholder to the signature **before** the body is inferred,
+        // so a recursive call inside the body sees the declared result rather
+        // than a bare variable: `fn build(n: Int) -> Vec[Int] { … var v =
+        // build(n - 1); v.push(n) … }` can only resolve `push` if `v` already
+        // has a type. Lowering reads what inference decided and re-derives
+        // nothing, so the ordering has to be right here.
         let signature = self.db.func(param_types.clone(), result_ty);
         self.unify_at(placeholder, signature, item.syntax().text_range());
         self.fn_results.push(result_ty);
@@ -1450,9 +1406,9 @@ impl Inferer {
         };
         self.fn_results.pop();
         // The body **joins** with the declared result rather than unifying with
-        // it (TY-19): `fn f() -> Int { panic("x") }` has a `Never` body and is
-        // fine — every path that reaches the end diverges, so there is no value
-        // to disagree. Point a real mismatch at the offending tail expression
+        // it: `fn f() -> Int { panic("x") }` has a `Never` body and is fine —
+        // every path that reaches the end diverges, so there is no value to
+        // disagree. Point a real mismatch at the offending tail expression
         // (e.g. the trailing `out(...)`) rather than the whole `fn`, falling
         // back to the block's range, then the whole item.
         if let Some(b) = body_ty {
@@ -1463,11 +1419,11 @@ impl Inferer {
         }
         self.db.exit_level(prev);
         // Check the requirements this body's own uses settled, *before*
-        // generalizing (F10). The ordering is the whole discipline: what is
-        // still unresolved here is about a variable the scheme is about to
-        // quantify, so generalization claims it and each call site checks it
-        // against its own types. Draining after would report a generic body's
-        // requirement against a variable nothing pinned.
+        // generalizing. The ordering is the whole discipline: what is still
+        // unresolved here is about a variable the scheme is about to quantify,
+        // so generalization claims it and each call site checks it against its
+        // own types. Draining after would report a generic body's requirement
+        // against a variable nothing pinned.
         self.discharge_constraints();
         // Generalize the fn after its body is checked (§5.3), at the level the
         // declaration group was entered *from* — the group's own level is still
@@ -1491,17 +1447,17 @@ impl Inferer {
             self.bind_pattern_name(name_tok.text_range(), ty);
             return ty;
         }
-        // A **wildcard** parameter (REP-32). It names nothing, so there is nothing
-        // to look up — but its slot is a real slot and needs the parameter's type,
-        // or lowering reads a symbol with no scheme for a parameter that is
+        // A **wildcard** parameter. It names nothing, so there is nothing to look
+        // up — but its slot is a real slot and needs the parameter's type, or
+        // lowering reads a symbol with no scheme for a parameter that is
         // certainly there.
         if let Some(tok) = p.wildcard() {
             self.bind_pattern_name(tok.text_range(), ty);
             return ty;
         }
-        // A **destructuring** closure parameter (REP-29). The argument's own slot
-        // takes the parameter type, and the pattern is checked against it by the
-        // same walk a match arm and a `for` binding go through — so each name comes
+        // A **destructuring** closure parameter. The argument's own slot takes
+        // the parameter type, and the pattern is checked against it by the same
+        // walk a match arm and a `for` binding go through — so each name comes
         // out at its component's type rather than at the whole argument's.
         if let Some(pat) = p.pattern() {
             self.bind_pattern_name(pat.syntax().text_range(), ty);
@@ -1512,12 +1468,9 @@ impl Inferer {
 
     /// Infer `x = e` / `x += e`.
     ///
-    /// The target is the symbol **resolution** bound the name to (TY-13). This
-    /// was the one place inference looked a name up itself, through a scope
-    /// tree it had pushed empty children onto and never bound anything in — so
-    /// the walk fell out to the root and found either nothing (a local: the
-    /// assignment was unchecked) or a same-named top-level binding (whose type
-    /// it then constrained instead).
+    /// The target is the symbol **resolution** bound the name to — never a
+    /// lookup of inference's own, which under shadowing would find a same-named
+    /// top-level binding and constrain that instead.
     fn infer_assign(&mut self, stmt: &AssignStmt) {
         let rhs_ty = stmt.value().map(|e| self.infer_expr(&e));
         let (Some(name_tok), Some(rhs)) = (stmt.name(), rhs_ty) else {
@@ -1532,26 +1485,23 @@ impl Inferer {
         };
         // Every binding is assignable (ADR-125): a `var`, a parameter, a `for`
         // binding and a pattern binding are all just names bound to values, and
-        // the only thing assignment has to respect is the binding's *type*. What
-        // an assignment used to be checked for — being a `var` — was the whole
-        // of `Y009`, and that code is retired.
+        // the only thing assignment has to respect is the binding's *type*.
         let Some(scheme) = sym.scheme.as_ref() else {
             return;
         };
         let existing = self.db.instantiate(scheme);
         self.unify_at(existing, rhs, at);
         // A compound assignment is an arithmetic operation, so its target must
-        // be numeric. Matching operand types alone said nothing: `var flag =
-        // true; flag += false` unified `Bool` with `Bool` and was accepted
-        // (TY-15).
+        // be numeric. Matching operand types alone say nothing: `var flag =
+        // true; flag += false` unifies `Bool` with `Bool`.
         //
-        // It goes through the channel now (TY-31). S13 reported it only for a
-        // target whose type was already *known*, deliberately: `fn f(a) { a += 1
-        // }` leaves `a` a variable, and answering "not numeric" about a variable
-        // is wrong while pinning it to `Int` would silently narrow every
-        // unannotated numeric parameter. Deferring is the third option and the
-        // right one — the requirement is recorded, generalization carries it, and
-        // whatever a call site puts in `a`'s place is what has to be a number.
+        // The requirement goes through the channel. Deciding here would only
+        // work for a target whose type is already *known*: `fn f(a) { a += 1 }`
+        // leaves `a` a variable, and answering "not numeric" about a variable is
+        // wrong while pinning it to `Int` would silently narrow every
+        // unannotated numeric parameter. Deferred, the requirement is recorded,
+        // generalization carries it, and whatever a call site puts in `a`'s
+        // place is what has to be a number.
         let compound = stmt
             .op()
             .is_some_and(|t| !matches!(t.kind(), SyntaxKind::EQ));
@@ -1572,9 +1522,8 @@ impl Inferer {
         }
         // `%` is defined for integers only (§4.12), and a compound `%=` is that
         // same operation — so it is the same `Y016`. The numeric requirement
-        // above does not cover it: a `Float` *is* numeric, so `f %= 2.0` passed
-        // `praxis check` while `f % 2.0` was refused, and MIR then had no float
-        // remainder to lower it to (REP-64).
+        // above does not cover it: a `Float` *is* numeric, and MIR has no float
+        // remainder to lower `f %= 2.0` to.
         self.reject_float_remainder(
             stmt.op().map(|t| t.kind()) == Some(SyntaxKind::PERCENT_EQ),
             existing,
@@ -1590,7 +1539,7 @@ impl Inferer {
     /// An operand still under inference answers `false` here and is left alone:
     /// pinning it would narrow every unannotated numeric parameter, which is the
     /// reason the numeric requirement beside it goes through the deferred
-    /// channel (TY-31).
+    /// channel.
     fn reject_float_remainder(
         &mut self,
         is_remainder: bool,
@@ -1634,10 +1583,9 @@ impl Inferer {
 
     // --- expressions -------------------------------------------------------
 
-    /// Infer `expr`'s type **and record it** (F15).
+    /// Infer `expr`'s type **and record it**.
     ///
-    /// This is the one insertion into [`Inferer::expr_types`]. Every path that
-    /// infers an expression goes through here or through
+    /// Every path that infers an expression goes through here or through
     /// [`infer_expr_expected`](Self::infer_expr_expected), which records too —
     /// so "inference visited this node" and "there is a recorded type for this
     /// node" are the same statement, and lowering may treat a miss as an
@@ -1648,8 +1596,9 @@ impl Inferer {
         ty
     }
 
-    /// Record `ty` as `expr`'s inferred type. Called from the two entry points
-    /// above and nowhere else.
+    /// Record `ty` as `expr`'s inferred type. Called from
+    /// [`infer_expr`](Self::infer_expr) and
+    /// [`infer_expr_expected`](Self::infer_expr_expected), and nowhere else.
     fn record_expr_type(&mut self, expr: &Expr, ty: Type) {
         self.record_node_type(expr.syntax(), ty);
     }
@@ -1699,13 +1648,12 @@ impl Inferer {
             Expr::TupleIndex(t) => self.infer_tuple_index(t),
             Expr::Index(i) => self.infer_index(i),
             Expr::Match(m) => self.infer_match(m),
-            // M7-WS7: closure — type is `Func`; params bind in a child scope.
             Expr::Closure(c) => self.infer_closure(c),
             Expr::Error(_) => self.db.fresh_var(),
         }
     }
 
-    /// Infer the type of a `|params| expr` closure (M7, §4.10). The result is a
+    /// Infer the type of a `|params| expr` closure (§4.10). The result is a
     /// `Func` type `(P0, …) -> R` built from the param and body types. Free
     /// variables in the body resolve to outer-scope bindings (captures); the
     /// capture environment is a runtime concern, not a type-system one (§4.10).
@@ -1720,7 +1668,7 @@ impl Inferer {
 
     /// Infer a closure's body with its own result on the function-context stack,
     /// so a `return` inside it is checked against *the closure* rather than
-    /// against whatever function encloses it (TY-18).
+    /// against whatever function encloses it.
     ///
     /// The result is the join of the placeholder the `return`s pinned and the
     /// body's own type: a closure whose body diverges contributes nothing.
@@ -1746,17 +1694,17 @@ impl Inferer {
         }
     }
 
-    /// Bidirectional closure inference (M8, §3): infer a closure argument with
+    /// Bidirectional closure inference (§3): infer a closure argument with
     /// an expected `Func` type pushed down from the combinator's signature. Each
     /// param is unified with the corresponding expected Func param BEFORE the
     /// body is inferred, so a closure param whose type is the receiver's element
     /// type (e.g. `|inner| inner.len()` over a `Vec[Vec[Int]]`) is pinned and
     /// method calls on it resolve; and a fold's accumulator param `a` is pinned
     /// to the accumulator type threaded from the init argument. The expected
-    /// result type is threaded into the body. Falls back to plain
-    /// [`infer_closure`](Self::infer_closure) when the expected type is not a
-    /// Func (or the arity differs) — unification with a fresh var is a no-op, so
-    /// this is purely additive and cannot change currently-passing inference.
+    /// *result* type is **not** pushed down — only the parameters are. Falls
+    /// back to plain [`infer_closure`](Self::infer_closure) when the expected
+    /// type is not a Func (or the arity differs); unification with a fresh var
+    /// is a no-op, so the hint can only ever add information.
     fn infer_closure_expected(&mut self, c: &praxis_ast::ClosureExpr, expected: Type) -> Type {
         // Read the expected Func's params/result (after following). If it is not
         // a Func, or the param count differs, defer to the bottom-up path.
@@ -1777,17 +1725,17 @@ impl Inferer {
             let _ = self.db.unify(pt, *exp_pt);
             param_types.push(pt);
         }
-        // Thread the expected result type into the body. (The body is a single
-        // expression; we infer it directly. A full bidirectional system would
-        // push `exp_result` into block tails too, but Praxis closure bodies here
-        // are single expressions or push from their own tail.)
+        // `exp_result` is deliberately unused: the body is a single expression
+        // inferred bottom-up, and its type is joined with the closure's own
+        // result in `infer_closure_body`. A full bidirectional system would push
+        // it into block tails as well.
         let _ = exp_result;
         let result_ty = self.infer_closure_body(c);
         self.db.func(param_types, result_ty)
     }
 
     /// Infer an expression with an expected type pushed down from context
-    /// (bidirectional inference, M8 §3). Currently only closures take the hint;
+    /// (bidirectional inference, §3). Currently only closures take the hint;
     /// every other expression ignores `expected` and infers bottom-up (a fresh
     /// var unifies no-op, so this is safe).
     fn infer_expr_expected(&mut self, expr: &Expr, expected: Type) -> Type {
@@ -1801,23 +1749,20 @@ impl Inferer {
         }
     }
 
-    /// Infer the type of a record literal `Name { field: expr, … }` (M7, §4.5).
+    /// Infer the type of a record literal `Name { field: expr, … }` (§4.5).
     /// Looks up the struct type, unifies each field initializer with the declared
     /// field type, and returns the struct type.
     ///
-    /// **The head has to be a `struct`, and nothing asked (REP-26).** A head that
-    /// resolved to anything else kept that thing's type and lowered to nothing:
-    /// `var x = 1` / `var p = x { a: 1 }` passed `praxis check`, printed `Unit`,
-    /// and `p + 1` printed a raw pointer. That is REP-01's shape — a program the
-    /// checker accepts whose value has no representation — so the report is made
-    /// **here**, in inference, where `praxis check` sees it (REP-12).
+    /// **The head has to be a `struct`**, and the report is made *here*, in
+    /// inference, where `praxis check` sees it: a head that resolves to anything
+    /// else keeps that thing's type and lowers to nothing, which is a program the
+    /// checker accepts whose value has no representation.
     ///
-    /// It is the symbol's **kind** that decides, which is REP-22's rule at another
-    /// door: the head names a declaration, and `SymbolKind::Struct` is the only one
-    /// a `{ … }` can build. Deciding on the head's *type* instead would let an
-    /// unresolved one (a parameter, whose type is a variable) look like a failure
-    /// and would say nothing useful about an `enum`, which is a perfectly good type
-    /// with no fields to initialize.
+    /// It is the symbol's **kind** that decides: the head names a declaration, and
+    /// `SymbolKind::Struct` is the only one a `{ … }` can build. Deciding on the
+    /// head's *type* instead would let an unresolved one (a parameter, whose type
+    /// is a variable) look like a failure and would say nothing useful about an
+    /// `enum`, which is a perfectly good type with no fields to initialize.
     fn infer_record_lit(&mut self, r: &RecordLitExpr) -> Type {
         // The literal's head is an ordinary name reference, so resolution
         // already decided which symbol it names — including under shadowing,
@@ -1834,9 +1779,9 @@ impl Inferer {
             let head_ty = struct_ty.unwrap_or_else(|| self.db.fresh_var());
             self.record_node_type(head.syntax(), head_ty);
         }
-        // A head that is not a `struct` (REP-26). Reported before the type is
-        // consulted, so an `enum`, a `fn`, a builtin and a binding all answer the
-        // same way and all of them stop here.
+        // A head that is not a `struct`, reported before the type is consulted,
+        // so an `enum`, a `fn`, a builtin and a binding all answer the same way
+        // and all of them stop here.
         if let Some(resolved) = resolved_head {
             if let Some(sym) = self.names.get(resolved.symbol) {
                 if sym.kind != SymbolKind::Struct {
@@ -1869,11 +1814,10 @@ impl Inferer {
             _ => return struct_ty,
         };
         // A record literal is **exact**: every declared field exactly once, and
-        // nothing else (HIR-04). None of that was checked. A missing field was
-        // allocated as `Unit` under its declared type; a duplicate pushed a
-        // second payload into an object whose schema had one slot for it; and
-        // an unknown field's initializer was not lowered at all, so its side
-        // effects disappeared.
+        // nothing else. Unchecked, a missing field would be allocated as `Unit`
+        // under its declared type, a duplicate would push a second payload into
+        // an object whose schema has one slot for it, and an unknown field's
+        // initializer would not be lowered at all.
         let type_name = self.db.render(self.db.follow(struct_ty));
         let declared: Vec<String> = self
             .db
@@ -1943,8 +1887,8 @@ impl Inferer {
     /// answer a fresh variable.
     ///
     /// The two heads that cannot be checked — one that resolved to nothing
-    /// (`N001`) and one that is not a `struct` (`N008`, REP-26) — both take this
-    /// path: the initializers are expressions the program wrote, and dropping them
+    /// (`N001`) and one that is not a `struct` (`N008`) — both take this path:
+    /// the initializers are expressions the program wrote, and dropping them
     /// drops whatever else is wrong inside them.
     fn infer_record_lit_fields_only(&mut self, r: &RecordLitExpr) -> Type {
         if let Some(fl) = r.field_list() {
@@ -1957,17 +1901,13 @@ impl Inferer {
         self.db.fresh_var()
     }
 
-    /// Infer the type of a field access `receiver.field` (M7, §4.5). Returns the
+    /// Infer the type of a field access `receiver.field` (§4.5). Returns the
     /// field's declared type.
     ///
     /// Every read that cannot be answered here goes through
     /// [`require_field`](Self::require_field) — **including** one whose receiver is
-    /// already concrete (REP-28, corrected). That is not symmetry for its own sake,
-    /// it is what makes the requirement have teeth. A field read used to constrain
-    /// nothing at all: the read answered a fresh variable and recorded no
-    /// requirement, so `fn dist(a) -> Int { a.x + a.y }` / `out(dist(3))` passed
-    /// `praxis check` and then failed under `praxis run` with `Y112`. That is
-    /// TY-30's shape exactly, and this is TY-30's fix at the third door.
+    /// already concrete. That is not symmetry for its own sake, it is what makes
+    /// the requirement have teeth.
     ///
     /// The two receivers take the two arms [`require_cap_as`](Self::require_cap_as)
     /// already has. A **variable** is deferred and answered by
@@ -1975,9 +1915,9 @@ impl Inferer {
     /// says what it is. A **concrete** receiver — `Int`, or a record with no such
     /// field — is decided here and now, by `crate::capability::check`, and reported
     /// at `praxis check` time. Routing the concrete case through the same door is
-    /// ADR-057's rule (a capability check goes through `require_cap`) and it is also
-    /// the only thing that makes `Capability::HasField`'s rejection arm reachable:
-    /// before this, that arm was dead code and `check` reported nothing at all.
+    /// ADR-057's rule (a capability check goes through `require_cap`) and it is
+    /// also the only thing that makes `Capability::HasField`'s rejection arm
+    /// reachable.
     ///
     /// A receiver that is *still* a variable when lowering runs is the one case
     /// nobody can decide — no call site ever pinned it — and `lower_field_get`
@@ -2003,22 +1943,18 @@ impl Inferer {
         result
     }
 
-    /// `p.0` — a tuple element, selected by position (REP-08, §4.4).
+    /// `p.0` — a tuple element, selected by position (§4.4).
     ///
-    /// A `(Int, Int)` was a legal value, a legal `Map` key and a legal graph state
-    /// (ADR-060) that **no function could read**: `p.0` was a `P001` at the dot.
-    ///
-    /// The report is emitted **here** and not at lowering, for `Y018`'s reason
-    /// (ADR-061): `praxis check` does not run lowering, so a program reported only
-    /// there is clean under `check` and fails under `run` — the asymmetry REP-12
-    /// was about. `Y112`'s emitter, which is where a bad *field* is reported, has
-    /// exactly that shape today.
+    /// A receiver that is not a tuple, or an index past its arity, is reported
+    /// **here** and not at lowering, for `Y018`'s reason (ADR-061): `praxis
+    /// check` does not run lowering, so a program reported only there is clean
+    /// under `check` and fails under `run`.
     ///
     /// An unresolved receiver says nothing. That is the same optimism every
     /// capability predicate has about a variable, and it is why `fn first(p) {
     /// p.0 }` comes out with a fresh result type rather than a diagnostic; giving
-    /// it a real answer needs a "has an element at position n" requirement on the
-    /// constraint channel, which no finding asks for.
+    /// it a real answer would need a "has an element at position n" requirement on
+    /// the constraint channel.
     fn infer_tuple_index(&mut self, t: &praxis_ast::TupleIndexExpr) -> Type {
         let receiver_ty = t
             .receiver()
@@ -2059,18 +1995,18 @@ impl Inferer {
         }
     }
 
-    /// `m[key]`, `grid[x, y]` — a subscript read (REP-16, §4.7/§6.2/§6.4).
+    /// `m[key]`, `grid[x, y]` — a subscript read (§4.7/§6.2/§6.4).
     ///
     /// Dispatched through the method catalog under [`INDEX_READ`], so which
     /// collections index and at what arity is one table's answer rather than a
     /// match arm here — and so an unannotated receiver defers on the constraint
-    /// channel exactly as `values.sum()` does (TY-30). `fn first(m, k) { m[k] }`
-    /// therefore infers, and the requirement is answered by whatever the call site
-    /// puts in `m`'s place.
+    /// channel exactly as `values.sum()` does. `fn first(m, k) { m[k] }` therefore
+    /// infers, and the requirement is answered by whatever the call site puts in
+    /// `m`'s place.
     ///
     /// A concrete receiver with no row is `Y020`, reported here rather than at
     /// lowering: `praxis check` does not run lowering, so a program reported only
-    /// there is clean under `check` and fails under `run` (REP-12's asymmetry).
+    /// there is clean under `check` and fails under `run`.
     fn infer_index(&mut self, i: &praxis_ast::IndexExpr) -> Type {
         let receiver_ty = match i.receiver() {
             Some(r) => self.infer_expr(&r),
@@ -2090,7 +2026,7 @@ impl Inferer {
         )
     }
 
-    /// `m[key] = v`, `counts[key] += 1` — a subscript store (REP-16, §6.2).
+    /// `m[key] = v`, `counts[key] += 1` — a subscript store (§6.2).
     ///
     /// The store is a second catalog row ([`INDEX_STORE`]) rather than the read
     /// row written backwards, because the two surfaces are not the same set: a
@@ -2101,8 +2037,8 @@ impl Inferer {
     /// store takes to agree, which they do by construction — both are the entry's
     /// last parameter — so what is left to check is that the type is one the
     /// arithmetic accepts. That goes through the channel for `infer_assign`'s
-    /// reason (TY-31): `fn bump(m, k) { m[k] += 1 }` leaves the value a variable,
-    /// and answering "not numeric" about a variable is wrong.
+    /// reason: `fn bump(m, k) { m[k] += 1 }` leaves the value a variable, and
+    /// answering "not numeric" about a variable is wrong.
     fn infer_place_assign(&mut self, stmt: &praxis_ast::PlaceAssignStmt) {
         let Some(target) = stmt.target() else { return };
         let value_ty = stmt
@@ -2141,8 +2077,8 @@ impl Inferer {
         // the value is inferred first: `infer_catalog_call` pushes each expected
         // param type into its argument, and the value expression is one of them.
         // Which row the store is dispatched through is the operator's answer:
-        // `min=`/`max=` are rows of their own (REP-21, ADR-064), because §6.2
-        // gives them a semantics no read-modify-write can express.
+        // `min=`/`max=` are rows of their own (ADR-064), because §6.2 gives them
+        // a semantics no read-modify-write can express.
         let op = stmt.op();
         let row = match op {
             praxis_ast::PlaceAssignOp::Min => praxis_stdlib::catalog::INDEX_STORE_MIN,
@@ -2180,7 +2116,7 @@ impl Inferer {
             );
         }
         // …and `%=` is not one of the operations a `Float` value accepts, for
-        // the binary `%`'s reason (§4.12, REP-64).
+        // the binary `%`'s reason (§4.12).
         self.reject_float_remainder(
             op == praxis_ast::PlaceAssignOp::Rem,
             value_ty,
@@ -2191,17 +2127,15 @@ impl Inferer {
 
     /// `p.x = 5`, `p.x += 1` — a store into a record field (§4.5).
     ///
-    /// **A field is a place**, which §4.2 already implies and nothing in the
-    /// language could spell: a `var` binding "may still point to a mutable
-    /// object", and every record was one you could only rebuild. `p.x = 5` was
-    /// `Y021` and `Point { x: 5, y: p.y }` was the whole workaround.
+    /// **A field is a place** (ADR-124), which §4.2 implies: a `var` binding "may
+    /// still point to a mutable object".
     ///
     /// The field's type comes from the **same** [`infer_field_get`] a read takes,
     /// which is what keeps a store from being a second answer to "what does this
     /// receiver hold": a receiver still under inference defers on the constraint
-    /// channel (REP-28's `HasField`) and is answered by whatever a call site puts
-    /// in its place, and a concrete receiver with no such field is reported once,
-    /// there, rather than again here in different words.
+    /// channel (`HasField`) and is answered by whatever a call site puts in its
+    /// place, and a concrete receiver with no such field is reported once, there,
+    /// rather than again here in different words.
     ///
     /// The numeric requirement is the target's rather than the value's, for
     /// [`infer_assign`](Self::infer_assign)'s reason and with its one exception:
@@ -2252,18 +2186,18 @@ impl Inferer {
     }
 
     /// Infer the type of a `match scrutinee { pattern => body, … }` expression
-    /// (M7, §4.6). Unifies the scrutinee with each pattern, then unifies all
-    /// arm body types to determine the match's result type.
+    /// (§4.6). Unifies the scrutinee with each pattern, then unifies all arm
+    /// body types to determine the match's result type.
     fn infer_match(&mut self, m: &praxis_ast::MatchExpr) -> Type {
         let scrutinee_ty = m
             .scrutinee()
             .map(|s| self.infer_expr(&s))
             .unwrap_or_else(|| self.db.fresh_var());
         let arms: Vec<_> = m.arms().collect();
-        // The arms **join** (TY-19). Seeded with `Never` rather than a fresh
-        // variable, so an arm that diverges contributes nothing and a match
-        // whose every arm diverges is itself `Never` — a fresh variable would
-        // silently make it "whatever the first non-divergent use wants".
+        // The arms **join**. Seeded with `Never` rather than a fresh variable,
+        // so an arm that diverges contributes nothing and a match whose every
+        // arm diverges is itself `Never` — a fresh variable would silently make
+        // it "whatever the first non-divergent use wants".
         let mut result = self.db.never();
         for arm in &arms {
             if let Some(pat) = arm.pattern() {
@@ -2283,8 +2217,8 @@ impl Inferer {
         result
     }
 
-    /// Infer a pattern against an expected type (M7, §4.6). Binds pattern
-    /// variables and unifies variant payloads.
+    /// Infer a pattern against an expected type (§4.6). Binds pattern variables
+    /// and unifies variant payloads.
     #[allow(clippy::only_used_in_recursion)]
     fn infer_pattern(&mut self, pat: &praxis_ast::Pattern, expected: Type) {
         use praxis_ast::PatternKind;
@@ -2319,10 +2253,10 @@ impl Inferer {
                 }
                 let _ = name;
             }
-            // `(a, b)` — a tuple pattern (REP-10, §4.4). The elements are fresh
-            // variables unified *through* the scrutinee, so an unannotated
-            // parameter destructured in a `match` is pinned to a tuple by the
-            // pattern rather than left open.
+            // `(a, b)` — a tuple pattern (§4.4). The elements are fresh variables
+            // unified *through* the scrutinee, so an unannotated parameter
+            // destructured in a `match` is pinned to a tuple by the pattern
+            // rather than left open.
             PatternKind::Tuple => {
                 let subs: Vec<_> = pat.sub_patterns().collect();
                 let elems: Vec<Type> = subs.iter().map(|_| self.db.fresh_var()).collect();
@@ -2346,7 +2280,7 @@ impl Inferer {
                 }
             }
             // `P { x, y: p }` or a headless `{ x, y: p }` — a record pattern
-            // (REP-10, §4.5; ADR-091).
+            // (§4.5, ADR-091).
             PatternKind::Record(rname) => {
                 self.infer_record_pattern(pat, rname.as_deref(), expected)
             }
@@ -2354,24 +2288,15 @@ impl Inferer {
         }
     }
 
-    /// Infer a variant pattern `V(p, …)` against `expected` (M7, §4.6; REP-56).
+    /// Infer a variant pattern `V(p, …)` against `expected` (§4.6, ADR-091).
     ///
-    /// **A variant pattern's enum is the scrutinee's.** That is the rule lowering
-    /// has always had — `lower_pattern`'s own `Variant` arm reads the def off
-    /// `scrutinee_ty` — and it is now the rule here, which is what makes the two
-    /// halves agree instead of disagreeing about where the enum comes from.
-    ///
-    /// Inference used to reach the enum *only* through the constructor's resolved
-    /// symbol, and its comment asserted the symbol was "resolution already
-    /// resolved". That is false for every anonymous enum: a `choice(...)` type has
-    /// no declaration, so `resolve_pattern_bindings` records no ref for the
-    /// constructor, the symbol was `None`, and the whole arm was skipped. Three
-    /// things then never happened — the scrutinee was never unified, the payload
-    /// was never asked for, and the payload binding never got a type. `Mul(p) =>
-    /// p.a` left `p` an unbound var, so `infer_field_get` took its REP-28
-    /// tolerance arm, lowering answered `Unit` instead of emitting the field load
-    /// at all, and the *next* instruction aborted the runtime reading a `Unit` as
-    /// an `Int` payload. `praxis check` was clean the whole way (REP-56).
+    /// **A variant pattern's enum is the scrutinee's**, which is the rule lowering
+    /// has (`lower_pattern`'s `Variant` arm reads the def off `scrutinee_ty`), so
+    /// the two halves cannot disagree about where the enum comes from. Reaching
+    /// the enum through the *constructor's* resolved symbol alone would not work
+    /// for an anonymous enum: a `choice(...)` type has no declaration, so
+    /// `resolve_pattern_bindings` records no ref for the constructor and there is
+    /// no symbol to ask.
     ///
     /// The constructor symbol stays as the **fallback**, for the case that is
     /// exactly the other way round: when nothing has pinned the scrutinee, the
@@ -2393,11 +2318,9 @@ impl Inferer {
             Some((def, args)) => {
                 let Some(idx) = self.db.enum_def(def).variant(vname) else {
                     // The scrutinee is a concrete enum and it has no such
-                    // variant: the answer is known *here*, so say it here. This
-                    // used to be lowering's alone, which made a misspelled
-                    // variant REP-12's asymmetry — `praxis check` clean, `praxis
-                    // run` exiting 1 on the same file — for every enum, not only
-                    // the anonymous ones this row is about.
+                    // variant: the answer is known *here*, so say it here rather
+                    // than leaving it to lowering, which `praxis check` never
+                    // runs.
                     let rendered = self.db.render(resolved);
                     self.diagnostics
                         .push(crate::diagnostics::unknown_enum_variant(
@@ -2435,9 +2358,9 @@ impl Inferer {
         for (i, sub) in sub_pats.iter().enumerate() {
             match payload_types.get(i) {
                 Some(&payload_ty) => self.infer_pattern(sub, payload_ty),
-                // More sub-patterns than payload slots is lowering's `Y124`
-                // (REP-05); infer the extras anyway so what is inside them is
-                // still checked.
+                // More sub-patterns than payload slots is lowering's `Y124`;
+                // infer the extras anyway so what is inside them is still
+                // checked.
                 None => {
                     let fresh = self.db.fresh_var();
                     self.infer_pattern(sub, fresh);
@@ -2469,35 +2392,32 @@ impl Inferer {
     }
 
     /// Infer a record pattern `P { x, y: p }` — or a headless `{ x, y: p }` —
-    /// against `expected` (REP-10, §4.5; ADR-091).
+    /// against `expected` (§4.5, ADR-091).
     ///
     /// A head is a type name resolution already resolved, exactly as a record
     /// *literal*'s is; the fields are checked against that record's declared
     /// fields, and a field the record does not have is the literal's own `Y114`.
     ///
     /// With **no head** the record is the scrutinee's, which is how a tuple
-    /// pattern has always worked (ADR-069 Decision 4) and the only way an
-    /// anonymous record can be matched at all: a `choice(...)` payload record has
-    /// no name a head could write.
+    /// pattern works (ADR-069 Decision 4) and the only way an anonymous record
+    /// can be matched at all: a `choice(...)` payload record has no name a head
+    /// could write.
     ///
     /// A headless pattern therefore needs a record it can *see*. Field names
     /// alone cannot construct a record type — the language has no row variables,
     /// so unlike a tuple pattern this one cannot pin an open scrutinee from its
     /// own shape — and it is reported when the scrutinee is still open (ADR-091
     /// Decision 2). Staying silent there, the way `infer_field_get` stays silent
-    /// about an unpinned receiver (REP-28), was measured and is *not* the same
-    /// trade: `var f = |{x, y}| x + y` passed `praxis check` and then aborted the
-    /// runtime with "int_payload wants a `Int` payload; this value is a `Unit`",
-    /// because inference had bound `x` and `y` to fresh variables while lowering
-    /// — which reads the record off the scrutinee and by then knows it — stored
-    /// the fields at `Int`. The binding's type and the body's disagreed, which is
-    /// REP-56's own failure mode reintroduced one pattern over. A field *read*
-    /// can be silent because lowering answers `Unit` too, consistently; a
-    /// *binding* cannot.
+    /// about an unpinned receiver, is *not* the same trade: inference would bind
+    /// the names to fresh variables while lowering — which reads the record off
+    /// the scrutinee and by then knows it — stores the fields at their real
+    /// types, so `var f = |{x, y}| x + y` would abort the runtime reading a
+    /// `Unit` as an `Int`. A field *read* can be silent because lowering answers
+    /// `Unit` too, consistently; a *binding* cannot.
     ///
     /// Unlike a literal, a pattern need not name every field: an unnamed field is
-    /// a wildcard, which is HIR-06's padding rule at the second kind of composite
-    /// pattern (`Some` and `Some(_)` are one test for the same reason).
+    /// a wildcard, the padding rule at the second kind of composite pattern
+    /// (`Some` and `Some(_)` are one test for the same reason).
     fn infer_record_pattern(
         &mut self,
         pat: &praxis_ast::Pattern,
@@ -2522,8 +2442,8 @@ impl Inferer {
             praxis_types::TypeData::Record { def, args } => (*def, args.clone()),
             // A headless pattern whose scrutinee is still open: the fields it
             // names do not determine a record, so there is no honest type to
-            // bind them at. See this function's doc comment for what silence
-            // here cost. Name the record, or annotate the value.
+            // bind them at. See this function's doc comment for why silence
+            // here is wrong. Name the record, or annotate the value.
             praxis_types::TypeData::Var(_) if rname.is_none() => {
                 self.diagnostics.push(crate::diagnostics::not_a_pattern(
                     at,
@@ -2600,7 +2520,7 @@ impl Inferer {
         }
     }
 
-    /// Synthesize the result type of a `read parser_expression` (§7.1, M6).
+    /// Synthesize the result type of a `read parser_expression` (§7.1).
     fn infer_read(&mut self, r: &praxis_ast::ReadExpr) -> Type {
         match r.parser_expr() {
             Some(pe) => crate::parser_lower::synthesize_parser_type(
@@ -2615,18 +2535,16 @@ impl Inferer {
         }
     }
 
-    /// Synthesize the result type of a `parse(text, parser_expression)` (§7.1, M6).
+    /// Synthesize the result type of a `parse(text, parser_expression)` (§7.1).
     fn infer_parse(&mut self, p: &praxis_ast::ParseExpr) -> Type {
         // The text argument is an ordinary expression; resolve it — and it has
         // to be `Text`. `parse(text, parser)` runs a parser plan over a byte
-        // buffer, so `parse(1, int)` reaches the runtime with an `Int` where a
-        // `Text` payload is expected. Its type was inferred and then discarded
-        // (TY-25).
+        // buffer, so an unchecked `parse(1, int)` would reach the runtime with an
+        // `Int` where a `Text` payload is expected.
         if let Some(text_expr) = p.text_expr() {
             let arg_ty = self.infer_expr(&text_expr);
             let text = self.db.text();
-            // `text` first — `parse` requires it, `arg_ty` is what was passed
-            // (REP-61).
+            // `text` first — `parse` requires it, `arg_ty` is what was passed.
             self.unify_at(text, arg_ty, text_expr.syntax().text_range());
         }
         match p.parser_expr() {
@@ -2650,13 +2568,13 @@ impl Inferer {
         match tok.kind() {
             SyntaxKind::IntLit => {
                 // An `Int` is signed 64-bit (§4.3), so a literal outside that
-                // range names a value the language cannot represent (TY-28).
+                // range names a value the language cannot represent.
                 //
-                // Decided **here** and not at lowering, which is where it used to
-                // be: lowering is the pass `praxis check` and the editor do not
-                // run, so `var x = 99999999999999999999999` checked clean and
-                // then refused to run (ADR-133). Nothing about the range needs
-                // the typed tree — the token's own text is the whole question.
+                // Decided **here** and not at lowering (ADR-133): lowering is the
+                // pass `praxis check` and the editor do not run, so a report left
+                // to it would let `var x = 99999999999999999999999` check clean
+                // and then refuse to run. Nothing about the range needs the typed
+                // tree — the token's own text is the whole question.
                 if praxis_syntax::numeric::parse_int_literal(tok.text()).is_none() {
                     let at = self.file_span(tok.text_range());
                     self.diagnostics
@@ -2675,11 +2593,9 @@ impl Inferer {
             SyntaxKind::KW_TRUE | SyntaxKind::KW_FALSE => self.db.bool(),
             // A backtick template reaching *here* is one written in value
             // position: the `read`/`parse` path lowers its template through
-            // `parse_parser_template` and never builds a `Literal` (REP-47).
-            // §7.1 enters the parser-expression sublanguage at those two words
-            // and nowhere else, so this template has nothing to parse and no
-            // meaning — it used to be typed `Text` and lowered as a text literal
-            // containing its own braces, so `` `n = {int}` `` printed itself.
+            // `parse_parser_template` and never builds a `Literal`. §7.1 enters
+            // the parser-expression sublanguage at those two words and nowhere
+            // else, so this template has nothing to parse and no meaning.
             //
             // A fresh variable, not `Text`: the report is the answer, and
             // claiming a type here would produce a second diagnostic about the
@@ -2738,7 +2654,7 @@ impl Inferer {
                 // A `fn` name reaches here only in **value** position: a call's
                 // callee is instantiated by `infer_call`, which records its own
                 // node type. A monomorphic one becomes a closure over its adapter
-                // (REP-01, ADR-061); a *generic* one has nothing to adapt, because
+                // (ADR-061); a *generic* one has nothing to adapt, because
                 // monomorphization is driven by call sites and a value has none —
                 // so the adapter would call a clone-source the mono pass drops,
                 // and the JIT would fail with "unresolved user function". That is
@@ -2755,11 +2671,10 @@ impl Inferer {
                 }
                 // A **builtin** or a **constructor** in value position has no
                 // function value either, and for a blunter reason than `Y018`'s:
-                // nothing was ever built for it. `out(pi)` printed `Unit`, and
-                // `var h = abs` then `h(-3)` printed nothing at all and exited 0
-                // — the name lowered to the unit value and the call went nowhere
-                // (REP-70). Reported here, where the name is written, so `check`
-                // and the editor see it.
+                // nothing is ever built for it, so `var h = abs` would lower the
+                // name to the unit value and `h(-3)` would go nowhere. Reported
+                // here, where the name is written, so `check` and the editor see
+                // it.
                 if let Some((what, arity)) = self.no_function_value(resolved.symbol, ty) {
                     let name = self
                         .names
@@ -2780,32 +2695,31 @@ impl Inferer {
     }
 
     /// Whether `symbol` is a `fn` whose scheme quantifies anything — the case a
-    /// function *value* cannot represent (REP-01).
+    /// function *value* cannot represent.
     ///
     /// The kind is what makes this answerable: a `var` bound to a closure also
     /// has a `Func` scheme, and a generalized one at that, so the scheme alone
-    /// cannot tell a declaration from a binding that holds a value (the same
-    /// reason `SymbolKind::EnumVariant` exists — HIR-03).
+    /// cannot tell a declaration from a binding that holds a value.
     fn is_generic_fn(&self, symbol: SymbolId, scheme: &praxis_types::Scheme) -> bool {
         self.names.get(symbol).map(|s| s.kind) == Some(SymbolKind::Fn)
             && !scheme.binders().is_empty()
     }
 
     /// Whether `symbol` names something that has **no** function value at all,
-    /// and what to call it in the report (REP-70).
+    /// and what to call it in the report.
     ///
     /// Two kinds qualify, and the test is the same for both: the name is a
     /// builtin or an enum constructor, and the type it instantiated to is a
     /// function. A user `fn` is not here — ADR-061 gives it a real value, a
     /// closure over its adapter. A builtin has no adapter, and a constructor's
     /// `Wrap(7)` is built at the call rather than by a function anything can
-    /// hold, so in value position both lowered to `Unit`.
+    /// hold, so in value position both would lower to `Unit`.
     ///
     /// The type is what decides, not a list of names: a **payload-less** variant
     /// (`None`, `Empty`) instantiates to the enum type and is an ordinary value,
     /// which is exactly what distinguishes it from `Some`. Answering "is it a
     /// function" instead of "is it one of these thirty names" is what keeps a
-    /// prelude entry added later from silently rejoining the broken set.
+    /// prelude entry added later from silently joining the unreported set.
     fn no_function_value(&mut self, symbol: SymbolId, ty: Type) -> Option<(&'static str, usize)> {
         let what = match self.names.get(symbol).map(|s| s.kind) {
             Some(SymbolKind::Builtin) => "a builtin",
@@ -2825,7 +2739,7 @@ impl Inferer {
     ///
     /// The bounds are `Int` **only**. A `Float` range would need a step, and
     /// `0.0..1.0` has no elements to iterate — `iter_item` says a range yields
-    /// `Int`, and admitting float bounds would make that a lie (D6).
+    /// `Int`, and admitting float bounds would make that a lie.
     fn infer_range(&mut self, r: &praxis_ast::RangeExpr) -> Type {
         let (start, end) = r.bounds();
         let start_range = start.as_ref().map(|e| e.syntax().text_range());
@@ -2837,7 +2751,7 @@ impl Inferer {
         for (bound, at) in [(st, start_range), (et, end_range)] {
             let Some(bound) = bound else { continue };
             // `int_ty` first — the range requires it, the bound is what was
-            // written (REP-61).
+            // written.
             self.unify_at(int_ty, bound, at.unwrap_or(whole));
         }
         self.db
@@ -2860,7 +2774,7 @@ impl Inferer {
     /// The *order* of the unification is what makes the message read correctly:
     /// `unify(element, el)` puts the type established so far in `expected`, so a
     /// `[1, "a"]` says "expected `Int`, found `Text`" at the `"a"` and not the
-    /// reverse (REP-61).
+    /// reverse.
     fn infer_list(&mut self, l: &praxis_ast::ListExpr) -> Type {
         let element = self.db.fresh_var();
         for el in l.elements() {
@@ -2876,8 +2790,7 @@ impl Inferer {
     fn infer_bin(&mut self, b: &BinExpr) -> Type {
         let (lhs, rhs) = b.operands();
         // Keep each operand's node so a type mismatch can point at the specific
-        // bad operand rather than the whole binary expression (the earlier
-        // behavior underlined `a + b` even when only `a` was at fault).
+        // bad operand rather than underlining the whole `a + b`.
         let lhs_range = lhs.as_ref().map(|e| e.syntax().text_range());
         let rhs_range = rhs.as_ref().map(|e| e.syntax().text_range());
         // Detect a float-literal operand before the operands are moved below;
@@ -2936,16 +2849,14 @@ impl Inferer {
                     let lhs_at = lhs_range.unwrap_or(whole);
                     let rhs_at = rhs_range.unwrap_or(whole);
                     // `target` first: it is what the operator requires, and the
-                    // operand is what the program wrote. Reversed, `"a" + "b"`
-                    // read `expected Text, found Int` — the operand named as the
-                    // requirement (REP-61).
+                    // operand is what the program wrote. Reversed, the operand
+                    // would be named as the requirement.
                     self.unify_at(target, l, lhs_at);
                     self.unify_at(target, r, rhs_at);
                 }
                 // `%` is defined for integers only (§4.12). MIR has no Float
-                // remainder: its `lower_bin` fell through to *addition*, so
-                // `5.0 % 2.0` computed `7.0` (TY-27). There is no operation to
-                // lower, so there is nothing to accept.
+                // remainder, so there is no operation to lower and nothing to
+                // accept.
                 self.reject_float_remainder(
                     op_kind == Some(SyntaxKind::PERCENT),
                     target,
@@ -2997,17 +2908,16 @@ impl Inferer {
                     //
                     // Ordering (`<`, `>`, `<=`, `>=`) requires `supports_ord`,
                     // which is the scalars with a `compare` callback and
-                    // nothing else (ADR-045). This check is new: the capability
-                    // existed since M5 and was **never called**, so `true <
-                    // false` and `(1, 2) < (1, 3)` compiled and compared two
-                    // reinterpreted payload words (P0-12). Emit Y006.
+                    // nothing else (ADR-045); unchecked, `true < false` and
+                    // `(1, 2) < (1, 3)` would compare two reinterpreted payload
+                    // words. Emit Y006.
                     //
-                    // Both go through the constraint channel (F10, TY-29). A
-                    // concrete operand is decided on the spot, exactly as
-                    // before; an operand that is still a variable is *deferred*,
-                    // because it may be generalized and then instantiated at a
-                    // type with no such operation — which is what let
-                    // `fn equal(a, b) { a == b }` accept `equal(f, g)`.
+                    // Both go through the constraint channel. A concrete operand
+                    // is decided on the spot; an operand that is still a variable
+                    // is *deferred*, because it may be generalized and then
+                    // instantiated at a type with no such operation — which is
+                    // what would let `fn equal(a, b) { a == b }` accept
+                    // `equal(f, g)`.
                     let operand_ty = self.db.follow(l);
                     let kind = if matches!(op_kind, Some(SyntaxKind::EQ2 | SyntaxKind::NEQ)) {
                         CapKind::Eq
@@ -3023,11 +2933,9 @@ impl Inferer {
             // MIR's, not a typing difference between the two operators.
             //
             // The operands **join** with `Bool` rather than unifying with it, so a
-            // divergent one is absorbed (TY-19/ADR-053): `false && panic("x")` is
-            // the exit criterion's own example, and `panic` is `Never`. Unifying
-            // reported "expected Never, found Bool" — a `Y001` about the operator,
-            // not about the program — which is what `||` did before `&&` existed
-            // to make it visible.
+            // divergent one is absorbed (ADR-053): `false && panic("x")` is fine
+            // because `panic` is `Never`. Unifying would report "expected Never,
+            // found Bool" — a `Y001` about the operator, not about the program.
             Some(SyntaxKind::PIPE2 | SyntaxKind::AMP2) => {
                 let bool = self.db.bool();
                 if let (Some(l), Some(r)) = (lt, rt) {
@@ -3054,12 +2962,10 @@ impl Inferer {
             // Negation follows the operand's literal kind under the strict
             // per-literal model (§4.12): `-3.5` is Float, `-3` is Int.
             Some(SyntaxKind::MINUS) => {
-                // Follow the operand's **type**, not only its literal syntax.
-                // `-x` where `x: Float` used to come out `Int` and then fail to
-                // unify with its own operand, so `fn negate(x: Float) -> Float
-                // { -x }` was rejected — the one shape a per-literal rule cannot
-                // see (TY-26). Binary arithmetic already asked both questions;
-                // negation asked only the first.
+                // Follow the operand's **type**, not only its literal syntax:
+                // `-x` where `x: Float` has no float literal to go by, and a
+                // per-literal rule alone would make it `Int` and then reject
+                // `fn negate(x: Float) -> Float { -x }`.
                 let is_float = operand_is_float_literal(&operand_node)
                     || operand.is_some_and(|t| is_float_scalar(&self.db, t));
                 if is_float {
@@ -3078,7 +2984,7 @@ impl Inferer {
                 .map(|e| e.syntax().text_range())
                 .unwrap_or_else(|| u.syntax().text_range());
             // `result` first — it is the type the operator demands of its
-            // operand, so `!1` reads `expected Bool, found Int` (REP-61).
+            // operand, so `!1` reads `expected Bool, found Int`.
             self.unify_at(result, o, at);
         }
         result
@@ -3103,12 +3009,10 @@ impl Inferer {
     /// when the value is the implicit trailing `Unit`).
     fn infer_block_inner(&mut self, block: &BlockExpr) -> (Type, Option<TextRange>) {
         // Only the **last** statement can be the block's value, and only if it
-        // is an expression statement. Every expression statement used to
-        // overwrite `last`, so `{ 1; var x = 2 }` was inferred `Int` while
-        // lowering demoted the `1` to an effect and gave the block a `Unit`
-        // tail — inference and execution disagreed about the result type
-        // (TY-16). `lower_block` is the shape this mirrors: a *pending* tail
-        // that any following statement, of any kind, demotes.
+        // is an expression statement: `{ 1; var x = 2 }` is `Unit`, not `Int`.
+        // `lower_block` is the shape this mirrors — a *pending* tail that any
+        // following statement, of any kind, demotes — and inference and
+        // execution have to agree about the result type.
         let unit = self.db.unit();
         let mut pending: Option<(Type, TextRange)> = None;
         for child in block.stmts() {
@@ -3130,7 +3034,7 @@ impl Inferer {
         // through `infer_expr`: a branch body, a loop body and a function body
         // are all `infer_block` calls. Recording here as well is what makes
         // "every expression node has a type" true of the whole tree rather than
-        // of the subset that happened to sit in an expression position (F15).
+        // of the subset that happened to sit in an expression position.
         self.expr_types
             .insert(crate::NodeKey::of(block.syntax()), last);
         // No trailing expression: the value is Unit; point at the whole block so
@@ -3149,8 +3053,8 @@ impl Inferer {
         let then_ty = i.then_branch().map(|b| self.infer_block(&b));
         let else_ty = i.else_branch().and_then(|e| self.infer_else(&e));
         match (then_ty, else_ty) {
-            // The two branches **join**, they do not unify (TY-19). A branch
-            // that diverges — `if flag { panic("stop") } else { 1 }` — has type
+            // The two branches **join**, they do not unify. A branch that
+            // diverges — `if flag { panic("stop") } else { 1 }` — has type
             // `Never` and produces no value, so asking the two to be equal
             // rejects a program that is fine.
             (Some(t), Some(e)) => match self.db.join(t, e) {
@@ -3168,11 +3072,11 @@ impl Inferer {
                 }
             },
             // No `else`: MIR materializes `Unit` on the false path, so the
-            // expression's value is the join of the then branch and `Unit`
-            // (TY-17). `if c { 1 }` is therefore a mismatch — the value the
-            // then branch produces has nowhere to come from when the condition
-            // is false — while `if c { return 1 }` and `if c { panic("x") }`
-            // stay legal, because a divergent branch is absorbed.
+            // expression's value is the join of the then branch and `Unit`.
+            // `if c { 1 }` is therefore a mismatch — the value the then branch
+            // produces has nowhere to come from when the condition is false —
+            // while `if c { return 1 }` and `if c { panic("x") }` stay legal,
+            // because a divergent branch is absorbed.
             (Some(t), None) => {
                 let unit = self.db.unit();
                 match self.db.join(t, unit) {
@@ -3215,15 +3119,15 @@ impl Inferer {
         self.db.unit()
     }
 
-    /// `for binding in iter { body }` (M8, §4.11). The iterator must be iterable
+    /// `for binding in iter { body }` (§4.11). The iterator must be iterable
     /// (§5.4); the binding gets the element type. `for` yields Unit.
     ///
     /// **An unannotated iterated parameter is generic in the iterable and
-    /// monomorphic in the item** (REP-03). `iter_item` answers an unresolved
-    /// iterator with a *fresh* item variable, so the two are related by the
-    /// deferred `Iterable { item }` constraint rather than by being the same
-    /// variable — which is what `fn total(r) { … for i in r { t = t + i } … }`
-    /// needs, because pinning the item used to pin the iterator with it.
+    /// monomorphic in the item.** `iter_item` answers an unresolved iterator with
+    /// a *fresh* item variable, so the two are related by the deferred
+    /// `Iterable { item }` constraint rather than by being the same variable —
+    /// otherwise pinning the item in `fn total(r) { … for i in r { t = t + i } … }`
+    /// would pin the iterator with it.
     ///
     /// That fresh variable is then **pinned to the declaration group's level**,
     /// for ADR-057 Decision 5's reason and no other: there is one lowered body per
@@ -3237,7 +3141,7 @@ impl Inferer {
     ///
     /// So `total` generalizes to "any iterable of `Int`". Two call sites that
     /// disagree about the *element* are a disagreement about `total`'s signature,
-    /// exactly as two receivers at one method call site are (ADR-057 D5).
+    /// exactly as two receivers at one method call site are (ADR-057 Decision 5).
     fn infer_for(&mut self, f: &ForExpr) -> Type {
         let iter_ty = f
             .iter()
@@ -3253,9 +3157,8 @@ impl Inferer {
         let item_ty = crate::capability::iter_item(&mut self.db, iter_ty);
         // An unresolved iterator's requirement cannot be answered here: it may be
         // generalized and then instantiated at a type that is not iterable at all,
-        // which is what let `fn drain(values) { for v in values { … } }` accept
-        // `drain(1)` (TY-29). Defer it. A concrete iterator is decided on the
-        // spot, exactly as before.
+        // which would let `fn drain(values) { for v in values { … } }` accept
+        // `drain(1)`. Defer it. A concrete iterator is decided on the spot.
         if let Some(item) = item_ty {
             if iter_deferred {
                 let site = self.decl_site;
@@ -3271,8 +3174,8 @@ impl Inferer {
         }
         if let Some(pat) = f.binding() {
             if let Some(item) = item_ty {
-                // The binding is a pattern (REP-25): a bare name binds the item,
-                // and `(k, v)` unifies it with a pair. Either way it is the same
+                // The binding is a pattern: a bare name binds the item, and
+                // `(k, v)` unifies it with a pair. Either way it is the same
                 // walk a match arm goes through, at the element type.
                 // Keyed by the **pattern node**, which for a bare name is the
                 // same range as the name token and for `(k, v)` is a range no
@@ -3298,8 +3201,8 @@ impl Inferer {
         self.db.unit()
     }
 
-    /// `loop { body }` (M8, §4.11). The **only** expression loop: its type is
-    /// the join of every `break` value (TY-21, D2).
+    /// `loop { body }` (§4.11). The **only** expression loop: its type is the
+    /// join of every `break` value.
     ///
     /// A `loop` no `break` leaves — `loop { }`, or one exited only by `return` —
     /// produces no value, so it is `Never` and not `Unit`: that is what makes
@@ -3330,12 +3233,12 @@ impl Inferer {
             .result
     }
 
-    /// `break [expr]` (M8, §4.11). Diverges; type `Never`.
+    /// `break [expr]` (§4.11). Diverges; type `Never`.
     ///
     /// The *value* is what the enclosing loop produces, so it is joined into
-    /// that loop's running result (TY-21). A bare `break` contributes `Unit` —
-    /// it leaves the loop with nothing — which is why `loop { break }` is `Unit`
-    /// and why mixing the two spellings is a mismatch rather than a coincidence.
+    /// that loop's running result. A bare `break` contributes `Unit` — it leaves
+    /// the loop with nothing — which is why `loop { break }` is `Unit` and why
+    /// mixing the two spellings is a mismatch rather than a coincidence.
     fn infer_break(&mut self, b: &BreakExpr) -> Type {
         let value = b.value();
         let (value_ty, at) = match &value {
@@ -3348,10 +3251,9 @@ impl Inferer {
         self.db.never()
     }
 
-    /// Join a `break`'s value into the loop it leaves, or report why it cannot
-    /// (TY-21). `carries_value` distinguishes a written `break e` from the bare
-    /// `break` whose contribution is `Unit`: only the first is `Y017` in a
-    /// `while`/`for`.
+    /// Join a `break`'s value into the loop it leaves, or report why it cannot.
+    /// `carries_value` distinguishes a written `break e` from the bare `break`
+    /// whose contribution is `Unit`: only the first is `Y017` in a `while`/`for`.
     fn record_break_value(&mut self, carries_value: bool, value_ty: Type, at: TextRange) {
         let Some(&LoopCtx {
             flavour,
@@ -3380,15 +3282,15 @@ impl Inferer {
         }
     }
 
-    /// `continue` (M8, §4.11). Diverges; type `Never`.
+    /// `continue` (§4.11). Diverges; type `Never`.
     fn infer_continue(&mut self, c: &ContinueExpr) -> Type {
         self.check_in_loop(c.syntax().text_range(), "continue");
         self.db.never()
     }
 
-    /// Whether there is an enclosing loop to leave; `Y012` when there is not
-    /// (TY-20). MIR's builder used to tolerate the absent loop context with an
-    /// `if let`; the check belongs here, where the source position is.
+    /// Whether there is an enclosing loop to leave; `Y012` when there is not.
+    /// The check belongs here rather than in MIR's builder, because this is
+    /// where the source position is.
     fn check_in_loop(&mut self, at: TextRange, keyword: &str) -> bool {
         if self.loops.is_empty() {
             self.diagnostics.push(crate::diagnostics::outside_loop(
@@ -3400,11 +3302,11 @@ impl Inferer {
         true
     }
 
-    /// `return [expr]` (M8, §4.11). Diverges; type `Never`.
-    /// `return e` — the value must be what the enclosing function produces
-    /// (TY-18). It used to be inferred and thrown away, so
-    /// `fn bad() -> Int { return "wrong"; 1 }` type-checked: the tail had the
-    /// declared type and nothing else was asked.
+    /// `return [expr]` (§4.11). Diverges; type `Never`.
+    ///
+    /// `return e` — the value must be what the enclosing function produces, so
+    /// `fn bad() -> Int { return "wrong"; 1 }` is a mismatch even though the tail
+    /// has the declared type.
     ///
     /// The expression itself is `Never`: it diverges, so it contributes nothing
     /// to whatever branch it sits in.
@@ -3422,7 +3324,7 @@ impl Inferer {
                     self.diag_unify_hinted(self.file_span(at), e, "the function's return type");
                 }
             }
-            // Nothing to return *from* (TY-20).
+            // Nothing to return *from*.
             None => self
                 .diagnostics
                 .push(crate::diagnostics::return_outside_function(
@@ -3438,7 +3340,7 @@ impl Inferer {
             .arg_list()
             .map(|a| self.collect_args(&a))
             .unwrap_or_default();
-        // Postfix call on an arbitrary expression (`expr(args)`, M8 §4.10):
+        // Postfix call on an arbitrary expression (`expr(args)`, §4.10):
         // when there is no named callee, the callee is an expression (e.g.
         // `fs.get(0)`). Infer its type, unify it against `(arg_types) -> result`
         // (which pins a fresh closure param to a Func and checks the arity), and
@@ -3463,12 +3365,11 @@ impl Inferer {
                         .get(resolved.symbol)
                         .and_then(|s| s.scheme.clone());
                     if let Some(scheme) = scheme {
-                        // Instantiating **at the call site** (F10): a
-                        // requirement the callee's scheme carries is re-emitted
-                        // against this call's types, and a failure is reported
-                        // here rather than inside the generic body — where the
-                        // very same expression is correct for every other
-                        // instantiation.
+                        // Instantiating **at the call site**: a requirement the
+                        // callee's scheme carries is re-emitted against this
+                        // call's types, and a failure is reported here rather
+                        // than inside the generic body — where the very same
+                        // expression is correct for every other instantiation.
                         let site = self.file_span(c.syntax().text_range());
                         // A collection constructor's argument *count* selects
                         // its shape (ADR-146): `Vec(n, fill)` and `Grid(w, h,
@@ -3491,16 +3392,16 @@ impl Inferer {
                         let result = self.db.fresh_var();
                         // Snapshot the concrete arg types before they are moved
                         // into the expected Func type — this is the call site's
-                        // monomorphization witness (WS8, §13.6).
+                        // monomorphization witness (§13.6).
                         let arg_types_snapshot = arg_types.clone();
                         // A graph helper's first argument is the state the walk
                         // starts from, and the requirement below is about its
                         // type. Read before the witness is moved.
                         let state_arg = arg_types_snapshot.first().copied();
                         // Written type arguments constrain what this call
-                        // constructs (REP-09): `Counter[(Int, Int)]()` says the
-                        // key type here, where inference would otherwise wait for
-                        // a use to pin it. Applied to the *instantiated* callee, so
+                        // constructs: `Counter[(Int, Int)]()` says the key type
+                        // here, where inference would otherwise wait for a use
+                        // to pin it. Applied to the *instantiated* callee, so
                         // the constraint lands on this call site's variables and
                         // not on the ctor's scheme.
                         self.apply_written_type_args(c, callee_ty);
@@ -3519,7 +3420,7 @@ impl Inferer {
                                 // The result is a witness too: a callee whose
                                 // quantified variable appears only in its result
                                 // (`fn empty() { Vec() }`) has nothing to
-                                // specialize from otherwise (MONO-02).
+                                // specialize from otherwise.
                                 result,
                             },
                         );
@@ -3554,7 +3455,7 @@ impl Inferer {
     }
 
     /// Unify a call's written type arguments with the type its callee constructs
-    /// (REP-09, §3.3's `Counter[(Int, Int)]()`).
+    /// (§3.3's `Counter[(Int, Int)]()`).
     ///
     /// `callee_ty` is the callee's type **instantiated at this call site**, so its
     /// result's arguments are this call's own variables — the ones a later use
@@ -3612,11 +3513,12 @@ impl Inferer {
         }
     }
 
-    /// Infer `receiver.method(args)` (M5, §16.2). Resolves the method against
-    /// the built-in catalog by receiver type + name + arity, unifies the
-    /// element-type variable with the receiver's element type, checks arg types,
-    /// and returns the result type. Records the method-name range in
-    /// `ref_types` for hover.
+    /// Infer `receiver.method(args)` (§16.2). Resolves the method against the
+    /// built-in catalog by receiver type + name + arity, unifies the element-type
+    /// variable with the receiver's element type, checks arg types, and returns
+    /// the result type. The method-name range is recorded in
+    /// [`Inferer::method_refs`], not in `ref_types`: a method name is not a name
+    /// reference.
     fn infer_method_call(&mut self, m: &MethodCallExpr) -> Type {
         // Infer the receiver's type.
         let receiver_ty = match m.receiver() {
@@ -3660,30 +3562,30 @@ impl Inferer {
         praxis_source::nearest(name, candidates.iter().copied())
     }
 
-    /// Resolve one catalog-dispatched operation — a method call, or a subscript
-    /// (REP-16) — against the receiver type, the name and the arity, and return
-    /// its result type.
+    /// Resolve one catalog-dispatched operation — a method call, or a subscript —
+    /// against the receiver type, the name and the arity, and return its result
+    /// type.
     ///
     /// One function for both because dispatch *is* the same act: §5.7's table is
     /// keyed by receiver shape and name, and a subscript's brackets select a row
     /// of it the way a method's name does. Sharing it is not only economy — the
     /// bidirectional argument inference, the `HasMethod` deferral for a receiver
-    /// that is still a variable, TY-31's bounds and TY-32's collection invariants
+    /// that is still a variable, the entry's bounds and the collection invariants
     /// are each load-bearing, and a second copy would be a second place for one of
     /// them to be missing.
     ///
     /// `key` is where the [`crate::MethodRef`] is recorded — lowering reads that
-    /// map and nothing else (F15/HIR-02) — and where diagnostics point. A method
-    /// call keys on its name token; a subscript has no name token and keys on the
-    /// whole `INDEX_EXPR` node, whose range always ends in `]` and so can never
-    /// collide with an identifier's.
+    /// map and nothing else — and where diagnostics point. A method call keys on
+    /// its name token; a subscript has no name token and keys on the whole
+    /// `INDEX_EXPR` node, whose range always ends in `]` and so can never collide
+    /// with an identifier's.
     ///
     /// `unresolved` **overrides** the report for a concrete receiver with no
     /// matching row. A method call passes `None` and gets `Y110`, built here
     /// (ADR-093). A subscript passes its own, because there is no method name to
     /// report about — `m[k]` on a `Set` is "cannot be indexed", not "no method
     /// `[]`". Both report at `praxis check` time, which is the point: lowering
-    /// is a pass `check` never runs (REP-12).
+    /// is a pass `check` never runs.
     fn infer_catalog_call(
         &mut self,
         receiver_ty: Type,
@@ -3710,13 +3612,13 @@ impl Inferer {
             // anything: nothing has said what it is yet, and `catalog::lookup`
             // cannot answer about a type that does not exist. That one becomes a
             // requirement on the channel, answered when the program pins the
-            // receiver — the whole of TY-30, and what makes §5.2's `fn
-            // total(values) { values.sum() }` infer. But if the catalog holds the
-            // name nowhere at that arity, no receiver can ever answer it, and
-            // deferring is deferring forever: `take_dischargeable` only returns
-            // constraints whose variable has resolved, so an unpinned one sits in
-            // `pending_constraints` and is never looked at again. That is how `fn
-            // f(x) { x.nope() }` used to reach lowering unreported.
+            // receiver — which is what makes §5.2's `fn total(values)
+            // { values.sum() }` infer. But if the catalog holds the name nowhere
+            // at that arity, no receiver can ever answer it, and deferring is
+            // deferring forever: `take_dischargeable` only returns constraints
+            // whose variable has resolved, so an unpinned one sits in
+            // `pending_constraints` and is never looked at again — leaving
+            // `fn f(x) { x.nope() }` unreported.
             //
             // A **concrete** receiver with no matching entry has no such method,
             // full stop. `unresolved` is the subscript's own wording for that —
@@ -3726,11 +3628,11 @@ impl Inferer {
                 // The name-universe half is for **method calls only**, which is
                 // why it asks `unresolved.is_none()`. A subscript reaches this
                 // function through the same door but has no method name to
-                // report about: REP-16 gave it "values of type `X` cannot be
+                // report about: its wording is "values of type `X` cannot be
                 // indexed with N index(es)" precisely so the user never reads
                 // ``no method `[]` ``, and there is no receiver type to put in
                 // that sentence here. A subscript on a receiver nothing pinned
-                // therefore defers exactly as it did before.
+                // therefore defers.
                 if unresolved.is_some() || self.catalog.has_name_at_arity(name, arity) {
                     self.require_method(receiver_ty, name.to_string(), arg_types, result, key);
                 } else {
@@ -3761,14 +3663,9 @@ impl Inferer {
                 // are the rows dispatch would have searched — this receiver's,
                 // not the whole catalog's — so `v.is_emty()` is offered
                 // `is_empty` and never a `Map` method a `Vec` does not have.
-                //
-                // The example used to be `v.lenght()` → `len`, and it is not:
-                // `lenght` is six characters, so `suggest`'s budget is 2 and the
-                // distance to `len` is 3. That name draws no suggestion at all.
-                // The claim about *which* candidates are searched is the one
-                // this comment is making and it is correct; only the example was
-                // wrong, and an example that does not fire is the one kind of
-                // comment a reader cannot check by reading.
+                // `suggest`'s edit-distance budget still applies: `v.lenght()`
+                // draws nothing, because `lenght` is six characters (budget 2)
+                // and the distance to `len` is 3.
                 if let Some(near) = self.nearest_method(receiver_ty, name) {
                     diag = diag.with_did_you_mean(self.file_span(key), near);
                 }
@@ -3777,16 +3674,16 @@ impl Inferer {
             return result;
         };
 
-        // Bidirectional inference (M8, §3): instantiate the method's full
-        // signature (params + result) with ONE shared name map, so repeated
-        // `Var(name)` occurrences in the catalog entry are the same type
-        // variable (fold's `Acc` appears in the init param, both closure params,
-        // and the result — they must be one type). The receiver's element type is
-        // also a shared `Var("T")` in most combinators; unify the receiver
-        // against the entry's receiver pattern (instantiated from the same map)
-        // to pin `T` BEFORE inferring the arguments — so an argument closure
-        // whose param is the element type (e.g. `|inner| inner.len()` over
-        // `Vec[Vec[Int]]`) gets pinned and its body's method calls resolve.
+        // Bidirectional inference (§3): instantiate the method's full signature
+        // (params + result) with ONE shared name map, so repeated `Var(name)`
+        // occurrences in the catalog entry are the same type variable (fold's
+        // `Acc` appears in the init param, both closure params, and the result —
+        // they must be one type). The receiver's element type is also a shared
+        // `Var("T")` in most combinators; unify the receiver against the entry's
+        // receiver pattern (instantiated from the same map) to pin `T` BEFORE
+        // inferring the arguments — so an argument closure whose param is the
+        // element type (e.g. `|inner| inner.len()` over `Vec[Vec[Int]]`) gets
+        // pinned and its body's method calls resolve.
         // Catalog `params` are exactly the user arguments (the receiver is
         // separate, in `entry.receiver`).
         let mut names = HashMap::new();
@@ -3807,8 +3704,7 @@ impl Inferer {
         // `Acc`, which appears in the init arg and the closure's signature)
         // propagates to subsequent args before they are inferred. For a closure
         // argument whose expected type is a Func, the closure's params are pinned
-        // to the Func's param types before its body is inferred (closing the §3
-        // gaps).
+        // to the Func's param types before its body is inferred.
         let mut arg_types: Vec<Type> = Vec::with_capacity(arg_exprs.len());
         for (i, arg) in arg_exprs.iter().enumerate() {
             let expected = param_tys.get(i).copied();
@@ -3823,19 +3719,19 @@ impl Inferer {
             arg_types.push(at);
         }
         let name_range = key;
-        // What the entry declares about its own type variables (TY-31). Applied
-        // after the receiver and the arguments have unified, so a bound on `T`
-        // is asked about the type the call site actually chose.
+        // What the entry declares about its own type variables. Applied after the
+        // receiver and the arguments have unified, so a bound on `T` is asked
+        // about the type the call site actually chose.
         self.apply_bounds(entry, &names, name_range);
         // A `Map`/`Set`/`Counter` key must be findable after it is stored, and a
-        // heap element must be orderable (TY-32, D4). Required at the method
-        // call because that is where a program actually puts a value into one —
-        // and required *after* the arguments have unified, so `m.insert(key, 1)`
-        // has pinned `K` to the key's type by now.
+        // heap element must be orderable. Required at the method call because
+        // that is where a program actually puts a value into one — and required
+        // *after* the arguments have unified, so `m.insert(key, 1)` has pinned
+        // `K` to the key's type by now.
         self.require_collection_invariants(receiver_ty, name_range);
-        // Record the resolved method at `key` (HIR-02). Lowering reads the entry
-        // rather than repeating the catalog lookup against a receiver type it
-        // derived itself, and hover reads the result.
+        // Record the resolved method at `key`. Lowering reads the entry rather
+        // than repeating the catalog lookup against a receiver type it derived
+        // itself, and hover reads the result.
         self.method_refs.insert(
             key,
             crate::MethodRef {
@@ -3877,7 +3773,7 @@ impl Inferer {
     ///
     /// A `SymbolKind::Builtin` resolution is required, so a `var Vec = …`
     /// binding in scope makes `Vec(3, 0)` an ordinary call of that binding
-    /// (HIR-03's shadowing rule) rather than a construction.
+    /// rather than a construction.
     fn sized_ctor_type(&mut self, symbol: SymbolId, argc: usize) -> Option<Type> {
         if argc == 0 {
             return None;
@@ -3927,10 +3823,10 @@ impl Inferer {
 /// (§5.3). `var x = <value>` may generalize `x`'s type; `var x = <expansive>`
 /// (a call, method call, block, `read`, …) is left monomorphic so its type
 /// variables are shared across uses instead of instantiated fresh per reference
-/// — the standard fix for the `var r = ref []` / `var v = Vec()` generalization
-/// gap. Recurses through `Paren` (a transparent wrapper) and `Tuple` of values
-/// (a value iff every element is). An explicit type annotation on the `var`
-/// overrides the restriction, handled by the caller.
+/// — the standard restriction, and what makes `var v = Vec()` usable at one
+/// element type. Recurses through `Paren` (a transparent wrapper) and `Tuple`
+/// of values (a value iff every element is). An explicit type annotation on the
+/// `var` overrides the restriction, handled by the caller.
 fn is_syntactic_value(e: &Expr) -> bool {
     match e {
         // Pure values.
@@ -3993,9 +3889,9 @@ fn is_text_scalar(db: &TypeDb, t: Type) -> bool {
 
 /// How to name a binding kind in a diagnostic, in the words the source uses.
 ///
-/// [`SymbolKind::Var`] is spelled "a binding" rather than "a `var` binding":
-/// since ADR-125 it covers a `for` variable and a pattern name as well as a
-/// `var` statement, and naming the keyword would be wrong for two of the three.
+/// [`SymbolKind::Var`] is spelled "a binding" rather than "a `var` binding": it
+/// covers a `for` variable and a pattern name as well as a `var` statement
+/// (ADR-125), and naming the keyword would be wrong for two of the three.
 fn describe_binding(kind: SymbolKind) -> &'static str {
     match kind {
         SymbolKind::Var => "a binding",

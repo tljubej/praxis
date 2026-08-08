@@ -1,18 +1,16 @@
-//! Diagnostic construction for name resolution and (later) type inference.
+//! Diagnostic construction for name resolution and type inference.
 //!
 //! Name-resolution diagnostics use the `N0xx` prefix; type diagnostics use
 //! `Y0xx`. Both reuse the existing [`Diagnostic`] type from `praxis-source` —
-//! there is no separate error channel (§8.2, rule 20.6).
+//! there is no separate error channel (§8.2, rule 20.6). The `Y0xx`
+//! constructors are used by type inference and kept here alongside the `N0xx`
+//! ones so all diagnostic wording lives in one place.
 //!
-//! The `Y0xx` constructors are used by type inference (Slice 5); they are kept
-//! here alongside the `N0xx` ones so all diagnostic wording lives in one place.
-//!
-//! There is deliberately no blanket `allow(dead_code)` here. The one it used to
-//! cover was a `Y0xx` constructor nothing had ever called, while every other
-//! constructor in the file is either called directly or handed to
-//! [`crate::infer`]'s catalog dispatch as a function pointer — which the lint
-//! already counts as a use. A constructor with no emitter is a diagnostic the
-//! compiler cannot report; let the lint say so.
+//! There is deliberately no blanket `allow(dead_code)` here. Every constructor
+//! is either called directly or handed to [`crate::infer`]'s catalog dispatch
+//! as a function pointer — which the lint already counts as a use. A
+//! constructor with no emitter is a diagnostic the compiler cannot report; let
+//! the lint say so.
 
 use praxis_source::{DiagCode, Diagnostic, FileSpan, Severity};
 
@@ -38,13 +36,12 @@ pub(crate) fn unknown_type(at: FileSpan, name: &str) -> Diagnostic {
     )
 }
 
-/// `N003` — a name in type position resolves to a value, not a type (TY-11).
+/// `N003` — a name in type position resolves to a value, not a type.
 ///
-/// Annotation validation asked only whether the name resolved *at all*, so
-/// `var Alias = 1` followed by `var value: Alias = "text"` was accepted:
-/// `Alias` was in scope, the annotation named no type, and inference quietly
-/// used a fresh variable. `N002` would be the wrong report — the name is
-/// known; it is the wrong sort of thing.
+/// Annotation validation asks more than whether the name resolves *at all*:
+/// `var Alias = 1` followed by `var value: Alias = "text"` has `Alias` in scope
+/// while the annotation names no type. `N002` would be the wrong report — the
+/// name is known; it is the wrong sort of thing.
 pub(crate) fn name_is_not_a_type(at: FileSpan, name: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
@@ -54,12 +51,10 @@ pub(crate) fn name_is_not_a_type(at: FileSpan, name: &str) -> Diagnostic {
     )
 }
 
-/// `N004` — a name is declared twice in one scope (TY-24).
+/// `N004` — a name is declared twice in one scope.
 ///
-/// Two top-level `fn`s of one name used to bind two distinct symbols in the
-/// same scope: the second overwrote the first in the scope map while both kept
-/// their `decls` entry, so both reached the backend and were emitted under one
-/// JIT symbol name.
+/// Two top-level `fn`s of one name would otherwise bind two distinct symbols in
+/// the same scope and reach the backend under one JIT symbol name.
 pub(crate) fn duplicate_declaration(at: FileSpan, name: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
@@ -69,11 +64,11 @@ pub(crate) fn duplicate_declaration(at: FileSpan, name: &str) -> Diagnostic {
     )
 }
 
-/// `N005` — a function is declared inside a function (TY-23).
+/// `N005` — a function is declared inside a function.
 ///
-/// The grammar parses one and name resolution never declared it, so inference
-/// reached an `expect` on the missing declaration and panicked — which broke
-/// `analyze`'s contract that malformed input becomes diagnostics.
+/// The grammar parses one and name resolution does not declare it, so the
+/// report has to be made here: `analyze`'s contract is that malformed input
+/// becomes diagnostics rather than a panic in inference.
 pub(crate) fn nested_function(at: FileSpan, name: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
@@ -83,7 +78,7 @@ pub(crate) fn nested_function(at: FileSpan, name: &str) -> Diagnostic {
     )
 }
 
-/// `N005` — a `struct`/`enum` declared inside a function body (REP-06).
+/// `N005` — a `struct`/`enum` declared inside a function body.
 ///
 /// The same code as a nested `fn`, because it is the same mistake: only the
 /// source file's own statements are a declaration position. The wording differs
@@ -98,34 +93,32 @@ pub(crate) fn nested_declaration(at: FileSpan, name: &str) -> Diagnostic {
     )
 }
 
-/// `N007` — a `fn` body naming a binding declared outside it (REP-22, ADR-068).
+/// `N007` — a `fn` body naming a binding declared outside it (ADR-068).
 ///
 /// ```praxis
 /// var x = 1
 /// fn f() { x }        // N007
 /// ```
 ///
-/// It resolved, silently, and answered **`Unit`** — the binding is a local of
-/// whatever function encloses it (the file's own generated entry, after
-/// ADR-067), and a `fn` body has no slot for another function's local. Through a
-/// closure it was worse: `fn g() { |n| n + x }` captured a symbol with no slot,
-/// so the environment cell held whatever the read found and `g()(1)` printed a
-/// nine-digit number.
+/// The binding is a local of whatever function encloses it (the file's own
+/// generated entry, ADR-067), and a `fn` body has no slot for another
+/// function's local: unreported, the read answers `Unit`, and through a closure
+/// — `fn g() { |n| n + x }` — the captured symbol has no slot at all.
 ///
 /// A `fn` does not capture — §4.9 describes functions and §4.10 describes
 /// closures, and only the second says "capture". So the message names the
 /// distinction and the two ways out, because both are ordinary: pass it as a
 /// parameter, or write a closure.
 ///
-/// The closure half is conditional (handover 31 item 6). A closure cannot name
-/// itself — a `var`'s initializer is resolved in the *preceding* environment, so
+/// The closure half is conditional. A closure cannot name itself — a `var`'s
+/// initializer is resolved in the *preceding* environment, so
 /// `var f = |n| … f(n - 1) …` is `N001` — which means that for a **recursive**
 /// `fn`, exactly the case where threading state through the parameter list
 /// hurts, "or use a closure" is advice the compiler itself refuses. So
 /// `recursive_through` drops that clause and attaches a `help:` line saying why,
 /// naming the other members of the call cycle the way `N006` names the other
-/// members of a type cycle. `None` — the common, non-recursive case — is the
-/// message unchanged, byte for byte.
+/// members of a type cycle. `None` — the common, non-recursive case — carries
+/// the plain message.
 pub(crate) fn function_reads_outer_binding(
     at: FileSpan,
     name: &str,
@@ -164,14 +157,13 @@ pub(crate) fn function_reads_outer_binding(
     .finish()
 }
 
-/// `N006` — a `struct`/`enum` declaration that refers to itself (REP-14,
-/// ADR-063).
+/// `N006` — a `struct`/`enum` declaration that refers to itself (ADR-063).
 ///
-/// The declaration pass registers types in dependency order; a declaration in a
-/// cycle never becomes ready, and the recursive member used to fall back to a
-/// **fresh type variable** with no report. That is not merely silence: a variable
-/// unifies with everything, so `struct Node { next: Node, value: Int }` accepted
-/// `Node { next: 7, value: 1 }` and ran it.
+/// The declaration pass registers types in dependency order, so a declaration
+/// in a cycle never becomes ready. Reporting it is what keeps the recursive
+/// member from falling back to a **fresh type variable**, which unifies with
+/// everything: `struct Node { next: Node, value: Int }` would then accept
+/// `Node { next: 7, value: 1 }`.
 ///
 /// `through` names the other declarations in the cycle when there are any, so a
 /// mutual pair says which two. Wording follows §5.4: it says what the program
@@ -198,18 +190,16 @@ pub(crate) fn recursive_type_declaration(
     )
 }
 
-/// `N008` — a record literal whose head does not name a `struct` (REP-26).
+/// `N008` — a record literal whose head does not name a `struct`.
 ///
 /// ```praxis
 /// var x = 1
 /// var p = x { a: 1 }      // N008
 /// ```
 ///
-/// Nothing checked, so the literal kept the head's own type and lowered to
-/// nothing: `out(p)` printed `Unit` and `out(p + 1)` printed a raw pointer. That
-/// is REP-01's shape — a program `praxis check` accepts whose value has no
-/// representation — and it is why the report is made in inference rather than at
-/// lowering (REP-12).
+/// Unchecked, the literal keeps the head's own type and lowers to nothing — a
+/// program `praxis check` accepts whose value has no representation. That is
+/// why the report is made in inference rather than at lowering.
 ///
 /// A declaration mistake, so it is in the Name category next to `N003` ("a name
 /// used in type position that names a value"): a record literal's head *is* a type
@@ -236,7 +226,7 @@ fn list_names(names: &[String]) -> String {
     }
 }
 
-/// `Y019` — a `.n` element access on a receiver that is not a tuple (REP-08).
+/// `Y019` — a `.n` element access on a receiver that is not a tuple.
 ///
 /// A tuple has no field *names*, so `Y112`'s "no field `0` on this type" would
 /// name the wrong thing. Wording follows §5.4: it says what the program did.
@@ -249,7 +239,7 @@ pub(crate) fn not_a_tuple(at: FileSpan, ty: &str, index: usize) -> Diagnostic {
     )
 }
 
-/// `Y019` — a `.n` past the end of a tuple (REP-08).
+/// `Y019` — a `.n` past the end of a tuple.
 ///
 /// The same code as [`not_a_tuple`] and a different message: the receiver *is* a
 /// tuple, so naming its arity is the useful thing to say.
@@ -266,7 +256,7 @@ pub(crate) fn tuple_index_out_of_range(at: FileSpan, arity: usize, index: usize)
     )
 }
 
-/// `Y020` — a subscript **read** on a type that has none (REP-16).
+/// `Y020` — a subscript **read** on a type that has none.
 ///
 /// `indices` is in the message because arity is part of what selects the
 /// operation: `Grid[T]` indexes at two and `Map[K, V]` at one, so `grid[x]` is a
@@ -282,13 +272,13 @@ pub(crate) fn not_indexable(at: FileSpan, ty: &str, indices: usize) -> Diagnosti
     )
 }
 
-/// `Y020` — a subscript **store** on a type that has none (REP-16).
+/// `Y020` — a subscript **store** on a type that has none.
 ///
 /// The same code as [`not_indexable`] and a different message, because the two
 /// halves of the surface are not the same set: a `Text` reads through `t[0]` and
 /// is immutable (§4.3), so "cannot be indexed" would be wrong about it while
-/// "cannot be assigned through" is exact. `Vec` and `Deque` were in that
-/// sentence too until ADR-124 gave them element stores; `Text` is what is left.
+/// "cannot be assigned through" is exact. `Text` is the whole of what this
+/// covers — `Vec` and `Deque` have element stores (ADR-124).
 pub(crate) fn not_index_assignable(at: FileSpan, ty: &str, indices: usize) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
@@ -298,7 +288,7 @@ pub(crate) fn not_index_assignable(at: FileSpan, ty: &str, indices: usize) -> Di
     )
 }
 
-/// `Y020` — a `min=` update on a type that has none (REP-21).
+/// `Y020` — a `min=` update on a type that has none.
 ///
 /// Its own message beside [`not_index_assignable`] because a `Counter` *can* be
 /// assigned through one index — `c[k] = n` is a row — and what it has not is the
@@ -308,7 +298,7 @@ pub(crate) fn not_index_min_updatable(at: FileSpan, ty: &str, indices: usize) ->
     not_index_updatable(at, ty, indices, "min=")
 }
 
-/// `Y020` — a `max=` update on a type that has none (REP-21).
+/// `Y020` — a `max=` update on a type that has none.
 pub(crate) fn not_index_max_updatable(at: FileSpan, ty: &str, indices: usize) -> Diagnostic {
     not_index_updatable(at, ty, indices, "max=")
 }
@@ -323,7 +313,7 @@ fn not_index_updatable(at: FileSpan, ty: &str, indices: usize, op: &str) -> Diag
 }
 
 /// `Y023` — a backtick parser template written where a value is expected
-/// (REP-47, ADR-084).
+/// (ADR-084).
 pub(crate) fn parser_template_outside_read(at: FileSpan) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
@@ -335,7 +325,7 @@ pub(crate) fn parser_template_outside_read(at: FileSpan) -> Diagnostic {
     )
 }
 
-/// `Y021` — an assignment whose left side names no storage (REP-16).
+/// `Y021` — an assignment whose left side names no storage.
 pub(crate) fn not_an_assignment_target(at: FileSpan) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
@@ -386,10 +376,10 @@ pub(crate) fn infinite_type(at: FileSpan) -> Diagnostic {
 }
 
 /// `Y024` — a call whose argument count does not match the function's
-/// (D16, ADR-089).
+/// (ADR-089).
 ///
-/// The counts, not the two function types. `assert(cond, "why")` used to report
-/// *expected `(Bool) -> Unit`, found `(Bool, Text) -> ?T`* — a whole-type diff
+/// The counts, not the two function types: for `assert(cond, "why")`,
+/// *expected `(Bool) -> Unit`, found `(Bool, Text) -> ?T`* is a whole-type diff
 /// that reads like an inference accident, where the mistake is arithmetic.
 ///
 /// There is no `assert`-specific wording, and no `help:` naming another
@@ -440,7 +430,7 @@ pub(crate) fn not_orderable(at: FileSpan, ty: &str) -> Diagnostic {
 }
 
 /// `Y014` — a value is used as a `Map` key or a `Set` element but cannot be
-/// found again once it changes (D4, TY-32/RT-08).
+/// found again once it changes.
 ///
 /// The wording is the *reason*, not the rule (§5.4: never name the capability).
 /// A key is looked up by its contents; a `Vec` that is pushed to after it is
@@ -463,7 +453,7 @@ pub(crate) fn not_hashable(at: FileSpan, ty: &str) -> Diagnostic {
     .finish()
 }
 
-/// `Y015` — arithmetic on a type that has none (TY-31).
+/// `Y015` — arithmetic on a type that has none.
 ///
 /// Concrete wording again: it names the operation the program wrote and the
 /// type it wrote it on, and never says "numeric constraint".
@@ -478,13 +468,11 @@ pub(crate) fn not_numeric(at: FileSpan, ty: &str) -> Diagnostic {
 
 /// `Y110` — **the** builder for a method call that cannot resolve (ADR-093).
 ///
-/// There were two of these. Inference's said the type and not the arity;
-/// lowering's said the arity and not the type, and lowering's was the one users
-/// met — because `praxis check` never runs lowering, so every `Y110` arrived at
-/// `run` after a silent `check`. ADR-093 moved the report to inference and
-/// deleted lowering's, and this message is the union of what the two said: the
-/// type is what §5.4 asks for (concrete language, never the capability), and the
-/// arity is what distinguishes `v.get(0)` from `v.get()`.
+/// The one builder, and it reports from inference rather than from lowering:
+/// `praxis check` never runs lowering, so a `Y110` raised there would only
+/// arrive at `run`, after a silent `check`. The message names both the type —
+/// what §5.4 asks for (concrete language, never the capability) — and the
+/// arity, which is what distinguishes `v.get(0)` from `v.get()`.
 ///
 /// `ty` is `None` for the one shape where there is no receiver type to name:
 /// nothing has pinned the receiver, and the call is refused anyway because the
@@ -506,7 +494,7 @@ pub(crate) fn unknown_method(
 }
 
 /// `Y112` at a *use* site rather than at a field name — [`unknown_method`]'s
-/// counterpart for `Capability::HasField` (REP-28).
+/// counterpart for `Capability::HasField`.
 ///
 /// The honest translation of the capability, and the match arm that names it is
 /// what keeps it honest if a second emitter appears. `require_field` defers only a
@@ -524,11 +512,11 @@ pub(crate) fn unknown_field(at: FileSpan, name: &str, ty: &str) -> Diagnostic {
 /// `Y007` — a type constructor in an annotation was given the wrong number of
 /// type arguments, e.g. `Map[Int]` or `Vec[Int, Text]`.
 ///
-/// The arity was declared by [`CollectionCtor::arity`](praxis_types::CollectionCtor::arity)
-/// all along and nothing consulted it (TY-07): a wrong-arity annotation
-/// interned a type that could never unify with anything, so the user saw a
-/// downstream `Y001` naming a type they did not write. This names the mistake
-/// where it was made.
+/// The arity is declared by
+/// [`CollectionCtor::arity`](praxis_types::CollectionCtor::arity) and checked
+/// against it here. Unchecked, a wrong-arity annotation interns a type that can
+/// never unify with anything, and the user sees a downstream `Y001` naming a
+/// type they did not write; this names the mistake where it was made.
 pub(crate) fn wrong_type_argument_count(
     at: FileSpan,
     ctor: &str,
@@ -546,9 +534,9 @@ pub(crate) fn wrong_type_argument_count(
 /// `Y008` — a `struct` or `enum` declaration names the same field or variant
 /// twice.
 ///
-/// Also TY-07. The def used to register with both members and every lookup
-/// answered the first, so `struct P { x: Int, x: Text }` silently declared a
-/// one-field record whose second `x` was unreachable.
+/// Unreported, the def registers with both members while every lookup answers
+/// the first, so `struct P { x: Int, x: Text }` declares a one-field record
+/// whose second `x` is unreachable.
 pub(crate) fn duplicate_member(at: FileSpan, what: &str, name: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
@@ -580,12 +568,11 @@ pub(crate) fn unreachable_arm(at: FileSpan) -> Diagnostic {
     )
 }
 
-/// `Y113` — a record literal that does not initialize every declared field
-/// (HIR-04).
+/// `Y113` — a record literal that does not initialize every declared field.
 ///
-/// A missing field was allocated as `Unit` under the field's declared type, so
-/// the object's schema and its payloads disagreed and every later read of that
-/// field got a `Unit` the type system said was an `Int`.
+/// A missing field would be allocated as `Unit` under the field's declared
+/// type, so the object's schema and its payloads would disagree and every later
+/// read of that field would get a `Unit` the type system called an `Int`.
 pub(crate) fn missing_record_fields(
     at: FileSpan,
     type_name: &str,
@@ -607,11 +594,11 @@ pub(crate) fn missing_record_fields(
     )
 }
 
-/// `Y013` — an integer literal outside the range of `Int` (TY-28).
+/// `Y013` — an integer literal outside the range of `Int`.
 ///
-/// An `Int` is signed 64-bit (§4.3). The literal used to saturate to `i64::MAX`
-/// silently, on the theory that the arithmetic would fault — it does not, and
-/// the program runs with a number nobody wrote.
+/// An `Int` is signed 64-bit (§4.3). Saturating the literal to `i64::MAX`
+/// instead would not fault later: the program would simply run with a number
+/// nobody wrote.
 ///
 /// Two positions raise it, an expression and a literal pattern, and they share
 /// this wording because they are one mistake read at two places.
@@ -624,8 +611,7 @@ pub(crate) fn int_literal_out_of_range(at: FileSpan, text: &str) -> Diagnostic {
     )
 }
 
-/// `Y123` — a pattern whose shape cannot match, with the reason spelled out
-/// (REP-10).
+/// `Y123` — a pattern whose shape cannot match, with the reason spelled out.
 ///
 /// The shape is what is wrong, not the type it was matched against: a tuple
 /// pattern with one element and a record pattern whose head is not a record both
@@ -635,13 +621,13 @@ pub(crate) fn not_a_pattern(at: FileSpan, reason: &str) -> Diagnostic {
 }
 
 /// `Y122` — a variant pattern naming a variant the scrutinee's enum does not
-/// have (REP-56; ADR-091 Decision 5).
+/// have (ADR-091 Decision 5).
 ///
-/// The same code lowering reports, because it is the same mistake seen one phase
-/// earlier. It had been lowering's alone, and lowering only runs on a program
-/// analysis accepted — so `praxis check` was clean on a misspelled variant while
-/// `praxis run` exited 1 on the same file, which is REP-12's asymmetry for every
-/// enum. `praxis check` is the command that is supposed to know.
+/// The same code lowering reports, because it is the same mistake seen one
+/// phase earlier. Were it raised only in lowering — which runs only on a
+/// program analysis accepted — `praxis check` would be clean on a misspelled
+/// variant while `praxis run` exited 1 on the same file, and `praxis check` is
+/// the command that is supposed to know.
 pub(crate) fn unknown_enum_variant(at: FileSpan, type_name: &str, variant: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
@@ -651,7 +637,7 @@ pub(crate) fn unknown_enum_variant(at: FileSpan, type_name: &str, variant: &str)
     )
 }
 
-/// `Y115` — a record *pattern* naming one field twice (REP-10).
+/// `Y115` — a record *pattern* naming one field twice.
 ///
 /// The same code as a literal's duplicate, because it is the same mistake read
 /// in the other direction: the second sub-pattern would silently replace the
@@ -665,10 +651,11 @@ pub(crate) fn duplicate_pattern_field(at: FileSpan, field: &str) -> Diagnostic {
     )
 }
 
-/// `Y114` — a record literal naming a field the type does not have (HIR-04).
+/// `Y114` — a record literal naming a field the type does not have.
 ///
-/// The initializer was not lowered at all, so its side effects disappeared. A
-/// record *pattern* naming one is the same mistake and the same code (REP-10).
+/// An unknown field's initializer is not lowered at all, so unreported its side
+/// effects would simply disappear. A record *pattern* naming one is the same
+/// mistake and the same code.
 pub(crate) fn unknown_record_field(at: FileSpan, type_name: &str, field: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
@@ -678,10 +665,11 @@ pub(crate) fn unknown_record_field(at: FileSpan, type_name: &str, field: &str) -
     )
 }
 
-/// `Y115` — a record literal naming one field twice (HIR-04).
+/// `Y115` — a record literal naming one field twice.
 ///
-/// Both payloads were pushed, so the object had more values than its schema had
-/// slots and every field after the duplicate read the wrong one.
+/// Both payloads are pushed, so unreported the object would carry more values
+/// than its schema has slots, and every field after the duplicate would read
+/// the wrong one.
 pub(crate) fn duplicate_record_field(at: FileSpan, field: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
@@ -691,12 +679,12 @@ pub(crate) fn duplicate_record_field(at: FileSpan, field: &str) -> Diagnostic {
     )
 }
 
-/// `Y010` — a compound assignment whose target is not numeric (TY-15).
+/// `Y010` — a compound assignment whose target is not numeric.
 ///
 /// `x += e` is arithmetic, and arithmetic is defined on `Int` and `Float`
-/// (§4.12). The check was that the two operand types *matched*, which
-/// `var flag = true; flag += false` satisfies. Wording is concrete and never
-/// names the capability (§5.4).
+/// (§4.12). Checking only that the two operand types *match* would accept
+/// `var flag = true; flag += false`. Wording is concrete and never names the
+/// capability (§5.4).
 pub(crate) fn compound_assign_non_numeric(at: FileSpan, ty: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
@@ -706,12 +694,11 @@ pub(crate) fn compound_assign_non_numeric(at: FileSpan, ty: &str) -> Diagnostic 
     )
 }
 
-/// `Y011` — `return` with no function to return from (TY-20).
+/// `Y011` — `return` with no function to return from.
 ///
-/// The analyzer tracked no function context, so a top-level `return` passed
-/// every check and reached MIR, whose builder tolerated the missing context
-/// with an `if let`. The mistake has a source position; this is where it is
-/// reported.
+/// The analyzer tracks the enclosing function context so a top-level `return`
+/// is caught here rather than reaching MIR. The mistake has a source position;
+/// this is where it is reported.
 pub(crate) fn return_outside_function(at: FileSpan) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
@@ -721,7 +708,7 @@ pub(crate) fn return_outside_function(at: FileSpan) -> Diagnostic {
     )
 }
 
-/// `Y012` — `break` or `continue` with no loop to leave (TY-20).
+/// `Y012` — `break` or `continue` with no loop to leave.
 ///
 /// A closure is a function boundary, so a loop *outside* a closure is not one a
 /// `break` inside it can leave — which is why the depth is cleared and restored
@@ -735,7 +722,7 @@ pub(crate) fn outside_loop(at: FileSpan, keyword: &str) -> Diagnostic {
     )
 }
 
-/// `Y017` — a `break` carrying a value out of a `while`/`for` (TY-21, D2).
+/// `Y017` — a `break` carrying a value out of a `while`/`for`.
 ///
 /// Only `loop` is an expression loop. A `while` or `for` leaves by its condition
 /// failing as well as by a `break`, and there is no value the compiler could
@@ -750,9 +737,9 @@ pub(crate) fn value_break_outside_loop_expression(at: FileSpan, keyword: &str) -
     )
 }
 
-/// `Y016` — an operator the language does not define for this operand type
-/// (TY-27). Not a *mismatch*: both operands agree, and the operation still has
-/// no meaning.
+/// `Y016` — an operator the language does not define for this operand type.
+/// Not a *mismatch*: both operands agree, and the operation still has no
+/// meaning.
 pub(crate) fn operator_not_defined(at: FileSpan, op: &str, ty: &str) -> Diagnostic {
     Diagnostic::new(
         Severity::Error,
@@ -762,7 +749,7 @@ pub(crate) fn operator_not_defined(at: FileSpan, op: &str, ty: &str) -> Diagnost
     )
 }
 
-/// `Y018` — a **generic** `fn` used as a value (REP-01, ADR-061).
+/// `Y018` — a **generic** `fn` used as a value (ADR-061).
 ///
 /// The wording names the remedy because there is one and it is exact: a closure
 /// body *is* a call site, so `|x| id(x)` gives monomorphization the
@@ -780,7 +767,7 @@ pub(crate) fn generic_function_as_value(at: FileSpan, name: &str) -> Diagnostic 
     )
 }
 
-/// `Y022` — a builtin or a constructor named without being called (REP-70).
+/// `Y022` — a builtin or a constructor named without being called.
 ///
 /// [`generic_function_as_value`]'s neighbour, and its wording follows the same
 /// rule: name the remedy, because there is one and it is exact. A nullary name

@@ -1,10 +1,7 @@
 //! How much of the corpus ADR-117 reaches, counted rather than argued.
 //!
-//! W7's scope was written as *"on `bfs` and `vm` — the two benchmarks dominated
-//! by runtime calls — this reaches almost nothing; it is a `collatz`/`primes`
-//! change"* (handover 26 §4), and handover 26 §9 registered the number behind
-//! that sentence as unmeasured: **how many `Inst::CheckFault`s in the corpus are
-//! actually foldable.** This is the measurement, over the eight programs
+//! The question is **how many `Inst::CheckFault`s in the corpus are actually
+//! foldable.** This is the measurement, over the eight programs
 //! `benchmarks/run.py` runs, and ADR-117 quotes it.
 //!
 //! **It is a count of sites, not of executions.** A program's hot loop is a few

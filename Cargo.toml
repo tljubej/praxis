@@ -29,7 +29,7 @@ repository = "https://github.com/tljubej/praxis"
 # below what its dependencies require. CI installs the `rust-toolchain.toml`
 # pin (`stable`) and there is no separate MSRV job, so this number is a claim
 # about the graph rather than something a build verifies — keep it honest by
-# raising it with the dependencies instead of leaving it where Milestone 0 set it.
+# raising it whenever a dependency raises its own.
 rust-version = "1.88"
 
 [workspace.dependencies]
@@ -89,11 +89,11 @@ debug = 1
 # This is here for **Cranelift**, which a `praxis run` spends nearly all of its
 # time inside and which is unusably slow when built without optimization. The
 # corpus test (`crates/praxis-cli/tests/corpus.rs`) runs the binary once per
-# program, so it pays that cost 36 times over:
+# program, so it pays that cost once for every program in the tree:
 #
-#     dev, deps unoptimized        rep15 246ms    whole corpus 1.05s
-#     dev, deps at opt-level 3     rep15  33ms    whole corpus 0.27s
-#     release                      rep15  21ms    whole corpus 0.18s
+#     dev, deps unoptimized        rep15 246ms
+#     dev, deps at opt-level 3     rep15  33ms
+#     release                      rep15  21ms
 #
 # Optimizing the Cranelift crates alone measured the same as optimizing every
 # dependency, so this is one dependency's cost and not a general debug tax —

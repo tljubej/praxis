@@ -25,10 +25,9 @@ clippy:
 # Doctests are NOT part of this, and not part of `ci`: every library crate sets
 # `doctest = false`. `cargo test` runs `rustdoc --test` per crate, rustdoc must
 # analyze the whole crate before it can find out how many doctests are in it,
-# and the result is never cached — so finding zero cost ~6s per crate on every
-# run, 95s of the suite to execute the one doctest the workspace had. A `///`
-# example is still compiled by `cargo doc`; it is never executed, so assertions
-# belong in unit tests. See the README.
+# and the result is never cached — so finding zero still costs ~6s per crate on
+# every run. A `///` example is still compiled by `cargo doc`; it is never
+# executed, so assertions belong in unit tests. See the README.
 test:
     cargo test --workspace
 
@@ -39,8 +38,8 @@ build:
 # The full quality gate — exactly what hosted CI runs. Run this before pushing.
 #
 # `book-verify` is last because it needs the binary `book-binary` links, and
-# that link is the one new cost this gate takes on. See the book section below
-# for what it bought.
+# that link is the most expensive step in the gate. See the book section below
+# for what it covers.
 ci: fmt-check clippy test book-binary book-verify
     @echo "all Praxis checks passed"
 
@@ -52,8 +51,8 @@ ci: fmt-check clippy test book-binary book-verify
 # exec-scanning freshly linked binaries. Doubling that makes the pre-push gate
 # one people stop running, which costs more than the sanitizer catches. So it
 # runs nightly instead: `.github/workflows/asan.yml`, on a schedule, calling this
-# same recipe. ADR-002's rule that hosted CI runs what developers run is intact —
-# what is new is a second *job*, not a second command.
+# same recipe — a second *job*, not a second command, so ADR-002's rule that
+# hosted CI runs what developers run still holds.
 #
 # Needs a nightly toolchain (`rustup toolchain install nightly`);
 # `rust-toolchain.toml` pins stable and the script overrides it with `+nightly`.
@@ -74,24 +73,12 @@ asan:
 # `docs/book/examples/`, and `book-verify` re-runs all of them against the
 # compiler in this tree and diffs the result against what the chapter prints.
 #
-# **`book-verify` is part of `ci`, and it was not, and here is what that cost.**
-# The trade this comment used to describe — five seconds of checking against one
-# link step, which is the expensive part on macOS — was decided the wrong way,
-# and the evidence is a measurement rather than a preference. Two commits landed
-# green with 66 of the 402 examples broken. Sixty-two of those were an intended
-# change to the debugger's value renderer that simply never re-blessed the book.
-# The other four were a **regression**: ADR-121 stopped boxing a slot that
-# provably holds a scalar, and `p EXPR` read its frame through
-# `DebugValue::reference` — which answers `None` for a scalar — so `p n` said
-# ``type error: `n` is not defined`` about a local the `locals` pane was
-# printing one line above. Nothing else in the workspace covers `p` over an
-# unboxed local. `cargo test` was green for both.
+# **`book-verify` is part of `ci`**, and it is not there for documentation
+# tidiness: it is the only end-to-end coverage the crash debugger's expression
+# evaluator has, and the link it costs is one binary the developer building this
+# tree wanted anyway. `cargo test` can be green while the examples are broken.
 #
-# So the gate is not paying for documentation tidiness. It is the only
-# end-to-end coverage the crash debugger's expression evaluator has, and the
-# link it costs is one binary the developer building this tree wanted anyway.
-#
-# `book-bless` is still deliberately *not* in `ci` — see its own note.
+# `book-bless` is deliberately *not* in `ci` — see its own note.
 
 # Render the book to docs/book/book (gitignored).
 book:
@@ -120,9 +107,8 @@ book-binary:
 # prefers `target/release/praxis` over the debug one, which for a gate is a
 # silent wrong answer waiting to happen: a release binary left behind by an
 # earlier build checks the book against a compiler that is not this tree's, and
-# the failure it reports is about the wrong program. Measured, not imagined —
-# a stale release binary here failed the two examples for rows it predates.
-# An explicit `PRAXIS` still wins, so `PRAXIS=… just book-verify` works.
+# the failure it reports is about the wrong program. An explicit `PRAXIS` still
+# wins, so `PRAXIS=… just book-verify` works.
 book-verify:
     PRAXIS="${PRAXIS:-$PWD/target/debug/praxis}" ./docs/book/examples/verify.sh
 

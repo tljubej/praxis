@@ -99,9 +99,7 @@ impl DiagnosticCode {
     ///
     /// `pub(crate)` on purpose: the only way to reach a code from outside is
     /// [`DiagCode::code`], so a number nobody registered in [`DiagCode`] has no
-    /// way into a diagnostic. Before that, five crates wrote
-    /// `DiagnosticCode::new(Type, 110)` at the site, and there was no place to
-    /// look up which numbers were spent.
+    /// way into a diagnostic.
     #[inline]
     pub(crate) const fn new(category: DiagnosticCategory, number: u32) -> DiagnosticCode {
         DiagnosticCode { category, number }
@@ -140,9 +138,8 @@ impl std::fmt::Display for DiagnosticCode {
 /// **The allocation is ADR-051.** Adding a variant means amending it first;
 /// `every_code_is_distinct` is what catches a collision if you do not.
 ///
-/// The numbers are not contiguous and are not meant to be. `Y09x` is internal
-/// errors, `Y11x` member errors, `Y12x` match errors — a split the codes that
-/// shipped before this registry already implied, and renumbering them would
+/// The numbers are not contiguous and are not meant to be: `Y09x` is internal
+/// errors, `Y11x` member errors, `Y12x` match errors. Renumbering them would
 /// change identifiers users have already seen.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum DiagCode {
@@ -172,8 +169,7 @@ pub enum DiagCode {
     // --- Parse (`P0xx`) ---
     /// `P001` — a token that cannot appear here.
     UnexpectedToken,
-    /// `P002` — two statements with no `;` and no line break between them
-    /// (FE-04).
+    /// `P002` — two statements with no `;` and no line break between them.
     ExpectedStatementSeparator,
 
     // --- Name (`N0xx`) ---
@@ -183,21 +179,20 @@ pub enum DiagCode {
     UnknownName,
     /// `N002` — a type annotation naming a type that does not exist.
     UnknownType,
-    /// `N003` — a name used in type position that names a value (TY-11).
+    /// `N003` — a name used in type position that names a value.
     NameIsNotAType,
-    /// `N004` — one name declared twice in one scope (TY-24).
+    /// `N004` — one name declared twice in one scope.
     DuplicateDeclaration,
-    /// `N005` — a function declared inside a function (TY-23).
+    /// `N005` — a function declared inside a function.
     NestedFunction,
     /// `N006` — a `struct`/`enum` declaration that refers to itself, directly or
-    /// through a cycle (REP-14, ADR-063).
+    /// through a cycle (ADR-063).
     ///
     /// A declaration mistake, so it is in this category next to `N004`/`N005`
     /// rather than in `Y0xx`: the mistake is what was *declared*, and there is no
     /// pair of types to have failed to unify.
     RecursiveTypeDeclaration,
-    /// `N007` — a `fn` body naming a binding declared outside it (REP-22,
-    /// ADR-068).
+    /// `N007` — a `fn` body naming a binding declared outside it (ADR-068).
     ///
     /// A declaration mistake in the same sense `N005` is: the name resolves, and
     /// what is wrong is *where* it was declared relative to what reads it. A `fn`
@@ -210,21 +205,21 @@ pub enum DiagCode {
     /// closure cannot name itself, which is `N001`. One code either way, because
     /// it is the same mistake with one fewer way out.
     FunctionReadsOuterBinding,
-    /// `N008` — a record literal whose head does not name a `struct` (REP-26).
+    /// `N008` — a record literal whose head does not name a `struct`.
     ///
     /// A declaration mistake in `N003`'s sense: a record literal's head is a type
     /// position, and the name reaches the wrong sort of declaration. Reported in
-    /// inference and not at lowering, because a literal on a non-`struct` head used
-    /// to pass `praxis check` and produce a value with no representation.
+    /// inference and not at lowering, so `praxis check` rejects a literal on a
+    /// non-`struct` head rather than letting it produce a value with no
+    /// representation.
     NotARecordLiteralHead,
-    /// `N009` — a **retired keyword** written where a statement starts (REP-71).
+    /// `N009` — a **retired keyword** written where a statement starts.
     ///
-    /// `let` is the only one so far. It was the binding keyword until ADR-125
-    /// replaced it with `var`, and every document written before then opens with
-    /// one — so it is the first thing a reader of an old example meets.
+    /// `let` is the only one so far: it was the binding keyword before ADR-125
+    /// chose `var`, so it is the first thing a reader of an old example meets.
     ///
     /// Not `N001`: it is not a name that happens to be missing, and treating it
-    /// as one produced the wrong help. The suggestion budget is `max(1, len/3)`,
+    /// as one gives the wrong help. The suggestion budget is `max(1, len/3)`,
     /// `let` is three characters, so the budget is 1 — and the nearest name in
     /// scope one edit away is `Set`. The rule is right in general (it is
     /// rustc's); the outcome for a retired keyword is not, because the answer is
@@ -248,7 +243,7 @@ pub enum DiagCode {
     /// `Y006` — a type that has no ordering.
     NotOrderable,
     /// `Y007` — a type constructor given the wrong number of type arguments.
-    /// Also TY-12's `Option[Int, Text]`, which is the same mistake.
+    /// `Option[Int, Text]` is the same mistake.
     WrongTypeArgumentCount,
     /// `Y008` — a `struct`/`enum` declaring one field or variant twice.
     DuplicateMember,
@@ -257,97 +252,86 @@ pub enum DiagCode {
     // cannot be written. The number stays spent: a code is a permanent
     // user-facing identifier, and re-issuing one is how an old message and a new
     // one come to share a name.
-    /// `Y010` — a compound assignment whose operands are not numeric (TY-15).
+    /// `Y010` — a compound assignment whose operands are not numeric.
     CompoundAssignNonNumeric,
-    /// `Y011` — `return` outside a function (TY-20).
+    /// `Y011` — `return` outside a function.
     ReturnOutsideFunction,
-    /// `Y012` — `break`/`continue` outside a loop (TY-20).
+    /// `Y012` — `break`/`continue` outside a loop.
     BreakOutsideLoop,
-    /// `Y013` — an integer literal outside the representable range (TY-28).
+    /// `Y013` — an integer literal outside the representable range.
     IntLiteralOutOfRange,
-    /// `Y014` — a `Map`/`Set` key type that cannot be hashed (TY-32).
+    /// `Y014` — a `Map`/`Set` key type that cannot be hashed.
     NotHashable,
-    /// `Y015` — a non-numeric type where a numeric one is required (TY-31).
+    /// `Y015` — a non-numeric type where a numeric one is required.
     NotNumeric,
-    /// `Y016` — an operator not defined for these operand types (TY-26, TY-27).
+    /// `Y016` — an operator not defined for these operand types.
     OperatorNotDefined,
-    /// `Y017` — a `break` carrying a value out of a `while`/`for` (TY-21).
+    /// `Y017` — a `break` carrying a value out of a `while`/`for`.
     ValueBreakOutsideLoopExpression,
-    /// `Y018` — a **generic** `fn` used as a value (REP-01, ADR-061).
+    /// `Y018` — a **generic** `fn` used as a value (ADR-061).
     ///
     /// A monomorphic one is a closure over its adapter; a generic one has no
     /// instantiation to adapt, because monomorphization is driven by call sites
     /// and a value has none. `|x| id(x)` is the spelling that works — the
     /// closure's body *is* a call site.
     GenericFunctionAsValue,
-    /// `Y019` — a `.0` element access on something that has no such element
-    /// (REP-08): a receiver that is not a tuple, or an index past its arity.
+    /// `Y019` — a `.0` element access on something that has no such element: a
+    /// receiver that is not a tuple, or an index past its arity.
     ///
     /// Not `Y112` ("no field on this type"): a tuple has no field *names*, so a
     /// message about a missing field would name the wrong thing. Both are
-    /// emitted in inference and both reach `praxis check` — the contrast this
-    /// used to draw, that `Y112` was lowering-only, was true when it was written
-    /// and stopped being true when ADR-093 moved the member diagnostics. The
-    /// reason for the separate code is the *message*, and that reason stands.
+    /// emitted in inference and both reach `praxis check` (ADR-093); the reason
+    /// for the separate code is the *message*.
     NoTupleElement,
-    /// `Y020` — a subscript on a type that has none (REP-16), in either
-    /// direction: `s[0]` on a `Set`, `t[0] = c` on a `Text` (which can be read
-    /// through a subscript and is immutable, so it has no element store), or
-    /// `grid[x]` — the wrong *arity* for a receiver that does index, since
-    /// `grid[x, y]` is the spelling §6.4 gives.
+    /// `Y020` — a subscript on a type that has none, in either direction: `s[0]`
+    /// on a `Set`, `t[0] = c` on a `Text` (which can be read through a subscript
+    /// and is immutable, so it has no element store), or `grid[x]` — the wrong
+    /// *arity* for a receiver that does index, since `grid[x, y]` is the
+    /// spelling §6.4 gives.
     ///
     /// Not `Y110` ("no such method"): a subscript names no method, so a message
     /// about one would name something the program did not write. Both are
-    /// emitted in inference and both reach `praxis check` — `Y110` moved there
-    /// with ADR-093, so the "lowering-only" contrast this used to draw is stale.
-    /// The reason for the separate code is the *message*, and that reason
-    /// stands.
+    /// emitted in inference and both reach `praxis check` (ADR-093); the reason
+    /// for the separate code is the *message*.
     NotIndexable,
-    /// `Y021` — an assignment whose left side names no storage (REP-16):
-    /// `f() = 1`, `a + b[0] = 1`. A **field** is a place and no longer among
-    /// them: `p.x = 5` stores (§4.5).
-    ///
-    /// It is about a left side that is not a place at all. (It used to be
-    /// distinguished from `Y009`, "assignment to something that is not a `var`";
-    /// that code is retired and every binding is now writable — ADR-125.)
+    /// `Y021` — an assignment whose left side is not a place at all: `f() = 1`,
+    /// `a + b[0] = 1`. A **field** is a place and is not among them: `p.x = 5`
+    /// stores (§4.5).
     NotAnAssignmentTarget,
     /// `Y022` — a prelude builtin or an enum constructor named without being
-    /// called (REP-70).
+    /// called.
     ///
     /// [`GenericFunctionAsValue`](DiagCode::GenericFunctionAsValue)'s neighbour,
     /// one symbol kind over. A user `fn` in value position becomes a closure
     /// over its adapter (ADR-061); a builtin and a constructor have no adapter to
-    /// close over, and nothing was ever built for them — the name lowered to
-    /// `Unit`. `var h = abs` then `out(h(-3))` printed nothing and exited 0,
-    /// which is the worst answer a compiler can give.
+    /// close over, so there is nothing for the name to lower to — without this
+    /// code `var h = abs` then `out(h(-3))` prints nothing and exits 0.
     ///
     /// `out(pi)` is the shape a reader meets first: `pi` is a nullary function,
-    /// so the missing parentheses are the whole mistake, and printing `Unit` was
-    /// the least useful way to say so.
+    /// so the missing parentheses are the whole mistake.
     NameHasNoFunctionValue,
     /// `Y023` — a backtick parser template written where a value is expected
-    /// (REP-47, ADR-084). §7.1 says the parser-expression sublanguage is entered
+    /// (ADR-084). §7.1 says the parser-expression sublanguage is entered
     /// at `read` or at `parse(text, …)` and nowhere else, so `` `n = {int}` ``
-    /// standing alone is a template with nothing to parse. It used to be typed
-    /// `Text` and lowered as a text literal containing its own braces.
+    /// standing alone is a template with nothing to parse.
     ///
-    /// Reported from inference, not the parser, for REP-12's reason: `praxis
-    /// check` must see it. The token still parses to a `LITERAL` node so the
-    /// tree round-trips the source and one mistake produces one diagnostic.
+    /// Reported from inference, not the parser, so `praxis check` sees it. The
+    /// token still parses to a `LITERAL` node so the tree round-trips the source
+    /// and one mistake produces one diagnostic.
     ParserTemplateOutsideRead,
     /// `Y024` — a call whose argument count does not match the function's
-    /// (D16, ADR-089).
+    /// (ADR-089).
     ///
     /// A name in Praxis has exactly one signature — no arity-based overloading,
     /// no optional or default parameters — so a count mismatch is never a
     /// candidate for some other overload and can be reported as the mistake it
-    /// is. Before this code it came back as `Y001` showing two whole function
-    /// types to diff by eye, next to a `Y007` that names collection arity and a
-    /// `Y110` that names method arity.
+    /// is. It sits next to `Y007`, which names collection arity, and `Y110`,
+    /// which names method arity; without it the mistake arrives as a `Y001`
+    /// showing two whole function types to diff by eye.
     ///
-    /// Raised from `TypeDb::unify`, where the two lengths were already compared
-    /// and the fact discarded, so every function-to-function unification
-    /// benefits rather than just a direct call.
+    /// Raised from `TypeDb::unify`, which compares the two lengths anyway, so
+    /// every function-to-function unification reports it rather than just a
+    /// direct call.
     CallArityMismatch,
 
     // --- Type (`Y09x`), internal ---
@@ -359,14 +343,14 @@ pub enum DiagCode {
     NoMethodOnType,
     /// `Y112` — no such field on this type.
     NoFieldOnType,
-    /// `Y113` — a record literal missing one or more fields (HIR-04).
+    /// `Y113` — a record literal missing one or more fields.
     MissingRecordFields,
     /// `Y114` — a record literal *or pattern* naming a field the type does not
-    /// have (HIR-04, REP-10).
+    /// have.
     UnknownRecordField,
-    /// `Y115` — a record literal *or pattern* naming one field twice (HIR-04,
-    /// REP-10). In a pattern the second sub-pattern would silently replace the
-    /// first, so one of the two bindings the program wrote would never happen.
+    /// `Y115` — a record literal *or pattern* naming one field twice. In a
+    /// pattern the second sub-pattern would silently replace the first, so one
+    /// of the two bindings the program wrote would never happen.
     DuplicateRecordField,
 
     // --- Type (`Y12x`), match errors ---
@@ -374,23 +358,22 @@ pub enum DiagCode {
     NonExhaustiveMatch,
     /// `Y121` — a `match` arm an earlier arm already covers.
     UnreachableArm,
-    /// `Y122` — a pattern naming a variant the scrutinee's type has not
-    /// (HIR-07).
+    /// `Y122` — a pattern naming a variant the scrutinee's type has not.
     UnknownEnumVariant,
-    /// `Y123` — a pattern whose shape cannot match the scrutinee (HIR-06), or
-    /// one no value can have at all (REP-10): a one-element tuple pattern, or a
-    /// record pattern whose head names something that is not a record.
+    /// `Y123` — a pattern whose shape cannot match the scrutinee, or one no
+    /// value can have at all: a one-element tuple pattern, or a record pattern
+    /// whose head names something that is not a record.
     NotAPatternForType,
-    /// `Y125` — a pattern that must match every value but can fail (REP-25): a
-    /// literal or a variant in a **binding** position, such as a `for` header.
+    /// `Y125` — a pattern that must match every value but can fail: a literal or
+    /// a variant in a **binding** position, such as a `for` header.
     ///
     /// A binding has no second arm for an item to fall through to, so a pattern
     /// that tests would silently skip the steps it does not match.
     RefutableBinding,
     /// `Y124` — a pattern whose sub-patterns do not fit the variant's payload
-    /// (REP-05, ADR-134).
+    /// (ADR-134).
     ///
-    /// Two shapes reach this code, and the second one used to compile:
+    /// Two shapes reach this code:
     ///
     /// - **More** sub-patterns than the variant has slots. `Wrap(a, b)` against
     ///   a one-slot variant would read a payload the object does not have.
@@ -399,9 +382,9 @@ pub enum DiagCode {
     ///   like a payload-less variant to anyone who did not check the
     ///   declaration. Write `A(_)` to say "any payload" out loud.
     ///
-    /// Naming *fewer* inside parentheses stays legal and is padded with
-    /// wildcards, so `Some(_)` and `Some(n)` are one test (HIR-06). Bare `Some`
-    /// is no longer the third spelling of it.
+    /// Naming *fewer* inside parentheses is legal and is padded with wildcards,
+    /// so `Some(_)` and `Some(n)` are one test. Bare `Some` is not a third
+    /// spelling of it.
     PayloadArityMismatch,
 
     // --- Input (`I0xx`) ---
@@ -411,13 +394,13 @@ pub enum DiagCode {
     ParserConversion,
     /// `I010` — an atomic parser name that does not exist.
     UnknownAtomic,
-    /// `I011` — an invalid capture name in a template (IP-04).
+    /// `I011` — an invalid capture name in a template.
     InvalidCaptureName,
-    /// `I012` — a capture kind that does not exist (IP-06).
+    /// `I012` — a capture kind that does not exist.
     UnknownCaptureKind,
-    /// `I013` — a parser constructor that does not exist (IP-07).
+    /// `I013` — a parser constructor that does not exist.
     UnknownConstructor,
-    /// `I014` — a constructor argument that is invalid or in excess (IP-07).
+    /// `I014` — a constructor argument that is invalid or in excess.
     InvalidConstructorArgument,
     /// `I020` — named and anonymous captures mixed in one template (§7.3).
     MixedCaptureNaming,
@@ -425,7 +408,7 @@ pub enum DiagCode {
     DuplicateCaptureName,
     /// `I022` — a constructor called with the wrong number of arguments.
     ConstructorArity,
-    /// `I023` — an empty separator, which cannot advance a cursor (IP-10).
+    /// `I023` — an empty separator, which cannot advance a cursor.
     EmptySeparator,
     /// `I024` — a section or block field declared twice.
     DuplicateSectionField,
@@ -435,7 +418,7 @@ pub enum DiagCode {
     UnnamedScalarBlockItem,
     /// `I027` — a `choice` case declared twice.
     DuplicateChoiceCase,
-    /// `I028` — a misplaced or repeated `repeated(...)` tail (IP-09).
+    /// `I028` — a misplaced or repeated `repeated(...)` tail.
     MisplacedRepeatedTail,
     /// `I030` — a backtick template the scanner could not read.
     TemplateScan,
@@ -535,7 +518,7 @@ impl DiagCode {
     /// [`code`](DiagCode::code)'s exhaustive match forces a new variant to be
     /// *numbered*; only `all_lists_every_variant` forces it to be listed here,
     /// and a variant missing from this list is one the injectivity test never
-    /// checks. `CallArityMismatch` was missing for exactly that reason.
+    /// checks.
     pub const ALL: &'static [DiagCode] = {
         use DiagCode::*;
         &[
@@ -727,9 +710,8 @@ impl Diagnostic {
     /// then its end.
     ///
     /// **The one comparator.** Every stage of the front end concatenates its own
-    /// diagnostics onto the previous stage's and re-sorts, so this used to be
-    /// spelled out by hand at five call sites across four crates — including two
-    /// inside one function of `praxis run`.
+    /// diagnostics onto the previous stage's and re-sorts, and they all sort by
+    /// this key.
     ///
     /// The file is not part of the key: every list sorted this way is one file's
     /// diagnostics. [`sort_by_position`] is how a caller normally reaches this;
@@ -947,7 +929,7 @@ impl<'a> Renderer<'a> {
                 // Line by line, skipping the leading break an *insertion* starts
                 // with: a fix that adds a line writes `"\n        B => …"`, so
                 // that break belongs to where the text goes rather than to what
-                // it says, and printing it raw left a line of trailing spaces.
+                // it says, and printing it raw emits a line of trailing spaces.
                 for line in repl.trim_start_matches('\n').lines() {
                     let _ = writeln!(out, "      {line}");
                 }
@@ -1025,9 +1007,7 @@ mod tests {
         assert_eq!(code.to_string(), "T012");
     }
 
-    /// F2's whole point: two diagnostics must never render the same code. The
-    /// numbers used to be integer literals at five crates' call sites, with no
-    /// place to look up what was spent — so this could not be asked.
+    /// Two diagnostics must never render the same code.
     #[test]
     fn every_code_is_distinct() {
         let mut seen = std::collections::HashMap::new();
@@ -1041,15 +1021,10 @@ mod tests {
     /// …and `ALL` really is all of them. A variant left out of the list is a
     /// variant the injectivity test never checks.
     ///
-    /// This was `assert_eq!(DiagCode::ALL.len(), 70)`, and a count is the one
-    /// guard the omission it stood for could walk straight past: `code()`'s
-    /// exhaustive match forces a new variant to be *numbered*, nothing forced
-    /// it into `ALL`, so leaving it out left the list and the count agreeing at
-    /// 70 and the assert green. `CallArityMismatch` (`Y024`) had never been
-    /// checked. The count only ever fired in the other direction — when `ALL`
-    /// *was* updated and the number was not.
-    ///
-    /// The match below forces the list instead, the way `CapKind::ALL` is
+    /// A count assertion cannot state this: `code()`'s exhaustive match forces a
+    /// new variant to be *numbered*, nothing forces it into `ALL`, so a variant
+    /// left out leaves the list and any expected length agreeing with each
+    /// other. The match below forces the list instead, the way `CapKind::ALL` is
     /// guarded in `praxis-stdlib`: a new variant stops this test compiling, in
     /// the test whose whole subject is `ALL`.
     #[test]

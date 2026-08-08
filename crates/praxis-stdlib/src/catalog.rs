@@ -5,14 +5,13 @@
 //! [`MethodCatalogBuilder::finish`], which **rejects duplicate entries** — the
 //! `(receiver, name, parameter-count)` triple must be unique. That makes a
 //! duplicate overload unrepresentable: the builder errors rather than silently
-//! shadowing an earlier entry, which is exactly the kind of "illegal state" the
-//! project rules say we should forbid.
+//! shadowing an earlier entry.
 
 use std::fmt;
 
 use crate::type_pattern::{Bound, TypePattern};
 
-/// The catalog name of the subscript **read** `m[key]` (REP-16).
+/// The catalog name of the subscript **read** `m[key]`.
 ///
 /// A subscript is dispatched on the receiver's shape and its arity exactly as a
 /// method is — `grid[x, y]` is `Grid[T]` at arity two, `m[key]` is `Map[K, V]` at
@@ -22,8 +21,8 @@ use crate::type_pattern::{Bound, TypePattern};
 /// nothing in the language can name these rows except the subscript grammar.
 pub const INDEX_READ: &str = "[]";
 
-/// The catalog name of the subscript **store** `m[key] = value` (REP-16). The
-/// value is the last parameter, after the indices.
+/// The catalog name of the subscript **store** `m[key] = value`. The value is
+/// the last parameter, after the indices.
 pub const INDEX_STORE: &str = "[]=";
 
 /// The catalog name of `distance[key] min= candidate` (§6.2) — and
@@ -118,10 +117,10 @@ impl MethodEntry {
     /// Whether calling this method may allocate, and so whether its call site
     /// is a GC safepoint.
     ///
-    /// Derived from the ABI manifest, not restated per row: a catalog entry
-    /// that disagreed with the wrapper it lowers to was the drift this
-    /// replaces. An intrinsic has no wrapper — the MIR lowering it expands to
-    /// carries its own per-instruction effects.
+    /// Derived from the ABI manifest, not restated per row: a row that carried
+    /// its own answer could disagree with the wrapper it lowers to. An
+    /// intrinsic has no wrapper — the MIR lowering it expands to carries its
+    /// own per-instruction effects.
     pub fn allocates(&self) -> bool {
         match self.lowering {
             MethodLowering::RuntimeSymbol(sym) | MethodLowering::ScalarPrimitive(sym) => {
@@ -134,12 +133,12 @@ impl MethodEntry {
     /// Whether calling this method may raise a runtime fault (§9.1), and so
     /// whether its call site needs a fault check after it.
     ///
-    /// Derived, for the same reason as [`MethodEntry::allocates`]: the field
-    /// this replaces was dead metadata — nothing read it, because `build.rs`
-    /// emits an unconditional check after every method call — and it had drifted.
-    /// `bitset_insert` declared `can_fault: false` while
-    /// `praxis_bitset_insert` raises `InvalidSize` for a member outside
-    /// `BitIndex`'s range. Nobody noticed, because nobody asked.
+    /// Derived, for the same reason as [`MethodEntry::allocates`]: a per-row
+    /// field would be a second statement of the manifest's answer, free to
+    /// drift — a `bitset_insert` row claiming it cannot fault beside a
+    /// `praxis_bitset_insert` that raises `InvalidSize` for a member outside
+    /// `BitIndex`'s range. MIR's own `Inst::can_fault` reads the same manifest
+    /// row, so the check lowering emits and this answer agree by construction.
     pub fn can_fault(&self) -> bool {
         match self.lowering {
             MethodLowering::RuntimeSymbol(sym) | MethodLowering::ScalarPrimitive(sym) => {
@@ -149,7 +148,7 @@ impl MethodEntry {
         }
     }
 
-    /// What each of this entry's type variables must be (TY-31), by name.
+    /// What each of this entry's type variables must be, by name.
     ///
     /// A bound is a fact about the *variable*, not about the position it is
     /// written in, so this sweeps the receiver, the parameters and the result and
@@ -188,9 +187,9 @@ pub enum MethodCatalogError {
         name: &'static str,
         arity: usize,
     },
-    /// One entry declares two *different* bounds for the same type variable
-    /// (TY-31). A bound is a fact about the variable, so the row is asking for
-    /// two incompatible things and whichever the checker happened to read first
+    /// One entry declares two *different* bounds for the same type variable. A
+    /// bound is a fact about the variable, so the row is asking for two
+    /// incompatible things and whichever the checker happened to read first
     /// would win silently.
     ConflictingBound {
         method: &'static str,
@@ -219,14 +218,13 @@ pub enum MethodCatalogError {
     /// differing only in what they bound their item to (ADR-144).
     ///
     /// This is [`AmbiguousWithIterable`](Self::AmbiguousWithIterable)'s blind
-    /// spot, and it was found by trying to write `join` twice — once for a
-    /// sequence of `Text` and once for a sequence of `Char`. The pair is not a
-    /// `Duplicate`, because the receivers differ; it is not a shadowing, because
-    /// neither row is the concrete one. But `praxis_hir::catalog::lookup` matches
-    /// an `Iterable` receiver on *shape*, so both hit and inference takes the
-    /// first — which is a precedence rule by insertion order, exactly what
-    /// ADR-127 decision 6 refuses. A sequence of `Char` gets a differently-named
-    /// row instead.
+    /// spot — `join` for a sequence of `Text` beside `join` for a sequence of
+    /// `Char`. The pair is not a `Duplicate`, because the receivers differ; it
+    /// is not a shadowing, because neither row is the concrete one. But
+    /// `praxis_hir::catalog::lookup` matches an `Iterable` receiver on *shape*,
+    /// so both hit and inference takes the first — which is a precedence rule
+    /// by insertion order, exactly what ADR-127 decision 6 refuses. A sequence
+    /// of `Char` gets a differently-named row instead.
     AmbiguousIterablePair { name: &'static str, arity: usize },
     /// A row writes [`TypePattern::Iterable`] somewhere other than its receiver
     /// (ADR-127 decision 1).
@@ -376,8 +374,8 @@ impl MethodCatalogBuilder {
 
     /// Finalize the catalog, returning an error if any two entries share a
     /// `(receiver, name, arity)` triple, if any single entry bounds one type
-    /// variable two different ways (TY-31), or if a concrete row shadows a
-    /// generic `Iterable` one on a receiver both accept (ADR-127).
+    /// variable two different ways, or if a concrete row shadows a generic
+    /// `Iterable` one on a receiver both accept (ADR-127).
     pub fn finish(self) -> Result<MethodCatalog, MethodCatalogError> {
         for (i, a) in self.entries.iter().enumerate() {
             // A receiver may *be* the generic pattern — that is the whole point
@@ -547,9 +545,9 @@ mod tests {
         }
     }
 
-    /// A bound is a fact about the *variable* (TY-31), so one entry cannot
-    /// declare two of them for one name: whichever the checker read first would
-    /// win, silently, and the row's other claim would simply not happen.
+    /// A bound is a fact about the *variable*, so one entry cannot declare two
+    /// of them for one name: whichever the checker read first would win,
+    /// silently, and the row's other claim would simply not happen.
     ///
     /// The same bound written twice is *not* a conflict — an entry that names `T`
     /// in three positions may restate it — which is the half a "reject
@@ -753,13 +751,12 @@ mod tests {
     /// **ADR-144.** Two generic rows at one `(name, arity)` are refused, even
     /// though their receivers are not equal.
     ///
-    /// This is the shape `join` was first written as: one row for a sequence of
-    /// `Text` and one for a sequence of `Char`. Neither the `Duplicate` check
-    /// (the receivers differ) nor the shadowing check (neither row is concrete)
-    /// saw it, and `lookup` matches an `Iterable` on shape — so `cs.join("")`
-    /// would have resolved to whichever row was registered first and reported
-    /// `expected Text, found Char`. A precedence rule nobody wrote is worse than
-    /// a build failure, which is what this now is.
+    /// The shape this refuses: one row for a sequence of `Text` and one for a
+    /// sequence of `Char`. Neither the `Duplicate` check (the receivers differ)
+    /// nor the shadowing check (neither row is concrete) catches it, and
+    /// `lookup` matches an `Iterable` on shape — so `cs.join("")` would resolve
+    /// to whichever row was registered first and report `expected Text, found
+    /// Char`. A precedence rule nobody wrote is worse than a build failure.
     #[test]
     fn finish_rejects_two_generic_rows_at_one_arity() {
         let of_text = MethodEntry {
@@ -866,20 +863,17 @@ mod tests {
         let e = vec_push();
         assert_eq!(e.arity(), 1);
         // `allocates` is the manifest's answer, not a field the row restates.
-        // Both of these are safepoints, and `len` is the interesting one: the
-        // row used to declare `allocates: false` because "reading a length
-        // allocates nothing" — but `praxis_vec_len` boxes the count into a
-        // fresh `Int`, so a collection can run inside it. That disagreement is
-        // exactly what deriving the answer from the wrapper removes.
+        // Both of these are safepoints, and `len` is the interesting one:
+        // "reading a length allocates nothing" is the wrong reading —
+        // `praxis_vec_len` boxes the count into a fresh `Int`, so a collection
+        // can run inside it.
         assert!(e.allocates());
         assert!(vec_len().allocates());
-        // **This assertion used to be `!e.can_fault()`** (REP-45, §8.2), with
-        // the reason "praxis_vec_push is Allocates, not AllocatesAndFaults" —
-        // which restated the manifest row rather than checking it against the
-        // wrapper. `praxis_vec_push` calls `adopt_or_reject`, which ends in
-        // `set_fault(ctx, TYPE_MISMATCH)`, so the row was wrong and the test
-        // was pinning it. `praxis_vec_len` is the contrast that keeps the
-        // assertion meaningful: it really cannot fault.
+        // `praxis_vec_push` calls `adopt_or_reject`, which ends in
+        // `set_fault(ctx, TYPE_MISMATCH)`, so a row declaring "Allocates, not
+        // AllocatesAndFaults" would be restating the manifest rather than
+        // reading it. `praxis_vec_len` is the contrast that keeps the assertion
+        // meaningful: it really cannot fault.
         assert!(e.can_fault(), "praxis_vec_push raises TypeMismatch");
         assert!(!vec_len().can_fault());
         assert_eq!(e.purity, Purity::Impure);

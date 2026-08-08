@@ -16,13 +16,13 @@
 //! It rewrites the **consuming instruction's operand field** from the extracted
 //! local to the scalar the producer boxed, and then deletes what became dead.
 //! Nothing is copied, no local leaves [`Function::locals`], and no [`Inst`]
-//! variant is added — which is the whole reason this is 300 lines in
-//! `praxis-mir` and not a change to the Cranelift backend. Handover 26 §3 posed
-//! the mechanism as a dilemma between adding a `MoveScalar` variant and doing
-//! whole-function `LocalId` substitution; the first would edit `lower_inst` and
-//! the second is invalid in a non-SSA IR (`ir.rs`'s header: MIR is "deliberately
-//! **not** SSA", and `Assign` lowers to a `MoveGc` **into the binding's existing
-//! slot**, so a `LocalId` does not name one value).
+//! variant is added — which is the whole reason this lives in `praxis-mir` and
+//! is not a change to the Cranelift backend. The two obvious alternatives are
+//! both worse: a `MoveScalar` variant would edit `lower_inst`, and
+//! whole-function `LocalId` substitution is invalid in a non-SSA IR (`ir.rs`'s
+//! header: MIR is "deliberately **not** SSA", and `Assign` lowers to a `MoveGc`
+//! **into the binding's existing slot**, so a `LocalId` does not name one
+//! value).
 //!
 //! # Where it runs, and why that is the end of `lower_module`
 //!
@@ -51,11 +51,9 @@
 //! correctness hazard into a missed-optimization hazard, and it is what leaves
 //! ADR-044's count of exhaustive `Inst` matches at five rather than six.
 //!
-//! (Handover 27 §3 phrased the guard as "delete, then put the `ExtractScalar`
-//! back if a use survived". Asking first is the same guard with no undo path,
-//! and an undo path is the thing that would have needed its own correctness
-//! argument: reversing an operand rewrite `s → e` would clobber a use of `s`
-//! that was there all along.)
+//! (Asking first rather than deleting speculatively is deliberate: the undo
+//! path would need its own correctness argument, because reversing an operand
+//! rewrite `s → e` would clobber a use of `s` that was there all along.)
 //!
 //! # What it leaves behind
 //!
@@ -67,22 +65,12 @@
 //! and one debug slot zeroed in the prologue per elided temp — a per-call cost
 //! against a per-iteration win.
 //!
-//! It also cost the debugger a value, and that was a known, measured regression
-//! rather than a surprise: a temp whose producer is gone rendered
-//! `<tmp#N: Int> @ "a + b" = <uninit>` where it used to render `= 30`. Two
-//! tests said so and both were red on the part-1 branch on purpose:
-//! `crates/praxis-cli/tests/run.rs`'s
-//! `a_forwarded_binop_temp_still_renders_the_value_it_materialized`, added by
-//! this package because handover 26 believed an existing test covered it and
-//! handover 27 §1 proved none did, and
-//! `crates/praxis-codegen-cranelift/tests/jit.rs`'s
-//! `a_temp_that_never_reached_a_shadow_slot_is_still_renderable`, which was
-//! already there.
-//!
-//! **ADR-120 part 2 (W8-S0b) turned both green, unedited**, by giving the
-//! elided box's debug slot the *scalar* the box would have held. This pass
-//! hands it the two things it needs, and both are here because this is the last
-//! point in the compiler that knows the box and the scalar are one value:
+//! Eliding a box would otherwise cost the debugger a value: a temp whose
+//! producer is gone would render `<tmp#N: Int> @ "a + b" = <uninit>` rather than
+//! `= 30`. ADR-120 part 2 answers that by giving the elided box's debug slot the
+//! *scalar* the box would have held. This pass hands the backend the two things
+//! it needs for that, and both are here because this is the last point in the
+//! compiler that knows the box and the scalar are one value:
 //! [`carry_debug_metadata`] moves the box's provenance onto the scalar, and
 //! [`carry_debug_slot`] tells the box which scalar feeds its slot.
 
@@ -97,11 +85,10 @@ use crate::liveness::{defs, term_uses, uses};
 /// Idempotent: a second run over the result finds nothing, because the gates
 /// are properties of the MIR and not of a worklist.
 pub fn forward_boxes(func: &mut Function) -> usize {
-    // ADR-120's measurement arm A. The A/B baseline is "this tree with this
-    // package's single toggle reverted" (handover 26 §6), and this `if` is that
-    // toggle: with the feature on the pass is a no-op and the rest of the branch
-    // — the tests, the debug hand-off, the census helpers — is compiled
-    // unchanged, so the two binaries differ in exactly this transform.
+    // ADR-120's measurement arm A, and the whole of the A/B toggle: with the
+    // feature on the pass is a no-op and everything else — the tests, the debug
+    // hand-off, the census helpers — is compiled unchanged, so the two binaries
+    // differ in exactly this transform.
     if cfg!(feature = "adr120-arm-a") {
         return 0;
     }
@@ -380,11 +367,9 @@ fn drop_producer_if_dead(func: &mut Function, site: &Site) {
 
 /// Move the elided box's debugger provenance onto the scalar that replaced it.
 ///
-/// It renders nothing today — a `Scalar` local has no debug slot, which is why
-/// the regression in this module's header exists — and it is the whole of
-/// W8-S0b's input: the scalar slot that stage adds needs to know that this word
-/// is the value of the expression `@ "a + b"`, and this is the only point in the
-/// compiler that still knows it.
+/// A `Scalar` local has no debug slot of its own, so this renders nothing by
+/// itself. What it records is that this word is the value of the expression
+/// `@ "a + b"`, and this is the only point in the compiler that still knows it.
 ///
 /// Written once. A scalar reached by two forwardings would otherwise take the
 /// second box's span, and the first is the one whose expression produced it.
@@ -414,8 +399,8 @@ fn carry_debug_metadata(func: &mut Function, boxed: LocalId, scalar: LocalId) {
 /// one `DebugLocalMeta` per `Gc` local, in position order, with the box's own
 /// name, span and `type_id`. Nothing is renumbered and no second line appears
 /// for one temp: the slot that was there gains a value instead of the debugger
-/// gaining a local. ADR-120 decision 7 kept the box in `Function::locals` for
-/// the numbering; this is what that decision was worth.
+/// gaining a local. ADR-120 decision 7 keeps the box in `Function::locals` for
+/// exactly that numbering.
 ///
 /// **The gate is that the scalar is defined exactly once in the function.** A
 /// debug slot is never cleared, so it renders whatever the most recently
@@ -431,7 +416,7 @@ fn carry_debug_slot(func: &mut Function, census: &Census, boxed: LocalId, scalar
     // feature on, no box is ever linked to a scalar, so the backend has nothing
     // to store and nothing to mark. The transform above is unaffected — both
     // arms compute the same thing — and what differs is the debugger's view and
-    // the stores that produce it, which is exactly the package.
+    // the stores that produce it.
     if cfg!(feature = "adr120b-arm-a") {
         return;
     }
@@ -572,11 +557,10 @@ mod tests {
     use crate::ir::LocalKind;
     // **The forwarded door, not the finished one** (ADR-121). Every number in
     // this module is a statement about what *this* pass leaves behind, and
-    // several of the doc comments below say so in as many words — "the two that
-    // remain are `x` and `y`, which are W8-S1's". Promotion then removes them,
-    // so read through `lower_src_to_mir` these tests would assert ADR-121's
-    // output while claiming to measure ADR-120's, and reverting promotion would
-    // present as a failure here. The alias keeps the call sites unedited.
+    // several of the doc comments below say so in as many words. Lowering
+    // through the whole pipeline runs ADR-121's promotion too, which removes
+    // more, so these tests would assert its output while claiming to measure
+    // ADR-120's.
     use crate::test_support::lower_src_to_mir_forwarded as lower_src_to_mir;
     use crate::test_support::{benchmark_source, Census, InstKind, Lowered, BENCHMARK_SUITE};
     use crate::verify::verify;
@@ -903,18 +887,15 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // The suite: the gate handover 26 §1 stated and handover 27 §9 sent back
-    // for measurement
+    // The suite: the per-loop numbers, over the real benchmark programs
     // -----------------------------------------------------------------------
 
-    /// **The headline.** Handover 26 §1 predicted `mandelbrot`'s inner loop goes
-    /// from 10 `Materialize{Float}` to 2, and handover 27 §9 listed the figure
-    /// as hand-walked and unverified. Wave 0 measured the 10; this is the 2, and
-    /// the prediction was exactly right.
+    /// **The headline.** `mandelbrot`'s inner loop boxes 2 `Materialize{Float}`
+    /// where an unforwarded lowering boxes 10.
     ///
     /// The two that remain are `x` and `y`, which are loop-carried assignments
     /// and therefore not this pass's shape at all — a `MoveGc` into a binding's
-    /// existing slot is what W8-S1 addresses.
+    /// existing slot is ADR-121's.
     #[test]
     fn mandelbrots_inner_loop_boxes_two_floats_where_it_boxed_ten() {
         let mut lowered = lower_src_to_mir(&benchmark_source("mandelbrot"));
@@ -932,11 +913,11 @@ mod tests {
         );
     }
 
-    /// Handover 26 framed this package as a float transform throughout. It is
-    /// not: `TypedExpr::Bin` materializes every intermediate node, `Int` as well
-    /// as `Float`, and the `Bool` box a condition pays is the most common of the
-    /// three. `collatz` allocates no float at all and its inner loop still loses
-    /// four boxes and eleven reloads.
+    /// This is not a float transform: `TypedExpr::Bin` materializes every
+    /// intermediate node, `Int` as well as `Float`, and the `Bool` box a
+    /// condition pays is the most common of the three. `collatz` allocates no
+    /// float at all and its inner loop still loses four boxes and eleven
+    /// reloads.
     #[test]
     fn collatzs_inner_loop_is_an_int_and_bool_win_with_no_float_in_it() {
         let mut lowered = lower_src_to_mir(&benchmark_source("collatz"));
@@ -993,11 +974,10 @@ mod tests {
         );
     }
 
-    /// The hand-off to ADR-120 part 2 (W8-S0b). An elided box takes its
-    /// debugger provenance onto the scalar that replaced it, because this pass
-    /// is the last point in the compiler that knows the two are one value.
-    /// Nothing renders it today — a `Scalar` local has no debug slot — and that
-    /// is exactly the regression part 2 repairs.
+    /// The hand-off to ADR-120 part 2. An elided box leaves its debugger
+    /// provenance on the scalar that replaced it, because this pass is the last
+    /// point in the compiler that knows the two are one value. A `Scalar` local
+    /// has no debug slot of its own; the value channel is the test below.
     #[test]
     fn an_elided_box_leaves_its_expression_span_on_the_scalar_that_replaced_it() {
         let src = "fn f(a: Int, b: Int) -> Int { a + b + 1 }";
@@ -1018,14 +998,14 @@ mod tests {
         );
     }
 
-    /// The other half of the hand-off, and the one part 2 actually reads: the
-    /// **box** learns which scalar now holds its word, so the backend can point
-    /// its debug slot at that scalar's definition.
+    /// The other half of the hand-off, and the one the backend actually reads:
+    /// the **box** learns which scalar now holds its word, so the backend can
+    /// point its debug slot at that scalar's definition.
     ///
     /// Recorded against the box rather than the scalar because the box is the
     /// local that owns the debug slot and the `symbol_id`. That is what keeps
-    /// `<tmp#7>` `<tmp#7>` — one metadata entry per `Gc` local, in position
-    /// order, exactly as ADR-120 decision 7 left it.
+    /// `<tmp#7>` named `<tmp#7>` — one metadata entry per `Gc` local, in
+    /// position order, exactly as ADR-120 decision 7 leaves it.
     #[test]
     fn an_elided_box_learns_which_scalar_holds_the_word_it_would_have_boxed() {
         let src = "fn f(a: Int, b: Int) -> Int { a + b + 1 }";
@@ -1078,10 +1058,10 @@ mod tests {
         }
     }
 
-    /// The `ConstGc` case (decision 4) hands part 2 the `Inst::ConstInt` that
-    /// replaced the reload, which is a `Scalar` local like any other. Without
-    /// this the immediate-forwarded literals would be the one shape that stayed
-    /// `<uninit>` for no reason a reader could state.
+    /// The `ConstGc` case (ADR-120 decision 4) hands the backend the
+    /// `Inst::ConstInt` that replaced the reload, which is a `Scalar` local like
+    /// any other. Without this the immediate-forwarded literals would be the one
+    /// shape that stayed `<uninit>` for no reason a reader could state.
     #[test]
     fn an_elided_small_int_literal_is_fed_by_the_const_int_that_replaced_it() {
         // `a + 7`: the `7` is in ADR-100's intern range, so its box is a

@@ -19,26 +19,18 @@
 //! **Not `#[repr(C)]`.** These are ordinary Rust enums and slices with the
 //! default representation, and nothing here crosses an FFI boundary: the plan
 //! is consumed by `praxis-runtime`, which is Rust and links against this crate,
-//! and only the plan *id* is passed as a JIT immediate. Earlier revisions of
-//! this doc claimed a C layout the types never had; if a plan ever does need to
-//! be read by generated code, that is a real representation change (explicit
-//! `#[repr(C)]`, no enums with payloads, no `&str` fat pointers) and not
-//! something to assume from this comment.
+//! and only the plan *id* is passed as a JIT immediate. If a plan ever does
+//! need to be read by generated code, that is a real representation change
+//! (explicit `#[repr(C)]`, no enums with payloads, no `&str` fat pointers) and
+//! not something to assume from this comment.
 //!
-//! # Ownership (IP-12)
+//! # Ownership
 //!
-//! Every plan used to be `Box::leak`ed — the nodes, the template parts, the
-//! literals, every field name — and pushed onto an unbounded global `Vec` whose
-//! length was narrowed to `u32` with an unchecked `as`. Three things were wrong
-//! with that: nothing was ever reclaimable, a long enough compile could wrap
-//! the index and hand the runtime a *different* plan, and index `0` doubled as
-//! the failure sentinel the HIR emitted when parser analysis failed — so a
-//! broken `parse(...)` silently ran plan zero.
-//!
-//! Now each [`CompiledPlan`] owns a `bumpalo` arena holding everything the
-//! plan's `&'static` fields point into, registration is bounded and checked,
-//! and a [`PlanId`] is a `NonZeroU32`, so "no plan" is not spelled `0` — it is
-//! not spellable at all.
+//! Each [`CompiledPlan`] owns a `bumpalo` arena holding everything the plan's
+//! `&'static` fields point into, so a plan is reclaimable at all; registration
+//! is bounded and checked, so a long enough compile cannot wrap the index and
+//! hand the runtime a *different* plan; and a [`PlanId`] is a `NonZeroU32`, so
+//! "no plan" is not spelled `0` — it is not spellable at all.
 //!
 //! Reclamation has the same ordering obligation as the JIT generation arena:
 //! record schemas the runtime builds for named-capture templates borrow their
@@ -67,7 +59,7 @@ pub enum PlanNode {
     Lines { child: u32 },
     /// `sections(P)` (homogeneous).
     Sections { child: u32 },
-    /// Named heterogeneous `sections(name: P, ..., tail: repeated(P))` (M9).
+    /// Named heterogeneous `sections(name: P, ..., tail: repeated(P))`.
     /// `fields` are the named arguments in source order, each contributing one
     /// record field and consuming
     /// [`SectionItemNode::sections_wanted`] sections; `repeated_tail` is the
@@ -77,29 +69,29 @@ pub enum PlanNode {
         fields: &'static [SectionItemNode],
         repeated_tail: Option<(&'static str, u32)>,
     },
-    /// `block(item, ...)` (M9, §7.5). Sequential parsers within one region;
+    /// `block(item, ...)` (§7.5). Sequential parsers within one region;
     /// positional named-capture templates flatten their fields into the result
     /// record, named items contribute one field each.
     Block { items: &'static [BlockItemNode] },
-    /// `choice(Name: P, ...)` (M9, §7.5). Try each case in source order; the
+    /// `choice(Name: P, ...)` (§7.5). Try each case in source order; the
     /// first match wins and its value becomes the variant's payload. `cases`
     /// are `(name, child_index)` pairs.
     Choice {
         cases: &'static [(&'static str, u32)],
     },
-    /// `optional(P)` (M9, §7.5). Parse `P`; on success return Some(value)
+    /// `optional(P)` (§7.5). Parse `P`; on success return Some(value)
     /// (Option tag 0), on failure consume nothing and return None (tag 1).
     Optional { child: u32 },
-    /// `scan(P)` (M9, §7.5). Slide a cursor; at each position try `P`; collect
+    /// `scan(P)` (§7.5). Slide a cursor; at each position try `P`; collect
     /// matches in source order, ignoring unmatched text.
     Scan { child: u32 },
-    /// `one_of("LR")` (M9, §7.5). `chars_index` is into `ParserPlan::literals`.
+    /// `one_of("LR")` (§7.5). `chars_index` is into `ParserPlan::literals`.
     OneOf { chars_index: u32 },
-    /// `chars(P, skip:)` (M9, §7.5). Apply a char-parser repeatedly.
+    /// `chars(P, skip:)` (§7.5). Apply a char-parser repeatedly.
     Characters { child: u32, skip: SkipPolicy },
-    /// `matrix(P)` (M9, §7.5, ADR-030). Whitespace-tokenized rectangular Grid.
+    /// `matrix(P)` (§7.5, ADR-030). Whitespace-tokenized rectangular Grid.
     Matrix { child: u32 },
-    /// Ragged `grid(P, ragged, fill:)` (M9, §7.5). `fill_index` into literals.
+    /// Ragged `grid(P, ragged, fill:)` (§7.5). `fill_index` into literals.
     GridRagged { child: u32, fill_index: u32 },
     /// `csv(P)`.
     Csv { child: u32 },
@@ -137,15 +129,14 @@ pub enum TemplatePartNode {
 /// a scalar when there is one and a tuple when there are several. A template
 /// with no captures matches literally and produces `Unit`.
 ///
-/// **Stated here, next to the parts it classifies, because it was previously
-/// stated in four places and three of them had gone stale.** The static type
-/// (`synthesize::template_type`), this lowering, the interpreter's assembly of
-/// the value, and the interpreter's *element tag* each answered the same
-/// question separately, and the tag answered `Unit` for the tuple shape: so
-/// ``read lines(`{int},{int}`)`` printed `[Unit, Unit]` and compared unequal to
-/// an identical `Vec` built with `push`, while `praxis check` typed it
-/// `Vec[(Int, Int)]` throughout. That is REP-54; ADR-092 has the whole story.
-/// The value and its tag now ask this one function.
+/// **Stated here, next to the parts it classifies, and asked rather than
+/// re-derived** (ADR-092). The interpreter assembles a template's value
+/// (`walk_template`) and tags a collection built from it
+/// (`template_result_descriptor`) through this one function, because answering
+/// the question separately is how the two drift: a tag that says `Unit` for the
+/// tuple shape makes ``read lines(`{int},{int}`)`` print `[Unit, Unit]` and
+/// compare unequal to an identical `Vec` built with `push`, while
+/// `praxis check` types it `Vec[(Int, Int)]` throughout.
 ///
 /// **There is no `PlanNode::Tuple`, and that is not an omission.** A variant
 /// carrying only child indices cannot represent a multi-capture template,
@@ -206,12 +197,12 @@ impl TemplateShape {
 }
 
 /// One named argument of a heterogeneous `sections(...)` other than its
-/// unbounded tail (M9, §7.5), in plan form.
+/// unbounded tail (§7.5), in plan form.
 ///
 /// The count is a plain `u32` and not the [`crate::ast::RepeatCount`] newtype:
-/// the invariant was discharged upstream, where the source span was still in
-/// hand to report the violation against, and the plan is a flat `&'static`
-/// repr the runtime reads without unwrapping anything.
+/// the invariant is discharged upstream, where the source span is still in hand
+/// to report the violation against, and the plan is a flat `&'static` repr the
+/// runtime reads without unwrapping anything.
 #[derive(Debug)]
 pub enum SectionItemNode {
     /// `name: P` — one section.
@@ -245,7 +236,7 @@ impl SectionItemNode {
     }
 }
 
-/// One item of a `block(...)` (M9, §7.5), in plan form.
+/// One item of a `block(...)` (§7.5), in plan form.
 #[derive(Debug)]
 pub enum BlockItemNode {
     /// A positional parser. A named-capture template's fields flatten into the
@@ -429,11 +420,10 @@ pub fn lower_to_plan(ast: &ParserAst) -> CompiledPlan {
 
 /// The identity of a registered parser plan.
 ///
-/// `NonZeroU32` on purpose: the HIR used to emit `plan_index: 0` when parser
-/// analysis *failed*, which is indistinguishable from the first successfully
-/// registered plan. There is now no `u32` that means "no plan", so that
-/// encoding is unwritable — a failed analysis lowers to an error expression
-/// instead.
+/// `NonZeroU32` on purpose: a `0` meaning "parser analysis failed" would be
+/// indistinguishable from the first successfully registered plan. No `u32`
+/// means "no plan", so that encoding is unwritable — a failed analysis lowers
+/// to an error expression instead.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct PlanId(NonZeroU32);
 
@@ -493,9 +483,7 @@ static PLAN_ARENA: Mutex<Vec<CompiledPlan>> = Mutex::new(Vec::new());
 /// Register a compiled plan, returning its id.
 ///
 /// # Errors
-/// [`TooManyPlans`] once [`MAX_PLANS`] plans have been registered. The
-/// predecessor pushed unconditionally and narrowed `Vec::len()` with an
-/// unchecked `as u32` (IP-12).
+/// [`TooManyPlans`] once [`MAX_PLANS`] plans have been registered.
 pub fn register_plan(plan: CompiledPlan) -> Result<PlanId, TooManyPlans> {
     register_with_limit(plan, MAX_PLANS)
 }
@@ -695,13 +683,9 @@ fn lower_node(b: &mut PlanBuilder<'_>, ast: &ParserAst) -> u32 {
 /// they are the separators the runtime matches, and they are what makes
 /// `` `{int},{int}` `` a pair rather than a comma-less run of digits. Which of
 /// the three a given template *is* is [`TemplateShape::of`]'s answer, read from
-/// these same parts by the interpreter; this function no longer decides it.
-///
-/// It used to look as though it did. There were two trailing branches here,
-/// byte-identical `push_node(PlanNode::Template { .. })` calls distinguished
-/// only by their comments — one for "named", one for "scalar or tuple" — which
-/// read as a lowering-time classification and was not one. `captures` is still
-/// collected, for the field indices [`lower_template_parts`] assigns.
+/// these same parts by the interpreter; this function does not decide it.
+/// `captures` is collected only for the field indices [`lower_template_parts`]
+/// assigns.
 fn lower_template(b: &mut PlanBuilder<'_>, parts: &[TemplatePart]) -> u32 {
     // Capture positions, which is what assigns each capture its field index in
     // the resulting record or tuple.
@@ -820,8 +804,7 @@ mod tests {
         }
     }
 
-    /// A `PlanId` cannot be zero, so the HIR's old `plan_index: 0` failure
-    /// sentinel has no encoding (IP-12).
+    /// A `PlanId` cannot be zero, so a `0` failure sentinel has no encoding.
     #[test]
     fn zero_is_not_a_plan_id() {
         assert!(PlanId::from_raw(0).is_none());
@@ -855,8 +838,7 @@ mod tests {
     }
 
     /// Registration is bounded and refuses cleanly: the caller gets a
-    /// diagnostic instead of a wrapped index (IP-12). The predecessor pushed
-    /// unconditionally and narrowed `Vec::len()` with an unchecked `as u32`.
+    /// diagnostic instead of a wrapped index.
     ///
     /// The bound is a parameter here only so the test need not register a
     /// million plans; a limit of zero refuses deterministically regardless of
@@ -887,7 +869,7 @@ mod tests {
 
     /// The plan's storage really is owned: an interned literal survives being
     /// read back out of the arena, and the `CompiledPlan` is what keeps it
-    /// alive (the predecessor `Box::leak`ed it instead).
+    /// alive.
     #[test]
     fn a_compiled_plan_owns_its_interned_strings() {
         let compiled = lower_to_plan(&ParserAst::Sep {
@@ -904,13 +886,10 @@ mod tests {
     /// Two anonymous captures lower to a `Template` node — **not** to a tuple
     /// node, because there is none and cannot be one (ADR-092).
     ///
-    /// This assertion is what makes deleting `PlanNode::Tuple` safe rather than
-    /// hopeful: the deleted variant was documented as "reserved" for nine
-    /// milestones and nothing ever pushed one, and this test is the standing
-    /// proof that the shape it was reserved for takes the `Template` path.
-    /// The literals between the captures are preserved on that path, which is
-    /// exactly what a `Tuple { elements: &[u32] }` had nowhere to put; the
-    /// interpreter reads the shape back off the parts with
+    /// This assertion is the standing proof that the tuple shape takes the
+    /// `Template` path. The literals between the captures are preserved on that
+    /// path, which is exactly what a `Tuple { elements: &[u32] }` would have
+    /// nowhere to put; the interpreter reads the shape back off the parts with
     /// [`TemplateShape::of`] and assembles the tuple from the captured values.
     #[test]
     fn template_literal_lower_to_plan() {

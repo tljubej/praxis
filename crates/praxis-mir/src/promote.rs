@@ -2,13 +2,12 @@
 //! a scalar-typed binding from being a heap object at all.
 //!
 //! [`crate::forward`] deletes a box whose only reader is in its own block. What
-//! it provably cannot touch is the shape handover 28 §1 named as what remains:
-//! a **loop-carried assignment**, which lowers to a [`Inst::MoveGc`] into the
-//! binding's existing slot. `collatz`'s `c` and `steps`, `mandelbrot`'s `x` and
-//! `y`, and the `acc` of `dump.rs`'s canonical loop are all that shape, and each
-//! costs one [`Inst::Materialize`] per iteration plus one guarded
-//! [`Inst::ExtractScalar`] per *use* per iteration — `c` is read three times in
-//! its loop body, in three different blocks.
+//! it provably cannot touch is a **loop-carried assignment**, which lowers to a
+//! [`Inst::MoveGc`] into the binding's existing slot. `collatz`'s `c` and
+//! `steps`, `mandelbrot`'s `x` and `y`, and the `acc` of `dump.rs`'s canonical
+//! loop are all that shape, and each costs one [`Inst::Materialize`] per
+//! iteration plus one guarded [`Inst::ExtractScalar`] per *use* per iteration —
+//! `c` is read three times in its loop body, in three different blocks.
 //!
 //! # What it does, which is not substitution
 //!
@@ -40,7 +39,7 @@
 //!   (a caller passes a `GcRef`), which is not this package.
 //! - **A runtime result is `Bottom`.** A `Vec[Int]` element read through
 //!   `praxis_vec_get` has no proof, so no `MirType` is consulted and no front-end
-//!   guarantee is believed — the premise handover 26 §4 refuted.
+//!   guarantee is believed.
 //! - **It is a greatest fixpoint**, so a loop variable whose back edge assigns it
 //!   from another loop variable resolves to its class instead of collapsing. That
 //!   is the shape this pass exists for; a pessimistic analysis would find nothing.
@@ -378,15 +377,14 @@ fn block_weights(func: &Function) -> Vec<i64> {
 /// far end: `m` alone sees one box added and nothing removed, so it is declined;
 /// the temp that fed it then sees a copy to a *non*-promoted slot, so it is
 /// declined; and so on backwards until nothing is promoted and the boxes have
-/// merely moved. Both of ADR-121's first two failing tests were that, and the
-/// symptom was a shape that ended one box short of correct rather than wrong.
+/// merely moved.
 ///
 /// A `MoveGc` between two candidates is a copy of one value, so the two slots
 /// are promoted together or not at all. Union them and the group is scored as
 /// what it is: the boxes its definitions stop writing, against the boxes its
 /// escaping uses start writing.
 ///
-/// # Why this needs no fixpoint, where the per-local rule did
+/// # Why this needs no fixpoint
 ///
 /// The groups are independent. A `MoveGc` whose two ends are both candidates has
 /// already unioned them, so no edge crosses a group boundary with a candidate on
@@ -797,8 +795,7 @@ out(acc)
         let lowered = lower_src_to_mir(CANONICAL_LOOP);
         let c = census(lowered.entry());
         // `out(acc)` still wants an object, and nothing else does: one
-        // materialization, outside the loop. Before this pass the same function
-        // materialized once per assignment per iteration.
+        // materialization, outside the loop.
         assert_eq!(
             c.count(InstKind::Materialize(ScalarKind::Int)),
             1,
@@ -852,8 +849,8 @@ out(acc)
     }
 
     /// `mandelbrot`'s shape, reduced: two loop-carried `Float`s, each assigned
-    /// from an expression over both. Handover 26 predicted W8-S1 takes that
-    /// inner loop to zero float allocations; this is the claim as a test.
+    /// from an expression over both. The inner loop keeps no float allocation:
+    /// only the `out(x)` after it boxes.
     #[test]
     fn a_loop_carried_float_is_promoted() {
         let src = "\

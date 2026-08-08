@@ -5,19 +5,16 @@
 //! parser produces rowan nodes; `praxis-hir` converts those into this `ParserAst`
 //! before validation, type synthesis, and plan construction.
 //!
-//! The M6 subset (§19.6): atomics `int`/`char`/`word`/`text`/`rest`/`digit`;
-//! constructors `lines`/`sections`/`csv`/`ws`/`sep`/`grid`; and backtick
-//! templates with `{name:parser}` / `{parser}` captures. The advanced
-//! constructors (`block`, `choice`, `scan`, heterogeneous `sections`, `optional`,
-//! `matrix`, `chars`, `repeated`) land in M9.
+//! The node set is §7.4's ten atomics ([`AtomicKind`]), §7.5's fourteen
+//! structural constructors ([`Constructor`]), and backtick templates with
+//! `{name:parser}` / `{parser}` captures ([`TemplatePart`]).
 
 use praxis_source::Span;
 
 /// One of the atomic parsers (§7.4).
 ///
-/// **§7.4's list is closed, and this is all ten of it.** Four were missing
-/// (IP-11) — `uint`, `float`, `byte`, `identifier` — so a program that wrote
-/// one got "unknown atomic parser" for a name the design document requires.
+/// **§7.4's list is closed, and this is all ten of it.** A name the design
+/// document requires but this enum omits gets "unknown atomic parser".
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AtomicKind {
     /// Signed decimal integer → `Int`.
@@ -25,11 +22,11 @@ pub enum AtomicKind {
     /// Non-negative decimal integer → `Int`.
     ///
     /// **`Int`, not `ScalarType::UInt`.** `UInt` is reserved and has no runtime
-    /// object at all: `praxis_repr::builtin_for_type` answers `NoRuntimeRepr`
-    /// for it, and under D9 a JIT compile fails when a descriptor is missing —
-    /// so a `uint` capture typed `UInt` would make every program containing one
-    /// fail to compile. The non-negativity is enforced by the *parse rule*
-    /// (a leading `-` is refused), which is what §7.4 asks for.
+    /// object at all: `praxis-repr` answers `NoRuntimeRepr` for it, and a JIT
+    /// compile fails when a descriptor is missing — so a `uint` capture typed
+    /// `UInt` would make every program containing one fail to compile. The
+    /// non-negativity is enforced by the *parse rule* (a leading `-` is
+    /// refused), which is what §7.4 asks for.
     UInt,
     /// Decimal floating-point number → `Float`.
     Float,
@@ -51,7 +48,7 @@ pub enum AtomicKind {
     /// **one** identifier class (`praxis_syntax::ident`), which is a deliberate
     /// widening. A parser that accepted a narrower set of names than the
     /// language itself does would refuse identifiers a Praxis program can
-    /// declare, and F3 exists precisely so there is not a second rule.
+    /// declare, and the workspace keeps exactly one copy of that rule.
     Identifier,
     /// Minimally consumes text until the following template literal can match → `Text`.
     Text,
@@ -64,9 +61,8 @@ impl AtomicKind {
     ///
     /// The **only** place these ten strings are spelled. Completion labels,
     /// hover, and the runtime's `expected …` parse-fault names all read them
-    /// from here; `praxis_runtime::parser::walk_atomic` used to re-spell them
-    /// per-arm, and the copy shared by `text` and `rest` had already drifted to
-    /// naming `text` for both.
+    /// from here, so a second copy cannot drift into naming two atomics the
+    /// same.
     pub fn keyword(self) -> &'static str {
         match self {
             AtomicKind::Int => "int",
@@ -146,12 +142,11 @@ pub enum WsPolicy {
     /// The literal had no whitespace run in front of it, so no whitespace is
     /// consumed before matching it.
     ///
-    /// Added by S20 (IPR-12). Before it, every literal was tagged
-    /// [`SpaceRun`](Self::SpaceRun) whether or not the template had written a
-    /// space run, so the interpreter could not tell "this literal had a leading
-    /// run" from "it did not" — and the only way to keep templates matching was
-    /// to implement `SpaceRun` as zero-or-more, contradicting its own
-    /// definition. This variant is what lets `SpaceRun` mean what it says.
+    /// This variant is what lets [`SpaceRun`](Self::SpaceRun) mean what it
+    /// says. Without it every literal would be tagged `SpaceRun` whether or not
+    /// the template wrote a space run, the interpreter could not tell the two
+    /// apart, and the only way to keep templates matching would be to implement
+    /// `SpaceRun` as zero-or-more — contradicting its own definition.
     None,
     /// A run of ordinary spaces matches one or more spaces or tabs (the default,
     /// flexible rule for AoC column alignment, §7.2).
@@ -168,14 +163,14 @@ pub enum WsPolicy {
     Tab,
 }
 
-/// The name of a template capture — **an identifier by construction** (IP-04).
+/// The name of a template capture — **an identifier by construction**.
 ///
-/// §4.1 allows Unicode identifiers and F3 gave the workspace one character
-/// class for them. The scanner used to carry a private ASCII copy of the rule,
-/// so `{λ:int}` was not recognized as a *named* capture at all: the whole body
-/// `λ:int` was silently reinterpreted as the parser expression. A name a
-/// consumer cannot accept must be reported, never rewritten into a different
-/// name — see `praxis_syntax::ident::is_ident`, which is the predicate.
+/// §4.1 allows Unicode identifiers and the workspace has one character class
+/// for them, `praxis_syntax::ident::is_ident`, which is the predicate here. A
+/// private ASCII copy of the rule would leave `{λ:int}` unrecognized as a
+/// *named* capture, silently reinterpreting the whole body `λ:int` as the
+/// parser expression: a name a consumer cannot accept must be reported, never
+/// rewritten into a different name.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CaptureName(Box<str>);
 
@@ -235,9 +230,7 @@ pub enum TemplatePart {
     /// A capture `{name? : parser}`. `name` is `None` for anonymous captures.
     ///
     /// `parser` is the capture's **own** parser expression, parsed from its own
-    /// body (IP-05, D10). It used to be a placeholder `Atomic { Int }` that the
-    /// HIR overwrote by rescanning the whole template and taking the first
-    /// recognizable name — so every capture in a template shared one kind.
+    /// body (ADR-072), so captures in one template do not share a kind.
     ///
     /// `span` covers the whole capture including both braces; `name_span`
     /// covers the name **as trimmed** (`{ n :int}` names `n`, not `" n "`), and
@@ -261,7 +254,7 @@ impl TemplatePart {
     }
 }
 
-/// A parser expression (§7.9 `ParserExpr`). The M6 subset of the full node list.
+/// A parser expression (§7.9 `ParserExpr`).
 #[derive(Clone, Debug)]
 pub enum ParserAst {
     /// An atomic parser: `int`, `char`, etc.
@@ -273,11 +266,12 @@ pub enum ParserAst {
     },
     /// `lines(P)` → `Vec[result(P)]`.
     Lines { child: Box<ParserAst>, span: Span },
-    /// `sections(P)` → `Vec[result(P)]` (homogeneous; named sections are M9).
+    /// `sections(P)` → `Vec[result(P)]` (homogeneous; the named form is
+    /// [`SectionsNamed`](Self::SectionsNamed)).
     Sections { child: Box<ParserAst>, span: Span },
-    /// Named heterogeneous `sections(name: P, ..., tail: repeated(P))` (M9,
-    /// §7.5). Result is an anonymous record with one field per named argument,
-    /// in source order.
+    /// Named heterogeneous `sections(name: P, ..., tail: repeated(P))` (§7.5).
+    /// Result is an anonymous record with one field per named argument, in
+    /// source order.
     ///
     /// A named argument takes one of three forms, and the split between
     /// `fields` and `repeated_tail` is what keeps the third one's rule
@@ -309,7 +303,7 @@ pub enum ParserAst {
     /// `ws(P)` → `Vec[result(P)]` (whitespace-separated).
     Ws { child: Box<ParserAst>, span: Span },
     /// `sep(separator, P)` → `Vec[result(P)]`. The separator is a
-    /// [`Separator`], which cannot be empty (IP-10).
+    /// [`Separator`], which cannot be empty.
     Sep {
         separator: Separator,
         child: Box<ParserAst>,
@@ -317,13 +311,13 @@ pub enum ParserAst {
     },
     /// `grid(P)` → `Grid[result(P)]`.
     Grid { child: Box<ParserAst>, span: Span },
-    /// `block(item, ...)` (M9, §7.5): apply sequential parsers within one
+    /// `block(item, ...)` (§7.5): apply sequential parsers within one
     /// region. A positional item that is a named-capture template *flattens*
     /// its captures into the block's record; a positional scalar must be
     /// named (else rejected). A named item contributes one field. Result is a
     /// flattened anonymous record.
     Block { items: Vec<BlockItem>, span: Span },
-    /// `choice(Name: P, Name: P, ...)` (M9, §7.5): parse one of several
+    /// `choice(Name: P, Name: P, ...)` (§7.5): parse one of several
     /// alternatives, generating an anonymous enum. Each case's parser produces
     /// the payload (a record for a named-capture template, a scalar otherwise).
     /// The first alternative that matches wins (source order).
@@ -331,34 +325,34 @@ pub enum ParserAst {
         cases: Vec<(String, ParserAst)>,
         span: Span,
     },
-    /// `optional(P)` (M9, §7.5): parse `P` if it matches, else consume nothing
+    /// `optional(P)` (§7.5): parse `P` if it matches, else consume nothing
     /// and return `None`. Result is `Option[result(P)]`. Failure consumes no
     /// input (parser-level optionality, not exception recovery).
     Optional { child: Box<ParserAst>, span: Span },
-    /// `scan(P)` (M9, §7.5): find repeated `P` matches inside otherwise
+    /// `scan(P)` (§7.5): find repeated `P` matches inside otherwise
     /// irrelevant text (e.g. corrupted AoC input). Returns matches in source
     /// order as `Vec[result(P)]`, ignoring unmatched text.
     Scan { child: Box<ParserAst>, span: Span },
-    /// `one_of("LR")` (M9, §7.5): match one character from a literal character
+    /// `one_of("LR")` (§7.5): match one character from a literal character
     /// set. Result is `Char`.
     OneOf { chars: String, span: Span },
-    /// `chars(P, skip:)` (M9, §7.5): apply a char-parser repeatedly. Result is
-    /// `Vec[result(P)]` (D-S20-A) — **not** `Vec[Char]` whatever `P` is, which
-    /// is what `synthesize` said while the runtime stored what `P` produced, so
-    /// `chars(int, skip: none)` advertised a `Vec[Char]` full of `Int` objects.
-    /// `chars(one_of("LR"))` is still `Vec[Char]`, because `one_of` is `Char`.
-    /// The `skip` policy trims between matches; see [`SkipPolicy`], and note
-    /// that `newlines` is the *broader* of the two non-`none` policies.
+    /// `chars(P, skip:)` (§7.5): apply a char-parser repeatedly. Result is
+    /// `Vec[result(P)]` — **not** `Vec[Char]` whatever `P` is, since the
+    /// runtime stores what `P` produced: `chars(int, skip: none)` is a
+    /// `Vec[Int]`, and `chars(one_of("LR"))` is a `Vec[Char]` because `one_of`
+    /// is `Char`. The `skip` policy trims between matches; see [`SkipPolicy`],
+    /// and note that `newlines` is the *broader* of the two non-`none`
+    /// policies.
     Characters {
         child: Box<ParserAst>,
         skip: SkipPolicy,
         span: Span,
     },
-    /// `matrix(P)` (M9, §7.5, ADR-030): parse lines of whitespace-separated
+    /// `matrix(P)` (§7.5, ADR-030): parse lines of whitespace-separated
     /// tokens into a rectangular `Grid[result(P)]`. Same result type as `grid`
     /// but tokenizes on whitespace rather than per-character.
     Matrix { child: Box<ParserAst>, span: Span },
-    /// Ragged `grid(P, ragged, fill:)` (M9, §7.5): permit uneven rows and pad
+    /// Ragged `grid(P, ragged, fill:)` (§7.5): permit uneven rows and pad
     /// to the maximum width with `fill`. The plain `grid(P)` keeps its own arm.
     GridRagged {
         child: Box<ParserAst>,
@@ -369,8 +363,7 @@ pub enum ParserAst {
     },
 }
 
-/// The separator of a `sep(separator, P)` call — **non-empty by construction**
-/// (IP-10).
+/// The separator of a `sep(separator, P)` call — **non-empty by construction**.
 ///
 /// An empty separator is not a parser that matches nothing: it is a cursor that
 /// never advances. `walk_sep` in `praxis-runtime` asks
@@ -556,23 +549,19 @@ impl SectionItem {
 /// English word, and `skip: newlines` means "newlines *as well*", not "newlines
 /// only".
 ///
-/// That inversion is not academic: it is what made
-/// `chars(one_of("^v<>"), skip: whitespace)` — §7.5's own example — look like it
-/// should absorb an input file's trailing `\n`, and a stage shipped believing
-/// it. It does not, and it does not have to: the terminator is **inside** the
+/// That inversion is not academic: `chars(one_of("^v<>"), skip: whitespace)` —
+/// §7.5's own example — looks like it should absorb an input file's trailing
+/// `\n`. It does not, and it does not have to: the terminator is **inside** the
 /// root region — the root region is the whole buffer, and nothing is trimmed off
 /// it — and it is forgiven because it is whitespace the character parser
 /// declined (`walk_characters` asks the child first and accepts a
 /// whitespace-only leftover through `ByteRegion::is_all_whitespace`, the bound
-/// half of ADR-078's rule). No skip policy has to account for it. (An earlier
-/// version of this note said the terminator was *outside* the root region, which
-/// was round two's answer — a trim of exactly one terminator, deleted because a
-/// file ending `"\n\n"` defeated it.) The sets are kept as they are because they are the ones
-/// §7.5's example needs and swapping them would silently change what every
-/// existing `skip: newlines` program accepts; what was missing was this
-/// paragraph. `walk_characters`/`skip_chars` in `praxis-runtime` is the
-/// implementation, and `SkipPolicy::skips` below is the single description both
-/// the runtime comment and the `skip:` diagnostic quote.
+/// half of ADR-078's rule). No skip policy has to account for it. The sets are
+/// the ones §7.5's example needs, and swapping them would silently change what
+/// every existing `skip: newlines` program accepts. `walk_characters` /
+/// `skip_chars` in `praxis-runtime` is the implementation, and
+/// `SkipPolicy::skips` below is the single description both the runtime comment
+/// and the `skip:` diagnostic quote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SkipPolicy {
     /// No trimming between matches: every byte of the region is the child's.
@@ -617,7 +606,7 @@ impl SkipPolicy {
     ];
 }
 
-/// One item in a `block(...)` (M9, §7.5).
+/// One item in a `block(...)` (§7.5).
 #[derive(Clone, Debug)]
 pub enum BlockItem {
     /// A positional parser. If it is a named-capture template, its captures
@@ -724,8 +713,7 @@ impl ParserAst {
 /// span *and* its parts, while [`crate::body`] — which has just scanned a
 /// nested template whose interior has its own offsets — has to rebase the parts
 /// **without** touching the enclosing span, which it already built in the outer
-/// text's offsets. Doing that with an open-coded loop is how the nested case
-/// came to be missed in the first place.
+/// text's offsets.
 pub fn shift_part_spans(parts: &mut [TemplatePart], delta: u32) {
     for part in parts {
         match part {
@@ -746,14 +734,11 @@ pub fn shift_part_spans(parts: &mut [TemplatePart], delta: u32) {
     }
 }
 
-/// The name of a structural constructor — **the whole of §7.5**, not just the
-/// M6 six.
+/// The name of a structural constructor — **the whole of §7.5**.
 ///
-/// This table used to know six names, and the eight M9 constructors were
-/// dispatched ahead of it by an `if ctor_name == "…"` chain in `praxis-hir`
-/// that took `args.into_iter().next()` and dropped the rest (IP-07). A
-/// constructor with no row here had no arity, so it had no arity *error*
-/// either: an unknown name became `None` with no diagnostic at all.
+/// Every constructor is dispatched from this table and nowhere else. A
+/// constructor with no row here would have no arity, and therefore no arity
+/// *error* either: its name would become `None` with no diagnostic at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Constructor {
     Lines,
@@ -778,10 +763,10 @@ pub enum Constructor {
 
 /// The **shape** of a constructor call's argument list (§7.5).
 ///
-/// A count was not enough: `sep` takes a string and then a parser, `choice`
+/// A count is not enough: `sep` takes a string and then a parser, `choice`
 /// takes named arguments and no positional ones, `chars` takes a parser and an
-/// optional keyword. Checking only `positional_arity` is why
-/// `optional(int, word)` and `choice(int)` both passed.
+/// optional keyword. Checking a positional arity alone would accept
+/// `optional(int, word)` and `choice(int)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArgShape {
     /// Exactly `n` positional parsers and nothing else.
@@ -943,14 +928,11 @@ impl Constructor {
     /// `grid(P, ragged, fill: value)`'s `fill:` (§7.5). `None` for every other
     /// constructor.
     ///
-    /// Both front ends used to decide this from the argument's *name* alone
-    /// (`if name == "skip" || name == "fill"`), with no reference to the
-    /// constructor being called. So a `block` item or a `sections` field
-    /// legitimately named `fill` or `skip` was minted as a keyword argument,
-    /// accepted by the shape check as a well-shaped named argument, and then
-    /// dropped by a `filter_map` — the field vanished from the record with no
-    /// diagnostic. A keyword belongs to a constructor, so the constructor is
-    /// what answers the question.
+    /// A keyword belongs to a constructor, so the constructor is what answers
+    /// the question. Deciding it from the argument's *name* alone would mint a
+    /// `block` item or a `sections` field legitimately named `fill` or `skip`
+    /// as a keyword argument, and the field would then vanish from the record
+    /// with no diagnostic.
     pub fn keyword_arg(self) -> Option<&'static str> {
         match self {
             Constructor::Chars => Some("skip"),
@@ -964,14 +946,12 @@ impl Constructor {
     /// constructor.
     ///
     /// The companion to [`Constructor::keyword_arg`], and here for the same
-    /// reason: `ragged` had no row at all, so both front ends minted a
-    /// `CallArg::Flag` from the bare *name* with no reference to the
-    /// constructor being called. A bare `ragged` was therefore a flag in
-    /// **every** constructor's argument list — `lines(ragged)` was told it had
-    /// written a flag where a parser belongs rather than that `ragged` is not a
-    /// parser, and the word was reserved everywhere instead of in `grid`. A
-    /// flag belongs to a constructor, so the constructor is what answers the
-    /// question.
+    /// reason: a flag belongs to a constructor, so the constructor is what
+    /// answers the question. Minting a `CallArg::Flag` from the bare *name*
+    /// would make `ragged` a flag in **every** constructor's argument list, so
+    /// `lines(ragged)` would be told it had written a flag where a parser
+    /// belongs rather than that `ragged` is not a parser, and the word would be
+    /// reserved everywhere instead of in `grid`.
     pub fn flag_arg(self) -> Option<&'static str> {
         match self {
             Constructor::Grid => Some("ragged"),
@@ -1004,10 +984,8 @@ impl Constructor {
 mod tests {
     use super::*;
 
-    /// §7.4's list is a **closed set of ten**, and it used to be six: `uint`,
-    /// `float`, `byte` and `identifier` had no row at all, so a program that
-    /// wrote one of the design document's own atomic names got "unknown atomic
-    /// parser" (IP-11).
+    /// §7.4's list is a **closed set of ten**, and every one of the design
+    /// document's atomic names round-trips through the table.
     #[test]
     fn atomic_round_trips_keywords() {
         for kind in AtomicKind::ALL {
@@ -1016,8 +994,8 @@ mod tests {
             // `Constructor`'s sweep below gives: the `names` assertion under
             // this loop looks like it pins the set, but it collects *from
             // `ALL`*, so an eleventh atomic left out of `ALL` leaves that list
-            // ten long and green — the same blind spot `ALL.len() == 14` had.
-            // Adding a variant fails to compile here instead.
+            // ten long and green. Adding a variant fails to compile here
+            // instead.
             match kind {
                 AtomicKind::Int
                 | AtomicKind::UInt
@@ -1057,14 +1035,10 @@ mod tests {
         }
     }
 
-    /// **Rewritten (IP-07).** This used to assert three numbers out of
-    /// `expected_arity`, which was the whole of the constructor check — and a
-    /// count cannot say that `sep`'s first argument is a *string*, that
-    /// `choice` takes no positional argument at all, or that `optional` takes
-    /// one and not two. Eight of §7.5's fourteen constructors had no row here,
-    /// so they had no arity and therefore no arity error.
-    ///
-    /// The table now states the *shape*, and this asserts it for every name.
+    /// Every §7.5 constructor round-trips through the table and states its
+    /// argument **shape**, not just a count: a count cannot say that `sep`'s
+    /// first argument is a *string*, that `choice` takes no positional argument
+    /// at all, or that `optional` takes one and not two.
     #[test]
     fn constructor_round_trips_keywords_and_states_its_shape() {
         for ctor in Constructor::ALL {
@@ -1076,11 +1050,11 @@ mod tests {
             );
             // Every §7.5 name is spelled here, exhaustively: adding a
             // constructor fails to compile at this match rather than passing
-            // quietly out of `ALL`. That is what `ALL.len() == 14` could not
-            // do — a count is green while the list is short and only fires
-            // when the list *was* updated and the number was not. `ALL` feeds
-            // completion, signature help and the keyword list as well as this
-            // sweep, so a name missing from it is one the editor never offers.
+            // quietly out of `ALL`. A length assertion could not do that — it
+            // is green while the list is short and only fires when the list
+            // *was* updated and the number was not. `ALL` feeds completion,
+            // signature help and the keyword list as well as this sweep, so a
+            // name missing from it is one the editor never offers.
             match ctor {
                 Constructor::Lines
                 | Constructor::Sections
@@ -1123,8 +1097,7 @@ mod tests {
         );
 
         // And which constructor owns `ragged` — one, and not "whichever call
-        // happens to have a bare `ragged` in it", which is what both front ends
-        // used to answer.
+        // happens to have a bare `ragged` in it".
         for ctor in Constructor::ALL {
             let expected = (*ctor == Constructor::Grid).then_some("ragged");
             assert_eq!(ctor.flag_arg(), expected, "`{}`", ctor.keyword());

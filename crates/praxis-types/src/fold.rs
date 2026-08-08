@@ -1,35 +1,27 @@
-//! The one walk over [`TypeData`] (F9).
+//! The one walk over [`TypeData`].
 //!
-//! Five recursive walks over the type arena were written independently —
-//! `lower_levels` and `occurs` (unify), `generalize_walk` and
-//! `instantiate_walk` (generalize), and `deep_resolve` (db) — and every one of
-//! them ended in a `_ => …` catch-all. A catch-all over `TypeData` is a silent
-//! omission waiting to happen, and it has happened twice:
+//! [`fold`] is the crate's single traversal of the type arena: its match is
+//! exhaustive with no catch-all, and a folder overrides only the arms it cares
+//! about. Level clamping and `occurs` (unify), generalization and instantiation
+//! (generalize) and `deep_resolve` (db) are all folders. A `_ => …` catch-all
+//! over `TypeData` is a silent omission waiting to happen — ADR-025 records one
+//! that lost a `Collection` arm exactly that way — so adding a `TypeData`
+//! variant is a compile error in one place instead of a silent skip in each
+//! walk.
 //!
-//! * ADR-025 records `instantiate_walk` losing its `Collection` arm exactly
-//!   this way.
-//! * `deep_resolve`'s `_ => t` skips `Record` and `Enum` *today*, so the crash
-//!   debugger's static-type capture (ADR-035) hands back a record whose fields
-//!   are still unresolved variables.
-//!
-//! [`fold`] is the single traversal, its match is exhaustive with no catch-all,
-//! and a folder overrides only the arms it cares about. Adding a `TypeData`
-//! variant is now a compile error in one place instead of five silent skips.
-//!
-//! # Two things the fold does that no hand-written walk did
+//! # Two things the fold does that a hand-written walk forgets
 //!
 //! **A cycle memo.** Record and enum children live in side tables, not in the
-//! type slot, so a type can reach itself through a def — and none of the five
-//! walks guarded against it. `deep_resolve` in particular would hang. Every
-//! type is folded at most once per fold, and a type reached again while it is
-//! still being folded maps to itself.
+//! type slot, so a type can reach itself through a def. Every type is folded at
+//! most once per fold, and a type reached again while it is still being folded
+//! maps to itself.
 //!
 //! **Identity preservation.** A composite is re-interned only if a child
-//! actually changed. `instantiate` of a scheme with no applicable binder now
-//! returns the *same* handle rather than a fresh copy of the whole tree, which
-//! is what stopped the arena growing per instantiation (TY-02) — and, for a
-//! record or enum, what stops a fresh nominal def being minted per use site
-//! when nothing about the def needed specializing.
+//! actually changed. `instantiate` of a scheme with no applicable binder returns
+//! the *same* handle rather than a fresh copy of the whole tree, which is what
+//! keeps the arena from growing per instantiation — and, for a record or enum,
+//! what stops a fresh nominal def being minted per use site when nothing about
+//! the def needed specializing.
 //!
 //! # Writing a folder
 //!
@@ -94,8 +86,8 @@ pub trait TypeFolder {
         t
     }
 
-    /// A type variable, in whatever state pruning left it: `Unbound` or
-    /// `Generalized` (a `Linked` var is followed before the folder sees it).
+    /// A type variable, in the state pruning left it: `Unbound` (a `Linked` var
+    /// is followed before the folder sees it).
     fn fold_var(&mut self, t: Type, _var: VarId, _state: &VarState) -> Type {
         t
     }
@@ -233,17 +225,16 @@ pub fn fold_collection_default<F: TypeFolder + ?Sized>(
 
 /// The default [`TypeFolder::fold_record`].
 ///
-/// # Two shapes, one arm (F12)
+/// # Two shapes, one arm
 ///
 /// A **generic** def is a definition, not a type: its field types are written
 /// in terms of its own parameters, and the instance's `args` are the whole
 /// substitution. Folding it means folding the arguments and keeping the def —
-/// which is what preserves nominal identity across instantiation (TY-06).
+/// which is what preserves nominal identity across instantiation.
 ///
 /// A **non-generic** def has no arguments, so its field types *are* the type's
-/// children. Folding one that changed registers a specialized def, as it always
-/// has: the anonymous structural records the input parser synthesizes are the
-/// case that needs it.
+/// children. Folding one that changed registers a specialized def: the anonymous
+/// structural records the input parser synthesizes are the case that needs it.
 pub fn fold_record_default<F: TypeFolder + ?Sized>(
     folder: &mut F,
     t: Type,
@@ -400,9 +391,8 @@ pub fn fold_enum_default<F: TypeFolder + ?Sized>(
     let mut changed = false;
     let mut variants = Vec::with_capacity(edef.variants.len());
     for variant in &edef.variants {
-        // TY-05: one payload representation, so one arm. This was a two-arm
-        // match over `Option<Vec<Type>>` whose `None` case existed only to say
-        // "the empty payload, spelled the other way".
+        // One payload representation, so one arm: an empty payload is an empty
+        // list, not a second spelling.
         let (payload, any) = fold_all(folder, &variant.payload);
         changed |= any;
         variants.push(EnumVariantDef {
@@ -464,8 +454,8 @@ mod tests {
         }
     }
 
-    /// TY-02. A fold that changes nothing returns the handles it was given, all
-    /// the way down — no re-interning, no arena growth. This is what makes
+    /// A fold that changes nothing returns the handles it was given, all the
+    /// way down — no re-interning, no arena growth. This is what makes
     /// `instantiate` of a monomorphic scheme free.
     #[test]
     fn an_identity_fold_returns_the_same_handles_and_interns_nothing() {
@@ -503,7 +493,8 @@ mod tests {
         assert_eq!(db.render(folded), "Vec[(Text, Bool)]");
     }
 
-    /// The fold walks into records and enums — the two `deep_resolve` skipped.
+    /// The fold walks into records and enums, whose children live in the `db`'s
+    /// side tables rather than in the type slot.
     #[test]
     fn records_and_enums_are_folded_through_their_defs() {
         let mut db = TypeDb::new();
@@ -574,9 +565,9 @@ mod tests {
 
     /// A record that reaches itself through its own field terminates. Nothing
     /// builds one today — `occurs` rejects a cyclic *variable* link — but the
-    /// side tables make it representable, and F12's `Record { def, args }` makes
-    /// it reachable. The memo is what keeps this from hanging: without it this
-    /// test does not fail, it runs until the stack ends.
+    /// side tables make it representable and `Record { def, args }` makes it
+    /// reachable. The memo is what keeps this from hanging: without it this test
+    /// does not fail, it runs until the stack ends.
     #[test]
     fn a_record_that_contains_itself_terminates() {
         let mut db = TypeDb::new();

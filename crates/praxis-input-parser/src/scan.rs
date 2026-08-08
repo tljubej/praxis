@@ -12,13 +12,12 @@
 //! fixes the dependency direction, and this crate must not depend on the
 //! ordinary grammar.
 //!
-//! # The cursor (IP-01)
+//! # The cursor
 //!
-//! The scanner used to walk `interior.as_bytes()` with a bare `usize` and turn
-//! each ordinary byte into a `char` with `char::from(b)` — a Latin-1 decode, so
-//! `λ=` came out as `Î»=`. Every position here is a **scalar** boundary with its
-//! absolute byte offset in `interior`, and there is no `char::from(u8)` left to
-//! split a multi-byte scalar.
+//! Every position here is a **scalar** boundary with its absolute byte offset in
+//! `interior`. The scanner walks `char_indices`, never bytes: `char::from(u8)`
+//! is a Latin-1 decode, and it would both split a multi-byte scalar and turn
+//! `λ=` into `Î»=`.
 
 use std::iter::Peekable;
 use std::str::CharIndices;
@@ -42,16 +41,15 @@ pub use praxis_syntax::MAX_TEMPLATE_NESTING as MAX_NESTING;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanError {
     /// An invalid escape sequence (e.g. `\q`). `seq` is **the text the source
-    /// actually wrote**, sliced from it, not a re-`format!` of a guessed byte
-    /// (IP-03).
+    /// actually wrote**, sliced from it, not a re-`format!` of a guessed byte.
     InvalidEscape { byte_offset: usize, seq: String },
     /// An unterminated capture `{...` (no closing `}`).
     UnterminatedCapture { byte_offset: usize },
     /// An empty capture `{}`.
     EmptyCapture { byte_offset: usize },
-    /// A capture whose name is not an identifier (§4.1, IP-04).
+    /// A capture whose name is not an identifier (§4.1).
     InvalidCaptureName { byte_offset: usize, name: String },
-    /// A capture body naming a parser that does not exist (IP-06).
+    /// A capture body naming a parser that does not exist.
     UnknownCaptureKind { byte_offset: usize, name: String },
     /// A capture body calling a constructor that does not exist (§7.5).
     UnknownConstructor { byte_offset: usize, name: String },
@@ -63,11 +61,10 @@ pub enum ScanError {
     CallShape(ValidationError),
     /// Nesting past [`MAX_NESTING`].
     ///
-    /// `what` is **which** nesting hit the bound — templates, `{`, or `(`. The
-    /// message named templates for all three, so `csv(` thirty-three deep was
-    /// reported as "template nesting is deeper than 32" for text with one
-    /// template in it. A diagnostic that states the wrong thing is worse than a
-    /// vague one.
+    /// `what` is **which** nesting hit the bound — templates, `{`, or `(`. A
+    /// diagnostic that states the wrong thing is worse than a vague one: a
+    /// `csv(` thirty-three deep is a parenthesis bound, and calling it template
+    /// nesting misnames the limit in text that holds one template.
     NestingTooDeep {
         byte_offset: usize,
         what: &'static str,
@@ -97,9 +94,7 @@ impl ScanError {
     /// scanner is handed the text between the backticks and knows nothing about
     /// where that text sits in the template that contains it. The caller does
     /// know, and this is how the two are joined. Without it every caret under a
-    /// nested template lands short by the nested interior's own offset — the
-    /// error for `` `{a:sections(x: `{y:csv(int, int)}`)}` `` pointed at
-    /// `sections`.
+    /// nested template lands short by the nested interior's own offset.
     #[must_use]
     pub fn shifted(self, delta: usize) -> ScanError {
         let bump = |at: usize| at + delta;
@@ -146,13 +141,12 @@ impl ScanError {
 
     /// The diagnostic this error is reported under.
     ///
-    /// **Exhaustive on purpose** (IP-06). Every `ScanError` used to be
-    /// flattened into `DiagCode::TemplateScan` (I030) by one `err_diag` call in
-    /// `praxis-hir`, so the codes ADR-051 allocated for these cases —
-    /// `InvalidCaptureName` I011, `UnknownCaptureKind` I012,
-    /// `UnknownConstructor` I013 — were constructed nowhere in the tree. A
-    /// `match` with no wildcard is what stops the next variant from silently
-    /// inheriting I030.
+    /// **Exhaustive on purpose.** A wildcard would flatten every variant it
+    /// caught into `DiagCode::TemplateScan` (I030) and leave the codes ADR-051
+    /// allocates for these cases — `InvalidCaptureName` I011,
+    /// `UnknownCaptureKind` I012, `UnknownConstructor` I013 — constructed
+    /// nowhere in the tree. A `match` with no wildcard is what stops the next
+    /// variant from silently inheriting I030.
     #[must_use]
     pub fn code(&self) -> DiagCode {
         match self {
@@ -224,10 +218,8 @@ impl std::fmt::Display for ScanError {
             } => write!(f, "malformed capture body at byte {byte_offset}: {message}"),
             ScanError::CallShape(err) => f.write_str(&err.message),
             // **The number is the number that is enforced**, and `what` is
-            // what was counted. The message named templates and `MAX_NESTING`
-            // whatever tripped — including a parenthesis bound, and including a
-            // template bound that fired at half that depth because the two
-            // mutually recursive halves each added one per level.
+            // what was counted: a `{`, a `(` and a template are three different
+            // bounds, and the message names the one that tripped.
             ScanError::NestingTooDeep { byte_offset, what } => write!(
                 f,
                 "{what} nesting is deeper than {MAX_NESTING} at byte {byte_offset}"
@@ -239,7 +231,7 @@ impl std::fmt::Display for ScanError {
 impl std::error::Error for ScanError {}
 
 // ===========================================================================
-// The scalar cursor (IP-01).
+// The scalar cursor.
 // ===========================================================================
 
 /// A cursor over the scalars of a `&str`, each with its absolute byte offset.
@@ -337,12 +329,6 @@ pub fn scan_template(interior: &str) -> Result<Vec<TemplatePart>, ScanError> {
 /// scanned at `0` and the bound is `MAX_NESTING` levels — the same count, and
 /// the same limit, as `praxis_syntax::template::template_end`, which is what
 /// decides how much text the lexer hands over in the first place.
-///
-/// It used to be incremented at *both* hops of the mutual recursion — here for
-/// the capture body, and again in `body::parse_expr` for the nested template —
-/// so one template level cost two, the scanner refused at seventeen levels, and
-/// the message still named thirty-two. A stricter inner bound would have been
-/// defensible; a diagnostic naming a limit nothing enforces is not.
 pub(crate) fn scan_template_at(
     interior: &str,
     depth: usize,
@@ -388,12 +374,9 @@ pub(crate) fn scan_template_at(
                 });
             }
             '\\' => {
-                // **No guard** (IP-02). A backslash at the very end used to
-                // fail the `i + 1 < bytes.len()` test on the arm itself and
-                // fall through to the ordinary-character arm, so `"prefix\"`
-                // ended up as the literal text `prefix\`. End-of-input is a
-                // case *inside* the escape handler now, which is what makes the
-                // handler total.
+                // **No guard.** End-of-input is a case *inside* the escape
+                // handler, which is what makes the handler total: a terminal
+                // backslash is an invalid escape, not literal text.
                 cur.bump();
                 match escape(&mut cur, at)? {
                     Escape::Policy(ws) => {
@@ -444,38 +427,31 @@ fn trimmed_span(raw: &str, base: usize) -> Span {
 /// of it into a whitespace policy part.
 ///
 /// **A space/tab run at either end of a literal is flexible whitespace, not
-/// text** (REP-20). §7.2's rule is that an ordinary run of spaces or tabs is
-/// flexible, and a literal's own policy is applied before its bytes are
-/// matched. Leaving a run in the text made it *also* exact, so it had to be
-/// matched twice:
+/// text.** §7.2's rule is that an ordinary run of spaces or tabs is flexible,
+/// and a literal's own policy is applied before its bytes are matched. Leaving
+/// a run in the text would make it *also* exact, so it would have to be matched
+/// twice:
 ///
-///   - The leading run could never match at all. §3.3's own
-///     `` `{x1:int},{y1:int} -> {x2:int},{y2:int}` `` failed at the `-` of `->`
-///     on every input, because the policy consumed the space and then the
-///     literal " -> " was compared against "-> ".
-///   - The trailing run made the spacing rigid on one side only: `1 -> 2`
-///     matched and `1->2` did not.
+///   - A leading run could never match at all. §3.3's own
+///     `` `{x1:int},{y1:int} -> {x2:int},{y2:int}` `` would fail at the `-` of
+///     `->` on every input, because the policy consumes the space and then the
+///     literal " -> " is compared against "-> ".
+///   - A trailing run would make the spacing rigid on one side only: `1 -> 2`
+///     matching and `1->2` not.
 ///
-/// # Each end is its own part (REP-20's trailing half)
+/// # Each end is its own part
 ///
 /// A literal has one policy slot and it sits in front of the text, so one
-/// `Literal` part cannot carry a run on both sides. The predecessor stripped
-/// both ends with a single `trim_matches` and derived a policy from the leading
-/// end only — so the **trailing** run was scanned away and represented nowhere.
-/// It was neither required nor consumed: `` `x: {a:rest}` `` matched `x:hello`,
-/// and over `x: hello` it handed `rest` the space the template had written.
-/// A silent wrong answer, and REP-20's row claimed it fixed.
+/// `Literal` part cannot carry a run on both sides. The trailing run therefore
+/// becomes **its own part** — an empty literal carrying `SpaceRun`, which is the
+/// representation `` `{a:int} {b:int}` `` already lowers to and every consumer
+/// already handles. `x: ` is `Literal{"x:", None}` then `Literal{"", SpaceRun}`.
 ///
-/// The trailing run therefore becomes **its own part** — an empty literal
-/// carrying `SpaceRun`, which is the representation `` `{a:int} {b:int}` ``
-/// already lowers to and every consumer already handles. `x: ` is
-/// `Literal{"x:", None}` then `Literal{"", SpaceRun}`.
-///
-/// The strip's old justification — "every capture consumes leading whitespace
-/// before it walks" — is a premise S20 deleted: a capture is offered the bytes
-/// at the cursor, whitespace and all, and `walk_atomic` decides. `int` and
-/// `word` still self-trim, which is why the defect stayed invisible; `char`,
-/// `text` and `rest` do not, and they are what it showed up in.
+/// Stripping a trailing run without representing it would leave it neither
+/// required nor consumed: `` `x: {a:rest}` `` would match `x:hello`, and over
+/// `x: hello` would hand `rest` the space the template wrote. A capture is
+/// offered the bytes at the cursor, whitespace and all, and `walk_atomic`
+/// decides — `int` and `word` self-trim, `char`, `text` and `rest` do not.
 ///
 /// A literal that strips to **nothing** is one run, not two, and emits one
 /// part: counting it at both ends would make `` `{a:int} {b:int}` `` demand two
@@ -486,15 +462,13 @@ fn trimmed_span(raw: &str, base: usize) -> Span {
 /// (`\x20` never reaches here as text: [`escape`] returns it as a policy part of
 /// its own, so an exact space cannot be mistaken for a run.)
 ///
-/// **The policy is derived, not assumed** (IPR-12). Every literal used to be
-/// tagged `SpaceRun` unconditionally, including literals with no whitespace run
-/// anywhere near them — so the runtime could not distinguish "the template
-/// wrote a space here" from "it did not", and the only way to keep
-/// `{a:int},{b:int}` matching was to implement `SpaceRun` as zero-or-more,
-/// which is not what `SpaceRun` means. A literal that had a run stripped from
-/// its **front** carries `SpaceRun`; one that did not carries
+/// **The policy is derived, not assumed.** A literal that had a run stripped
+/// from its **front** carries `SpaceRun`; one that did not carries
 /// [`WsPolicy::None`], and then `SpaceRun` can require the one-or-more its own
-/// definition promises — at both ends.
+/// definition promises — at both ends. Tagging every literal `SpaceRun`
+/// unconditionally would leave the runtime unable to distinguish "the template
+/// wrote a space here" from "it did not", and would force `SpaceRun` to be
+/// implemented as zero-or-more to keep `{a:int},{b:int}` matching.
 fn flush(lit: &mut String, run: &mut Option<(usize, usize)>, parts: &mut Vec<TemplatePart>) {
     if lit.is_empty() {
         *run = None;
@@ -554,12 +528,9 @@ enum Escape {
 
 /// Decode the escape whose backslash was at `at` and has already been consumed.
 ///
-/// **Total on end of input** (IP-02) and **honest about what it read** (IP-03):
-/// the reported `seq` is `&interior[at..cur.pos()]` — the text the source
-/// actually wrote. The predecessor built the message with
-/// `format!("\\s{}", char::from(next))` where `next` was the byte that *chose*
-/// the arm, so every bad `\s?` reported `\ss`, and every bad `\xNN` reported
-/// just `\x`.
+/// **Total on end of input** and **honest about what it read**: the reported
+/// `seq` is `&interior[at..cur.pos()]` — the text the source actually wrote,
+/// not a message rebuilt from the byte that *chose* the arm.
 fn escape(cur: &mut Scan<'_>, at: usize) -> Result<Escape, ScanError> {
     let invalid = |cur: &Scan<'_>| ScanError::InvalidEscape {
         byte_offset: at,
@@ -609,15 +580,14 @@ fn escape(cur: &mut Scan<'_>, at: usize) -> Result<Escape, ScanError> {
 /// offset)`.
 ///
 /// The name's own offset is returned rather than derived, because the two
-/// offsets are not the same: the body begins after the `:`, and computing the
-/// name's span from the body's base put the capture-*name* token on top of the
-/// capture *type* — `{name:word}` reported its name as `word`.
+/// offsets are not the same: the body begins after the `:`, so computing the
+/// name's span from the body's base would put the capture-*name* token on top
+/// of the capture *type* and report `{name:word}`'s name as `word`.
 ///
 /// **The `}`-scan is depth-aware** (D10). A capture body may hold `}` inside a
 /// string (`{c:one_of("}")}`), `)` and `,` inside a call (`{xs:sep(",", int)}`),
-/// and a template of its own. The predecessor scanned to the *first* `}`, which
-/// is why the grammar had to be "atomics only" — and §7.7's own monkey example
-/// writes `{items:csv(int)}`.
+/// and a template of its own; a scan to the *first* `}` would cut §7.7's own
+/// `{items:csv(int)}` short and force the grammar down to "atomics only".
 type CaptureExtent<'a> = (Option<(&'a str, usize)>, &'a str, usize);
 
 fn capture_extent<'a>(cur: &mut Scan<'a>, open: usize) -> Result<CaptureExtent<'a>, ScanError> {
@@ -744,11 +714,9 @@ pub(crate) fn skip_string(cur: &mut Scan<'_>) -> Result<(), ScanError> {
 /// text between the backticks). The cursor is on the opening backtick.
 ///
 /// **The extent rule is [`praxis_syntax::template::template_end`]'s**, the same
-/// one the lexer applies when it decides where the enclosing token ends. This
-/// function used to be a second implementation of it — one that counted `{`/`}`
-/// but knew about strings, against a lexer that counted `{`/`}` and did not —
-/// and the two also bounded nesting at depths that differed by one. There is
-/// one bound because there is one function.
+/// one the lexer applies when it decides where the enclosing token ends. There
+/// is one notion of where a template ends, and one nesting bound, because there
+/// is one function.
 pub(crate) fn take_template<'a>(cur: &mut Scan<'a>) -> Result<&'a str, ScanError> {
     let open = cur.pos();
     match praxis_syntax::template::template_end(cur.src(), open) {
@@ -766,13 +734,12 @@ pub(crate) fn take_template<'a>(cur: &mut Scan<'a>) -> Result<&'a str, ScanError
 }
 
 /// Validate a capture's name against the language's **one** identifier class
-/// (§4.1, IP-04).
+/// (§4.1).
 ///
-/// The predecessor used a local ASCII rule (`is_ascii_alphabetic`), so `{λ:int}`
-/// was not recognized as a named capture at all — the whole body `λ:int` was
-/// reinterpreted as the parser expression, which then failed for an unrelated
-/// reason. A name the lexer would not have produced is now *reported*, never
-/// silently re-read as something else.
+/// A local ASCII rule (`is_ascii_alphabetic`) would not recognize `{λ:int}` as a
+/// named capture at all — the whole body `λ:int` would be reinterpreted as the
+/// parser expression, and fail for an unrelated reason. A name the lexer would
+/// not have produced is *reported*, never silently re-read as something else.
 fn capture_name(raw: &str, at: usize) -> Result<crate::ast::CaptureName, ScanError> {
     crate::ast::CaptureName::parse(raw.trim()).map_err(|_| ScanError::InvalidCaptureName {
         byte_offset: at,
@@ -857,14 +824,14 @@ mod tests {
         }
     }
 
-    /// **REP-20 at the unit level.** A space/tab run at either end of a literal
-    /// becomes the whitespace policy and leaves the text — the leading run as
-    /// the literal's own `ws`, the trailing run as an empty literal of its own,
-    /// because a literal has one policy slot and it sits in front of the text.
+    /// A space/tab run at either end of a literal becomes the whitespace policy
+    /// and leaves the text — the leading run as the literal's own `ws`, the
+    /// trailing run as an empty literal of its own, because a literal has one
+    /// policy slot and it sits in front of the text.
     ///
-    /// Here as well as in the JIT tests because this is the *scanner's* rule: the
-    /// interpreter honours a policy it is given, and the defect was that the same
-    /// spaces were also in the bytes it had to match.
+    /// Here as well as in the JIT tests because this is the *scanner's* rule:
+    /// the interpreter honours a policy it is given, and those same spaces must
+    /// not also be in the bytes it has to match.
     #[test]
     fn a_literals_edge_whitespace_is_its_policy_and_not_its_text() {
         // §3.3's own template. The middle literal is `->`, not ` -> ` and not
@@ -872,7 +839,7 @@ mod tests {
         // part of its own.
         let parts = scan_template("{x1:int},{y1:int} -> {x2:int},{y2:int}").unwrap();
         assert_eq!(literals(&parts), vec![",", "->", "", ","]);
-        // …and the policy says which of them had a run in front of it (IPR-12).
+        // …and the policy says which of them had a run in front of it.
         // A comma the template wrote with nothing before it must not match an
         // input that has a space there.
         assert_eq!(
@@ -905,9 +872,8 @@ mod tests {
             _ => panic!("expected the trailing run's part"),
         }
 
-        // **A trailing run with no leading one is still a policy** — this is the
-        // half REP-20's first round dropped. `x: ` is `"x:"` with no policy,
-        // then the run.
+        // **A trailing run with no leading one is still a policy.** `x: ` is
+        // `"x:"` with no policy, then the run.
         let parts = scan_template("x: {a:rest}").unwrap();
         assert_eq!(literals(&parts), vec!["x:", ""]);
         assert_eq!(
@@ -976,8 +942,8 @@ mod tests {
         }
     }
 
-    /// **IP-01.** Ordinary template text used to be copied byte by byte through
-    /// `char::from(b)`, which is a Latin-1 decode: `λ=` became `Î»=`.
+    /// Ordinary template text keeps its scalars: a byte-by-byte copy through
+    /// `char::from(b)` is a Latin-1 decode, and would make `λ=` into `Î»=`.
     #[test]
     fn regression_unicode_literal_text_is_preserved() {
         let parts = scan_template("λ={int}").unwrap();
@@ -987,9 +953,8 @@ mod tests {
         }
     }
 
-    /// **IP-02.** The escape arm was guarded on there being a next byte, so a
-    /// terminal backslash fell through to the ordinary-character arm and became
-    /// literal text. Note the offset: the error is anchored at the backslash.
+    /// A terminal backslash is an invalid escape, not literal text. Note the
+    /// offset: the error is anchored at the backslash.
     #[test]
     fn regression_trailing_backslash_is_an_invalid_escape() {
         assert!(matches!(
@@ -998,11 +963,9 @@ mod tests {
         ));
     }
 
-    /// **IP-03.** The message used to be rebuilt from the byte that *selected*
-    /// the arm rather than sliced from the source, so every bad `\s?` reported
-    /// `\ss` and every bad `\xNN` reported `\x`. `seq` is now the exact source
-    /// substring, which is a property the assertions below can compare against
-    /// the input directly.
+    /// `seq` is the exact source substring at `byte_offset` — not a message
+    /// rebuilt from the byte that *selected* the arm — which is a property the
+    /// assertions below compare against the input directly.
     #[test]
     fn an_invalid_escape_reports_the_sequence_the_source_actually_wrote() {
         for (src, expected) in [
@@ -1034,9 +997,9 @@ mod tests {
         assert!(scan_template(r"a\s+b").is_ok());
     }
 
-    /// **IP-04.** A capture name is the language's own identifier (§4.1), not a
-    /// local ASCII rule. `{λ:int}` used to be read as an *anonymous* capture
-    /// whose parser expression was the whole text `λ:int`.
+    /// A capture name is the language's own identifier (§4.1), not a local
+    /// ASCII rule: `{λ:int}` is a capture named `λ`, not an *anonymous* capture
+    /// whose parser expression is the whole text `λ:int`.
     #[test]
     fn a_capture_name_is_the_languages_own_identifier() {
         for (src, name) in [
@@ -1073,11 +1036,9 @@ mod tests {
         }
     }
 
-    /// **IP-05/IP-06.** Each capture keeps its **own** parser. The scanner used
-    /// to throw the body away and leave a placeholder `Atomic { Int }` that the
-    /// HIR tried to recover by rescanning the whole template and taking the
-    /// first recognizable name — so `{name:word},{port:int}` gave both captures
-    /// `word`. And a name it recognized nothing in defaulted to `Int`.
+    /// Each capture keeps its **own** parser — `{name:word},{port:int}` is a
+    /// `word` and an `int`, not one kind recovered for both — and a name that
+    /// resolves to no parser is reported rather than defaulted.
     #[test]
     fn every_capture_keeps_its_own_parser() {
         let parts = scan_template("{name:word},{port:int}").unwrap();
@@ -1106,7 +1067,7 @@ mod tests {
     #[test]
     fn a_capture_body_is_a_parser_expression() {
         // `parts[2]`: `"Starting items: "` is the literal `"Starting items:"`
-        // and then the trailing run's own whitespace part (REP-20).
+        // and then the trailing run's own whitespace part.
         let parts = scan_template("Starting items: {items:csv(int)}").unwrap();
         match &parts[2] {
             TemplatePart::Capture { parser, .. } => {
@@ -1137,11 +1098,9 @@ mod tests {
             other => panic!("expected a capture, got {other:?}"),
         }
 
-        // A brace inside a string does **not** end the capture. The old scan to
-        // the first `}` cut the body at the quote. Both braces are covered on
-        // purpose: `"}"` happens to keep a brace *counter* balanced, so a
-        // counter that ignores strings passes that case and fails this one —
-        // which is exactly how the lexer's copy of the rule drifted.
+        // A brace inside a string does **not** end the capture. Both braces are
+        // covered on purpose: `"}"` happens to keep a brace *counter* balanced,
+        // so a counter that ignores strings passes that case and fails this one.
         for (body, expect) in [
             (r#"{c:one_of("}")}"#, "}"),
             (r#"{c:one_of("{")}"#, "{"),
@@ -1179,12 +1138,9 @@ mod tests {
     /// **A span is the text it names**, at every depth of nesting.
     ///
     /// `ParserAst::shift_spans` and `Span::shifted` are recursive span
-    /// arithmetic that nothing asserted, and the one place the shift was *not*
-    /// applied was the one D10 made reachable: a nested template's parts kept
-    /// offsets relative to the **nested** interior and were never rebased onto
-    /// the enclosing one, so `convert_template`'s single uniform shift — right
-    /// for one level — left every caret under a nested template short by that
-    /// interior's own offset.
+    /// arithmetic: a nested template's parts are scanned in the **nested**
+    /// interior's offsets and must be rebased onto the enclosing one, because
+    /// `convert_template`'s single uniform shift is right for one level only.
     ///
     /// The assertion is the strongest available one: slice the interior by the
     /// span and compare it to the source text the node was built from.
@@ -1202,7 +1158,7 @@ mod tests {
 
         // One level: the capture's parser span is the `int` that named it.
         // `parts[2]`: `"x = "` is `"x ="` plus the trailing run's own
-        // whitespace part (REP-20).
+        // whitespace part.
         let interior = "x = {x:int}";
         let parts = scan_template(interior).unwrap();
         assert_eq!(
@@ -1243,7 +1199,7 @@ mod tests {
         );
 
         // And the error channel is rebased too: the caret for a bad call inside
-        // a nested template pointed at the *enclosing* call.
+        // a nested template must name it, not the *enclosing* call.
         let interior = "{g:choice(A: `{x:csv(int, int)}`)}";
         let err = scan_template(interior).unwrap_err();
         assert_eq!(
@@ -1254,8 +1210,8 @@ mod tests {
     }
 
     /// A compiler must not answer adversarial input with a stack overflow
-    /// (D10). `scan_template` and `parse_capture_body` are mutually recursive
-    /// now, so the bound is not optional.
+    /// (D10). `scan_template` and `parse_capture_body` are mutually recursive,
+    /// so the bound is not optional.
     #[test]
     fn nesting_past_the_bound_is_an_error_and_not_a_stack_overflow() {
         let deep = format!("{}{}", "{a:".repeat(2_000), "}".repeat(2_000));
@@ -1283,15 +1239,13 @@ mod tests {
     ///
     /// Two layers bound template nesting: `praxis_syntax::template::template_end`
     /// decides how much text the lexer hands over, and the scanner's own
-    /// recursion refuses before it can overflow the stack. The scanner's guard
-    /// was incremented at *both* hops of the mutual recursion — once in
-    /// `scan_template_at` for the capture body and again in `body::parse_expr`
-    /// for the nested template — so one template level cost two and the
-    /// scanner refused at **17** levels. The message still said 32.
+    /// recursion refuses before it can overflow the stack. A level is added at
+    /// one hop of that mutual recursion only, so the depth the scanner enforces
+    /// is the depth the message names.
     ///
-    /// A stricter inner bound would have been defensible. A diagnostic naming a
-    /// limit that nothing enforces is not, which is why this asserts the
-    /// *rendered* number and not only the behaviour.
+    /// A stricter inner bound would be defensible. A diagnostic naming a limit
+    /// that nothing enforces is not, which is why this asserts the *rendered*
+    /// number and not only the behaviour.
     #[test]
     fn the_two_template_nesting_bounds_are_the_same_number_and_the_message_says_it() {
         use praxis_syntax::template::{template_end, TemplateEnd};
@@ -1334,11 +1288,10 @@ mod tests {
         // the template whole — the lexer delivers one token spanning all of it
         // and the scanner reads it.
         //
-        // Past the bound the two are not symmetric, and the comment should not
-        // pretend otherwise: `template_end` stops treating a backtick as an
-        // *opener* rather than refusing, so it still hands over a token. The
-        // scanner is the layer that says no, which is why its number has to be
-        // this one and its message has to name it.
+        // Past the bound the two are not symmetric: `template_end` stops
+        // treating a backtick as an *opener* rather than refusing, so it still
+        // hands over a token. The scanner is the layer that says no, which is
+        // why its number has to be this one and its message has to name it.
         assert_eq!(MAX_NESTING, praxis_syntax::MAX_TEMPLATE_NESTING);
         let at_the_bound = format!("`{}`", nested_interior(MAX_NESTING));
         assert_eq!(
@@ -1347,9 +1300,8 @@ mod tests {
             "the lexer delivers a {MAX_NESTING}-level template whole"
         );
 
-        // A `(` bound is not a template bound, and the message no longer says
-        // it is: `csv(` past the limit reported "template nesting is deeper
-        // than 32" for text holding exactly one template.
+        // A `(` bound is not a template bound, and the message must not say it
+        // is: this text holds exactly one template.
         let parens = format!("{{a:{}int{}}}", "csv(".repeat(64), ")".repeat(64));
         let err = scan_template(&parens).expect_err("too many parens");
         assert!(

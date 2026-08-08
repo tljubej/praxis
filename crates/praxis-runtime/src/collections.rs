@@ -9,22 +9,20 @@
 //! This is the composite type that proves nested `GcRef` tracing (ADR-013):
 //! `trace` forwards every element to the tracer.
 //!
-//! **M5 change:** `items` became growable (it was `Box<[GcRef]>` in M3) so
-//! `push` mutates the vector *in place* — matching §4.2's "a `var` binding may
-//! still point to a mutable object" and §11.1's `push -> Unit` (the receiver is
-//! mutated, no new reference returned). The backing storage may reallocate
-//! internally, but the `VecPayload` object itself stays at the same GC address
-//! (non-moving collector, ADR-011), so existing `GcRef`s remain valid. Per
-//! §11.5, runtime wrappers never expose an interior pointer to the vector's
-//! backing buffer across a capacity-mutating op; they reload from the payload
-//! each call.
+//! `items` is growable, so `push` mutates the vector *in place* — matching
+//! §4.2's "a `var` binding may still point to a mutable object" and §11.1's
+//! `push -> Unit` (the receiver is mutated, no new reference returned). The
+//! backing storage may reallocate internally, but the `VecPayload` object itself
+//! stays at the same GC address (non-moving collector, ADR-011), so existing
+//! `GcRef`s remain valid. Per §11.5, runtime wrappers never expose an interior
+//! pointer to the vector's backing buffer across a capacity-mutating op; they
+//! reload from the payload each call.
 //!
-//! **ADR-118 change:** `VecPayload.items` is a
-//! [`ReprCVec<GcRef>`](crate::repr_c_vec::ReprCVec) rather than a
-//! `std::Vec<GcRef>`. Same three words, same size, same growth machinery — but
-//! `#[repr(C)]`, so the length and the element pointer are at offsets a backend
-//! is allowed to bake in. `DequePayload` and `GridPayload` are deliberately not
-//! migrated; see the ADR.
+//! `VecPayload.items` is a [`ReprCVec<GcRef>`](crate::repr_c_vec::ReprCVec) and
+//! not a `std::Vec<GcRef>`: same three words, same size, same growth machinery,
+//! but `#[repr(C)]`, so the length and the element pointer are at offsets a
+//! backend is allowed to bake in (ADR-118). `DequePayload` and `GridPayload` are
+//! deliberately not migrated; see the ADR.
 
 use std::fmt::Write as _;
 
@@ -47,26 +45,23 @@ pub struct VecPayload {
     ///
     /// Null is the honest encoding of "unknown", and it only survives while the
     /// vector is empty: the first `push` adopts the pushed value's descriptor.
-    /// It used to be spelled `INT`, which is why an empty `Vec[Float]` claimed
-    /// to hold `Int`s and why `push` had licence to *retag* a vector that had
-    /// been told its type (P0-11).
+    /// A vector that has been told its element type is never retagged.
     pub element_descriptor: *const TypeDescriptor,
     /// The elements, in order. Growable (not `Box<[T]>`) so `push` mutates in
     /// place, and a [`ReprCVec`] rather than a `std::Vec` so the length and the
     /// element pointer are at offsets generated code is allowed to know
     /// (ADR-118). `std::Vec` is `#[repr(Rust)]` and hides both inside a private
-    /// `RawVec`; nothing else about the field changed, including its size.
+    /// `RawVec`.
     pub items: ReprCVec<GcRef>,
 }
 
-// The offsets W4b bakes into generated code, pinned here rather than asserted
-// in prose (ADR-118). `element_descriptor` stays at 0 — it is what
-// `same_element` and every `element()` call reads, and moving it would be an
-// unrelated churn — so `items` starts at 8, its element pointer is at 8 and its
-// length at 16.
+// The offsets generated code bakes in, pinned here rather than asserted in prose
+// (ADR-118). `element_descriptor` is at 0 — it is what `same_element` and every
+// `element()` call reads — so `items` starts at 8, its element pointer is at 8
+// and its length at 16.
 const _: () = assert!(std::mem::offset_of!(VecPayload, element_descriptor) == 0);
 const _: () = assert!(std::mem::offset_of!(VecPayload, items) == 8);
-// The block size class does not move: 8 + 24 is the 32 it always was (ADR-109).
+// 8 + 24 = 32, which is the block size class this payload falls in (ADR-109).
 const _: () = assert!(std::mem::size_of::<VecPayload>() == 32);
 
 /// The one site generated code may read a `Vec[T]`'s three words through
@@ -118,7 +113,7 @@ impl ElementSeq for VecPayload {
     }
 }
 
-/// Whether two collections agree on their element type (RT-10).
+/// Whether two collections agree on their element type.
 ///
 /// Descriptors are `static`, so pointer identity is the authoritative test
 /// where both sides *have* one (ADR-038).
@@ -133,20 +128,13 @@ impl ElementSeq for VecPayload {
 /// not. No element-wise dispatch can go wrong through a null: the side without
 /// a label contributes no elements to dispatch over.
 ///
-/// REP-42 is why this is written down. Before it, `praxis_map_new` hardcoded
-/// `INT` as every `Map`'s value descriptor, so an empty `Map`'s `values()`
-/// carried the label `Int` whatever the map held; after it, the label is
-/// learned from the first insert and a never-inserted map's `values()` carries
-/// none. Comparing by pointer identity then made an empty `Map[Text, Int]`'s
-/// `values()` **unequal** to an equally-typed empty `Vec[Int]` — comparing an
-/// unlearned label against a learned one, which is the label being treated as
-/// the authority it is explicitly not (REP-41). The pre-REP-42 `true` was an
-/// accident of the hardcoded `INT` and not a rule: the same program over a
-/// `Map[Text, Text]` answered `false` both before and after.
+/// **An unlearned label is never compared against a learned one**, which would
+/// treat the label as the authority it explicitly is not: a never-inserted
+/// `Map[Text, Int]`'s `values()` carries no label, and it must still equal an
+/// equally-typed empty `Vec[Int]`.
 ///
-/// What RT-10 asked for is untouched: two collections that have each been told
-/// their element type must agree, so an empty `Vec[Int]` is still not an empty
-/// `Vec[Text]`.
+/// Two collections that *have each* been told their element type must agree,
+/// so an empty `Vec[Int]` is not an empty `Vec[Text]`.
 pub(crate) fn same_element(a: *const TypeDescriptor, b: *const TypeDescriptor) -> bool {
     a.is_null() || b.is_null() || std::ptr::eq(a, b)
 }
@@ -173,19 +161,18 @@ pub(crate) fn nullable(d: *const TypeDescriptor) -> Option<&'static TypeDescript
 // The element-wise descriptor callbacks, written once (§11.4).
 //
 // To a descriptor, `Vec`, `Deque` and `Grid` are the same collection: a
-// nullable element descriptor and a sequence of `GcRef`s. Their trace/format/
-// equals/hash used to be three hand-copied sets of bodies, so RT-10's element
-// rule — the one `same_element` above documents at length — had to be written
-// into each of them, which is the drift realised once already. They are generic
-// over `ElementSeq` now and named monomorphised (`seq_trace::<VecPayload>`) at
-// each `TypeDescriptor::builtin` call, so what the descriptor stores is still
-// one direct, payload-specific function.
+// nullable element descriptor and a sequence of `GcRef`s. So trace/format/
+// equals/hash are generic over `ElementSeq` and named monomorphised
+// (`seq_trace::<VecPayload>`) at each `TypeDescriptor::builtin` call — what the
+// descriptor stores is still one direct, payload-specific function, and the
+// element rule `same_element` above documents is written once.
 //
-// The nine bodies these replace were `vec_`/`deque_`/`grid_trace`, `_format`,
-// `_equals` and `_hash`; comments elsewhere in the crate still cite them by
-// those names, and this is where they went. Only `drop` and `owned_bytes`
-// remain per payload, because those *are* per payload: three different backing
-// stores to free.
+// Comments elsewhere in the crate, and several ADRs, name these callbacks
+// `vec_`/`deque_`/`grid_trace`, `_format`, `_equals` and `_hash`. Those nine
+// names are the `seq_*` generics below; there is no function by any of them.
+//
+// Only `drop` and `owned_bytes` remain per payload, because those *are* per
+// payload: three different backing stores to free.
 // ===========================================================================
 
 /// What the element-wise callbacks need from a collection payload: a nullable
@@ -247,11 +234,11 @@ unsafe fn seq_equals<S: ElementSeq>(a: *const u8, b: *const u8) -> bool {
     // compatible element descriptors.
     let pa = unsafe { &*(a as *const S) };
     let pb = unsafe { &*(b as *const S) };
-    // Runtime element type is part of collection identity (RT-10) — a `Grid`'s
-    // cell type no less than a `Vec`'s element type. Without it an empty
-    // `Vec[Int]` and an empty `Vec[Text]` compared equal — both were "zero
-    // elements" — and a non-empty pair dispatched the *left* element
-    // descriptor's callback against the right's payloads.
+    // Runtime element type is part of collection identity — a `Grid`'s cell
+    // type no less than a `Vec`'s element type. Without it an empty `Vec[Int]`
+    // and an empty `Vec[Text]` compare equal (both are "zero elements") and a
+    // non-empty pair dispatches the *left* element descriptor's callback against
+    // the right's payloads.
     if !same_element(pa.element_descriptor(), pb.element_descriptor()) {
         return false;
     }
@@ -302,9 +289,8 @@ unsafe fn seq_hash<S: ElementSeq>(payload: *const u8, hasher: &mut dyn DynamicHa
 unsafe fn vec_drop(payload: *mut u8) {
     // SAFETY: caller guarantees `payload` points at an initialized `VecPayload`.
     // `drop_in_place` runs `ReprCVec`'s `Drop`, which hands the three words back
-    // to a `Vec` and lets it free the buffer — the same single free the
-    // `std::Vec` field performed before ADR-118, reached the same way. The
-    // element descriptor is a static reference and is not owned.
+    // to a `Vec` and lets it free the buffer — one single free. The element
+    // descriptor is a static reference and is not owned.
     unsafe { std::ptr::drop_in_place(payload as *mut VecPayload) };
 }
 
@@ -326,10 +312,9 @@ pub static VEC: TypeDescriptor = TypeDescriptor::builtin::<VecPayload>(
 .with_owned_bytes(vec_owned_bytes);
 
 impl VecPayload {
-    /// The heap bytes this payload owns beyond its GC block, for GC pacing
-    /// (RT-04) — the buffer, not the spine's three words. `capacity`, not
-    /// `len`: the buffer's real footprint is what the collector is paced
-    /// against.
+    /// The heap bytes this payload owns beyond its GC block, for GC pacing —
+    /// the buffer, not the spine's three words. `capacity`, not `len`: the
+    /// buffer's real footprint is what the collector is paced against.
     ///
     /// **One statement of the size, with two readers** (ADR-121). The
     /// descriptor's `owned_bytes` callback charges it once at construction;
@@ -343,11 +328,7 @@ impl VecPayload {
     /// **This is the statement, for every payload in the crate.** The rule is
     /// the same for a `Deque`'s ring, a `Grid`'s cells, a `Map`'s table, a
     /// heap's array and a `BitSet`'s words, so each of those `owned_bytes`
-    /// methods says what it multiplies and points back here for why. That the
-    /// rule needed one home is not hypothetical: `grid_owned_bytes` spelled its
-    /// multiplication inline for as long as a copy of this note sat above it,
-    /// which made `Grid` the one collection whose pacing charge was exactly the
-    /// second spelling the note warns against.
+    /// methods says what it multiplies and points back here for why.
     #[must_use]
     pub(crate) fn owned_bytes(&self) -> usize {
         self.items.capacity() * std::mem::size_of::<GcRef>()
@@ -361,7 +342,7 @@ unsafe fn vec_owned_bytes(payload: *const u8) -> usize {
 }
 
 // ===========================================================================
-// Deque[T] (M8-WS2, §6.1). A double-ended queue backed by Rust's `VecDeque`.
+// Deque[T] (§6.1). A double-ended queue backed by Rust's `VecDeque`.
 // Mirrors `VecPayload` exactly (element descriptor + growable items) — it is an
 // `ElementSeq` like the other two, so trace/format/equals/hash are not merely
 // identical but the same bodies; only the backing store and the front/back
@@ -420,8 +401,8 @@ pub static DEQUE: TypeDescriptor = TypeDescriptor::builtin::<DequePayload>(
 .with_owned_bytes(deque_owned_bytes);
 
 impl DequePayload {
-    /// The ring buffer this payload owns beyond its GC block, for GC pacing
-    /// (RT-04) — `capacity`, not `len`.
+    /// The ring buffer this payload owns beyond its GC block, for GC pacing —
+    /// `capacity`, not `len`.
     ///
     /// One statement of the size, with two readers (ADR-121):
     /// [`VecPayload::owned_bytes`] is that statement.
@@ -496,21 +477,19 @@ impl VecExtent {
 }
 
 // ===========================================================================
-// Grid[T] (M6, §7.5 `grid`, §7.8 type derivation). M6 ships a minimal runtime
-// type — row-major storage with a known width — so the synthesized type is the
-// spec-faithful `Grid[T]`. Grid methods (neighbors, indexing, etc.) are M8.
+// Grid[T] (§7.5 `grid`, §7.8 type derivation). Row-major storage with a known
+// width, so the synthesized type is the spec-faithful `Grid[T]`.
 // ===========================================================================
 
 /// A validated grid shape: a non-negative width and height whose product is a
 /// cell count the runtime can actually allocate.
 ///
-/// This is the *only* route from a user-supplied `Int` pair to a cell count
-/// (RT-07). `Grid[T](w, h)` used to reach `vec![unit; (w as usize) * (h as
-/// usize)]` directly, where `w = -1` became `usize::MAX` and the product
-/// overflowed — either an allocation the host could not serve (an OOM abort) or
-/// a capacity-overflow panic, both crossing `extern "C"`. Neither is expressible
-/// now: `GridExtent` holds `usize`s, and the multiplication it proves is the one
-/// `cells()` returns.
+/// This is the *only* route from a user-supplied `Int` pair to a cell count.
+/// Reaching `vec![unit; (w as usize) * (h as usize)]` directly would let
+/// `w = -1` become `usize::MAX` and the product overflow — either an allocation
+/// the host cannot serve (an OOM abort) or a capacity-overflow panic, both
+/// crossing `extern "C"`. Neither is expressible here: `GridExtent` holds
+/// `usize`s, and the multiplication it proves is the one `cells()` returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GridExtent {
     width: usize,
@@ -575,7 +554,7 @@ impl GridExtent {
 
 /// The `Grid[T]` payload: a row-major sequence of `GcRef`s plus the fixed
 /// column count (width). `items.len() == width * height`. Mirrors `VecPayload`
-/// but carries rectangular shape so M8 methods and indexing are cheap.
+/// but carries rectangular shape so indexing and neighbourhood walks are cheap.
 #[repr(C)]
 pub struct GridPayload {
     /// The descriptor for every cell in `items`, or null for "not told yet" —
@@ -610,10 +589,10 @@ unsafe fn grid_drop(payload: *mut u8) {
     unsafe { std::ptr::drop_in_place(payload as *mut GridPayload) };
 }
 
-/// Descriptor for the `Grid[T]` collection (M6, §7.8; M8-WS5 enables equality
-/// and hashing so a Grid can be used as a map key). Element-wise, like Vec —
+/// Descriptor for the `Grid[T]` collection (§7.8). Element-wise, like Vec —
 /// literally so: the callbacks are the shared `ElementSeq` ones, and the width
-/// reaches them as `extra_shape`.
+/// reaches them as `extra_shape`. It is equatable and hashable, but not a
+/// `Map` key: that requires immutability too (ADR-057 D4).
 pub static GRID: TypeDescriptor = TypeDescriptor::builtin::<GridPayload>(
     BuiltinTypeId::Grid,
     "Grid",
@@ -631,12 +610,11 @@ pub static GRID: TypeDescriptor = TypeDescriptor::builtin::<GridPayload>(
 
 impl GridPayload {
     /// The row-major cell buffer this payload owns beyond its GC block, for GC
-    /// pacing (RT-04) — `capacity`, not `cells()`. A grid is built at its full
-    /// extent, but what the allocator was asked for is still the vector's.
+    /// pacing — `capacity`, not `cells()`. A grid is built at its full extent,
+    /// but what the allocator was asked for is still the vector's.
     ///
     /// One statement of the size, with two readers (ADR-121):
-    /// [`VecPayload::owned_bytes`] is that statement, and this method exists
-    /// because `grid_owned_bytes` used to write the multiplication itself.
+    /// [`VecPayload::owned_bytes`] is that statement.
     #[must_use]
     pub(crate) fn owned_bytes(&self) -> usize {
         self.items.capacity() * std::mem::size_of::<GcRef>()
@@ -657,9 +635,9 @@ mod tests {
     use super::*;
 
     /// ADR-041 decision 1's guarantee, for the third newtype: the only route
-    /// from a source `Int` to a `Vec` allocation size refuses the two inputs
-    /// that used to end the process. Zero is not one of them — the empty `Vec`
-    /// is a `Vec`.
+    /// from a source `Int` to a `Vec` allocation size refuses a negative length
+    /// and one past the cap — the two that would otherwise end the process.
+    /// Zero is not one of them: the empty `Vec` is a `Vec`.
     #[test]
     fn a_vec_extent_refuses_a_negative_or_absurd_length() {
         assert!(VecExtent::new(-1).is_none());
@@ -727,8 +705,9 @@ mod tests {
         );
     }
 
-    // ADR-118. The three properties W4b will rest on, asserted against a real
-    // heap-allocated payload rather than against a standalone `ReprCVec`.
+    // ADR-118. The three layout properties generated code rests on, asserted
+    // against a real heap-allocated payload rather than a standalone
+    // `ReprCVec`.
 
     #[test]
     fn a_vec_payload_is_thirty_two_bytes_with_the_items_at_offset_eight() {
@@ -740,16 +719,16 @@ mod tests {
         assert_eq!(std::mem::offset_of!(VecPayload, items), 8);
     }
 
-    // Arm-B only. Under `std-vec-payload` the payload holds a `std::Vec`, whose
-    // field order is exactly the thing nothing is allowed to assume — so this
-    // test failing there is the toggle working, not the toggle broken.
+    // Only without `std-vec-payload`: under that feature the payload holds a
+    // `std::Vec`, whose field order is exactly the thing nothing is allowed to
+    // assume — so this test failing there is the toggle working, not broken.
     #[cfg(not(feature = "std-vec-payload"))]
     #[test]
     fn a_backend_can_read_the_length_and_the_elements_out_of_a_live_payload() {
-        // The rehearsal for W4b: everything below is a load at a constant
-        // displacement from the payload pointer generated code already holds.
-        // `praxis_vec_len` is the word at 16; `praxis_vec_get` is a bounds
-        // compare against it and a load through the word at 8.
+        // Everything below is a load at a constant displacement from the payload
+        // pointer generated code already holds. `praxis_vec_len` is the word at
+        // 16; `praxis_vec_get` is a bounds compare against it and a load through
+        // the word at 8.
         let rt = crate::Runtime::new();
         let elements: Vec<GcRef> = (0..7_i64).map(|v| rt.alloc_int(v)).collect();
         let vec_ref = rt.alloc_vec(&crate::scalars::INT, elements);
@@ -778,11 +757,9 @@ mod tests {
     /// through [`INLINE_VEC_SITE`], from the **object** base, with the header
     /// size folded in by the site rather than added at the emit site.
     ///
-    /// The test above is the payload-relative rehearsal W4a owed and W4b's
-    /// loads have to agree with; this is the agreement, and the reason it is a
-    /// second test rather than an edit of the first is that the two pin
-    /// different things — that one pins `VecPayload`'s field order, this one
-    /// pins the arithmetic the site performs on top of it.
+    /// A second test rather than an edit of the one above because the two pin
+    /// different things: that one pins `VecPayload`'s field order, this one pins
+    /// the arithmetic the site performs on top of it.
     #[cfg(not(feature = "std-vec-payload"))]
     #[test]
     fn the_inline_vec_site_addresses_a_live_vec_from_its_object_base() {

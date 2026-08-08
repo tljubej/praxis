@@ -1,4 +1,4 @@
-//! `MinHeap[T]` and `MaxHeap[T]` (M8-WS4, §6.1, §11.2).
+//! `MinHeap[T]` and `MaxHeap[T]` (§6.1, §11.2).
 //!
 //! Both reuse Rust's `BinaryHeap` behind an opaque GC object. Rust's
 //! `BinaryHeap` is a max-heap, so `MaxHeap[T]` maps directly
@@ -23,15 +23,15 @@ use crate::GcRef;
 ///
 /// `BinaryHeap::iter` yields the backing array, which is heap-ordered only at
 /// the root: `[3, 1, 2]` and `[3, 2, 1]` are both valid layouts for the same
-/// contents, and which one exists depends on insertion history. So the same
-/// heap could print two ways (RT-16) — and, since `for x in h` iterates a
-/// snapshot of this (REP-15, ADR-066), could *answer* two ways. Sorting
-/// descending by the heap's own `Ord` is pop order for a `BinaryHeap<T>`
-/// whatever `T` is — for `MinHeap`, whose `T` is `Reverse<HeapEntry>`, that
-/// comes out ascending by element, which is what `pop` gives.
+/// contents, and which one exists depends on insertion history. Iterating it
+/// would let the same heap print two ways — and, since `for x in h` iterates a
+/// snapshot of this (ADR-066), *answer* two ways. Sorting descending by the
+/// heap's own `Ord` is pop order for a `BinaryHeap<T>` whatever `T` is — for
+/// `MinHeap`, whose `T` is `Reverse<HeapEntry>`, that comes out ascending by
+/// element, which is what `pop` gives.
 ///
 /// This is the one collection whose deterministic order is also *meaningful*:
-/// heaps carry an ordering by construction, so nothing here waits on D3.
+/// heaps carry an ordering by construction.
 pub(crate) fn in_pop_order<T: Ord, F: Fn(&T) -> GcRef>(
     items: &BinaryHeap<T>,
     value_of: F,
@@ -44,11 +44,10 @@ pub(crate) fn in_pop_order<T: Ord, F: Fn(&T) -> GcRef>(
 /// Write a heap's elements in [`in_pop_order`].
 ///
 /// Each element formats through the descriptor in its **own** header, not
-/// through the heap's element label. The label is what the construction site
-/// knew and may be null (REP-41); `HeapEntry::cmp` has always ordered by the
-/// element's own descriptor, and this is the same rule for printing — a
-/// `MinHeap` built with no static element type used to render its `Float`s as
-/// the integers its `INT` label promised.
+/// through the heap's element label. The label is only what the construction
+/// site knew, and it is null when it knew nothing, so it is not something
+/// formatting can dispatch on; `HeapEntry::cmp` orders through the element's own
+/// descriptor for the same reason.
 unsafe fn write_in_pop_order<T: Ord, F: Fn(&T) -> GcRef>(
     out: &mut FormatSink<'_>,
     items: &BinaryHeap<T>,
@@ -111,9 +110,9 @@ impl Ord for HeapEntry {
     /// the miscompile case) and an element type with no ordering at all. There
     /// is no fault channel inside `Ord`, and a heap whose comparisons are all
     /// `Equal` is a consistent total order — the heap degrades to a bag instead
-    /// of corrupting its sift invariants. What it must never do is what it used
-    /// to: read every payload as an `i64`, which put `-2.0` after `-1.0` and
-    /// read four bytes past a `Char`.
+    /// of corrupting its sift invariants. What it must never do is read every
+    /// payload as an `i64`: that puts `-2.0` after `-1.0` and reads four bytes
+    /// past a `Char`.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         if !std::ptr::eq(self.descriptor, other.descriptor) {
             return std::cmp::Ordering::Equal;
@@ -154,9 +153,9 @@ impl std::fmt::Debug for HeapEntry {
 #[repr(C)]
 pub struct MaxHeapPayload {
     /// The descriptor for every element, or null when the construction site had
-    /// no static element type (REP-41). A label: each element carries its own
-    /// descriptor, both on its `HeapEntry` and in its object header. Read it
-    /// through [`MaxHeapPayload::element`].
+    /// no static element type. A label: each element carries its own descriptor,
+    /// both on its `HeapEntry` and in its object header. Read it through
+    /// [`MaxHeapPayload::element`].
     pub element_descriptor: *const TypeDescriptor,
     /// The elements, in max-heap order (largest surfaces first).
     pub items: BinaryHeap<HeapEntry>,
@@ -184,11 +183,12 @@ unsafe fn max_heap_drop(payload: *mut u8) {
 
 unsafe fn max_heap_format(payload: *const u8, out: &mut FormatSink<'_>) {
     let p = unsafe { &*(payload as *const MaxHeapPayload) };
-    // SAFETY: every element matches the heap's element descriptor.
+    // SAFETY: every element is a live object, and `write_in_pop_order` formats
+    // each through the descriptor in its own header.
     unsafe { write_in_pop_order(out, &p.items, |e| e.value) };
 }
 
-/// Descriptor for `MaxHeap[T]` (§11.2, TypeId 17).
+/// Descriptor for `MaxHeap[T]` (§11.2, TypeId 14).
 // Heaps are not equatable/hashable (contents + order define identity).
 pub static MAX_HEAP: TypeDescriptor = TypeDescriptor::builtin::<MaxHeapPayload>(
     BuiltinTypeId::MaxHeap,
@@ -206,8 +206,8 @@ pub static MAX_HEAP: TypeDescriptor = TypeDescriptor::builtin::<MaxHeapPayload>(
 .with_owned_bytes(max_heap_owned_bytes);
 
 impl MaxHeapPayload {
-    /// The sift array this payload owns beyond its GC block, for GC pacing
-    /// (RT-04) — `capacity`, not `len`.
+    /// The sift array this payload owns beyond its GC block, for GC pacing —
+    /// `capacity`, not `len`.
     ///
     /// One statement of the size, with two readers (ADR-121):
     /// [`VecPayload::owned_bytes`](crate::collections::VecPayload::owned_bytes)
@@ -230,7 +230,7 @@ unsafe fn max_heap_owned_bytes(payload: *const u8) -> usize {
 #[repr(C)]
 pub struct MinHeapPayload {
     /// The descriptor for every element, or null when the construction site had
-    /// no static element type (REP-41). See [`MaxHeapPayload::element_descriptor`].
+    /// no static element type. See [`MaxHeapPayload::element_descriptor`].
     pub element_descriptor: *const TypeDescriptor,
     /// The elements, wrapped in `Reverse` so the smallest surfaces first.
     pub items: BinaryHeap<Reverse<HeapEntry>>,
@@ -258,12 +258,13 @@ unsafe fn min_heap_drop(payload: *mut u8) {
 
 unsafe fn min_heap_format(payload: *const u8, out: &mut FormatSink<'_>) {
     let p = unsafe { &*(payload as *const MinHeapPayload) };
-    // SAFETY: every element matches the heap's element descriptor. The stored
-    // entry is `Reverse<HeapEntry>`, so pop order is ascending by element.
+    // SAFETY: every element is a live object, and `write_in_pop_order` formats
+    // each through the descriptor in its own header. The stored entry is
+    // `Reverse<HeapEntry>`, so pop order is ascending by element.
     unsafe { write_in_pop_order(out, &p.items, |e| e.0.value) };
 }
 
-/// Descriptor for `MinHeap[T]` (§11.2, TypeId 18).
+/// Descriptor for `MinHeap[T]` (§11.2, TypeId 13).
 pub static MIN_HEAP: TypeDescriptor = TypeDescriptor::builtin::<MinHeapPayload>(
     BuiltinTypeId::MinHeap,
     "MinHeap",
@@ -280,9 +281,9 @@ pub static MIN_HEAP: TypeDescriptor = TypeDescriptor::builtin::<MinHeapPayload>(
 .with_owned_bytes(min_heap_owned_bytes);
 
 impl MinHeapPayload {
-    /// The sift array this payload owns beyond its GC block, for GC pacing
-    /// (RT-04) — `capacity`, not `len`, and of `Reverse<HeapEntry>` because
-    /// that is what a min-heap stores.
+    /// The sift array this payload owns beyond its GC block, for GC pacing —
+    /// `capacity`, not `len`, and of `Reverse<HeapEntry>` because that is what
+    /// a min-heap stores.
     ///
     /// One statement of the size, with two readers (ADR-121):
     /// [`VecPayload::owned_bytes`](crate::collections::VecPayload::owned_bytes)
@@ -332,9 +333,9 @@ mod tests {
         );
     }
 
-    /// P0-12. A `Char` payload is four bytes; the old `int_key` read eight from
-    /// a four-byte-aligned address, so the ordering depended on whatever
-    /// followed the object.
+    /// A `Char` payload is four bytes, so ordering must go through the `Char`
+    /// descriptor: reading eight bytes from a four-byte-aligned address would
+    /// make the order depend on whatever follows the object.
     #[test]
     fn char_heap_entries_order_by_unicode_scalar_value() {
         let rt = crate::Runtime::new();
@@ -350,14 +351,12 @@ mod tests {
         assert_eq!(beta.cmp(&a), std::cmp::Ordering::Greater);
     }
 
-    /// **REP-15.** `in_pop_order` answers what draining the heap would, without
-    /// draining it — and for a `MinHeap`, whose entries are `Reverse`d, that is
-    /// ascending.
+    /// `in_pop_order` answers what draining the heap would, without draining it
+    /// — and for a `MinHeap`, whose entries are `Reverse`d, that is ascending.
     ///
     /// The backing array is the thing this is not: `[3, 1, 2]` and `[3, 2, 1]`
     /// are both valid layouts for the same heap, so a `for` that indexed the
-    /// array would answer by insertion history. It answered worse than that
-    /// before ADR-066 — it read the payload as a `Vec`'s.
+    /// array would answer by insertion history (ADR-066).
     #[test]
     fn a_heaps_snapshot_is_the_order_draining_it_would_give() {
         let rt = crate::Runtime::new();
@@ -427,11 +426,10 @@ mod tests {
     /// is `Equal`, which is still a consistent total order, so `BinaryHeap`
     /// keeps its invariants.
     ///
-    /// The fixture is a closure, which is the strongest remaining case: ADR-138
-    /// populated `compare` on every type a `Map` key can be, so `Bool` — what
-    /// this used to reach for — now has one. What is left without a `compare` is
-    /// exactly what can never be a key, and a closure is the type that can never
-    /// even be compared.
+    /// The fixture is a closure, which is the strongest remaining case: every
+    /// type a `Map` key can be has a `compare` (ADR-138), so what is left
+    /// without one is exactly what can never be a key, and a closure is the type
+    /// that can never even be compared.
     #[test]
     fn an_element_type_with_no_container_order_compares_equal_rather_than_reading_bytes() {
         let mut rt = crate::Runtime::new();
@@ -486,11 +484,12 @@ mod tests {
         s
     }
 
-    /// RT-16. `BinaryHeap::iter` walks the backing array, which is heap-ordered
-    /// only at the root — `[3, 1, 2]` and `[3, 2, 1]` are both valid layouts for
-    /// the same contents, and which one exists depends on insertion history. So
-    /// two heaps that are equal as values printed differently. Pop order is the
-    /// order the program would observe, and it is the same for both.
+    /// `BinaryHeap::iter` walks the backing array, which is heap-ordered only at
+    /// the root — `[3, 1, 2]` and `[3, 2, 1]` are both valid layouts for the
+    /// same contents, and which one exists depends on insertion history, so
+    /// printing it would make two heaps that are equal as values print
+    /// differently. Pop order is the order the program would observe, and it is
+    /// the same for both.
     #[test]
     fn heap_formatting_does_not_depend_on_insertion_order() {
         let rt = crate::Runtime::new();

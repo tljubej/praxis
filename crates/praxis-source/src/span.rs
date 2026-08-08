@@ -126,7 +126,7 @@ impl Span {
     /// rebase spans produced against a *fragment* onto the file that contains
     /// it: the input-parser's template scanner works in offsets relative to a
     /// backtick template's interior, and the HIR bridge rebases the tree by the
-    /// token's start (IP-05).
+    /// token's start.
     #[inline]
     #[must_use]
     pub const fn shifted(self, delta: u32) -> Span {
@@ -208,8 +208,6 @@ impl fmt::Debug for FileSpan {
     }
 }
 
-// FileSpan needs FileId, which is declared in `file.rs`. The `file` module is a
-// sibling, so the reference above resolves once `file.rs` is compiled.
 use crate::file::FileId;
 
 #[cfg(test)]
@@ -273,8 +271,7 @@ mod tests {
 
     // Only in debug: the assertion this test is about is compiled out when
     // `debug_assertions` is off, so under `cargo test --release` there is
-    // nothing to panic and `should_panic` fails on a *correct* build. The name
-    // already said `_in_debug`; this makes the build agree with it.
+    // nothing to panic and `should_panic` would fail on a *correct* build.
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "inverted range")]

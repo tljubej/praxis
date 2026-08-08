@@ -14,15 +14,16 @@ use crate::span::FileSpan;
 /// An opaque handle to one interned source file.
 ///
 /// `FileId`s are only ever minted by [`SourceMap::intern`]; they are pure
-/// identity tokens and must never be constructed by hand. The `#[non_exhaustive]`
-/// keeps the construction surface closed even across crate boundaries.
+/// identity tokens and must never be constructed by hand. The field is private,
+/// which keeps the construction surface closed across crate boundaries.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FileId(u32);
 
 impl FileId {
     /// The synthetic file id used for diagnostics that are not tied to any real
-    /// source location (for example a CLI usage error). Real files always start
-    /// at higher ids.
+    /// source location (for example a CLI usage error). It sits at the top of
+    /// the id space: [`SourceMap::intern`] mints from 0 upward and panics
+    /// rather than reach it.
     pub const SYNTHETIC: FileId = FileId(u32::MAX);
 
     #[inline]
@@ -103,8 +104,8 @@ impl SourceMap {
     ///
     /// Each call mints a fresh id even for a repeated path: a later load of the
     /// same path is treated as a distinct snapshot. This matches the §13.1
-    /// "revisioned source" model — the LSP will hold several revisions of one
-    /// file simultaneously.
+    /// "revisioned source" model — the LSP holds several revisions of one file
+    /// simultaneously.
     pub fn intern(&self, path: impl Into<PathBuf>, text: impl Into<String>) -> FileId {
         let path = path.into();
         let text = text.into();
@@ -139,9 +140,6 @@ impl SourceMap {
     ///
     /// The returned view shares ownership of the file, so it stays valid across
     /// later `intern` calls (which reallocate the `Vec`) and across threads.
-    /// The previous implementation released the read guard and then extended
-    /// the borrow into the `Vec`'s storage, which a reallocating `intern`
-    /// invalidated.
     pub fn get(&self, id: FileId) -> Option<FileView> {
         if id == FileId::SYNTHETIC {
             return None;
@@ -226,9 +224,9 @@ mod tests {
         assert_eq!(map.len(), 0);
     }
 
-    /// A live view must survive a reallocating `intern`. This was UB rather
-    /// than a wrong answer, so it needs Miri to *fail*; it is in the ordinary
-    /// suite because the fix (shared ownership) is observable without it.
+    /// A live view must survive a reallocating `intern`. Violating this is UB
+    /// rather than a wrong answer, so only Miri would fail on it; it is in the
+    /// ordinary suite because shared ownership is observable without Miri.
     #[test]
     fn regression_file_view_remains_valid_when_more_files_are_interned() {
         let map = SourceMap::new();
@@ -236,8 +234,8 @@ mod tests {
         let view = map.get(first).expect("first file exists");
 
         // Force the backing Vec through several reallocations while `view`
-        // remains live. Miri should reject the subsequent access until stored
-        // SourceFiles have stable addresses (or FileView retains a read guard).
+        // remains live: the `Arc` is what keeps the file's address stable
+        // through them.
         for i in 0..4_096 {
             map.intern(format!("later-{i}.px"), format!("revision {i}"));
         }

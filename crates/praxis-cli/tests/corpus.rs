@@ -1,11 +1,10 @@
-//! Every `.px` program in the workspace `tests/` tree runs (REP-12).
+//! Every `.px` program in the workspace `tests/` tree runs.
 //!
 //! The corpus under `tests/aoc-corpus` and `tests/input-parsers` is the design
-//! doc's own acceptance material (§17.3, §19.8, §19.9) and **no Rust test
-//! covered it**. That is how `day02_grid_of_char.px` sat broken: it calls
-//! `map.len()` on a `Grid[Char]`, which is reported at *lowering*, so a
-//! `praxis check` sweep was clean while `praxis run` exited 1. Reading a file is
-//! not running it, and only the second one compiles.
+//! doc's own acceptance material (§17.3, §19.8, §19.9), and it has to be *run*
+//! rather than read: a mistake reported at *lowering* — `map.len()` on a
+//! `Grid[Char]`, say — leaves a `praxis check` sweep clean while `praxis run`
+//! exits 1.
 //!
 //! Each program is a triple:
 //!
@@ -16,7 +15,8 @@
 //!   fixture is what this test exists to prevent.
 //! * `name.in`  — its input, passed as `--input`. Optional: a program with no
 //!   `read` needs none. A *missing* one for a program that reads is not silent
-//!   either — the parse faults and the run exits 1.
+//!   either: the run gets empty input rather than the harness's stdin
+//!   (ADR-087), and the answer it prints is not the one its `.out` documents.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -53,11 +53,9 @@ fn every_corpus_program_runs_and_prints_the_answer_it_documents() {
     // A guard against the test silently covering nothing — a wrong `corpus_root`
     // would otherwise pass by finding no programs at all.
     //
-    // **The floor is the actual count, not a comfortable margin below it.** At
-    // `>= 13` the gate agreed with a handoff that said "25 programs (17
-    // aoc-corpus, 8 input-parsers)" while the tree held 24 (18 and 6), and
-    // neither number was checkable against the other. Bumping this when a
-    // program lands is the price of the doc and the gate stating one fact.
+    // **The floor is the actual count, not a comfortable margin below it**: a
+    // slack floor is a floor nothing can be checked against. Bumping it when a
+    // program lands is the price of the gate and the tree stating one fact.
     // Today: 34 under `tests/aoc-corpus`, 13 under `tests/input-parsers`.
     assert!(
         programs.len() >= 47,
@@ -83,8 +81,8 @@ fn every_corpus_program_runs_and_prints_the_answer_it_documents() {
             cmd.arg("--input").arg(&input);
         }
         // Never inherit the harness's stdin: a `read` program with no `.in`
-        // must run against *empty* input rather than block on a terminal. It no
-        // longer faults there — a zero-byte buffer is empty input, and the
+        // must run against *empty* input rather than block on a terminal. That
+        // does not fault — a zero-byte buffer is empty input, and the
         // constructors answer from their own rules (ADR-087) — so this line
         // buys determinism, not a fault. Every corpus program that reads has an
         // `.in` anyway.

@@ -1,7 +1,7 @@
-//! Rich parse-failure detail (§7.11, M10-WS1).
+//! Rich parse-failure detail (§7.11).
 //!
 //! A parse mismatch (§7.11) is signalled as [`crate::FaultKind::ParseFailed`],
-//! but the fault kind alone carries no detail. The crash debugger (M10) and the
+//! but the fault kind alone carries no detail. The crash debugger and the
 //! noninteractive fallback need the *structured* information §7.11 lists:
 //!
 //! ```text
@@ -9,7 +9,7 @@
 //! parser span         — the source span of the failing parser expression
 //! expected description — what the parser expected (e.g. "int", "literal ':'")
 //! actual preview      — a bounded slice of the input around the mismatch
-//! parser path         — the active input parser path (reserved; M10b)
+//! parser path         — the active input parser path (reserved)
 //! partial root value  — best-effort deepest successfully-built sub-value
 //! ```
 //!
@@ -154,10 +154,11 @@ const PREVIEW_RADIUS: usize = 24;
 fn preview_around(input: &[u8], offset: usize) -> String {
     // `start` is clamped to `end`, not merely to the radius. An offset past the
     // end of the buffer gives `start > end`, and `&input[start..end]` panics on
-    // an inverted range — inside `extern "C"`, where a panic is undefined
-    // behaviour rather than a crash report (D12). It was reachable: a ragged
-    // grid's fill is parsed against its own buffer, so a failure there carries
-    // an offset that means nothing here.
+    // an inverted range — inside `extern "C"`, where the ABI guard turns a panic
+    // into an internal fault rather than the preview a total function gives
+    // (ADR-080). Such an offset is reachable: a ragged grid's fill is parsed
+    // against its own buffer, so a failure there carries an offset that means
+    // nothing here.
     let end = (offset + PREVIEW_RADIUS).min(input.len());
     let start = offset.saturating_sub(PREVIEW_RADIUS).min(end);
     let slice = &input[start..end];
@@ -177,13 +178,10 @@ fn preview_around(input: &[u8], offset: usize) -> String {
 mod tests {
     use super::*;
 
-    /// **D12's second panic path.** A failure offset past the end of the
-    /// buffer must not make the preview slice an inverted range.
-    ///
-    /// `start = offset - 24` and `end = min(offset + 24, len)`, so any offset
-    /// more than 24 bytes past the end gave `start > end` and
-    /// `&input[start..end]` panicked — inside `extern "C"`, where a panic is
-    /// undefined behaviour and not a crash report.
+    /// A failure offset past the end of the buffer must not make the preview
+    /// slice an inverted range: `start = offset - 24` and
+    /// `end = min(offset + 24, len)`, so without the clamp of `start` to `end`
+    /// any offset more than 24 bytes past the end panics in `&input[start..end]`.
     #[test]
     fn a_failure_offset_past_the_buffer_previews_rather_than_panicking() {
         let mut d = ParseDetail::new();

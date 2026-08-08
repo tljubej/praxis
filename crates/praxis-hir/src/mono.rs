@@ -1,4 +1,4 @@
-//! Monomorphization (WS8, §13.6, ADR-018).
+//! Monomorphization (§13.6, ADR-018).
 //!
 //! Inferred polymorphic functions are instantiated for concrete use sites. The
 //! pass runs *between* typed-HIR lowering and MIR building: it consumes a
@@ -13,8 +13,8 @@
 //! 1. Collect every `(callee_symbol, concrete_arg_types)` call site from the
 //!    typed tree whose callee scheme `is_polymorphic()`.
 //! 2. For each, build a canonical key (the callee symbol + the canonicalized arg
-//!    types) and cache the mangled clone name. Repeated call sites with the same
-//!    canonical types share one clone.
+//!    types + the canonicalized result) and cache the mangled clone name.
+//!    Repeated call sites with the same canonical types share one clone.
 //! 3. To specialize: instantiate the callee scheme, unify its param types with
 //!    the concrete arg types (pinning the quantified vars), then clone the
 //!    callee `TypedFn` and substitute every `Type` in it by its resolved form.
@@ -66,7 +66,7 @@ pub fn monomorphize(module: TypedModule, names: &NameTable, db: &mut TypeDb) -> 
                 TypedItem::Fn(f) => (f.symbol, f.clone()),
             })
             .collect(),
-        // (symbol, canonical arg types) → mangled clone name.
+        // (symbol, canonical arg types, canonical result) → mangled clone name.
         cache: HashMap::new(),
         used_names: HashSet::new(),
         // The clones emitted so far (appended after the monomorphic originals).
@@ -110,19 +110,17 @@ struct MonoPass<'a> {
     db: &'a mut TypeDb,
     names: &'a NameTable,
     originals: HashMap<SymbolId, TypedFn>,
-    /// Cache key: (callee symbol, the arg types' [`TypeKey`]s). Structural (not
-    /// type-id) so two call sites with the same concrete type share a clone even
-    /// when inference gave them distinct arena slots.
+    /// Cache key: (callee symbol, the arg types' [`TypeKey`]s, the result's).
+    /// Structural (not type-id) so two call sites with the same concrete type
+    /// share a clone even when inference gave them distinct arena slots.
     ///
-    /// **MONO-03**: this used to be the *rendered* type, which is display and
-    /// not identity. `Option` printed as a bare name whatever it held, so
-    /// `id(Some(1))` and `id(Some("a"))` hashed to one key and the second call
-    /// silently reused the first's `Int` specialization.
+    /// The key is never the *rendered* type, which is display and not identity;
+    /// two types that render alike are pulled apart by their keys.
     ///
-    /// **MONO-02**: the key carries the call's *result* as well as its
-    /// arguments. A callee whose quantified variable appears only in its result
-    /// — `fn empty() { Vec() }` is `forall T. () -> Vec[T]` — has no argument to
-    /// tell two instantiations apart, and used not to be specialized at all.
+    /// The key carries the call's *result* as well as its arguments. A callee
+    /// whose quantified variable appears only in its result — `fn empty() {
+    /// Vec() }` is `forall T. () -> Vec[T]` — has no argument to tell two
+    /// instantiations apart.
     cache: HashMap<(SymbolId, Vec<TypeKey>, TypeKey), String>,
     /// The mangled names handed out so far. The name is still built from the
     /// rendered types (it has to be readable), so two distinct keys that render
@@ -174,10 +172,9 @@ impl<'a> MonoPass<'a> {
 
     /// A mangled clone name that no other specialization has taken.
     ///
-    /// The readable form comes from the rendered argument types; if two
-    /// specializations render the same — which the cache key no longer lets
-    /// pass for one specialization — the second gets a numeric suffix rather
-    /// than the first one's symbol.
+    /// The readable form comes from the rendered argument types; two distinct
+    /// cache keys that render alike are pulled apart here, the second getting a
+    /// numeric suffix rather than the first one's symbol.
     fn fresh_mangled_name(&mut self, callee: SymbolId, arg_types: &[Type], result: Type) -> String {
         // A zero-argument generic callee has nothing to render but its result;
         // naming every instantiation of `empty()` `empty__mono` would collide
@@ -252,8 +249,8 @@ fn rewrite_block(block: &mut TypedBlock, pass: &mut MonoPass<'_>) {
 fn rewrite_stmt(stmt: &mut TypedStmt, pass: &mut MonoPass<'_>) {
     // Every sub-expression of the statement, not only an assignment's value: a
     // subscript store's receiver or index, and both of a field store's, can hold
-    // the call this pass retargets. The list is `stmt_exprs`', written once —
-    // this used to name the fields by hand, as `resolve_stmt` did beside it.
+    // the call this pass retargets. The list is `stmt_exprs_mut`'s, written once
+    // rather than named field by field here.
     for e in stmt_exprs_mut(stmt) {
         rewrite_expr(e, pass);
     }
@@ -274,17 +271,17 @@ fn rewrite_expr(e: &mut TypedExpr, pass: &mut MonoPass<'_>) {
         let is_poly = scheme_of(pass.names, *callee).is_some_and(|s| s.is_polymorphic())
             && pass.originals.contains_key(callee);
         if is_poly {
-            // An empty argument list is still a real generic call site: the
-            // guard that skipped it dropped `fn empty() { Vec() }`'s original
-            // without ever emitting a clone, so the call had no target at all
-            // (MONO-02). The call's own type is what pins such a callee.
+            // An empty argument list is still a real generic call site — the
+            // call's own type is what pins a callee like `fn empty() { Vec() }`
+            // — so it must not be skipped, or the original would be dropped
+            // with no clone for the call to target.
             let mangled = pass.instantiate(*callee, arg_types, *ty);
             *callee_name = mangled;
         }
     }
-    // …everywhere else, recurse. The child list is F20's, written once: this
-    // used to be its own 29-arm match, and a field missing from it was a call
-    // that never got retargeted.
+    // …everywhere else, recurse. The child list is `children_mut`'s, written
+    // once: a hand-written match here would retarget nothing in whatever
+    // variant it forgot.
     for child in e.children_mut() {
         rewrite_expr(child, pass);
     }
@@ -296,18 +293,13 @@ fn rewrite_expr(e: &mut TypedExpr, pass: &mut MonoPass<'_>) {
 /// Specialize `original` (a generic fn) for the concrete `arg_types` and
 /// `result`, and rename the clone to `name`.
 ///
-/// **MONO-01.** This used to instantiate the scheme, unify *that* copy's params
-/// with the argument types, and then `follow` every type in the clone. The copy
-/// and the clone shared no variables: the fresh instantiation's variables were
-/// the ones unification pinned, and the clone's were the ones the typed tree
-/// carried — so `follow` found them exactly as unbound as it left them and the
-/// "specialized" clone was the generic original with a new name.
-///
-/// The two are one set now. Lowering writes the scheme's own variables into the
-/// typed tree (see `lower_fn`), so what a use site chooses for each **binder**
-/// is a substitution the clone can be rewritten by. `instantiate_with_mapping`
-/// is what says which variable stands for which binder; unifying that copy
-/// against the call site is what decides them.
+/// Specialization is a *substitution over binders*, not a `follow` of the
+/// clone's own types: lowering writes the scheme's own variables into the typed
+/// tree (see `lower_fn`), so what a use site chooses for each **binder** is what
+/// the clone is rewritten by. `instantiate_with_mapping` says which fresh
+/// variable stands for which binder; unifying that copy against the call site is
+/// what decides them. Unifying a fresh instantiation and then `follow`ing the
+/// clone would touch two disjoint variable sets and leave the clone generic.
 fn specialize(
     db: &mut TypeDb,
     original: &TypedFn,
@@ -324,7 +316,7 @@ fn specialize(
         let _ = db.unify(*pt, *at);
     }
     // The result is a witness too, and for a zero-argument generic callee it is
-    // the only one (MONO-02).
+    // the only one.
     let _ = db.unify(result_ty, result);
     let binders: Vec<VarId> = scheme.binders().to_vec();
     let args: Vec<Type> = mapping.iter().map(|m| db.deep_resolve(*m)).collect();
@@ -361,7 +353,7 @@ fn resolve_stmt(db: &mut TypeDb, binders: &[VarId], args: &[Type], stmt: &mut Ty
         | TypedStmt::FieldAssign { .. }
         | TypedStmt::Expr(_) => {}
     }
-    // …and the sub-expressions, from `stmt_exprs`' list rather than by hand.
+    // …and the sub-expressions, from `stmt_exprs_mut`'s list rather than by hand.
     for e in stmt_exprs_mut(stmt) {
         resolve_expr(db, binders, args, e);
     }
@@ -446,9 +438,8 @@ fn resolve_expr(db: &mut TypeDb, binders: &[VarId], args: &[Type], e: &mut Typed
         // walk reaches.
         TypedExpr::Block(_) => {}
     }
-    // The recursion is F20's child walker, written once. This used to be its own
-    // 29-arm match — the second of the three the audit found, each independently
-    // forgettable and each already having forgotten something.
+    // The recursion is the shared child walker, written once rather than as
+    // another hand-maintained match over every variant.
     for child in e.children_mut() {
         resolve_expr(db, binders, args, child);
     }
@@ -631,12 +622,9 @@ mod tests {
         );
     }
 
-    /// **MONO-01.** Two instantiations of one generic are two *concrete*
-    /// functions, not two names for the same unresolved one. The clone used to
-    /// be renamed and nothing else: specialization unified a fresh
-    /// instantiation of the scheme, then `follow`ed the clone's own types —
-    /// which mentioned different variables entirely — so both clones came out
-    /// carrying the binder as unbound as it started.
+    /// Two instantiations of one generic are two *concrete* functions, not two
+    /// names for the same unresolved one: each clone's own type is the one its
+    /// call site chose.
     #[test]
     fn two_instantiations_of_one_generic_are_two_concrete_functions() {
         let src = "fn id(x) { x }\n\
@@ -666,11 +654,9 @@ mod tests {
         );
     }
 
-    /// **MONO-02.** A zero-argument generic is specialized *per result type*.
-    /// `empty` is `forall T. () -> Vec[T]`; nothing in its argument list says
-    /// which `T`, so keying on arguments alone made two uses one clone — after
-    /// the guard that skipped zero-argument sites entirely stopped dropping the
-    /// original without emitting any clone at all.
+    /// A zero-argument generic is specialized *per result type*. `empty` is
+    /// `forall T. () -> Vec[T]`; nothing in its argument list says which `T`, so
+    /// the result must participate in the cache key.
     #[test]
     fn a_zero_argument_generic_is_specialized_per_result_type() {
         let names = mono_names(
@@ -693,11 +679,9 @@ mod tests {
         );
     }
 
-    /// MONO-03. The cache key is a [`TypeKey`], and an enum's key carries its
-    /// def **and its arguments** — so `Option[Int]` and `Option[Text]` are two
-    /// keys. The rendered string it replaces was one: `render` emitted the
-    /// nominal name alone, because before F12 the element type lived in a fresh
-    /// def rather than in the type.
+    /// The cache key is a [`TypeKey`], and an enum's key carries its def **and
+    /// its arguments** — so `Option[Int]` and `Option[Text]` are two keys and
+    /// two specializations.
     #[test]
     fn enum_payload_types_participate_in_monomorphization_cache_key() {
         let names = mono_names(

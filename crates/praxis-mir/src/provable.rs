@@ -6,7 +6,7 @@
 //! belongs to, and diverts to a refusal when they disagree. That check exists
 //! because [`Inst::ExtractScalar`] names a width — `praxis_int_load` reads eight
 //! bytes — and a MIR that names the wrong one is an out-of-bounds heap read from
-//! a program `praxis check` accepted (REP-56, and REP-49 before it).
+//! a program `praxis check` accepted.
 //!
 //! This module is the *static* half of the same question, and it is an
 //! **analysis, not a transform**: nothing here rewrites an instruction. For each
@@ -34,8 +34,7 @@
 //! `LoadTupleElem`, `EnumPayloadGet`, `LoadCapture` — is `Bottom`: the
 //! descriptor came out of the runtime, and reading the *static* type off
 //! [`crate::ir::Local::ty`] instead would be believing the front end's
-//! guarantee, which is the premise handover 26 §4 read the repair log and
-//! refuted.
+//! guarantee, which this analysis does not do.
 //!
 //! **The analysis is flow-insensitive and that is what makes it sound over a
 //! non-SSA IR.** The answer is a property of the *slot* — "every definition
@@ -245,8 +244,7 @@ enum Def {
 /// contributes [`Def::Opaque`], which meets to [`Lattice::Bottom`], which is an
 /// *absence of proof* — so the cost of forgetting is a missed elision, never a
 /// verifier that blesses a read it should have refused. That is worth more than
-/// keeping ADR-044's count of exhaustive matches at five would have been, and it
-/// is the same trade handover 27 §3 makes for W8-S0's rollback guard.
+/// an exhaustive match here would be.
 fn def_of(inst: &Inst) -> Option<(LocalId, Def)> {
     let dst = defines(inst)?;
     let def = match inst {
@@ -610,10 +608,10 @@ mod tests {
         assert_eq!(ProvableDescriptors::of(&f).class(slot), None);
     }
 
-    /// A value that came out of the runtime is `Bottom`, and this is the reason
-    /// the rule catches REP-56 and REP-49 but **not** REP-54 or TY-31's catalog
-    /// bound: both of those build their wrong descriptor inside a wrapper, and
-    /// MIR sees only an [`Inst::Call`] with a `Gc` destination.
+    /// A value that came out of the runtime is `Bottom`, and that is the edge
+    /// of what the rule can catch: it catches a wrong width MIR itself emitted,
+    /// and not one built inside a runtime wrapper, because MIR sees only an
+    /// [`Inst::Call`] with a `Gc` destination.
     #[test]
     fn a_call_result_is_not_provable_because_the_runtime_chose_its_descriptor() {
         let mut f = Function::empty("f");
@@ -708,25 +706,22 @@ mod tests {
     }
 }
 
-/// The census handover 27 §5 makes the gate for W11's *backend* half — how
-/// often the analysis above actually proves something on the benchmark suite.
+/// How often the analysis above actually proves something on the benchmark
+/// suite.
 ///
 /// It lives here rather than in a scratch script because the number is a claim
 /// about this tree and it expires the moment the lowering changes. Both columns
-/// are reported, and reporting both is the point: handover 26's producer set
-/// omits [`Inst::MoveGc`], and `TypedExpr::Path` hands back the *binding's slot*
-/// — so every read of a user variable is an `ExtractScalar` whose `src` is
-/// `MoveGc`-defined and the literal column covers none of them. Run the census
-/// one way and the package is declined on an artifact of how one sentence was
-/// written.
+/// are reported, and reporting both is the point: a producer set that omits
+/// [`Inst::MoveGc`] covers almost nothing, because `TypedExpr::Path` hands back
+/// the *binding's slot* — so every read of a user variable is an
+/// `ExtractScalar` whose `src` is `MoveGc`-defined.
 #[cfg(test)]
 mod census {
     use super::*;
     use crate::ir::{BlockId, Function};
     // The forwarded door (ADR-121, and `forward.rs`'s test module for the full
-    // reason). Every figure in this census is documented as a *post-W8-S0*
-    // measurement — "the post-W8-S0 inner-loop census, to the site" — so it must
-    // read the MIR that description names.
+    // reason): every figure below is measured over MIR with box forwarding
+    // already applied, which is the MIR the backend sees.
     use crate::test_support::lower_src_to_mir_forwarded as lower_src_to_mir;
     use crate::test_support::{benchmark_source, Lowered, BENCHMARK_SUITE};
 
@@ -734,7 +729,7 @@ mod census {
     #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
     struct Sites {
         total: usize,
-        /// Handover 26's set: every definition of `src` is *directly* a
+        /// The unchased set: every definition of `src` is *directly* a
         /// `ConstGc`, an `Alloc` or a `Materialize`.
         literal: usize,
         /// The same question with `MoveGc` resolved transitively — which is what
@@ -769,7 +764,7 @@ mod census {
         }
     }
 
-    /// Whether every definition of `local` is one of handover 26's three
+    /// Whether every definition of `local` is one of the three direct
     /// producers *without* chasing a copy. Trap 1 applies to this column too: a
     /// local with no definition is not literal-provable either, which is why
     /// this ends `seen.is_some()` rather than `true`.
@@ -823,40 +818,22 @@ mod census {
     /// the table.
     ///
     /// The assertion is on the *gap between the columns*, not on the digits: the
-    /// digits move with every lowering change — W8-S0 deletes sites from the
-    /// denominator, W4b adds inline arms — and a gate that has to be re-typed is
-    /// a gate nobody re-reads. The gap is the finding, and it is the one thing
-    /// that cannot be an artifact of the benchmark selection.
+    /// digits move with every lowering change, and a gate that has to be
+    /// re-typed is a gate nobody re-reads. The gap is the finding, and it is the
+    /// one thing that cannot be an artifact of the benchmark selection.
     ///
-    /// Measured **before** W8-S0 merged: 419 sites, 230 literal (54.9%), 340
-    /// chased (81.1%), with `vm` the floor at 54.3% and `collatz` the ceiling at
-    /// 95.8%.
+    /// Measured on this tree: **218 sites, 30 literal (13.8%), 140 chased
+    /// (64.2%)**. The literal column sits that low because box forwarding's
+    /// producer set is `Materialize`/`Alloc`/`ConstGc`, which is *exactly* what
+    /// that column counts — so the two anti-correlate rather than merely
+    /// differ: every site the literal column could prove is a site forwarding
+    /// would rather delete.
     ///
-    /// Measured with W8-S0 and W8-S0b in the tree and W4b not yet: 219 sites,
-    /// 30 literal (13.7%), 140 chased (63.9%). The denominator nearly halved
-    /// and the literal column collapsed by 41 points, and both are one fact:
-    /// W8-S0's producer set is `Materialize`/`Alloc`/`ConstGc`, which is
-    /// *exactly* what the literal column counts, so the two anti-correlate
-    /// rather than merely differ. Every site the literal column could prove is
-    /// a site W8-S0 would rather delete.
-    ///
-    /// That is the strongest argument in the round against W11's backend half,
-    /// and it arrived by measurement rather than by judgement.
-    ///
-    /// Measured **on this tree**, with W4b in it too: **218 sites, 30 literal
-    /// (13.8%), 140 chased (64.2%)**. The whole of the move is **one site, in
-    /// `bfs`** — 63 → 62, with `literal` and `chased` both unchanged at 4 and
-    /// 49 — and the size of it is the finding. ADR-122's open questions
-    /// nominate W4b as the way to make *more* sites provable, on the grounds
-    /// that it "moves descriptors out of `Inst::Call` and into MIR's own
-    /// emissions". That is true of exactly one of its three arms:
-    /// `Inst::BitsetContains` is a MIR instruction and its `ExtractScalar`
-    /// disappears with the box W8-S0 forwards away, which is the one site.
-    /// `praxis_vec_get` and `praxis_vec_len` inline **in the backend** and
-    /// keep their `Inst::Call` in MIR, so this census — which reads MIR —
-    /// cannot see them, and the descriptor of a value the wrapper minted is no
-    /// more provable than it was. Making it so is an `Inst` per primitive, not
-    /// a backend arm (ADR-118 decision 10).
+    /// Inlining a primitive **in the backend** moves nothing here.
+    /// `praxis_vec_get` and `praxis_vec_len` keep their `Inst::Call` in MIR, so
+    /// this census — which reads MIR — cannot see them, and the descriptor of a
+    /// value the wrapper minted stays unprovable. Making one provable is an
+    /// `Inst` per primitive, not a backend arm (ADR-118 decision 10).
     #[test]
     fn the_census_over_the_whole_suite_is_a_different_answer_in_each_column() {
         let mut suite = Sites::default();
@@ -880,30 +857,15 @@ mod census {
         );
     }
 
-    /// **The inner-loop census, and the two hand counts it settles.**
+    /// **The inner-loop census.** The `collatz`, `primes` and `mandelbrot`
+    /// innermost loops together: **29 sites, 2 literal (6.9%), 27 chased
+    /// (93.1%)**.
     ///
-    /// Handover 27 §5 hand-walked `collatz`/`primes`/`mandelbrot` inner loops
-    /// twice. Its **pre-W8-S0** count — 29/56 = 52% literal, 54/56 = 96% chased
-    /// — was **exact on all four numbers**, verified mechanically before W8-S0
-    /// merged. Its **post-W8-S0 estimate** — 12/39 and 37/39 — was **wrong in
-    /// both**, and this test now holds the measured answer: **29 sites, 2
-    /// literal (6.9%), 27 chased (93.1%)**.
-    ///
-    /// Both errors point the same way, which is why they matter. The denominator
-    /// is 29 rather than 39 because W8-S0 deletes ten more sites than the walk
-    /// expected, and the literal column is 6.9% rather than 31% because W8-S0's
-    /// producer set *is* the literal column's — so it eats its own evidence.
-    ///
-    /// **One word of handover 27 is also wrong.** It glosses the pre-W8-S0 52%
-    /// as "a fail on the 'fewer than half' gate". 29 of 56 is not fewer than
-    /// half; it is a bare *pass*, by one site. What genuinely fails handover
-    /// 26's gate is this tree's 6.9%.
-    ///
-    /// **W4b moves none of these four numbers**, and that is not a null result
-    /// worth shrugging at: `collatz`, `primes` and `mandelbrot` are arithmetic
-    /// loops that touch no `BitSet` and no `Vec`, so the one site W4b removes
-    /// suite-wide lands in `bfs` and nowhere near here. The three inner loops
-    /// stay at 29/2/27 exactly.
+    /// The columns diverge for the suite-wide census's reason, sharper here:
+    /// box forwarding's producer set *is* the literal column's, so it eats that
+    /// column's evidence. All three are arithmetic loops that touch no `BitSet`
+    /// and no `Vec`, so a backend-inlined collection primitive moves none of
+    /// these numbers.
     ///
     /// These digits move with every lowering change. Re-measure, do not re-type:
     /// run with `--nocapture` and the table prints itself.

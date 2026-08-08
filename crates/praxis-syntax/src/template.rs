@@ -4,13 +4,8 @@
 //! `` `…` `` run: [`praxis-parser`'s lexer], which turns it into one
 //! `BacktickTemplate` token, and `praxis-input-parser`'s template scanner,
 //! which re-reads that token's interior and has to find the same nested
-//! templates and the same closing backtick inside it. When they were two
-//! implementations of one rule they drifted immediately: the lexer counted
-//! `{`/`}` everywhere and the scanner skipped string literals, so
-//! `` `{c:one_of("{")}` `` — a legal §7.5 program, and one the scanner
-//! accepted — left the lexer's brace counter above zero at the closing
-//! backtick, which it then read as an *opener* and swallowed the rest of the
-//! file into one token.
+//! templates and the same closing backtick inside it. Two implementations of
+//! one rule drift, so there is one implementation.
 //!
 //! `praxis-syntax` is the crate below both (it is where [`crate::ident`] and
 //! [`crate::numeric`] already live for exactly this reason), so the rule lives
@@ -36,8 +31,7 @@
 //! At most [`MAX_TEMPLATE_NESTING`] templates may nest; past that a backtick
 //! simply closes, so adversarial input lands on the ordinary
 //! unterminated/unexpected-token paths rather than on the stack. There is one
-//! bound because there is one function — the two copies of this rule disagreed
-//! about it by one level.
+//! bound because there is one function.
 //!
 //! # The quoted-run and scalar primitives
 //!
@@ -61,11 +55,9 @@ pub enum TemplateEnd {
     /// The line ended, or the text did, before the run closed.
     ///
     /// The index is where the run **stopped** — at the newline, or at the end
-    /// of the text — so `&src[open..end]` is still a bounded token. That bound
-    /// is the whole point of ADR-094: an unterminated template used to run to
-    /// EOF, so `T002` covered the rest of the file and the `}` closing the
-    /// enclosing block was swallowed inside the token, which produced a `P001`
-    /// and a `Y001` after it. Three errors for one typo.
+    /// of the text — so `&src[open..end]` is still a bounded token. Bounding it
+    /// is the whole point of ADR-094: one typo yields one `T002` rather than a
+    /// token covering the rest of the file and a cascade behind it.
     Unterminated(usize),
 }
 
@@ -76,17 +68,14 @@ pub enum TemplateEnd {
 /// # A template ends at the line it opens on (ADR-094)
 ///
 /// A raw newline may not appear inside a template; `\n` is how §7.2 says a
-/// template matches a line ending, and it is the only way. This is the rule a
-/// `"…"` literal already follows — the backtick template was the one delimited
-/// literal in the language that could silently span a line.
+/// template matches a line ending, and it is the only way. This is the same rule
+/// a `"…"` literal follows.
 ///
-/// A raw newline never had a meaning here in any case. §7.2 lists literal text,
-/// a space run, `\s*`, `\s+`, `\n`, `\t`, `\x20` and the ordinary escapes; a raw
-/// newline is whitespace but is not a space, so it matched none of them and fell
-/// through to *literal text*. Measured consequence: `` `{a:int}X⏎Y{b:int}` ``
-/// matched LF input and **failed on CRLF**, while the `\n` escape matches both.
-/// The multi-line template was a strictly weaker, silently CRLF-hostile shadow
-/// of the construct §7.2 specifies.
+/// A raw newline would have no useful meaning here in any case. §7.2 lists
+/// literal text, a space run, `\s*`, `\s+`, `\n`, `\t`, `\x20` and the ordinary
+/// escapes; a raw newline is whitespace but is not a space, so it matches none
+/// of them and would fall through to *literal text* — which matches LF input and
+/// **fails on CRLF**, while the `\n` escape matches both.
 #[must_use]
 pub fn template_end(src: &str, open: usize) -> TemplateEnd {
     debug_assert_eq!(src.as_bytes().get(open), Some(&b'`'));
@@ -124,9 +113,7 @@ fn run(bytes: &[u8], open: usize, level: usize) -> Result<usize, usize> {
             b'\n' => return Err(pos),
             b'\r' if bytes.get(pos + 1) == Some(&b'\n') => return Err(pos),
             // An escape hides the next scalar, but it cannot hide a line break:
-            // `\` at the end of a line is a dangling escape, not a continuation,
-            // and letting it swallow the newline would reintroduce exactly the
-            // multi-line token this rule removes.
+            // `\` at the end of a line is a dangling escape, not a continuation.
             b'\\' => {
                 if matches!(bytes.get(pos + 1), Some(b'\n') | None)
                     || (bytes.get(pos + 1) == Some(&b'\r') && bytes.get(pos + 2) == Some(&b'\n'))
@@ -175,9 +162,7 @@ fn run(bytes: &[u8], open: usize, level: usize) -> Result<usize, usize> {
 ///
 /// A dangling `\` before a CRLF stops *at* the `\r`, exactly as [`run`] and
 /// `interp`'s `fragment` do, so no token ever ends between a `\r` and the `\n`
-/// it precedes. The two copies this replaced tested only for a bare `\n` there
-/// and so stopped one byte later, mid-sequence — the single way they differed
-/// from their own callers, and an oversight rather than a decision.
+/// it precedes.
 pub(crate) fn quoted_run(bytes: &[u8], open: usize, terminator: u8) -> Result<usize, usize> {
     let mut pos = open + 1;
     while pos < bytes.len() {
@@ -257,10 +242,9 @@ mod tests {
         template_end(src, 0) == TemplateEnd::Closed(src.len())
     }
 
-    /// **The blocker.** A `{`, `}` or backtick inside a string literal is text,
-    /// not structure. The lexer's copy of this rule had no string arm, so
-    /// `one_of("{")` left its brace counter above zero and the closing backtick
-    /// read as an opener.
+    /// A `{`, `}` or backtick inside a string literal is text, not structure:
+    /// `one_of("{")` must not leave the brace counter above zero, or the closing
+    /// backtick reads as an opener.
     #[test]
     fn a_delimiter_inside_a_string_is_text() {
         for src in [
@@ -313,13 +297,6 @@ mod tests {
 
     /// **ADR-094.** A template ends at the line it opens on, so an unterminated
     /// run stops at the newline instead of swallowing the rest of the file.
-    ///
-    /// That bound is the whole decision: `read \`{int\`` used to produce a
-    /// `T002` covering everything after it, and because the `}` closing the
-    /// enclosing block was inside the token, a `P001` and a `Y001` after that.
-    ///
-    /// Observed red without the `b'\n'` arm in `run`: every assertion here
-    /// reports the length of the whole input instead of the first line's end.
     #[test]
     fn a_template_ends_at_the_line_it_opens_on() {
         // The run stops *at* the newline, so the token is `` `{int` `` and the
@@ -334,8 +311,7 @@ mod tests {
         // CRLF: the run stops before the `\r`, so no token ends mid-sequence.
         assert_eq!(template_end("`{int\r\n}", 0), TemplateEnd::Unterminated(5));
         // A trailing backslash cannot swallow the line break — a dangling
-        // escape is not a continuation, and treating it as one would reopen
-        // exactly the multi-line token this rule removes.
+        // escape is not a continuation.
         assert_eq!(
             template_end("`abc\\\ndef`", 0),
             TemplateEnd::Unterminated(5)
@@ -353,8 +329,6 @@ mod tests {
         );
         // A dangling `\` inside that string is not a continuation either, and it
         // stops at the line terminator's *first* byte — so a CRLF is not split.
-        // That byte is the one place the separate string scanner disagreed with
-        // `run` before the two became one `quoted_run`.
         assert_eq!(
             template_end("`{c:one_of(\"ab\\\ncd\")}`", 0),
             TemplateEnd::Unterminated(15)
@@ -370,10 +344,7 @@ mod tests {
     /// `MAX_TEMPLATE_NESTING + 1`-th is not.
     ///
     /// An *unbounded* implementation passes the first assertion and fails the
-    /// second; a bound one level shorter or longer fails one of them. This is
-    /// the assertion the predecessor test did not make: it fed the lexer 5,000
-    /// unclosed openers and asserted only that *something* was reported, which
-    /// a lexer with no nesting at all also does.
+    /// second; a bound one level shorter or longer fails one of them.
     #[test]
     fn nesting_is_bounded_at_max_template_nesting() {
         let at_the_bound = nested(MAX_TEMPLATE_NESTING);

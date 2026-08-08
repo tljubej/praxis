@@ -1,22 +1,18 @@
 //! The one literal decoder for the whole workspace (§4.3).
 //!
-//! There were two, and they disagreed (IP-08). `praxis-hir`'s `unquote_text`
-//! stripped exactly one quote at each end and decoded `\n \t \r \" \\ \0`;
-//! `parser_lower`'s copy was `raw.trim_start_matches('"').trim_end_matches('"')`
-//! — it never unescaped anything, so `sep("\t", int)` split on the two
-//! characters `\` and `t`, and it stripped a *run* of quotes at each end, so
-//! `sep("\"\"", int)` lost both of its real quotes and became the empty
-//! separator that cannot advance a cursor.
+//! Every caller decodes here, because a second decoder drifts from this one:
+//! one that never unescapes is how `sep("\t", int)` comes to split on the two
+//! characters `\` and `t` rather than on a tab.
 //!
 //! `praxis-syntax` depends only on `praxis-source`, so both the HIR lowerer and
-//! the input-parser's capture-body parser can reach this.
+//! the input-parser's capture-body parser can reach it.
 //!
-//! [`decode_char_literal`] is here for the same rule, before it has had a chance
-//! to be broken twice: a `'a'` is decoded by the **lexer** (which is where its
-//! one-scalar rule is enforced, ADR-141), by [`crate::SyntaxKind::CharLit`]'s
-//! expression lowering and by its pattern lowering. Three callers, one decoder,
-//! and one escape table — [`decode_escape`] — shared with `"…"` so the two
-//! spellings of `\n` cannot drift apart.
+//! [`decode_char_literal`] is here for the same rule: a `'a'` is decoded by the
+//! **lexer** (which is where its one-scalar rule is enforced, ADR-141), by
+//! [`crate::SyntaxKind::CharLit`]'s expression lowering and by its pattern
+//! lowering. Three callers, one decoder, and one escape table —
+//! [`decode_escape`] — shared with `"…"` so the two spellings of `\n` cannot
+//! drift apart.
 
 /// Whether `raw` is a well-formed text literal: at least `""`, quoted at both
 /// ends.
@@ -82,9 +78,9 @@ pub fn decode_text_body(inner: &str) -> String {
 /// they may not do is disagree about what `\n` *is*, which is why the eight rows
 /// live here rather than in each of them.
 ///
-/// `\{` and `\}` joined the table with §8.1's interpolation (ADR-147): a `{` in
-/// a text literal now opens a hole, so a literal brace needs a spelling. It is
-/// an escape rather than a doubling rule (`{{`) because the language has one
+/// `\{` and `\}` are in the table because of §8.1's interpolation (ADR-147): a
+/// `{` in a text literal opens a hole, so a literal brace needs a spelling. It
+/// is an escape rather than a doubling rule (`{{`) because the language has one
 /// escape table and every other literal brace-free character already goes
 /// through it — a doubling rule would be a second mechanism that only
 /// interpolation used. `\}` is accepted so a pair can be written symmetrically;
@@ -210,21 +206,6 @@ pub fn decode_char_literal(raw: &str) -> Result<char, CharLitError> {
     Ok(decoded)
 }
 
-/// **These four are characterization tests, not gates.**
-///
-/// `unquote_text` moved here verbatim from `praxis-hir`'s `lower.rs`; its body
-/// is unchanged apart from the `is_text_literal` extraction, so every assertion
-/// below also passes against the predecessor. They are worth having — the
-/// function is newly public and this is now the workspace's only text decoder,
-/// so its behaviour should be written down where it lives — but they must not
-/// be counted as evidence that IP-08 was fixed.
-///
-/// The gate for IP-08 is
-/// `praxis_hir::infer_tests::a_parser_string_literal_is_decoded_once_like_every_other_literal`,
-/// which fails against the predecessor: the defect was that `parser_lower` had
-/// a *second*, worse decoder (`trim_start_matches('"').trim_end_matches('"')`,
-/// which never unescaped and stripped a run of quotes at each end), not that
-/// this one was wrong.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,9 +239,7 @@ mod tests {
     fn one_quote_comes_off_each_end() {
         assert_eq!(unquote_text(r#""a""#), "a");
         assert_eq!(unquote_text(r#""""#), "");
-        // A literal whose content is two escaped quotes keeps both. (This is
-        // the case `parser_lower`'s decoder lost, not this one — see the module
-        // note above.)
+        // A literal whose content is two escaped quotes keeps both.
         assert_eq!(unquote_text(r#""\"\"""#), "\"\"");
     }
 
@@ -313,8 +292,8 @@ mod tests {
         assert_eq!(decode_char_literal("'字'"), Ok('字'));
     }
 
-    /// The three failure modes `"##"[0]` and `""[0]` used to have at run time,
-    /// or not at all (ADR-141 Decision 2).
+    /// The three ways a `'…'` fails to name exactly one character, each caught
+    /// at lex time rather than at run time or not at all (ADR-141 Decision 2).
     #[test]
     fn a_char_literal_names_exactly_one_character() {
         assert_eq!(decode_char_literal("''"), Err(CharLitError::Empty));

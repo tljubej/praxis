@@ -1,9 +1,9 @@
 //! CLI-facing diagnostic rendering.
 //!
 //! Thin wrapper over [`praxis_source::Renderer`] that adds terminal-friendly
-//! framing: a blank line between diagnostics and a trailing summary line. The
-//! real terminal colour/ styling is deferred to a later milestone; the output
-//! is plain text so snapshot tests stay stable.
+//! framing: a blank line between diagnostics and a trailing summary line.
+//! Styling is the caller's [`Palette`]; [`Palette::plain()`] emits no ANSI, so
+//! snapshot tests stay stable.
 
 use std::io::Write;
 

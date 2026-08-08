@@ -160,10 +160,11 @@ pub struct Tui {
     /// rather than from the top of the function.
     ///
     /// The pane shows the selected frame's whole extent, and a frame is a whole
-    /// function — so anchoring at the top puts the marked line below the fold in
-    /// anything longer than the pane, and finding the fault meant scrolling to it
-    /// on every frame change. Storing a delta means 0 is "wherever the fault is",
-    /// which is both the right default and the right thing to reset to.
+    /// function — so anchoring at the top would put the marked line below the
+    /// fold in anything longer than the pane, and finding the fault would mean
+    /// scrolling to it on every frame change. Storing a delta means 0 is
+    /// "wherever the fault is", which is both the right default and the right
+    /// thing to reset to.
     ///
     /// Signed because the user can scroll above the anchor; the resolved absolute
     /// offset is clamped to the document in [`source_anchor`].
@@ -200,7 +201,7 @@ impl Tui {
     }
 
     /// Consume the TUI and hand back the [`Repl`], so the caller can reach the
-    /// session for its ordered teardown (F13, H15 — see
+    /// session for its ordered teardown (see
     /// [`crate::session::DebugSession::teardown`]).
     #[must_use]
     pub fn into_repl(self) -> Repl {
@@ -373,10 +374,10 @@ fn handle_normal_key(tui: &mut Tui, key: KeyEvent) {
         // These four keys are **spatial**: they move the highlight the way it
         // points on screen. The backtrace is drawn innermost-first, so `↑` means
         // a *lower* frame number. Wiring them to the call-stack sense instead —
-        // `↑` for "toward the caller" — inverts them against the list the user is
-        // looking at: `↑` on frame 0 jumps the marker downward, and `↓` there does
-        // nothing at all, because frame 0 is already the top row. Which reads, and
-        // was reported, as the arrows not working.
+        // `↑` for "toward the caller" — would invert them against the list the
+        // user is looking at: `↑` on frame 0 would jump the marker downward, and
+        // `↓` there would do nothing at all, because frame 0 is already the top
+        // row.
         //
         // The call-stack sense keeps its own keys below, where no screen direction
         // is implied to contradict.
@@ -1306,19 +1307,18 @@ fn span_line(src: &str, frame: &praxis_runtime::crash_snapshot::SnapshotFrame) -
 /// rather than the `return xs[scaled]` that encloses it — which is the one worth
 /// pointing at.
 ///
-/// This is the same signal `render_frame_locals` already trusts when it keeps an
-/// uninit temp that carries a span: "a temp for an expression whose value
-/// genuinely never computed … which is exactly what the user needs to see".
+/// This is the same signal [`crate::render::render_frame_locals`] trusts when it
+/// keeps an uninit temp that carries a span.
 fn fault_span(frame: &praxis_runtime::crash_snapshot::SnapshotFrame) -> Option<(u32, u32)> {
     frame
         .locals
         .iter()
         // `is_none`, not `!is_live`: the question here is whether the expression
         // *finished*, and a temp the collector emptied afterwards did finish.
-        // Before the slot could say so it read as unwritten, and since the pick
-        // below is the narrowest span, a collected sub-expression — `10000` in
-        // `(0..10000).to_vec()` — could win the fault line from the expression
-        // that actually faulted.
+        // Since the pick below is the narrowest span, counting a collected temp
+        // as unfinished would let a sub-expression — `10000` in
+        // `(0..10000).to_vec()` — win the fault line from the expression that
+        // actually faulted.
         .filter(|l| !l.is_user() && l.value.is_none())
         .filter_map(|l| l.span())
         .filter(|(s, e)| e > s)
@@ -1432,10 +1432,6 @@ mod tests {
 
     /// The arrows are spatial: the backtrace is drawn innermost-first, so `↓`
     /// moves *down the list* to a higher frame number and `↑` back toward #0.
-    ///
-    /// Binding them the other way — `↑` for "toward the caller" — is what made
-    /// them look broken: every session opens on frame 0, the top row, where `↑`
-    /// jumped the marker downward and `↓` could do nothing at all.
     #[test]
     fn the_arrows_move_the_selection_the_way_they_point() {
         let mut t = tui();
@@ -1484,8 +1480,8 @@ mod tests {
     }
 
     /// A held arrow arrives as `Repeat` on terminals with kitty-style key
-    /// reporting. Dropping those made a held key move one frame and then look
-    /// stuck; `Release` must still be ignored or one press moves two frames.
+    /// reporting, so `Repeat` has to navigate or a held key moves one frame and
+    /// then looks stuck; `Release` must be ignored or one press moves two frames.
     #[test]
     fn repeat_events_navigate_and_release_events_do_not() {
         let mut t = tui();
@@ -1737,12 +1733,12 @@ mod tests {
     /// A temp whose value the **collector** took also finished evaluating, so it
     /// is not where the fault is either.
     ///
-    /// This is the same rule as the test below, at the state that used to be
-    /// indistinguishable from an unfinished temp. It matters because the pick is
-    /// the *narrowest* span: in `var c = (0..10000).to_vec()`, the boxed `10000`
-    /// is dead the moment the `Range` is built, so a big enough allocation
-    /// collects it — and its four-character span would beat the real faulting
-    /// expression on width every time.
+    /// This is the same rule as the test below, at the state easiest to mistake
+    /// for an unfinished temp. It matters because the pick is the *narrowest*
+    /// span: in `var c = (0..10000).to_vec()`, the boxed `10000` is dead the
+    /// moment the `Range` is built, so a big enough allocation collects it — and
+    /// its four-character span would beat the real faulting expression on width
+    /// every time.
     #[test]
     fn a_temp_whose_value_was_collected_is_not_the_fault_span() {
         let mut collected = temp_with_span(1, (7, 12));
@@ -1789,7 +1785,7 @@ mod tests {
     }
 
     /// The backtrace reports the faulting line, not the line the function is
-    /// declared on — that was the whole reason `fault_span` exists.
+    /// declared on — which is what `fault_span` is for.
     #[test]
     fn the_backtrace_line_is_the_faulting_line() {
         let src = "fn f() {\n  var a = 1\n  return xs[a]\n}\n";
@@ -1832,8 +1828,8 @@ mod tests {
     }
 
     /// The value budget must come from the pane, not from a constant: a constant
-    /// larger than the space is what let the pane clip a boundary-cut value
-    /// mid-element at its own edge.
+    /// larger than the space lets the pane clip a boundary-cut value mid-element
+    /// at its own edge.
     #[test]
     fn the_value_column_is_budgeted_to_the_pane() {
         // A 44-wide pane, `scaled` (6) names and `Vec[Int]` (8) types:
@@ -1879,8 +1875,8 @@ mod tests {
     }
 
     /// A frame's extent is a whole function, so a fault deep inside a long one
-    /// sits below the fold when the pane starts at row 0 — you had to scroll to
-    /// find the marker on every frame change. The anchor is what fixes that.
+    /// sits below the fold when the pane starts at row 0. The anchor is what
+    /// brings the marked row on screen.
     #[test]
     fn the_source_pane_scrolls_to_the_faulting_row() {
         // A 60-line function in a 20-row pane, faulting at row 45.

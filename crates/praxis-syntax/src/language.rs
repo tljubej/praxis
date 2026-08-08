@@ -64,7 +64,7 @@ mod tests {
         }
     }
 
-    /// Every raw value the boundary accepts must map to the kind with that
+    /// Every raw value in the range walked here must map to the kind with that
     /// discriminant. This is what makes the range check in `from_raw_u16`
     /// sufficient: it proves the discriminants really are consecutive.
     #[test]

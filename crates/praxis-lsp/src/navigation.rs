@@ -1,4 +1,4 @@
-//! Go-to-definition, find references, and document symbols (WS7, §15.2).
+//! Go-to-definition, find references, and document symbols (§15.2).
 //!
 //! Every query here turns on one thing: a name's **symbol**, not its spelling.
 //! Two shadowed bindings share a word and have distinct `SymbolId`s, so a query

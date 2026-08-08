@@ -1,10 +1,10 @@
-//! WS10's drift gates: the TextMate grammar is checked against the compiler's
-//! own closed tables.
+//! Drift gates: the TextMate grammar is checked against the compiler's own
+//! closed tables.
 //!
 //! A grammar's keyword list is a **copy** of the lexer's, and no compiler checks
-//! it. Every keyword added after M11 is a chance for the two to diverge
-//! silently: the failure is a word quietly ceasing to be coloured, which nobody
-//! files and no test would otherwise catch.
+//! it. Every keyword added later is a chance for the two to diverge silently:
+//! the failure is a word quietly ceasing to be coloured, which nobody files and
+//! no test would otherwise catch.
 //!
 //! So the grammar is read **at test time** rather than quoted here — the
 //! `design_doc.rs` precedent applied to a second file: a test that quotes a file
@@ -13,7 +13,7 @@
 //! `ALL`-swept closed tables, so each gate is a loop over one of them.
 //!
 //! **This adds no Node toolchain to CI.** `just ci` is the whole gate (ADR-002)
-//! and a second toolchain in it is a cost this milestone does not need to pay.
+//! and a second toolchain in it is a cost the project does not pay.
 
 use std::path::PathBuf;
 
@@ -60,8 +60,9 @@ fn rule_pattern(grammar: &serde_json::Value, rule: &str) -> String {
 /// Exact rather than a substring search, and that is the point: `int` must not
 /// be satisfied by the `int` inside `identifier`, and `word` must not be
 /// satisfied by a rule that happens to contain the letters. A gate that can be
-/// satisfied by an accident is not a gate — `the_alternation_reader_rejects_a_word_that_is_only_a_substring`
-/// below is the proof that this one cannot.
+/// satisfied by an accident is not a gate —
+/// `the_alternation_reader_rejects_a_word_that_is_only_a_substring` below is the
+/// proof that this one cannot.
 fn alternatives(pattern: &str) -> Vec<String> {
     let start = match pattern.find('(') {
         Some(i) => i + 1,

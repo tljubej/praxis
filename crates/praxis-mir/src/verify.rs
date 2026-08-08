@@ -1,13 +1,10 @@
-//! The MIR verifier (F17, MIR-10): the pass that makes a fixed invariant stay
-//! fixed.
+//! The MIR verifier: the pass that makes a fixed invariant stay fixed.
 //!
 //! ADR-015 §10.3 states the rooting invariant — the GC root set at a safepoint
 //! is exactly the live `Gc` locals, and a `Scalar` slot holds a raw word the
-//! collector must never see — but nothing checked it. That is how the integer
-//! `1` came to inhabit a rootable slot (P0-03, a closure capture index moved
-//! into a `Gc` local) and how sixty-one hand-written root lists could disagree
-//! with the liveness pass without anything going red. A fix with no verifier
-//! behind it is a fix that regresses quietly.
+//! collector must never see. This pass is what checks it. Without it a raw
+//! integer can inhabit a rootable slot, and a hand-written root list can
+//! disagree with the liveness pass without anything going red.
 //!
 //! [`verify`] runs after [`crate::annotate`] at every pipeline site. It is
 //! cheap — one linear pass — and it is a hard error: a function that fails it
@@ -36,25 +33,20 @@
 //! built on the universal quantifier would bless `primes`' `is_prime(n)` and a
 //! rule built on the existential would refuse it. Neither is what this checks.
 //! It fires only where MIR wrote one descriptor down and then read a different
-//! one out — REP-56's `ConstGc { Unit }` read as an `Int`, REP-49's
-//! `ConstGc { Bool }` read as an `Int` — which is why it needed no lowering
-//! change to deploy and has never fired on a correct program.
+//! one out — a `ConstGc { Unit }` read as an `Int`, a `ConstGc { Bool }` read
+//! as an `Int` — so it needs no lowering change and does not fire on a correct
+//! program.
 //!
-//! # The fault rule, and why it is strict in both directions (MIR-10, ADR-088)
+//! # The fault rule, and why it is strict in both directions (ADR-088)
 //!
 //! §10.4 says generated code checks `pending_fault` immediately after calls
-//! that can fault. Nothing enforced it, and both halves had rotted: the fused
-//! `collect` sink pushed into its result Vec with no check at all (REP-52),
-//! while every method call emitted one whether or not its wrapper could fault
-//! (REP-53) — including `praxis_vec_len`, which is `Effect::Allocates`. The
-//! answer to "can this fault" is [`Inst::can_fault`], which derives from the
-//! ABI manifest through the same instruction→symbol mapping the Cranelift
-//! backend uses, so the verifier and the emitted call cannot disagree.
+//! that can fault. The answer to "can this fault" is [`Inst::can_fault`], which
+//! derives from the ABI manifest through the same instruction→symbol mapping
+//! the Cranelift backend uses, so the verifier and the emitted call cannot
+//! disagree.
 //!
 //! The **converse** is checked too, and that is the half that does the work.
-//! Without it the forward rule is satisfied by checking after everything, which
-//! is what lowering did: REP-53's fix would have had no invariant behind it and
-//! would have regressed to unconditional the first time a site was copied. With
+//! Without it the forward rule is satisfied by checking after everything. With
 //! it, `praxis_runtime::abi::panic_fault_is_observable`'s premise — that a
 //! `Pure`/`Allocates` symbol is never followed by a `CheckFault`, so its panic
 //! path can abort rather than fault — is *enforced* rather than asserted.
@@ -73,44 +65,40 @@
 //! self-jump placeholder that `BadBlockTarget` would not catch anyway.
 //!
 //! **`ScalarLiveAcrossSafepoint` is not implemented, and that is a decision.**
-//! F17 predicted it would fire on the eager `lower_seq_*` accumulators, and it
-//! would: a `sum`'s running `i64` is live across every `praxis_vec_get` call in
-//! the loop by construction. It is also harmless there. A scalar is a *copy* of
-//! a payload, so it cannot dangle when the object it came from is collected;
-//! the invariant that actually matters is "no raw word in a slot the collector
-//! reads", and `RootIsNotGc` plus `MoveGcFromScalar` are that invariant stated
-//! directly. Turning the weaker rule on would mean either moving every
-//! accumulator into a `Gc` slot (an allocation per iteration) or weakening the
-//! rule until it says nothing.
+//! It would fire on the eager `lower_seq_*` accumulators: a `sum`'s running
+//! `i64` is live across every `praxis_vec_get` call in the loop by
+//! construction. It is also harmless there. A scalar is a *copy* of a payload,
+//! so it cannot dangle when the object it came from is collected; the invariant
+//! that actually matters is "no raw word in a slot the collector reads", and
+//! `RootIsNotGc` plus `MoveGcFromScalar` are that invariant stated directly.
+//! Turning the weaker rule on would mean either moving every accumulator into a
+//! `Gc` slot (an allocation per iteration) or weakening the rule until it says
+//! nothing.
 //!
-//! **`OpaqueAtDescriptorSite` is still off, and the reason has changed twice**
-//! (hazard H10). The plan schedules it here, on the grounds that lowering could
-//! not supply per-use types until F15. F15 landed and supplied them: the
-//! `for`-loop item, the parser result, the closure value, the indirect call
-//! result and a pipeline's *source* item are all `MirType::Known`, and every
-//! `AllocKind::Collection` a program writes carries real type arguments. Two
-//! sites were left — the pair a fused `enumerate` or `zip` builds — and they
-//! needed two things: the catalog to describe those two methods correctly, and
-//! the fused lowering to read what it describes. **Both have landed** (TY-31
-//! and S21's MIR-05), so no lowering site emits an unconditional `Opaque` into
-//! a descriptor-producing position any more.
+//! **`OpaqueAtDescriptorSite` is off, and not because lowering cannot supply
+//! the types.** It does: the `for`-loop item, the parser result, the closure
+//! value, the indirect call result and a pipeline's *source* item are all
+//! `MirType::Known`, every `AllocKind::Collection` a program writes carries
+//! real type arguments, and the pair a fused `enumerate` or `zip` builds is
+//! described by the catalog and read by the fused lowering. No lowering site
+//! emits an unconditional `Opaque` into a descriptor-producing position.
 //!
-//! What blocks the rule now is not a lowering gap at all — it is that `Opaque`
-//! is a **legal answer**. A type that is still an inference variable has no
-//! descriptor and never will: `var m = Map()` generalizes at the `var`, so a
-//! `for kv in m` whose body never opens the pair leaves K and V unresolved, and
-//! `var v = Vec()` with no push leaves a chain over it the same way. ADR-066
-//! decision 5 answers that with a **null schema slot** and a runtime read of the
-//! value's own header, which is never the wrong descriptor. A rule that refused
-//! `Opaque` outright would reject those programs.
+//! What blocks the rule is that `Opaque` is a **legal answer**. A type that is
+//! still an inference variable has no descriptor and never will: `var m = Map()`
+//! generalizes at the `var`, so a `for kv in m` whose body never opens the pair
+//! leaves K and V unresolved, and `var v = Vec()` with no push leaves a chain
+//! over it the same way. ADR-066 decision 5 answers that with a **null schema
+//! slot** and a runtime read of the value's own header, which is never the wrong
+//! descriptor. A rule that refused `Opaque` outright would reject those
+//! programs.
 //!
-//! So the rule this file is waiting for is narrower than the one the plan named:
-//! not "no `Opaque` at a descriptor site", but "no `Opaque` at a descriptor site
-//! *whose type could have been resolved*" — which needs a way to distinguish an
-//! unresolved inference variable from a lowering that simply did not look. That
-//! distinction does not exist in `MirType` today, and inventing it is a change
-//! to the representation, not to this pass. `MirType::expect_known` lands with
-//! the rule that needs it.
+//! So the rule this file is waiting for is narrower: not "no `Opaque` at a
+//! descriptor site", but "no `Opaque` at a descriptor site *whose type could
+//! have been resolved*" — which needs a way to distinguish an unresolved
+//! inference variable from a lowering that simply did not look. That distinction
+//! does not exist in `MirType` today, and inventing it is a change to the
+//! representation, not to this pass. `MirType::expect_known` lands with the rule
+//! that needs it.
 
 use std::collections::BTreeSet;
 
@@ -128,7 +116,7 @@ use crate::provable::{DescriptorClass, ProvableDescriptors};
 pub enum VerifyError {
     /// A slot set names a local that is not a [`LocalKind::Gc`] slot. The
     /// collector dereferences everything the shadow frame holds, so a `Scalar`
-    /// here is a raw word handed to the marker (P0-03, ADR-015 §10.3).
+    /// here is a raw word handed to the marker (ADR-015 §10.3).
     RootIsNotGc {
         func: String,
         block: BlockId,
@@ -145,7 +133,7 @@ pub enum VerifyError {
     },
     /// A `MoveGc` whose source or destination is a `Scalar` slot.
     /// [`Inst::Materialize`](crate::ir::Inst::Materialize) is the one legal
-    /// `Scalar → Gc` transition (P0-03).
+    /// `Scalar → Gc` transition.
     MoveGcFromScalar {
         func: String,
         block: BlockId,
@@ -194,8 +182,7 @@ pub enum VerifyError {
         inst: usize,
         local: LocalId,
     },
-    /// A branch, jump or fault edge naming a block that does not exist
-    /// (MIR-11's class).
+    /// A branch, jump or fault edge naming a block that does not exist.
     BadBlockTarget {
         func: String,
         block: BlockId,
@@ -225,11 +212,10 @@ pub enum VerifyError {
         op: IntBinOp,
     },
     /// An instruction that [`Inst::can_fault`] is not immediately followed by a
-    /// [`Inst::CheckFault`] in the same block (§10.4, MIR-10). The fault is
-    /// sticky, so it is not *lost* — it is observed wherever the next check
-    /// happens to be, which is a different frame, a different iteration, or
-    /// after `main` returns. `why` names the wrapper or operation that can
-    /// raise it.
+    /// [`Inst::CheckFault`] in the same block (§10.4). The fault is sticky, so
+    /// it is not *lost* — it is observed wherever the next check happens to be,
+    /// which is a different frame, a different iteration, or after `main`
+    /// returns. `why` names the wrapper or operation that can raise it.
     UnobservedFault {
         func: String,
         block: BlockId,
@@ -241,8 +227,8 @@ pub enum VerifyError {
     ///
     /// The converse of [`VerifyError::UnobservedFault`], and the half that
     /// keeps the forward rule from being satisfiable by checking after
-    /// everything (REP-53). It also costs: a check is a call plus a branch, and
-    /// on the fused-pipeline loop header it ran once per element.
+    /// everything. It also costs: a check is a call plus a branch, and on a
+    /// fused-pipeline loop header that is once per element.
     RedundantFaultCheck {
         func: String,
         block: BlockId,
@@ -251,14 +237,14 @@ pub enum VerifyError {
     /// An [`Inst::ExtractScalar`] reading a payload width out of an object MIR
     /// itself proves is something else (ADR-122).
     ///
-    /// This is REP-56's shape stated as a rule. An unresolvable field get
-    /// lowered to `error_expr()` → `Lit::Unit` → `Inst::ConstGc { Unit }`, and
-    /// an `ExtractScalar { scalar: Int }` was emitted against it — an
-    /// eight-byte `praxis_int_load` off a descriptor **zero** bytes wide, from a
-    /// program `praxis check` accepted. REP-49 is the same shape at a different
-    /// site: `Lit::Bool` shared `Lit::Int`'s arm in `emit_pattern_test`, so
-    /// `match b { true => … }` read eight bytes of a one-byte `BoolPayload` and
-    /// told the two immortals apart by their alignment padding.
+    /// Two shapes it refuses. An unresolvable field get lowers to
+    /// `error_expr()` → `Lit::Unit` → `Inst::ConstGc { Unit }`, and an
+    /// `ExtractScalar { scalar: Int }` against that is an eight-byte
+    /// `praxis_int_load` off a descriptor **zero** bytes wide, in a program
+    /// `praxis check` accepts. The same shape one type over: an `Int` extract
+    /// against a `ConstGc { Bool }` reads eight bytes of a one-byte
+    /// `BoolPayload`, telling the two immortals apart by their alignment
+    /// padding.
     ///
     /// **The rule refuses a proved contradiction, never an absence of proof.**
     /// [`crate::provable`] answers `None` for every local whose descriptor came
@@ -281,9 +267,8 @@ pub enum VerifyError {
     /// snapshot: the local claims to be a binding the programmer wrote and
     /// cannot say which one, so `locals` prints an anonymous row and `p` will
     /// not bind it. Every binding form ADR-125 lists has a name at the point
-    /// lowering allocates its slot, and four pattern sites used to throw theirs
-    /// away — so this is the rule that keeps the fifth from doing it silently
-    /// (ADR-139).
+    /// lowering allocates its slot, and this rule is what keeps a site from
+    /// throwing it away silently (ADR-139).
     ///
     /// It is *not* an error for a slot to be nameless. It is an error for a
     /// nameless slot to claim to be a binding; a compiler temp is `Temp`.
@@ -626,14 +611,13 @@ pub fn report(errs: &[VerifyError]) -> String {
 }
 
 /// Both directions of the fault rule, for the instruction at `block.insts[i]`
-/// (MIR-10, ADR-088; see this module's header for why it is strict).
+/// (ADR-088; see this module's header for why it is strict).
 ///
 /// The pairing is **positional and within one block**: a fault is observed by
 /// the instruction that immediately follows the one that can raise it. Looking
-/// further — "some check dominates this point" — is the weaker property the
-/// defect already satisfied: `v.sum()`'s overflow *was* eventually observed, by
-/// the next loop-header check, one iteration later and with a snapshot showing
-/// values from after the fault.
+/// further — "some check dominates this point" — is a weaker property that
+/// admits observing an overflow at the next loop-header check, one iteration
+/// later and with a snapshot showing values from after the fault.
 fn check_fault_observed(
     f: &Function,
     bid: BlockId,
@@ -676,11 +660,11 @@ fn check_fault_observed(
 /// contradicts what [`crate::provable`] proves about the object it reads.
 ///
 /// The width this instruction names *is* a claim about the object's descriptor —
-/// `praxis_int_load` reads eight bytes — and here MIR has already made a
-/// contradictory one at every definition of the slot. The two historical
-/// instances are REP-56 (`ConstGc { Unit }` read as an `Int`, an out-of-bounds
-/// heap read from a `praxis check`-clean program) and REP-49 (`ConstGc { Bool }`
-/// read as an `Int`, two immortals told apart by their alignment padding).
+/// `praxis_int_load` reads eight bytes — and the error is that MIR has already
+/// made a contradictory one at every definition of the slot: a
+/// `ConstGc { Unit }` read as an `Int` (an out-of-bounds heap read from a
+/// `praxis check`-clean program), a `ConstGc { Bool }` read as an `Int` (two
+/// immortals told apart by their alignment padding).
 ///
 /// **`None` is not an error, in either position.** An absence of proof about the
 /// source is the honest answer for a parameter, a capture, and every value the
@@ -718,9 +702,9 @@ fn check_proved_descriptor(
 }
 
 /// **ADR-122 arm A**: the rule is not compiled in, so MIR that reads an `Int`
-/// payload out of a proved `Unit` verifies — which is what this tree did before
-/// ADR-122. The analysis still runs; only the rule that reads it is absent, so
-/// the two arms differ in exactly the deliverable and in nothing else.
+/// payload out of a proved `Unit` verifies. The analysis still runs; only the
+/// rule that reads it is absent, so the two arms differ in exactly the
+/// deliverable and in nothing else.
 #[cfg(feature = "unproved-extract-scalar")]
 fn check_proved_descriptor(
     _f: &Function,
@@ -828,9 +812,9 @@ fn check_is_gc(
 ///
 /// **This is not a sixth exhaustive match over [`Inst`]** — ADR-044's
 /// Consequences fix that count at five, and
-/// [`liveness::defs`](crate::liveness::defs) is now this function with its
-/// answer wrapped, rather than a second list. The two cannot drift because
-/// there is only one.
+/// [`liveness::defs`](crate::liveness::defs) is this function with its answer
+/// wrapped, rather than a second list. The two cannot drift because there is
+/// only one.
 #[must_use]
 pub fn defines(inst: &Inst) -> Option<LocalId> {
     match inst {
@@ -973,7 +957,7 @@ mod tests {
     }
 
     /// `Inst::ConstGc` verifies with no slot sets, and a `CheckFault` after it
-    /// is rejected — both directions of ADR-088 over the new instruction.
+    /// is rejected — both directions of ADR-088 over that instruction.
     ///
     /// The first half is what makes it cheap: no `RootSlots`, so nothing is
     /// spilled, and `check_slot_sets` must not demand an annotation it has no
@@ -1035,9 +1019,8 @@ mod tests {
         assert_eq!(verify(&f), Ok(()));
     }
 
-    /// The exit criterion, first half: a `Scalar` local in a root set. The
-    /// collector dereferences everything the shadow frame holds, so this is
-    /// P0-03's shape — a raw word in a rootable slot.
+    /// A `Scalar` local in a root set. The collector dereferences everything the
+    /// shadow frame holds, so this is a raw word in a rootable slot.
     #[test]
     fn a_scalar_local_in_the_root_set_is_rejected() {
         let (mut f, scalar, _) = alloc_and_return();
@@ -1063,8 +1046,7 @@ mod tests {
         );
     }
 
-    /// The exit criterion, second half: a jump to a block that does not exist
-    /// (MIR-11's class).
+    /// A jump to a block that does not exist.
     #[test]
     fn an_out_of_range_jump_target_is_rejected() {
         let (mut f, _, _) = alloc_and_return();
@@ -1083,9 +1065,8 @@ mod tests {
         );
     }
 
-    /// P0-03 in its original shape: a raw integer moved into a `Gc` slot. The
-    /// closure-capture lowering did exactly this before `LoadCapture` carried
-    /// the index as an immediate.
+    /// A raw integer moved into a `Gc` slot, which is the shape a lowering takes
+    /// when it puts an index where a reference belongs.
     #[test]
     fn a_move_gc_out_of_a_scalar_is_rejected() {
         let (mut f, scalar, dst) = alloc_and_return();
@@ -1153,8 +1134,8 @@ mod tests {
     }
 
     /// A one-block function that reads a `scalar`-wide payload out of a local
-    /// holding `konst`, and returns the constant. The two historical defects
-    /// below are this shape with different arguments.
+    /// holding `konst`, and returns the constant. The cases below are this shape
+    /// with different arguments.
     fn extract_from_const_gc(konst: crate::ir::GcConst, scalar: ScalarKind) -> Function {
         let mut f = Function::empty("f");
         let boxed = gc_local(&mut f);
@@ -1174,16 +1155,16 @@ mod tests {
         f
     }
 
-    /// **REP-56, as a refusal** (ADR-122). An unresolvable field get lowers to
-    /// `error_expr()` → `Lit::Unit` → `Inst::ConstGc { Unit }`, and the
-    /// arithmetic around it then emits `ExtractScalar { Int }` against it. That
-    /// is an eight-byte `praxis_int_load` off a descriptor **zero** bytes wide,
-    /// from a program `praxis check` exits 0 on — measured in release as three
-    /// different pointer-shaped numbers on three consecutive runs.
+    /// An `Int` payload read out of a proved `Unit` is refused (ADR-122). An
+    /// unresolvable field get lowers to `error_expr()` → `Lit::Unit` →
+    /// `Inst::ConstGc { Unit }`, and the arithmetic around it emits
+    /// `ExtractScalar { Int }` against it: an eight-byte `praxis_int_load` off a
+    /// descriptor **zero** bytes wide, in a program `praxis check` exits 0 on,
+    /// reading a different pointer-shaped number on each run.
     ///
-    /// The runtime's own bound (`read_scalar`) turned that into a defined abort;
-    /// this turns it into a refusal at the compiler, which is where a compiler
-    /// bug belongs.
+    /// The runtime's own bound (`read_scalar`) makes that a defined abort; this
+    /// makes it a refusal at the compiler, which is where a compiler bug
+    /// belongs.
     #[test]
     fn extracting_an_int_from_a_proved_unit_is_rejected() {
         let f = extract_from_const_gc(crate::ir::GcConst::Unit, ScalarKind::Int);
@@ -1201,17 +1182,16 @@ mod tests {
         );
     }
 
-    /// **REP-49, as a refusal** (ADR-122). `emit_pattern_test` put `Lit::Bool`
-    /// in `Lit::Int`'s arm, so `match b { true => …, false => … }` extracted an
-    /// `Int` payload from *both* operands — and the literal operand is a
+    /// An `Int` payload read out of a proved `Bool` is refused (ADR-122). A
+    /// pattern test that extracts an `Int` from `match b { true => …, false =>
+    /// … }` reads both operands that way, and the literal operand is a
     /// `ConstGc { Bool }`, so the contradiction is proved rather than merely
     /// suspected. Eight bytes read off a one-byte `BoolPayload`; the seven above
     /// it are the block's alignment padding, which the bump allocator never
-    /// writes, so `true` and `false` were told apart by uninitialized memory.
+    /// writes, so `true` and `false` are told apart by uninitialized memory.
     ///
-    /// REP-37's width assertion caught this one twenty minutes after it landed.
-    /// The point of the rule is that the *next* one does not need a runtime
-    /// guard to be caught.
+    /// The rule catches this at the compiler rather than at a runtime width
+    /// assertion.
     #[test]
     fn extracting_an_int_from_a_proved_bool_is_rejected() {
         let f = extract_from_const_gc(crate::ir::GcConst::Bool(true), ScalarKind::Int);
@@ -1238,9 +1218,9 @@ mod tests {
         assert_eq!(verify(&f), Ok(()));
     }
 
-    /// **REP-49's defect, one type over** (ADR-141). A `Char`'s payload is four
+    /// The `Bool` case one type over (ADR-141). A `Char`'s payload is four
     /// bytes; reading it at an `Int`'s eight is the same read past the end of a
-    /// descriptor that made `true` and `false` compare equal. The character
+    /// descriptor that makes `true` and `false` compare equal. The character
     /// literal gives `GcConst` a fourth variant and `match c { '#' => … }` a
     /// second operand to extract, so the pair is worth pinning at the width the
     /// lowering actually emits *and* at the one next door.
@@ -1301,9 +1281,8 @@ mod tests {
     }
 
     /// A value the runtime chose the descriptor for proves nothing either, so
-    /// the rule is silent over it — which is why it catches REP-56 and REP-49
-    /// and **not** REP-54 or TY-31's catalog bound, whose bad descriptors are
-    /// built inside a wrapper.
+    /// the rule is silent over it: a wrong descriptor built inside a wrapper is
+    /// out of this rule's reach.
     #[test]
     fn extracting_a_payload_from_a_call_result_is_not_an_error() {
         let mut f = Function::empty("f");
@@ -1336,7 +1315,7 @@ mod tests {
     /// The proof survives the copy a `var` or an `Assign` lowers to, which is
     /// what makes the rule reach a *user variable* at all: `TypedExpr::Path`
     /// hands back the binding's slot, so every read of one is an
-    /// `ExtractScalar` whose `src` is `MoveGc`-defined (handover 27 §5).
+    /// `ExtractScalar` whose `src` is `MoveGc`-defined.
     #[test]
     fn the_proof_reaches_a_user_variable_through_the_move_gc_a_let_lowers_to() {
         let mut f = Function::empty("f");
@@ -1396,8 +1375,7 @@ mod tests {
     }
 
     /// ADR-139's gate. A `Gc` slot classified as a binding with no name is what
-    /// renders `? = value` in a crash snapshot, which is how a `for` variable
-    /// and a destructuring `for`'s elements shipped for four releases.
+    /// renders `? = value` in a crash snapshot.
     #[test]
     fn a_binding_slot_with_no_name_is_rejected() {
         let (mut f, _, _) = alloc_and_return();
@@ -1420,9 +1398,8 @@ mod tests {
         );
     }
 
-    /// The same slot with the name it should have carried all along. The pair
-    /// is what says the rule is about the *name*, not about classifying a slot
-    /// as a binding at all.
+    /// The same slot, named. The pair is what says the rule is about the
+    /// *name*, not about classifying a slot as a binding at all.
     #[test]
     fn a_named_binding_slot_verifies() {
         let (mut f, _, _) = alloc_and_return();

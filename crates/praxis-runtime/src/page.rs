@@ -5,7 +5,7 @@
 //! [`PageHeader`] and whose remainder is an array of equal-sized **blocks**. A
 //! block is one `[GcHeader | payload]` allocation. Because every block on a
 //! page has the same stride and the page's base is `PAGE_SIZE`-aligned, three
-//! questions that used to need a side table are pointer arithmetic:
+//! questions that would otherwise need a side table are pointer arithmetic:
 //!
 //! * *which page does this address belong to?* — mask off the low bits
 //!   ([`page_of`]);
@@ -14,10 +14,11 @@
 //! * *is that block live, and has the mark phase reached it?* — two bits in the
 //!   page's `allocated` and `mark` bitmaps.
 //!
-//! ADR-011 declined to recover object boundaries because "the design does not
-//! specify" them and the side `live` registry made it unnecessary. Segregating
-//! by size class is what makes recovery a multiply-shift instead of a scan, so
-//! that reason expired; the registry is what this module replaces.
+//! ADR-011 declined to recover object boundaries, on the grounds that "the
+//! design does not specify" them and a side `live` registry made it
+//! unnecessary. Segregating by size class is what makes recovery a
+//! multiply-shift instead of a scan, and so what lets this module stand in for
+//! that registry.
 //!
 //! **The allocated bitmap is the intra-page free list, and it is a bitmap on
 //! purpose.** Threading a next-pointer through a dead block's first eight bytes
@@ -133,10 +134,10 @@ const fn round_up_to_multiple(n: usize, m: usize) -> usize {
 /// where `base` is only 8-aligned. Everything `of` rejects goes to a page of its
 /// own, keyed on the whole [`BlockLayout`].
 ///
-/// Rounding a block *up* to its rung is sound for the same reason it was sound
-/// to reuse an exact match: the stride is at least the block's size, the
-/// alignment is uniform across the rung, and every block on the page starts its
-/// payload at the same offset (see [`PageHeader::payload_offset`]).
+/// Rounding a block *up* to its rung is sound for the same reason reusing an
+/// exact match is: the stride is at least the block's size, the alignment is
+/// uniform across the rung, and every block on the page starts its payload at
+/// the same offset (see [`PageHeader::payload_offset`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct SizeClass(u8);
 
@@ -144,7 +145,7 @@ impl SizeClass {
     /// `block`'s rung, or `None` if it is over-aligned or larger than the
     /// ladder — in which case it belongs on a large page.
     ///
-    /// `const` since ADR-119: [`InlineClaimSite`](crate::InlineClaimSite) is a
+    /// `const` for ADR-119: [`InlineClaimSite`](crate::InlineClaimSite) is a
     /// `const` initializer, so a descriptor whose block the ladder rejects fails
     /// the build rather than falling back to a wrapper call nobody noticed.
     #[inline]
@@ -211,8 +212,8 @@ pub(crate) struct PageHeader {
     /// rounded up to a word, minus one.
     ///
     /// Derived from `block_count`, and stored because the allocation loop reads
-    /// it on every turn: deriving it there put a divide-and-compare against a
-    /// second field between the loop and its bitmap load.
+    /// it on every turn: deriving it there would put a divide-and-compare
+    /// against a second field between the loop and its bitmap load.
     last_word: Cell<u32>,
     /// The bits of `allocated[last_word]` that name blocks this page really
     /// has. The tail of that word names nothing and must never be claimed.
@@ -289,10 +290,8 @@ impl PageHeader {
     /// being six independent chances to pair one page's cursor with another's
     /// bitmap.
     ///
-    /// **This is the surface ADR-113 decision 2 said it wanted to keep at two
-    /// offsets, and ADR-119 argues the case for widening it.** Repacking
-    /// `PageHeader` is a generated-code change from here on, and the assertion
-    /// that says so is
+    /// **Repacking `PageHeader` is a generated-code change** (ADR-113 decision
+    /// 2, widened by ADR-119), and the assertion that says so is
     /// `the_claim_site_displacements_name_the_fields_they_claim_to` in
     /// `heap.rs`, which reads a live page through every one of them.
     /// The word the next claim starts scanning from.
@@ -353,11 +352,10 @@ impl PageHeader {
     /// without first making a real descriptor take it.
     ///
     /// # Panics
-    /// Panics if the payload's alignment is at least [`PAGE_SIZE`]. ADR-039's
-    /// bound was "an alignment above 32 KiB would not fit `payload_offset`"; the
-    /// bound is now the same 32 KiB for a different reason — the block's header
-    /// must land inside the page's first `PAGE_SIZE` bytes or [`page_of`] would
-    /// mask to the wrong address.
+    /// Panics if the payload's alignment is at least [`PAGE_SIZE`]: the block's
+    /// header must land inside the page's first `PAGE_SIZE` bytes or [`page_of`]
+    /// would mask to the wrong address. ADR-039 records the same 32 KiB bound for
+    /// its own reason — an alignment above it would not fit `payload_offset`.
     pub(crate) fn new_large(
         descriptor: &TypeDescriptor,
         payload_offset: usize,
@@ -386,7 +384,9 @@ impl PageHeader {
 
     /// The one allocation site. Split out so `new_small` and `new_large` differ
     /// only in the geometry they compute, not in how they get memory.
-    #[allow(clippy::too_many_arguments)] // Seven numbers describing one page's geometry; naming them in a struct would only move the list.
+    // Seven numbers describing one page's geometry; naming them in a struct
+    // would only move the list.
+    #[allow(clippy::too_many_arguments)]
     fn alloc_page(
         page_bytes: usize,
         heap_id: u32,
@@ -462,9 +462,9 @@ impl PageHeader {
 
     /// Re-purpose an **empty** page for another size class.
     ///
-    /// This is what makes a page's storage reusable across layouts, where a
-    /// per-layout free list left an emptied bucket as dead capital for every
-    /// other layout (RT-01, strengthened).
+    /// This is what makes a page's storage reusable across layouts; a
+    /// per-layout free list leaves an emptied bucket as dead capital for every
+    /// other layout (RT-01).
     ///
     /// # Panics
     /// Panics if the page still holds a live block, or is a large page.
@@ -886,17 +886,17 @@ mod tests {
     }
 
     /// **An `Int` costs 24 bytes, and the ladder holds a 24-byte rung to put it
-    /// on.** Both halves have to be true for ADR-109 to have paid for itself,
-    /// and they are separate facts: shrinking `GcHeader` makes the *block* 24,
-    /// and `MIN_BLOCK` following the header is what puts a *rung* exactly there
-    /// rather than rounding 24 up to the old floor of 24-plus-a-granule.
+    /// on.** Both halves have to be true for ADR-109's density win, and they are
+    /// separate facts: a 16-byte `GcHeader` makes the *block* 24, and
+    /// `MIN_BLOCK` following the header is what puts a *rung* exactly there
+    /// rather than a granule above it.
     ///
     /// `Int` is the descriptor to pin because it is the one the benchmarks
     /// allocate in a loop — `collatz`, `primes` and `mandelbrot` are essentially
     /// `Int` allocation with arithmetic in between — so it is where the density
     /// win either shows up or does not. Without this test, a change that grew
-    /// the header back or coarsened `BLOCK_GRANULE` would move `Int` to the next
-    /// rung and the only symptom would be a benchmark number nobody attributed.
+    /// the header or coarsened `BLOCK_GRANULE` would move `Int` to the next rung
+    /// and the only symptom would be a benchmark number nobody attributed.
     ///
     /// This is deliberately a literal 24 rather than a re-derivation. Every
     /// other assertion in this module derives, because derivations are what this

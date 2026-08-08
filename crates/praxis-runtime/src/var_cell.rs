@@ -1,4 +1,4 @@
-//! The `VarCell` value descriptor (M7-WS7b, §4.10).
+//! The `VarCell` value descriptor (§4.10).
 //!
 //! A `VarCell` is a single-slot GC heap cell holding one `GcRef`. It is the
 //! shared mutable storage for a `var` binding captured by a closure (§4.10:
@@ -50,8 +50,8 @@ unsafe fn var_cell_format(payload: *const u8, out: &mut FormatSink<'_>) {
     let _ = out.write_str("<var-cell>");
 }
 
-/// Descriptor for the `VarCell` internal value type (M7-WS7b, §4.10). Never
-/// equatable or hashable (it is not a first-class value).
+/// Descriptor for the `VarCell` internal value type (§4.10). Never equatable
+/// or hashable (it is not a first-class value).
 pub static VAR_CELL: TypeDescriptor = TypeDescriptor::builtin::<VarCellPayload>(
     BuiltinTypeId::VarCell,
     "VarCell",

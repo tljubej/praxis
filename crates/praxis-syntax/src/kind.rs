@@ -14,7 +14,7 @@
 // `is_token`/`is_node`/keyword tables are exercised by the unit tests below;
 // the large match arms are exhaustive by construction.
 
-#![allow(dead_code)] // node kinds fill in across Slice 4; keep them all now.
+#![allow(dead_code)] // the kind space is exhaustive; not every kind has a consumer.
 
 /// Every lexical token, piece of trivia, and tree node in Praxis.
 ///
@@ -53,11 +53,12 @@ pub enum SyntaxKind {
     /// `"hello"` — the whole literal, quotes included.
     ///
     /// A literal that holds a `{` is not this kind: it is an
-    /// [`InterpOpen`](Self::InterpOpen)/[`InterpMiddle`](Self::InterpMiddle)/[`InterpClose`](Self::InterpClose)
-    /// run with the holes' ordinary tokens between the fragments (§8.1,
-    /// ADR-147). **An unterminated literal is this kind either way**, holes or
-    /// not: the lexer only splits a literal it has already proved closes on its
-    /// line, so `T004` reports exactly the token it always did.
+    /// [`InterpOpen`](Self::InterpOpen) / [`InterpMiddle`](Self::InterpMiddle) /
+    /// [`InterpClose`](Self::InterpClose) run with the holes' ordinary tokens
+    /// between the fragments (§8.1, ADR-147). **An unterminated literal is this
+    /// kind either way**, holes or not: the lexer only splits a literal it has
+    /// already proved closes on its line, so `T004` reports the whole run as one
+    /// token.
     TextLit,
     /// The first fragment of an interpolated text literal: the opening `"`, the
     /// literal text before the first hole, and the `{` that opens it — e.g.
@@ -99,8 +100,8 @@ pub enum SyntaxKind {
     /// template, because a `'` cannot open a sublanguage nobody scanned.
     CharLit,
     /// A backtick-delimited parser template, e.g. `` `{x:int}` ``. The whole
-    /// template is one token in Milestone 1; its interior is re-scanned by the
-    /// input-parser lexer in Milestone 6 (§7).
+    /// template is one token; its interior is re-scanned by the input-parser
+    /// lexer (§7).
     ///
     /// **This kind means the template closed.** A run that did not is
     /// [`SyntaxKind::UnterminatedBacktickTemplate`], so a `BacktickTemplate`'s
@@ -109,15 +110,12 @@ pub enum SyntaxKind {
     BacktickTemplate,
     /// A backtick run that did not close before its line ended (ADR-094).
     ///
-    /// Two kinds rather than one predicate, because the question "is this token
-    /// terminated" had grown a third hand-rolled answer:
-    /// `praxis-hir`'s `parser_lower` asked it with
-    /// `strip_prefix('`').and_then(strip_suffix('`'))`, which was correct only
-    /// while an unterminated token ran to EOF and therefore could not end in a
-    /// backtick. Once a template ends at its line, the common unterminated token
-    /// *is* `` `{int` `` — the strip succeeds, the interior scanner is handed
-    /// `{int`, and `I030` comes back describing an interior nobody wrote. That
-    /// is the fabricated-interior class
+    /// Two kinds rather than one predicate, because "is this token terminated"
+    /// must not be re-derived by each consumer. A template ends at its line, so
+    /// the common unterminated token *is* `` `{int` ``: a hand-rolled
+    /// `strip_prefix('`').and_then(strip_suffix('`'))` succeeds on it, the
+    /// interior scanner is handed `{int`, and `I030` comes back describing an
+    /// interior nobody wrote — the fabricated-interior class that
     /// `an_unterminated_template_does_not_also_report_a_fabricated_interior`
     /// exists to forbid.
     ///
@@ -128,7 +126,7 @@ pub enum SyntaxKind {
     /// template.
     UnterminatedBacktickTemplate,
 
-    // ---- Keywords (§4). All are lexed; only a subset is parsed in M1. ----
+    // ---- Keywords (§4) ----
     KW_VAR,      // `var`
     KW_FN,       // `fn`
     KW_IF,       // `if`
@@ -184,8 +182,8 @@ pub enum SyntaxKind {
     PIPE2,
     /// `&`
     AMP,
-    /// `&&` — logical and (REP-07). The lexer's max-munch keeps it one token, as
-    /// it does `||`, so a bare `AMP` is never part of one.
+    /// `&&` — logical and. The lexer's max-munch keeps it one token, as it does
+    /// `||`, so a bare `AMP` is never part of one.
     AMP2,
     /// `_` — a lone underscore (placeholder/punning site).
     UNDERSCORE,
@@ -243,7 +241,7 @@ pub enum SyntaxKind {
     /// diagnostic (`T003`) for it rather than silently dropping it.
     ERROR,
 
-    // ---- Tree nodes (produced by the parser; added incrementally in Slice 4) ----
+    // ---- Tree nodes (produced by the parser) ----
     /// The root node of a parsed file.
     SOURCE_FILE,
     /// A `var name = expr` binding — the language's one binding form (ADR-125).
@@ -253,7 +251,7 @@ pub enum SyntaxKind {
     /// A reassignment statement: `name = expr` or `name += expr` etc. (§4.2).
     ASSIGN_STMT,
     /// A reassignment through a place expression: `m[key] = expr`,
-    /// `counts[key] += 1` (REP-16, §6.2).
+    /// `counts[key] += 1` (§6.2).
     ///
     /// Its own kind rather than an `ASSIGN_STMT` with an expression target: an
     /// `ASSIGN_STMT`'s target is a *token* and its single expression child is the
@@ -261,8 +259,8 @@ pub enum SyntaxKind {
     /// value. The target here is the first expression child and the value the
     /// second.
     PLACE_ASSIGN_STMT,
-    /// The two-token `min=` / `max=` operator of an updating store (REP-21,
-    /// §6.2): an `Ident` spelling `min` or `max`, immediately followed by `=`.
+    /// The two-token `min=` / `max=` operator of an updating store (§6.2): an
+    /// `Ident` spelling `min` or `max`, immediately followed by `=`.
     ///
     /// A node rather than a token because `min` **is** an identifier — the lexer
     /// cannot claim it without taking `min` away from every program that names
@@ -274,9 +272,9 @@ pub enum SyntaxKind {
     UPDATE_OP,
     /// A top-level or nested `fn` declaration.
     FN_ITEM,
-    /// A `struct Name { field: Type, … }` declaration (M7, §4.5).
+    /// A `struct Name { field: Type, … }` declaration (§4.5).
     STRUCT_ITEM,
-    /// An `enum Name { Variant, Variant(Type), … }` declaration (M7, §4.6).
+    /// An `enum Name { Variant, Variant(Type), … }` declaration (§4.6).
     ENUM_ITEM,
     /// One variant of an enum: `Name` or `Name(Type, …)`.
     ENUM_VARIANT,
@@ -284,16 +282,16 @@ pub enum SyntaxKind {
     FIELD_LIST,
     /// A single `name: Type` field of a struct.
     FIELD,
-    /// A `Name { field: expr, … }` record-literal expression (M7, §4.5).
+    /// A `Name { field: expr, … }` record-literal expression (§4.5).
     RECORD_LIT_EXPR,
-    /// A `receiver.0` tuple-element expression (REP-08, §4.4).
+    /// A `receiver.0` tuple-element expression (§4.4).
     ///
     /// Its own kind rather than a `FIELD_EXPR` holding an `IntLit`: an element is
     /// selected by **position** and the index must be a literal, where a field is
     /// selected by name — two different operations that lower to two different
     /// runtime calls.
     TUPLE_INDEX_EXPR,
-    /// The `[Type, …]` type-argument list of a constructor call (REP-09, §3.3):
+    /// The `[Type, …]` type-argument list of a constructor call (§3.3):
     /// the brackets in `Counter[(Int, Int)]()`.
     ///
     /// Its own kind rather than an `INDEX_EXPR` holding types: the brackets in
@@ -301,25 +299,25 @@ pub enum SyntaxKind {
     /// two different operations, and only the *name* in front tells them apart
     /// (`Int` is a legal expression too, so the contents cannot).
     TYPE_ARG_LIST,
-    /// A `receiver[index]` subscript expression (REP-16, §4.7/§6.2/§6.4).
+    /// A `receiver[index]` subscript expression (§4.7/§6.2/§6.4).
     ///
     /// The index list is an `ARG_LIST`, because §6.4's `grid[x, y]` makes a
     /// subscript variadic: the arity is part of what selects the operation, the
     /// same way a method call's is.
     INDEX_EXPR,
-    /// A `receiver.field` field-access expression (M7, §4.5).
+    /// A `receiver.field` field-access expression (§4.5).
     FIELD_EXPR,
-    /// A `match scrutinee { pattern => expr, … }` expression (M7, §4.6/§4.11).
+    /// A `match scrutinee { pattern => expr, … }` expression (§4.6/§4.11).
     MATCH_EXPR,
-    /// A closure expression `|params| expr` (M7, §4.10). Bare `PIPE` claims the
+    /// A closure expression `|params| expr` (§4.10). Bare `PIPE` claims the
     /// `|` (lexer max-munch keeps `||` as logical-or `PIPE2`).
     CLOSURE_EXPR,
     /// One `pattern => expr` arm of a match expression.
     MATCH_ARM,
-    /// A pattern (M7, §4.6): wildcard `_`, literal, variable bind, enum variant,
+    /// A pattern (§4.6): wildcard `_`, literal, variable bind, enum variant,
     /// or tuple/record destructuring.
     PATTERN,
-    /// One `name` or `name: pattern` field of a record pattern (REP-10, §4.5).
+    /// One `name` or `name: pattern` field of a record pattern (§4.5).
     ///
     /// Its own kind rather than the [`FIELD`](Self::FIELD) a struct declaration
     /// and a record literal share: those hold a type and an expression, and this
@@ -340,19 +338,19 @@ pub enum SyntaxKind {
     ELSE_BRANCH,
     /// A `while cond { ... }` expression.
     WHILE_EXPR,
-    /// A `for pat in iter { ... }` expression (M8, §4.11).
+    /// A `for pat in iter { ... }` expression (§4.11).
     FOR_EXPR,
-    /// A `loop { ... }` expression (M8, §4.11).
+    /// A `loop { ... }` expression (§4.11).
     LOOP_EXPR,
-    /// A `break [expr]` expression (M8, §4.11).
+    /// A `break [expr]` expression (§4.11).
     BREAK_EXPR,
-    /// A `continue` expression (M8, §4.11).
+    /// A `continue` expression (§4.11).
     CONTINUE_EXPR,
-    /// A `return [expr]` expression (M8, §4.11).
+    /// A `return [expr]` expression (§4.11).
     RETURN_EXPR,
     /// A `callee(args)` call expression (covers `out(...)`).
     CALL_EXPR,
-    /// A `receiver.method(args)` method-call expression (M5, §16.2).
+    /// A `receiver.method(args)` method-call expression (§16.2).
     METHOD_CALL_EXPR,
     /// The `(arg, arg, ...)` argument list of a call.
     ARG_LIST,
@@ -399,12 +397,12 @@ pub enum SyntaxKind {
     /// receiver: the brackets in `[1, 2]` and in `m[k]` are the same two
     /// characters and two different operations, and what tells them apart is
     /// **position** — a subscript continues an expression, a list begins one.
-    /// That is the rule [`TYPE_ARG_LIST`](Self::TYPE_ARG_LIST) is decided by and
-    /// the rule REP-27 settled the `(` with.
+    /// That is the rule [`TYPE_ARG_LIST`](Self::TYPE_ARG_LIST) is decided by, and
+    /// the rule that decides the `(` too.
     LIST_EXPR,
-    /// A type written in source. M2 covers scalar names (`Int`, `Text`, …),
-    /// tuple types, and function types; richer type syntax lands with the
-    /// constructs that need it.
+    /// A type written in source: a scalar or grouped type name (`Int`, `Text`, …),
+    /// with or without a bracketed type-argument list (§4.4). Tuple and
+    /// function types carry their own kinds.
     TYPE_REF,
     /// A tuple type `(T, U, …)`. A parenthesized single type `(T)` is just `T`,
     /// so this always carries two or more elements.
@@ -414,7 +412,7 @@ pub enum SyntaxKind {
     /// A parse-error placeholder node wrapping tokens the parser could not
     /// place. Recovery (§15.2) emits these so the tree stays well-formed.
     PARSE_ERROR,
-    // ---- Input-parser expression nodes (M6, §7) ----
+    // ---- Input-parser expression nodes (§7) ----
     /// `read parser_expression` — a prefix expression applying a parser to the
     /// whole process-input buffer (§7.1).
     READ_EXPR,
@@ -435,7 +433,7 @@ pub enum SyntaxKind {
     PARSER_CALL,
     /// The `(arg, arg, ...)` argument list of a parser constructor call.
     PARSER_ARG_LIST,
-    /// A named argument inside a parser constructor call (M9, §7.5):
+    /// A named argument inside a parser constructor call (§7.5):
     /// `name: parser_expr`, e.g. `rules: lines(int)` in heterogeneous
     /// `sections`, or `skip: whitespace` in `chars`. Holds the name ident, the
     /// `:`, and the parser-expr value.
@@ -444,13 +442,11 @@ pub enum SyntaxKind {
     /// call: the `0` of `grid(char, ragged, fill: 0)` or the `"-"` of
     /// `fill: "-"` (§7.5).
     ///
-    /// A keyword argument's value is not a parser expression, so it cannot be
-    /// parsed as one. It used to be handed to `parse_parser_expr` anyway, which
-    /// reported `P001 expected a parser expression` and emitted a `PARSE_ERROR`
-    /// — and the HIR bridge, reading the value as "the first `Ident` in the
-    /// subtree", then found none and quietly used the empty string. So §7.5's
-    /// own documented spelling built a ragged grid padded with `""` on the
-    /// rowan front end while the capture-body front end kept the `0`.
+    /// Its own kind because a keyword argument's value is not a parser
+    /// expression and cannot be parsed as one: handing it to `parse_parser_expr`
+    /// reports `P001 expected a parser expression` and leaves a `PARSE_ERROR`
+    /// with no literal for the HIR bridge to read, so §7.5's own documented
+    /// spelling would build a ragged grid padded with `""` instead of `0`.
     PARSER_KEYWORD_VALUE,
 }
 
@@ -468,8 +464,8 @@ impl SyntaxKind {
     /// Whether this kind is a keyword token.
     ///
     /// Derived from [`SyntaxKind::keyword_text`] rather than maintained as a
-    /// second list: the previous hand-written list omitted `KW_IN`, and the
-    /// test that was supposed to catch that copied the same incomplete list.
+    /// second list, so a kind cannot be a keyword in one table and not in the
+    /// other.
     #[must_use]
     pub fn is_keyword(self) -> bool {
         self.keyword_text().is_some()
@@ -479,11 +475,9 @@ impl SyntaxKind {
     ///
     /// **Swept, not listed.** The whole kind space is walked and filtered by
     /// [`is_keyword`](Self::is_keyword), so a keyword added to
-    /// [`keyword_text`](Self::keyword_text) joins this by construction. A second
-    /// hand-written list is exactly what omitted `KW_IN` from the round-trip
-    /// test's copy of it.
+    /// [`keyword_text`](Self::keyword_text) joins this by construction.
     ///
-    /// M11's TextMate grammar is tested against this: the editor's keyword
+    /// The TextMate grammar is tested against this: the editor's keyword
     /// pattern is a copy of the lexer's table that no compiler checks, and the
     /// failure — a word quietly stopping being coloured — is one nobody files.
     #[must_use]
@@ -500,10 +494,9 @@ impl SyntaxKind {
     ///
     /// The set lives here, once, because everything that looks at an annotation
     /// needs the same answer: `praxis_ast::TypeRef::cast` accepts exactly these
-    /// kinds, and type resolution recurses through exactly these children. Each
-    /// site used to spell the list out for itself, and the one that only
-    /// listed `TYPE_REF` — the AST accessors — silently dropped every direct
-    /// tuple and function annotation (TY-08).
+    /// kinds, and type resolution recurses through exactly these children. A
+    /// site that spelled the list out for itself and listed only `TYPE_REF`
+    /// would silently drop every direct tuple and function annotation.
     #[must_use]
     pub fn is_type_node(self) -> bool {
         matches!(self, Self::TYPE_REF | Self::TUPLE_TYPE | Self::FN_TYPE)
@@ -513,12 +506,11 @@ impl SyntaxKind {
     /// [`LITERAL`](Self::LITERAL) node: the four scalar literals, `true`/`false`,
     /// and both backtick-template kinds.
     ///
-    /// Here for [`is_type_node`](Self::is_type_node)'s reason. The parser writes
-    /// this set when it builds the node and `praxis_ast::Literal::token` reads it
-    /// back, and the two copies had already drifted: the reader omitted
-    /// [`UnterminatedBacktickTemplate`](Self::UnterminatedBacktickTemplate), so
-    /// for a `LITERAL` the parser really does build it answered `None`, and both
-    /// HIR passes fell to their "no token at all" branch.
+    /// Here for [`is_type_node`](Self::is_type_node)'s reason: the parser writes
+    /// this set when it builds the node and `praxis_ast::Literal::token` reads
+    /// it back. Two copies drift, and a reader missing a kind answers `None` for
+    /// a `LITERAL` the parser really did build, dropping every HIR pass into its
+    /// "no token at all" branch.
     ///
     /// **Both template kinds are in.** A template in value position has no
     /// meaning — §7.1 enters the parser sublanguage at `read`/`parse` and nowhere
@@ -528,9 +520,9 @@ impl SyntaxKind {
     /// template (ADR-094); it types as a fresh variable, which is exactly what
     /// the missing-token branch happened to produce.
     ///
-    /// `true`/`false` are literals too. They used to be parsed by an arm of their
-    /// own *because* it was the one that did not eat leading trivia first, so
-    /// `true` spanned `" true"` where `1` spanned `"1"` (REP-63).
+    /// `true`/`false` are literals too, and take the same parse arm: an arm of
+    /// their own that did not eat leading trivia first would make `true` span
+    /// `" true"` where `1` spans `"1"`.
     #[must_use]
     pub fn is_literal_token(self) -> bool {
         matches!(
@@ -557,10 +549,9 @@ impl SyntaxKind {
     /// pattern whose only direct `Ident` is the hole's `x`, read as a variable
     /// bind, and swallow every value.
     ///
-    /// `CharLit` is in the set (ADR-141), and dropping it is REP-10's regression
-    /// class: while one caller's copy of this list omitted it, a `match` arm list
-    /// stopped after `'#' => …` and every arm below it left the tree with no
-    /// diagnostic at all.
+    /// `CharLit` is in the set (ADR-141). A caller's copy of this list that
+    /// omitted it would stop a `match` arm list after `'#' => …`, dropping every
+    /// arm below it from the tree with no diagnostic at all.
     #[must_use]
     pub fn is_pattern_literal(self) -> bool {
         matches!(
@@ -707,8 +698,8 @@ mod tests {
         assert!(!SyntaxKind::FloatLit.is_pattern_literal()); // §4.6: no float pattern
         assert!(!SyntaxKind::BacktickTemplate.is_pattern_literal());
         assert!(!SyntaxKind::UnterminatedBacktickTemplate.is_pattern_literal());
-        // …and the two whose absence was a real regression.
-        assert!(SyntaxKind::CharLit.is_pattern_literal()); // ADR-141, REP-10
+        // …and the two that must be in their sets.
+        assert!(SyntaxKind::CharLit.is_pattern_literal()); // ADR-141
         assert!(SyntaxKind::UnterminatedBacktickTemplate.is_literal_token()); // ADR-094
         assert!(!SyntaxKind::Ident.is_literal_token());
         assert!(!SyntaxKind::UNDERSCORE.is_pattern_literal());

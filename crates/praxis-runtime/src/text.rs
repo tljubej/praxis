@@ -7,12 +7,12 @@
 //! - A **source slice** carrying `(owner: GcRef, start, length)` (§7.10) — a
 //!   zero-copy view into another `Text` (typically the process-input buffer).
 //!
-//! Both are produced in M6: the input parser allocates source slices pointing
-//! into the immutable stdin buffer, and string literals remain owned. The
-//! descriptor callbacks handle both variants through [`text_bytes`], which
-//! follows slice owners — sound because the collector is non-moving (ADR-011)
-//! and owners are kept alive by GC reachability. Every walk of an owner chain
-//! in this module is iterative, because nothing bounds its depth
+//! Both are produced: the input parser allocates source slices pointing into
+//! the immutable stdin buffer, and string literals are owned. The descriptor
+//! callbacks handle both variants through [`text_bytes`], which follows slice
+//! owners — sound because the collector is non-moving (ADR-011) and owners are
+//! kept alive by GC reachability. Every walk of an owner chain in this module
+//! is iterative, because nothing bounds its depth
 //! (`reading_a_deep_slice_chain_does_not_recurse`).
 //!
 //! Owned payloads own a Rust allocation (`Box<str>`), so [`TEXT`]'s `drop_value`
@@ -37,17 +37,14 @@ use crate::descriptor::{
 };
 use crate::GcRef;
 
-/// **The ADR-115 measurement toggle** (handover 26 §6), and the only difference
-/// between the A/B arms this package was measured with.
+/// **The ADR-115 measurement toggle**: the only difference between the A/B arms
+/// the caching decision is measured with.
 ///
 /// `false` — enabled by the `adr115-arm-a` feature — keeps the representation
 /// byte-for-byte identical and makes the cache never answer: every count is
 /// recomputed from the bytes and [`text_ascii_bytes`] refuses, so `t.len()`
-/// walks the text and `t[i]` decodes to the index, which is the complexity the
-/// tree had before this decision. It exists so arm A differs from arm B in this
-/// mechanism and in nothing else; measuring against `main` would also be
-/// measuring [`SourceSlice::new`]'s dropped whole-owner revalidation, which is
-/// a separate finding and is in both arms.
+/// walks the text and `t[i]` decodes to the index. It exists so that arm A
+/// differs from arm B in this mechanism and in nothing else.
 const COUNT_IS_CACHED: bool = !cfg!(feature = "adr115-arm-a");
 
 /// The value [`OwnedText::char_count`] holds until someone asks.
@@ -99,10 +96,9 @@ pub struct OwnedText {
 
 /// `size_of::<TextPayload>()` is **32**, so a `Text` block is 48 and its size
 /// class does not move (ADR-109's ladder is 16, 24, 32, …, 128 with a 16-byte
-/// header). This is the claim ADR-115 rests on, and handover 26 §9 recorded it
-/// as measured on a standalone copy of these declarations rather than on this
-/// tree. It is measured here now, where a future field cannot silently move a
-/// `Text` to the 56-byte class and charge the pacer 16.7% more per text object.
+/// header). This is the claim ADR-115 rests on, asserted here so that a future
+/// field cannot silently move a `Text` to the 56-byte class and charge the
+/// pacer 16.7% more per text object.
 const _: () = {
     assert!(std::mem::size_of::<TextPayload>() == 32);
     assert!(std::mem::size_of::<OwnedText>() == 24);
@@ -131,12 +127,11 @@ impl OwnedText {
     /// The number of Unicode scalars in these bytes, counting them the first
     /// time and remembering the answer.
     ///
-    /// **Lazy, not computed at construction**, and deliberately against
-    /// handover 25 §5 F-8's phrasing: `praxis_get_input`'s buffer is one owned
-    /// `Text` that can be tens of megabytes, and a program that reads its input
-    /// and never indexes any text would pay a full scan of it for nothing.
-    /// Every caller of this is already asking a question whose honest answer is
-    /// a scan.
+    /// **Lazy, not computed at construction**: `praxis_get_input`'s buffer is
+    /// one owned `Text` that can be tens of megabytes, and a program that reads
+    /// its input and never indexes any text would pay a full scan of it for
+    /// nothing. Every caller of this is already asking a question whose honest
+    /// answer is a scan.
     #[inline]
     fn char_count(&self) -> u64 {
         let cached = self.char_count.get();
@@ -197,14 +192,11 @@ const fn is_continuation(b: u8) -> bool {
 ///
 /// The fields are private and [`SourceSlice::new`] is the only constructor,
 /// because the range is not a hint: a view whose end runs past the owner, or
-/// whose ends fall inside a multi-byte scalar, is not a `Text`. Both used to be
-/// constructible — the safe host helper only `debug_assert`'d the range and
-/// nothing checked scalar boundaries at all — and the damage surfaced far from
-/// its cause, as a release-build panic slicing out of range or as `text_str`
-/// quietly returning `""` for a `Text` that had content (RT-06).
+/// whose ends fall inside a multi-byte scalar, is not a `Text`. Neither is
+/// constructible, so bad ranges cannot surface far from their cause as an
+/// out-of-range slice or as a `Text` that reads empty.
 ///
-/// `#[repr(C)]` and field-ordered as the old inline variant was, so the payload
-/// layout is unchanged.
+/// `#[repr(C)]` fixes the field order, so the payload layout is stable.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct SourceSlice {
@@ -233,16 +225,13 @@ impl SourceSlice {
         // and reading it as a `&str` would fail.
         //
         // **Two byte tests, not a validation of the whole owner** (ADR-115).
-        // This used to be `std::str::from_utf8(bytes)` followed by two
-        // `str::is_char_boundary` calls, which re-validated every byte of the
-        // owner on every slice allocation — so parsing an n-byte input into k
-        // captures was O(n·k), a third quadratic nobody had named. The
-        // revalidation answered a question that was already settled: since
-        // ADR-111 the one door raw host bytes enter through
-        // (`praxis_get_input`) validates them, `praxis_alloc_text`'s callers
-        // owe UTF-8 as a precondition, and `text_str` states the invariant by
-        // `expect`ing it. `is_scalar_boundary` is `str::is_char_boundary`'s
-        // test spelled on bytes, and it is the whole of what the two calls did.
+        // Re-validating the owner's UTF-8 here would make parsing an n-byte
+        // input into k captures O(n·k), and it would answer a question that is
+        // already settled: since ADR-111 the one door raw host bytes enter
+        // through (`praxis_get_input`) validates them, `praxis_alloc_text`'s
+        // callers owe UTF-8 as a precondition, and `text_str` states the
+        // invariant by `expect`ing it. `is_scalar_boundary` is
+        // `str::is_char_boundary`'s test spelled on bytes.
         if !is_scalar_boundary(bytes, start) || !is_scalar_boundary(bytes, end) {
             return None;
         }
@@ -296,13 +285,13 @@ impl TextPayload {
 /// `payload` must point at a fully initialized, validly-linked `TextPayload` —
 /// every `owner` along the chain must point at a live `Text` object.
 pub unsafe fn text_bytes(payload: *const TextPayload) -> &'static [u8] {
-    // **Iterative, not recursive.** This used to recurse through `owner`, so a
-    // chain of depth n cost O(n) per read and a long enough one overflowed the
-    // stack and aborted the process — inside `extern "C"`, where an abort is
-    // the one outcome §10.4 rules out. Nothing about a chain is illegal, so the
-    // depth cannot be bounded by validation; the read just must not be
-    // recursive. (The parser also stops *building* chains: `Input::new`
-    // collapses to the root owner, see `text_root`.)
+    // **Iterative, not recursive.** Recursing through `owner` would cost a
+    // frame per link, and a long enough chain would overflow the stack and
+    // abort the process — inside `extern "C"`, where an abort is the one
+    // outcome §10.4 rules out. Nothing about a chain is illegal, so the depth
+    // cannot be bounded by validation; the read simply must not recurse. (The
+    // parser also refuses to *build* chains: `Input::new` collapses to the root
+    // owner, see `text_root`.)
     let mut payload = payload;
     let mut start = 0usize;
     // The window is the OUTERMOST slice's length: each step inward widens the
@@ -315,11 +304,9 @@ pub unsafe fn text_bytes(payload: *const TextPayload) -> &'static [u8] {
             TextPayload::Owned(owned) => {
                 let bytes = owned.as_str().as_bytes();
                 // In range by construction: `SourceSlice::new` is the only
-                // constructor and it rejects anything else. There used to be a
-                // clamp here — `&owner_bytes[start..]` when the end ran past —
-                // which turned a bad range into a *different, plausible* Text,
-                // and panicked anyway when `start` itself was out of range
-                // (RT-06).
+                // constructor and it rejects anything else. Nothing is clamped
+                // here — a clamp would turn a bad range into a *different,
+                // plausible* Text.
                 return match len {
                     None => bytes,
                     Some(len) => &bytes[start..start + len],
@@ -462,11 +449,10 @@ pub unsafe fn text_ascii_bytes(payload: *const TextPayload) -> Option<&'static [
 /// for Text by construction — the parser only splits on UTF-8 boundaries).
 pub unsafe fn text_str(payload: *const TextPayload) -> &'static str {
     // SAFETY: Text payloads are always valid UTF-8 by construction. An owned
-    // payload is a `Box<str>`; a slice comes from `TextPayload::slice`, which
-    // rejects ends that are not scalar boundaries. The `unwrap_or("")` this
-    // replaces is why a mis-sliced Text read as empty instead of failing
-    // (RT-06); `from_utf8_unchecked` would be the same lie without the
-    // diagnosis, so the error case panics with one.
+    // payload is a `Box<str>`; a slice comes from `SourceSlice::new`, which
+    // rejects ends that are not scalar boundaries. The error case panics with a
+    // diagnosis rather than reading as `""` or going through
+    // `from_utf8_unchecked`, either of which would hide a mis-sliced `Text`.
     let bytes = unsafe { text_bytes(payload) };
     std::str::from_utf8(bytes)
         .expect("a Text payload is UTF-8 by construction; SourceSlice::new enforces it")
@@ -499,19 +485,19 @@ unsafe fn text_drop(payload: *mut u8) {
 ///
 /// `Debug` writes a quoted literal, because the debugger's displays give a value
 /// one line and no other context, and a bare `Text` is ambiguous there in three
-/// ways at once. An empty one writes nothing — which the renderer could only
-/// report as `<unreadable>`, since "the descriptor wrote no bytes" and "the read
-/// failed" were the same observation. One containing a `"` could not be told
-/// from two values, and one containing a newline took a row that belonged to the
+/// ways at once. An empty one writes nothing, which the renderer can only report
+/// as `<unreadable>`, since "the descriptor wrote no bytes" and "the read
+/// failed" are the same observation. One containing a `"` could not be told from
+/// two values, and one containing a newline would take a row that belongs to the
 /// local underneath it.
 unsafe fn text_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at a TextPayload.
     let s = unsafe { text_str(payload as *const TextPayload) };
     let _ = match out.style() {
         FormatStyle::Display => out.write_str(s),
-        // Through `praxis-syntax`, which owns the escape table this inverts, for
-        // F3's reason: a second copy of the rule here would be free to disagree
-        // with `decode_escape` about what `\t` is.
+        // Through `praxis-syntax`, which owns the escape table this inverts: a
+        // second copy of the rule here would be free to disagree with
+        // `decode_escape` about what `\t` is.
         FormatStyle::Debug => out.write_str(&praxis_syntax::literal::quote_text(s)),
     };
 }
@@ -530,10 +516,9 @@ unsafe fn text_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 }
 
 /// Lexicographic order over the text's bytes (ADR-045). UTF-8 byte order *is*
-/// code-point order, so this needs no decoding — and it is the whole content of
-/// P0-12's Text half: the old lowering compared the first eight bytes of the
-/// `TextPayload` enum, which is a `Box<str>` pointer for an owned text and a
-/// `GcRef` for a slice. Two texts were ordered by where they happened to live.
+/// code-point order, so this needs no decoding. Comparing the payload itself
+/// would order texts by address: its first eight bytes are a `Box<str>` pointer
+/// for an owned text and a `GcRef` for a slice.
 ///
 /// # Safety
 /// Both pointers must point at `TextPayload`s.
@@ -545,7 +530,7 @@ unsafe fn text_compare(a: *const u8, b: *const u8) -> std::cmp::Ordering {
 }
 
 /// Descriptor for the `Text` scalar (§4.3). Handles both owned and source-slice
-/// payloads (ADR-013, M6). A single descriptor serves all `Text` values.
+/// payloads (ADR-013). A single descriptor serves all `Text` values.
 pub static TEXT: TypeDescriptor = TypeDescriptor::builtin::<TextPayload>(
     BuiltinTypeId::Text,
     "Text",
@@ -559,12 +544,13 @@ pub static TEXT: TypeDescriptor = TypeDescriptor::builtin::<TextPayload>(
 )
 .with_owned_bytes(text_owned_bytes);
 
-/// The heap bytes a `Text` owns beyond its payload (RT-04).
+/// The heap bytes a `Text` owns beyond its payload.
 ///
 /// An `Owned` text is a `Box<str>` whose length is the whole point: charging
-/// pacing 40 bytes for a megabyte of input is what made a text-heavy program
-/// invisible to the collector. A `Slice` owns nothing — it borrows its owner's
-/// buffer, and charging its length would count the same bytes once per slice.
+/// pacing only the payload's own bytes for a megabyte of input would make a
+/// text-heavy program invisible to the collector. A `Slice` owns nothing — it
+/// borrows its owner's buffer, and charging its length would count the same
+/// bytes once per slice.
 ///
 /// # Safety
 /// `payload` must point at an initialized `TextPayload`.
@@ -584,10 +570,10 @@ mod tests {
     /// `Text` is the one type whose two renderings differ, and this is the pair
     /// (§11.4, [`FormatStyle`]).
     ///
-    /// `Display` must stay byte-for-byte what it was: it is `out(s)`, `"{s}"`
-    /// and `praxis run`'s result line, and a quote appearing in any of those is
-    /// a change to what programs print. `Debug` is the debugger's, and the empty
-    /// string is the case that motivated it — zero bytes out is a value the
+    /// `Display` writes the characters unquoted: it is `out(s)`, `"{s}"` and
+    /// `praxis run`'s result line, and a quote appearing in any of those is a
+    /// change to what programs print. `Debug` is the debugger's, and the empty
+    /// string is the case that motivates it — zero bytes out is a value the
     /// renderer could only report as unreadable.
     #[test]
     fn text_renders_one_way_for_the_program_and_another_for_the_debugger() {
@@ -639,9 +625,9 @@ mod tests {
     }
 
     /// ADR-045: `Text` orders by its bytes, and the ordering is the same
-    /// whether the text is owned or a zero-copy slice of another. Comparing
-    /// the payload's first eight bytes — a `Box<str>` pointer here, a `GcRef`
-    /// there — ordered texts by *address* (P0-12).
+    /// whether the text is owned or a zero-copy slice of another — never by the
+    /// payload's first eight bytes, which are a `Box<str>` pointer here and a
+    /// `GcRef` there, i.e. an address.
     #[test]
     fn text_compares_lexicographically_whatever_its_representation() {
         let cmp = TEXT.compare.expect("Text is orderable");
@@ -724,17 +710,17 @@ mod tests {
 
     /// **Reading a `Text` costs no stack, however deep its owner chain is.**
     ///
-    /// `text_bytes` used to recurse through `owner`, so a chain of depth n cost
-    /// n frames per read and a long enough one overflowed the stack and
-    /// aborted the process — inside `extern "C"`, which is the one outcome
-    /// §10.4 rules out. A chain is not illegal, so the depth cannot be bounded
-    /// by validation; the read simply must not be recursive.
+    /// A recursive `text_bytes` would cost a frame per link, and a long enough
+    /// chain would overflow the stack and abort the process — inside
+    /// `extern "C"`, which is the one outcome §10.4 rules out. A chain is not
+    /// illegal, so the depth cannot be bounded by validation; the read simply
+    /// must not be recursive.
     ///
-    /// The thread's stack is deliberately small: on the recursive read this
-    /// depth overflows it, and no assertion can catch that, so the test's
-    /// passing *is* the assertion. The parser separately refuses to build
-    /// chains at all (`Input::new` resolves to the root owner), which is why
-    /// this has to be built by hand to be tested.
+    /// The thread's stack is deliberately small: a recursive read at this depth
+    /// overflows it, and no assertion can catch that, so the test's passing
+    /// *is* the assertion. The parser separately refuses to build chains at all
+    /// (`Input::new` resolves to the root owner), which is why this has to be
+    /// built by hand to be tested.
     #[test]
     fn reading_a_deep_slice_chain_does_not_recurse() {
         const DEPTH: usize = 4_000;
@@ -771,9 +757,9 @@ mod tests {
 
     /// The range is not a hint. A view past the owner's end, one whose length
     /// overflows, or one whose ends split a multi-byte scalar is not a `Text`,
-    /// and must be unconstructible rather than clamped: the old code
-    /// `debug_assert`'d the range only, so a release build either sliced out of
-    /// range or produced a `Text` that `text_str` read as `""` (RT-06).
+    /// and must be unconstructible rather than clamped or merely
+    /// `debug_assert`'d — a clamped range yields a `Text` that reads as `""` or
+    /// slices out of range in a release build.
     #[test]
     fn an_out_of_range_or_non_boundary_slice_is_unconstructible() {
         let rt = crate::Runtime::new();
@@ -836,11 +822,11 @@ mod tests {
     /// charge a full scan to every program that reads its input and never
     /// indexes a text.
     ///
-    /// This and the three tests below observe the cache itself, so they are the
-    /// tests that describe arm B rather than the language. Under the
-    /// `adr115-arm-a` measurement feature there is no cache to observe by
-    /// construction; the tests that state what a `Text` *answers* are not
-    /// gated, and they are the ones that must hold in both arms.
+    /// This and the three tests below observe the cache itself, so they
+    /// describe arm B rather than the language. Under the `adr115-arm-a`
+    /// measurement feature there is no cache to observe by construction; the
+    /// tests that state what a `Text` *answers* are not gated, and they are the
+    /// ones that must hold in both arms.
     #[cfg(not(feature = "adr115-arm-a"))]
     #[test]
     fn a_text_is_allocated_uncounted_and_counts_itself_once_when_asked() {
@@ -911,11 +897,11 @@ mod tests {
         }
     }
 
-    /// **A slice takes the licence from its owner, and that is why the package
-    /// works at all** (ADR-115). The `Text`s a program indexes are mostly the
-    /// parser's captures, which are `Slice`s of the input buffer — putting the
-    /// count only where the `Owned` variant's spare bytes are would have given
-    /// the case the decision exists for nothing.
+    /// **A slice takes the licence from its owner, and that is why the
+    /// mechanism works at all** (ADR-115). The `Text`s a program indexes are
+    /// mostly the parser's captures, which are `Slice`s of the input buffer, so
+    /// a count that lived only in the `Owned` variant's spare bytes would do
+    /// nothing for the case the decision exists for.
     #[cfg(not(feature = "adr115-arm-a"))]
     #[test]
     fn a_slice_of_a_one_byte_owner_answers_its_length_from_its_byte_length() {
@@ -1056,17 +1042,15 @@ mod tests {
             .expect("a deep chain must be countable without recursing");
     }
 
-    /// **Allocating a view is O(1), not O(the owner).** `SourceSlice::new` used
-    /// to call `std::str::from_utf8` on the owner's whole byte range so it could
-    /// ask `str::is_char_boundary` twice, which made parsing an n-byte input
-    /// into k captures O(n·k) — a third quadratic, and the one handover 25's
-    /// F-8 did not name. Since ADR-111 the owner's bytes are UTF-8 by a
+    /// **Allocating a view is O(1), not O(the owner).** Validating the owner's
+    /// whole byte range per view would make parsing an n-byte input into k
+    /// captures O(n·k); since ADR-111 the owner's bytes are UTF-8 by a
     /// precondition checked at the one door raw bytes enter, so the boundary
     /// test is two byte comparisons.
     ///
-    /// The sizes are chosen so the old code cannot finish this test: 8000 views
-    /// of a 256 KiB owner is two billion byte validations. There is no
-    /// assertion to make about that beyond the test returning.
+    /// The sizes are chosen so a per-view validation cannot finish this test:
+    /// 8000 views of a 256 KiB owner is two billion byte validations. There is
+    /// no assertion to make about that beyond the test returning.
     #[test]
     fn taking_a_view_does_not_walk_the_owner() {
         const OWNER_BYTES: usize = 256 * 1024;

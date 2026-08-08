@@ -1,20 +1,18 @@
 //! Property-test fuzz gate for the lexer and parser (ADR-006, §19 acceptance).
 //!
 //! Feeds arbitrary input to [`praxis_parser::lex`] and [`praxis_parser::parse`]
-//! and asserts they **terminate without panicking**. This is the Milestone 1
-//! acceptance criterion "no panic on fuzzed token streams." The parser is
-//! additionally expected to always return a (possibly error-filled) tree rather
-//! than abort.
+//! and asserts they **terminate without panicking** — §19's acceptance
+//! criterion "no panic on fuzzed token streams." The parser is additionally
+//! expected to always return a (possibly error-filled) tree rather than abort.
 //!
 //! **Generator coverage.** `lex`/`parse` take `&str`, so invalid UTF-8 cannot
 //! reach them: the byte-level boundary is the caller's file read, not this API.
-//! What the generators must cover is therefore the full *scalar* space, and the
-//! earlier `".{0,256}"` did not — a regex `.` excludes `\n`, so every
-//! newline-sensitive path (line comments, statement layout) went unfuzzed, and
-//! purely random scalars almost never form a token the parser recognizes. The
-//! generators below use `(?s)` for the any-scalar case and add an alphabet
-//! weighted toward real Praxis syntax so the parser is exercised past its first
-//! error.
+//! What the generators must cover is therefore the full *scalar* space. The
+//! any-scalar case is `(?s)`-flagged because a regex `.` excludes `\n`, which
+//! would leave every newline-sensitive path (line comments, statement layout)
+//! unfuzzed; and a second generator draws from an alphabet weighted toward real
+//! Praxis syntax, because purely random scalars almost never form a token the
+//! parser recognizes and it has to be exercised past its first error.
 //!
 //! Runs on stable Rust via `proptest`; `cargo-fuzz` can supplement this later
 //! with coverage-guided fuzzing.
@@ -58,8 +56,8 @@ fn praxis_shaped_text() -> impl Strategy<Value = String> {
         Just("42"),
         Just("3.14"),
         Just("_"),
-        // Non-ASCII identifiers and non-identifier scalars, which the old byte
-        // classifier treated identically.
+        // Non-ASCII identifiers and non-identifier scalars, which a byte-wise
+        // classifier would treat identically.
         Just("λ"),
         Just("日本語"),
         Just("e\u{0301}"),

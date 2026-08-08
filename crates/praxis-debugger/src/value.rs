@@ -36,9 +36,9 @@ use std::fmt;
 /// What a slot renders as when nothing has ever been written into it
 /// (`DebugLocal::value == None`).
 ///
-/// The absence is the type's, not a sentinel pointer's (F18): a slot nothing was
-/// ever spilled into reads back as `None`, and every display turns that `None`
-/// into this one word.
+/// The absence is the type's, not a sentinel pointer's: a slot nothing was ever
+/// spilled into reads back as `None`, and every display turns that `None` into
+/// this one word.
 ///
 /// Most usefully it is the faulting expression's own temp — the value the
 /// program never got as far as computing.
@@ -48,8 +48,7 @@ pub const UNINIT: &str = "<uninit>";
 /// ([`praxis_runtime::DebugValue::Reclaimed`]).
 ///
 /// Distinct from [`UNINIT`], and the distinction is the point: one is a local
-/// the program never wrote, the other a local it wrote and finished with. They
-/// were one string until the slot could tell them apart.
+/// the program never wrote, the other a local it wrote and finished with.
 pub const COLLECTED: &str = "<collected>";
 
 /// What a value renders as when its descriptor wrote no bytes at all.
@@ -139,18 +138,18 @@ pub fn format_bounded(value: praxis_runtime::DebugValue, budget: usize) -> Strin
         // is short by construction; truncating it would only ever hide digits.
         DebugValue::Scalar(s) => return s.to_string(),
         // A value was here; the collector has taken it (ADR-106). Worth its own
-        // word rather than `<uninit>`, which is what this used to print and
-        // which says the opposite: that the line never ran. `COLLECTED` names
-        // the mechanism the user can act on — the binding's last *use*, not its
-        // scope, is where it stopped being a root (ADR-044 decision 2), so the
-        // way to see it at the fault is to use it later.
+        // word rather than `<uninit>`, which says the opposite: that the line
+        // never ran. `COLLECTED` names the mechanism the user can act on — the
+        // binding's last *use*, not its scope, is where it stopped being a root
+        // (ADR-044 decision 2), so the way to see it at the fault is to use it
+        // later.
         DebugValue::Reclaimed => return COLLECTED.to_string(),
     };
     let mut sink = CappedSink::new();
     // `format_debug`, so a `Text` is a quoted literal — at this level and at
     // every level below it, since a container passes its style down with its
-    // writer. Without it the empty string wrote no bytes and fell into the
-    // `<unreadable>` answer below, and `["a", "", "b"]` rendered `[a, , b]`,
+    // writer. Without it the empty string writes no bytes and falls into the
+    // `<unreadable>` answer below, and `["a", "", "b"]` renders `[a, , b]`,
     // where the middle element is not short but *absent*.
     reference.format_debug(&mut sink);
     if sink.buf.is_empty() {
@@ -362,14 +361,13 @@ mod tests {
     /// A `Text` renders quoted here, at every depth, and an empty one is
     /// therefore visible.
     ///
-    /// This is [`format_bounded`]'s half of the change; `text_renders_one_way_
+    /// This is [`format_bounded`]'s half of the rule; `text_renders_one_way_
     /// for_the_program_and_another_for_the_debugger` in `praxis-runtime` is the
     /// descriptor's. Both are needed: the callback can quote all it likes if this
     /// function asks for the other rendering.
     ///
-    /// It also makes [`truncate_rendered`]'s quoted-run tracking reachable. That
-    /// scan has always understood `"` and `\\` — see the `"a long string"` row in
-    /// its doc — against a renderer that never produced either.
+    /// It is also what makes [`truncate_rendered`]'s quoted-run tracking
+    /// reachable — see the `"a long string"` row in its doc.
     #[test]
     fn a_text_is_quoted_so_the_empty_one_is_visible() {
         let mut rt = praxis_runtime::Runtime::new();
@@ -378,12 +376,12 @@ mod tests {
         };
 
         assert_eq!(render(rt.alloc_text("asdf")), "\"asdf\"");
-        // The row that used to read `b: Text = <unreadable>`: zero bytes out of
-        // the descriptor was the only evidence the renderer had.
+        // Quoted, an empty `Text` is visible; unquoted it writes zero bytes,
+        // which is indistinguishable from a value the renderer could not read.
         assert_eq!(render(rt.alloc_text("")), "\"\"");
 
-        // Nested, which is the case a per-type debug callback could not have
-        // reached: the element is quoted because the `Vec` passed its style down.
+        // Nested, which is the case a per-type debug callback cannot reach: the
+        // element is quoted because the `Vec` passed its style down.
         let mut ctx = rt.context();
         // SAFETY: `ctx` is wired to `rt`; every argument is a live `GcRef` of the
         // type the wrapper names.

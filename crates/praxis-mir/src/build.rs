@@ -10,9 +10,7 @@
 //! [`crate::annotate`] to populate each safepoint's [`RootSlots`]/[`DebugSlots`].
 //! Keeping the two phases separate makes the builder easier to test in
 //! isolation — and the sets are *sealed*, so a builder site can only write
-//! `unannotated()`. It used to write 61 hand-maintained root lists that the
-//! pass then silently overwrote; several disagreed with it, and none of them
-//! could be wrong in a way anything noticed.
+//! `unannotated()`.
 
 #![allow(dead_code)] // Consumed by the Cranelift backend (Phase 4).
 
@@ -30,7 +28,7 @@ use crate::ir::{
 };
 
 /// Lower a typed module to MIR: one [`Function`] per source `fn` item, plus one
-/// synthetic [`Function`] per closure literal (M7, §4.10). The synthetic closure
+/// synthetic [`Function`] per closure literal (§4.10). The synthetic closure
 /// functions are appended after the source functions; they are referenced by name
 /// from `AllocKind::Closure` at the allocation site.
 #[must_use]
@@ -39,10 +37,10 @@ pub fn lower_module(module: &TypedModule, db: &mut TypeDb) -> Vec<Function> {
     // The optimizations run *here* rather than beside `lower_module` at each of
     // the five hosts. Each deletes safepoints, so each has to run before
     // `crate::annotate` computes a slot set per safepoint; every host does
-    // `lower_module → annotate → verify` in that order, so the last line of this
-    // function is the one place that ordering holds with no host edited — which
-    // is ADR-108 §1's stated reason for refusing a standalone pass. Every
-    // closure and adapter is covered because they are in `funcs` by now.
+    // `lower_module → annotate → verify` in that order, so this is the one place
+    // that ordering holds with no host edited — ADR-108 §1's stated reason for
+    // refusing a standalone pass. Every closure and adapter is covered because
+    // they are in `funcs` by now.
     optimize(&mut funcs);
     funcs
 }
@@ -68,7 +66,7 @@ fn lower_module_raw(module: &TypedModule, db: &mut TypeDb) -> Vec<Function> {
             funcs.push(lower_closure_fn(&closure, db, bindings));
         }
     }
-    // …and one adapter per *function value* (REP-01, ADR-061). Deduplicated by
+    // …and one adapter per *function value* (ADR-061). Deduplicated by
     // name: every `var f = double` in the module shares `double`'s one adapter.
     let mut adapted: Vec<FnValueAdapter> = Vec::new();
     for item in &module.items {
@@ -96,10 +94,9 @@ fn lower_module_raw(module: &TypedModule, db: &mut TypeDb) -> Vec<Function> {
 /// **What the split buys is that each package's gate keeps measuring its own
 /// package.** ADR-108's tests assert that a loop-invariant literal's `Alloc`
 /// moved to the preheader, and ADR-121 deletes that `Alloc` outright, so run
-/// against the finished article those tests fail while the hoist they check is
-/// still working perfectly. Read against the builder's own output they go on
-/// saying what they were written to say. Seventeen tests across four modules
-/// went red when ADR-121 landed and not one of them had found a defect.
+/// against the finished article those tests would fail while the hoist they
+/// check is still working perfectly. Read against the builder's own output they
+/// go on saying what they were written to say.
 fn optimize(funcs: &mut [Function]) {
     for func in funcs {
         // Block-local box/unbox forwarding first (ADR-120).
@@ -138,8 +135,7 @@ pub fn lower_module_forwarded(module: &TypedModule, db: &mut TypeDb) -> Vec<Func
     funcs
 }
 
-/// One top-level `fn` used as a value, and the adapter it needs (REP-01,
-/// ADR-061).
+/// One top-level `fn` used as a value, and the adapter it needs (ADR-061).
 ///
 /// A closure's synthetic function takes the closure itself as a hidden first
 /// explicit argument — `fn(ctx, closure_self, args…)` — and a top-level `fn`
@@ -193,9 +189,9 @@ fn collect_closures_block(block: &TypedBlock, out: &mut Vec<LiftedClosure>) {
 }
 
 fn collect_closures_stmt(stmt: &TypedStmt, out: &mut Vec<LiftedClosure>) {
-    // The sub-expression list is `praxis-hir`'s, for the reason the *child* list
-    // is F20's: a statement field this walk forgot is a synthetic function that
-    // never gets emitted.
+    // The sub-expression list is `praxis-hir`'s, for the same reason the *child*
+    // list below is: a statement field this walk forgot is a synthetic function
+    // that never gets emitted.
     for e in praxis_hir::stmt_exprs(stmt) {
         collect_closures_expr(e, out);
     }
@@ -203,9 +199,9 @@ fn collect_closures_stmt(stmt: &TypedStmt, out: &mut Vec<LiftedClosure>) {
 
 fn collect_closures_expr(e: &TypedExpr, out: &mut Vec<LiftedClosure>) {
     // Recurse first, so an inner closure is emitted before the outer one
-    // (deterministic ordering for tests). The child list is F20's, written once
-    // in `praxis-hir`: this used to be a 29-arm match of its own, and a closure
-    // sitting in a field it forgot was a synthetic function never emitted.
+    // (deterministic ordering for tests). The child list is written once in
+    // `praxis-hir`, so a closure sitting in a field this walk forgot cannot
+    // happen.
     for child in e.children() {
         collect_closures_expr(child, out);
     }
@@ -231,10 +227,11 @@ fn collect_closures_expr(e: &TypedExpr, out: &mut Vec<LiftedClosure>) {
     }
 }
 
-/// Every `TypedExpr::FnValue` in a body, in source order (REP-01).
+/// Every `TypedExpr::FnValue` in a body, in source order (ADR-061).
 ///
 /// The same walk as [`collect_closures`] and for the same reason: the child list
-/// is F20's, so a function value in a field this forgot cannot happen.
+/// lives in `praxis-hir`, so a function value in a field this forgot cannot
+/// happen.
 fn collect_fn_values(block: &TypedBlock) -> Vec<FnValueAdapter> {
     let mut out = Vec::new();
     collect_fn_values_block(block, &mut out);
@@ -272,14 +269,14 @@ fn collect_fn_values_expr(e: &TypedExpr, out: &mut Vec<FnValueAdapter>) {
 /// at every site that binds a name to a slot.
 ///
 /// They are a pair because they answer one question in two steps: *can* anything
-/// write this binding (§4.2 — since ADR-125 any of them may be written), and if
-/// so, does a closure see the writes too.
+/// write this binding (§4.2, ADR-125 — any binding may be), and if so, does a
+/// closure see the writes too.
 #[derive(Clone, Copy)]
 struct Bindings<'a> {
     /// The bindings captured by some closure **and** written somewhere (escape
-    /// analysis, M7-WS7b). These are boxed into a `VarCell` at their binding
-    /// site, and reads/writes route through the cell so the closure shares the
-    /// storage. A subset of [`reassigned`](Self::reassigned).
+    /// analysis). These are boxed into a `VarCell` at their binding site, and
+    /// reads/writes route through the cell so the closure shares the storage.
+    /// A subset of [`reassigned`](Self::reassigned).
     escaping: &'a std::collections::HashSet<praxis_hir::SymbolId>,
     /// Every binding some `name = …` statement writes.
     ///
@@ -311,9 +308,10 @@ struct Builder<'a> {
     unit_ty: Type,
     /// How each binding must be stored — see [`Bindings`].
     bindings: Bindings<'a>,
-    /// The stack of enclosing loops (M8-WS6, §4.11). `break` jumps to the top's
-    /// `break_target`; `continue` jumps to the `continue_target` (the header for
-    /// `while`/`for`, the body top for `loop`). Empty at the function's top level.
+    /// The stack of enclosing loops (§4.11). `break` jumps to the top's
+    /// `break_target`; `continue` jumps to the `continue_target` (the header
+    /// for `while`/`for`, the body top for `loop`). Empty at the function's top
+    /// level.
     loop_stack: Vec<LoopCtx>,
     /// The stack of enclosing loops' **preheaders** — the block that jumps into
     /// each loop's header, which is the loop's only entry from outside and so
@@ -330,8 +328,8 @@ struct Builder<'a> {
     loop_preheaders: Vec<BlockId>,
 }
 
-/// One frame of the loop-context stack (M8-WS6). Pushed on entry to a
-/// `while`/`for`/`loop`, popped on exit. `break`/`continue` read the top frame.
+/// One frame of the loop-context stack. Pushed on entry to a `while`/`for`/
+/// `loop`, popped on exit. `break`/`continue` read the top frame.
 #[derive(Clone, Copy)]
 struct LoopCtx {
     /// The block `continue` jumps to (the loop header for `while`/`for`).
@@ -339,7 +337,7 @@ struct LoopCtx {
     /// The block `break` jumps to (the loop exit).
     break_target: BlockId,
     /// The slot holding the loop's value, for a `loop` that produces one
-    /// (TY-21): every `break` writes it before jumping, and the exit block
+    /// (ADR-053): every `break` writes it before jumping, and the exit block
     /// reads it. `None` for a `while`/`for` and for the fused pipeline loops,
     /// which are `Unit`-valued and whose `break`s therefore carry nothing.
     result: Option<LocalId>,
@@ -389,16 +387,16 @@ fn lower_fn(f: &TypedFn, db: &mut TypeDb, bindings: Bindings<'_>) -> Function {
     b.finish_with_return(ret)
 }
 
-/// Lower a closure literal to its synthetic MIR function (M7, §4.10). The
+/// Lower a closure literal to its synthetic MIR function (§4.10). The
 /// function's MIR params are `[closure_self, user_params...]` (ctx is the
 /// implicit hidden first ABI param, as for every Praxis function). At entry, a
 /// prologue loads each captured value via `praxis_closure_capture(ctx, self, i)`
 /// and binds it to the capture's symbol in `b.locals`; the params are already
 /// bound. Then the body is lowered as usual.
 ///
-/// This is Approach B (the closure value is passed as a hidden first arg; the
-/// synthetic function loads its captures at entry). The call site reads `fn_ptr`
-/// and emits a `call_indirect` with the matching signature.
+/// The closure value is passed as a hidden first arg and the synthetic function
+/// loads its captures at entry; the call site reads `fn_ptr` and emits a
+/// `call_indirect` with the matching signature.
 fn lower_closure_fn(closure: &LiftedClosure, db: &mut TypeDb, bindings: Bindings<'_>) -> Function {
     // Closures are lifted to synthetic functions, so there is no span of their
     // own to record; the `__p_expr` debugger function is also span-less. The
@@ -439,9 +437,9 @@ fn lower_closure_fn(closure: &LiftedClosure, db: &mut TypeDb, bindings: Bindings
     // Prologue: load each captured value from the closure's env and bind it to
     // the capture's symbol. The capture index is an ABI immediate on
     // `Inst::LoadCapture`, not a value: boxing it as `ConstInt` + `MoveGc` into
-    // a `Gc` slot (as this did before P0-03) put a small integer in a slot the
-    // liveness pass may spill into the shadow stack, and the collector would
-    // then dereference `0x1` as a `GcRef`.
+    // a `Gc` slot would put a small integer in a slot the liveness pass may
+    // spill into the shadow stack, and the collector would then dereference
+    // `0x1` as a `GcRef`.
     for (idx, cap) in closure.captures.iter().enumerate() {
         let dst = b.alloc_gc(
             MirType::Known(cap.ty),
@@ -477,7 +475,7 @@ fn lower_closure_fn(closure: &LiftedClosure, db: &mut TypeDb, bindings: Bindings
     b.finish_with_return(ret)
 }
 
-/// The adapter function for a top-level `fn` used as a value (REP-01, ADR-061).
+/// The adapter function for a top-level `fn` used as a value (ADR-061).
 ///
 /// Its params are `[closure_self, p0 … pn]` — the closure convention — and its
 /// body is one direct call to the target with `[p0 … pn]`, dropping the self
@@ -489,8 +487,8 @@ fn lower_closure_fn(closure: &LiftedClosure, db: &mut TypeDb, bindings: Bindings
 /// It is what "reuse `praxis_alloc_closure` with an empty environment" actually
 /// requires: the env is empty (a top-level `fn` captures nothing) but the *call*
 /// convention still has the extra hidden argument, so something has to absorb
-/// it. Nothing else about the closure path changes — the allocation, the fn_ptr
-/// read, the `call_indirect`, the rooting are all the existing ones.
+/// it. Nothing else about the closure path differs — the allocation, the fn_ptr
+/// read, the `call_indirect` and the rooting are the ones a real closure uses.
 fn lower_fn_value_adapter(adapter: &FnValueAdapter, db: &mut TypeDb) -> Function {
     // The adapter's body is one call forwarding its own params; it declares no
     // binding of its own, so neither set can have a member here.
@@ -548,9 +546,9 @@ impl<'a> Builder<'a> {
     /// and the cached scalar type handles.
     ///
     /// The one prologue for all three lowering entry points ([`lower_fn`],
-    /// [`lower_closure_fn`], [`lower_fn_value_adapter`]), which built it
-    /// character-identically three times over. `span` is the source span for a
-    /// real `fn` and `(0, 0)` for the synthetic ones — see their call sites.
+    /// [`lower_closure_fn`], [`lower_fn_value_adapter`]). `span` is the source
+    /// span for a real `fn` and `(0, 0)` for the synthetic ones — see their call
+    /// sites.
     ///
     /// `return_local` starts as the placeholder `LocalId(0)`: the return slot is
     /// allocated after the params (the ABI slots come first), so it cannot exist
@@ -635,9 +633,8 @@ impl<'a> Builder<'a> {
 
     fn alloc_scalar(&mut self, sk: ScalarKind) -> LocalId {
         // A scalar slot has no language type: its `ScalarKind` is authoritative
-        // and the backend never emits debugger metadata for it. `Opaque` says
-        // that, where the old placeholder `Type(0)` claimed to be whatever type
-        // the arena interned first.
+        // and the backend never emits debugger metadata for it. `MirType::Opaque`
+        // says exactly that.
         self.func.new_local(
             LocalKind::Scalar(sk),
             MirType::Opaque,
@@ -709,14 +706,11 @@ impl<'a> Builder<'a> {
     /// Push an instruction and, iff it can fault, the check that observes it.
     ///
     /// **The one place lowering decides whether a fault check is emitted**
-    /// (MIR-10, ADR-088). Before this the decision was made ~34 times, once per
-    /// emit site, and about half of them were wrong: the fused `collect` sink
-    /// pushed with no check (REP-52) while every method call checked whether or
-    /// not its wrapper could fault (REP-53). [`Inst::can_fault`] derives the
-    /// answer from the ABI manifest through the same instruction→symbol mapping
-    /// the backend uses, and [`crate::verify`] rejects a body that disagrees in
-    /// either direction — so a site that stops going through here fails the
-    /// build rather than going quiet.
+    /// (ADR-088). [`Inst::can_fault`] derives the answer from the ABI manifest
+    /// through the same instruction→symbol mapping the backend uses, and
+    /// [`crate::verify`] rejects a body that disagrees in either direction — so
+    /// a site that stops going through here fails the build rather than going
+    /// quiet.
     ///
     /// The sites that still call [`Builder::check_fault`] by hand are the ones
     /// whose instruction is not built here (`Inst::IntBinOp`, `Inst::ValueCmp`),
@@ -798,9 +792,23 @@ fn lower_block_body(b: &mut Builder<'_>, block: &praxis_hir::TypedBlock) -> Loca
     lower_expr_gc(b, &block.tail)
 }
 
+/// How the debugger should classify a parameter's slot: a binding the
+/// programmer named is a `User` local, and a destructuring parameter's
+/// whole-argument slot is a temp (`TypedParam::name` is `None` for it).
+///
+/// One function rather than the same `if` at the `fn` and closure sites, since
+/// the two disagreeing is how a slot ends up `User` with no name — the state
+/// [`crate::verify`] rejects.
+fn param_debug_kind(p: &TypedParam) -> LocalDebugKind {
+    match p.name {
+        Some(_) => LocalDebugKind::User,
+        None => LocalDebugKind::Temp,
+    }
+}
+
 /// Box `value` into a fresh `VarCell` and bind `symbol` to the cell.
 ///
-/// The one place a cell is created, because every binding form can now need one
+/// The one place a cell is created, because every binding form can need one
 /// (ADR-125): a `var` statement, a function or closure parameter, a `for`
 /// variable, and a name a pattern introduces are all writable and all
 /// capturable, so any of them can be in
@@ -814,26 +822,12 @@ fn lower_block_body(b: &mut Builder<'_>, block: &praxis_hir::TypedBlock) -> Loca
 ///
 /// The cell is a **compiler temp**, and `span` is the binding's so the crash
 /// snapshot can say which binding it belongs to. It is not the binding: it holds
-/// a `VarCell` object, not the bound value, so classifying it `User` made the
-/// snapshot print a row named `__cell_n` whose value read `<var-cell>` — an
-/// internal name, no type, and the wrong value. Naming it plainly `n` would be
-/// worse still, because `p n` would then bind the cell instead of what is in it.
+/// a `VarCell` object, not the bound value, so classifying it `User` would print
+/// a snapshot row named `__cell_n` whose value reads `<var-cell>` — an internal
+/// name, no type, and the wrong value. Naming it plainly `n` would be worse
+/// still, because `p n` would then bind the cell instead of what is in it.
 /// Showing a captured-and-written binding *by value* needs the renderer to
-/// dereference the cell, which is a separate change (ADR-139).
-/// How the debugger should classify a parameter's slot: a binding the
-/// programmer named is a `User` local, and a destructuring parameter's
-/// whole-argument slot is a temp (`TypedParam::name` is `None` for it).
-///
-/// One function rather than the same `if` at the `fn` and closure sites, since
-/// the two disagreeing is how a slot ends up `User` with no name — the state
-/// [`crate::verify`] now rejects.
-fn param_debug_kind(p: &TypedParam) -> LocalDebugKind {
-    match p.name {
-        Some(_) => LocalDebugKind::User,
-        None => LocalDebugKind::Temp,
-    }
-}
-
+/// dereference the cell (ADR-139).
 fn bind_cell(
     b: &mut Builder<'_>,
     symbol: praxis_hir::SymbolId,
@@ -858,10 +852,9 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
             let v = lower_expr_gc(b, init);
             if b.bindings.escaping.contains(symbol) {
                 // A captured, written binding is boxed into a `VarCell` at its
-                // binding site (M7-WS7b, §4.10). The local holds the cell;
-                // reads/writes route through
-                // `praxis_var_cell_get`/`praxis_var_cell_set` so a closure
-                // sharing the cell sees mutations.
+                // binding site (§4.10). The local holds the cell; reads/writes
+                // route through `praxis_var_cell_get`/`praxis_var_cell_set` so
+                // a closure sharing the cell sees mutations.
                 bind_cell(b, *symbol, v, Some(*span));
             } else {
                 let slot = b.alloc_gc(
@@ -900,7 +893,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
             } else {
                 // Compound assignment: `dst = dst <op> value`. Which arithmetic
                 // that is follows the operand type, and the answer comes from
-                // `arith_kind` — the same one the binary operators ask (REP-64).
+                // `arith_kind` — the same one the binary operators ask.
                 let cur = if escaping {
                     // Read the cell's current value.
                     let cur = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, Some(*span));
@@ -928,15 +921,14 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                 }
             }
         }
-        // `m[key] = v`, `counts[key] += 1` — a store through a subscript
-        // (REP-16). The receiver and the indices are lowered **once**, into
-        // locals reused by the read and the write, so a compound operator
-        // evaluates its place exactly once: `m[f()] += 1` calls `f` once.
+        // `m[key] = v`, `counts[key] += 1` — a store through a subscript. The
+        // receiver and the indices are lowered **once**, into locals reused by
+        // the read and the write, so a compound operator evaluates its place
+        // exactly once: `m[f()] += 1` calls `f` once.
         //
         // Which wrappers to call is HIR's answer (`get`/`set`, from the catalog
-        // rows inference resolved), not one re-derived here from the receiver's
-        // static ctor — the mistake `get_symbol_for` makes for `for` and REP-15
-        // is about.
+        // rows inference resolved), never one re-derived here from the
+        // receiver's static ctor.
         TypedStmt::IndexAssign {
             receiver,
             indices,
@@ -955,7 +947,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
                 // (HIR drops the statement otherwise), and the arithmetic is the
                 // same operation, under the same restriction, that a compound
                 // assignment to a local has — which is why both go through
-                // `lower_compound_arith` rather than each choosing (REP-64).
+                // `lower_compound_arith` rather than each choosing.
                 let Some(get) = *get else { return };
                 let cur = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, Some(*span));
                 let mut args = Vec::with_capacity(index_locals.len() + 1);
@@ -989,7 +981,7 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
         // `nodes(i).count += 1` calls `nodes` once.
         //
         // The slot index is an immediate on both instructions, so neither half
-        // is a `Call` with a boxed integer in a rootable argument (P0-03).
+        // is a `Call` with a boxed integer in a rootable argument.
         TypedStmt::FieldAssign {
             receiver,
             field_idx,
@@ -1064,11 +1056,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 }
             }
         }
-        // A top-level `fn` used as a value (REP-01, ADR-061): a closure over its
-        // adapter with an empty environment. This arm is what a `Path` to a `fn`
-        // used to fall through to the `None` above and answer `Unit` for — and
-        // `Inst::CallIndirect` then read the Unit's payload as a function
-        // pointer, which is a SIGBUS from a program `praxis check` accepted.
+        // A top-level `fn` used as a value (ADR-061): a closure over its adapter
+        // with an empty environment.
         TypedExpr::FnValue {
             callee_name, ty, ..
         } => {
@@ -1125,8 +1114,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 // unchecked (IEEE-754 inf/nan), so no fault check follows.
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
                     // Which arithmetic, from the one place that answers that —
-                    // the same `arith_kind` the compound-assignment paths ask
-                    // (REP-64), so the two cannot drift apart again.
+                    // the same `arith_kind` the compound-assignment paths ask,
+                    // so the two cannot drift apart.
                     let via = arith_kind(b, expr_static_type(lhs));
                     if via == ArithVia::Text {
                         // `+` on `Text` is concatenation (ADR-085), and it is a
@@ -1163,15 +1152,14 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 }
                 // Comparison: extract scalars, compare, materialize a Bool.
                 BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-                    // How the operands are compared follows their type, and the
-                    // choice is the whole of P0-12's compiler half. `==`/`!=`
+                    // How the operands are compared follows their type. `==`/`!=`
                     // on a composite GC value (record/tuple/enum/collection) is
                     // a structural-equality runtime call; a `Text` of either
                     // form goes through the descriptor (its payload is a
                     // pointer-and-length structure, not a number); every other
                     // scalar is compared natively *at its own width* — a `Char`
-                    // payload is four bytes and a `Bool` one, so the old
-                    // uniform `Int` extraction read past both.
+                    // payload is four bytes and a `Bool` one, so a uniform `Int`
+                    // extraction would read past both.
                     let operand_ty = b.db.follow(expr_static_type(lhs));
                     let compare_as = compare_kind(b, operand_ty);
                     let is_equality = matches!(op, BinOp::Eq | BinOp::Neq);
@@ -1246,14 +1234,14 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             match op {
                 UnaryOp::Neg => {
                     // A Float negation is IEEE-754 `negate` — the sign bit
-                    // flipped and nothing else — and **not** `0.0 - x`, which
-                    // is what this was: at `x = +0.0` that subtraction answers
-                    // `+0.0`, so `-0.0` evaluated to `+0.0` and printed `0.0`,
-                    // a rendering that does not read back as the Float it came
-                    // from (REP-50; ADR-083 states the rule, ADR-045 already
-                    // decided the two zeros are distinct values). An `Int`
-                    // negation *is* `0 - x`: it is the checked subtraction, and
-                    // faulting at `Int::MIN` is the right answer there.
+                    // flipped and nothing else — and **not** `0.0 - x`: at
+                    // `x = +0.0` that subtraction answers `+0.0`, so `-0.0`
+                    // would evaluate to `+0.0` and print `0.0`, a rendering that
+                    // does not read back as the Float it came from (ADR-083
+                    // states the rule, ADR-045 makes the two zeros distinct
+                    // values). An `Int` negation *is* `0 - x`: it is the checked
+                    // subtraction, and faulting at `Int::MIN` is the right
+                    // answer there.
                     if arith_kind(b, expr_static_type(operand)) == ArithVia::Float {
                         let result = lower_float_neg(b, o);
                         lower_materialize_float(b, result, espan)
@@ -1294,7 +1282,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             lower_for(b, binding, iter, body, *item_ty);
             lower_lit_gc(b, &Lit::Unit, espan) // for yields Unit
         }
-        // A `loop` yields what its `break`s carry (TY-21).
+        // A `loop` yields what its `break`s carry (ADR-053).
         TypedExpr::Loop { body, ty, .. } => lower_loop(b, body, *ty, espan),
         TypedExpr::Break { value, .. } => {
             lower_break(b, value);
@@ -1316,14 +1304,13 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             ty,
             ..
         } => {
-            // Postfix call on an arbitrary expression (`expr(args)`, M8 §4.10):
+            // Postfix call on an arbitrary expression (`expr(args)`, §4.10):
             // the callee is a closure value produced by an expression (e.g.
             // `fs.get(0)` in `fs.get(0)(100)`). Lower the callee expression to a
             // GcRef local and emit an indirect call through its `fn_ptr`. This
             // bypasses the named-call paths below (collection construction,
             // `out`, named/indirect-via-local) — those only apply when the callee
-            // is a name. Pre-fix this case fell through to `CallTarget::User("")`
-            // (a nonsense direct call that SIGSEGV'd); now it lowers soundly.
+            // is a name.
             if let Some(ce) = callee_expr {
                 let callee_local = lower_expr_gc(b, ce);
                 let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
@@ -1331,12 +1318,12 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 b.call_indirect(dst, callee_local, arg_locals);
                 return dst;
             }
-            // Collection construction: `Vec[T]()`, `Deque[T]()`, etc. (M8 WS1,
-            // §11.1/§11.2). The element type is extracted from the call's result
-            // type (the collection type) and carried through `AllocKind::Collection`
-            // so the codegen resolves the real element descriptor (closing the M7
-            // null-descriptor carryover). `out`/`panic` and other builtins fall
-            // through to the generic call path below.
+            // Collection construction: `Vec[T]()`, `Deque[T]()`, etc.
+            // (§11.1/§11.2). The element type is extracted from the call's result
+            // type (the collection type) and carried through
+            // `AllocKind::Collection` so the codegen resolves the real element
+            // descriptor. `out`/`panic` and other builtins fall through to the
+            // generic call path below.
             if let Some(ctor) = praxis_types::CollectionCtor::from_name(callee_name) {
                 // The sized forms' operands are lowered **first** (ADR-146), so
                 // an argument that allocates runs before the destination local
@@ -1345,10 +1332,10 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 let sized = init != CollectionInit::Empty;
                 let alloc = collection_alloc_kind(b, ctor, *ty, init);
                 // A sized construction carries its span; a nullary one does
-                // not, as it never has. The asymmetry is the fault: `Vec(-1, x)`
-                // stops the program, and the crash snapshot names the
-                // expression that asked for the impossible size only if the
-                // destination local knows where it came from. `Vec()` cannot be
+                // not. The asymmetry is the fault: `Vec(-1, x)` stops the
+                // program, and the crash snapshot names the expression that
+                // asked for the impossible size only if the destination local
+                // knows where it came from. `Vec()` cannot be
                 // refused for anything it was given, so a span on it would only
                 // add a row to a snapshot that is never about it — and the
                 // snapshot has a window, so an added row costs a real one.
@@ -1368,8 +1355,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     .map(|a| lower_expr_gc(b, a))
                     .unwrap_or_else(|| lower_lit_gc(b, &Lit::Unit, espan));
                 // The call's result temp materializes `e` (the whole call expr),
-                // so its type is the call's — which F15 now records at the call
-                // site rather than re-instantiating from the callee's scheme.
+                // so its type is the call's, which inference records at the call
+                // site.
                 let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
                 // `praxis_write_stdout` is `Effect::Pure`: no check.
                 b.call_runtime(dst, RuntimeSymbol::WriteStdout, vec![arg_local]);
@@ -1378,9 +1365,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // `dbg(x)`, `panic(x)` and `assert(c)` — the rest of §16.1's
             // output/control group. Each is one runtime call with the argument
             // the program wrote; `panic`/`assert` raise a fault, so each is
-            // followed by the usual fault check. Before this they fell through
-            // to `CallTarget::User`, which typechecked and then failed the
-            // compile with "unresolved user function `panic`" (TY-33).
+            // followed by the usual fault check.
             if let Some(sym) = control_builtin_symbol(callee_name) {
                 let arg_local = args
                     .first()
@@ -1394,9 +1379,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // `gcd`, `lcm`. Each is one runtime call taking the operands the
             // program wrote — the arity is the wrapper's, and inference already
             // rejected a call that does not match it, so the argument list is
-            // passed through as it stands. Before this they fell through to
-            // `CallTarget::User` and failed the compile with "unresolved user
-            // function `abs`" (TY-33, ADR-058).
+            // passed through as it stands (ADR-058).
             if let Some(helper) = praxis_stdlib::numeric_helper(callee_name) {
                 let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
                 let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
@@ -1408,9 +1391,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // state and the closures the program wrote — the same one path as
             // the numeric helpers, because every one of them takes only `Gc`
             // operands and returns one. All six allocate and all six can fault
-            // (a closure they call may), so each is followed by a fault check.
-            // Before this they fell through to `CallTarget::User` and failed the
-            // compile with "unresolved user function `bfs`" (TY-33, ADR-060).
+            // (a closure they call may), so each is followed by a fault check
+            // (ADR-060).
             if let Some(helper) = praxis_stdlib::graph_helper(callee_name) {
                 let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
                 let dst = b.alloc_gc(MirType::Known(*ty), None, LocalDebugKind::Temp, espan);
@@ -1430,7 +1412,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 return dst;
             }
             let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
-            // Indirect call dispatch (M7, §4.10): if the callee resolves to a
+            // Indirect call dispatch (§4.10): if the callee resolves to a
             // local binding (a `var`/`param` holding a closure value), the
             // call is indirect — read the closure's `fn_ptr` and call through it.
             // Top-level `fn`s are never in `b.locals`, so this distinguishes the
@@ -1466,11 +1448,11 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // empty (an intrinsic), the pipeline recognizer owns it and fuses
             // the whole chain into one loop (ADR-071).
             //
-            // There is no fallback lowering (REP-40). Inference only types this
-            // call at all if a catalog row matched it, and every row lowered as
-            // an `Intrinsic` is classified by `classify_link`/`classify_sink` —
-            // so a decline here is a compiler bug, not a program's, and it says
-            // so instead of answering the Unit singleton.
+            // There is no fallback lowering. Inference only types this call at
+            // all if a catalog row matched it, and every row lowered as an
+            // `Intrinsic` is classified by `classify_link`/`classify_sink` — so
+            // a decline here is a compiler bug, not a program's, and it says so
+            // instead of answering the Unit singleton.
             let Some(symbol) = *lowering_symbol else {
                 // Reconstruct the MethodCall node so the recognizer can walk
                 // the receiver chain.
@@ -1488,19 +1470,18 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     return lower_pipeline(b, plan);
                 }
                 // A receiver that is **still a type variable** is not a compiler
-                // bug. It is the body of a function nothing ever calls —
-                // ADR-093 §3's first bullet — and that bullet's explanation was
-                // wrong: `monomorphize` does not drop such a body, because
-                // ADR-057 decision 5 pins the receiver, which makes the function
-                // a monotype rather than a generic. Dropping it would be wrong
-                // anyway: `var g = f` on an uncalled `f` still needs the symbol.
+                // bug. It is the body of a function nothing ever calls (ADR-093
+                // §3). `monomorphize` does not drop such a body — ADR-057
+                // decision 5 pins the receiver, which makes the function a
+                // monotype rather than a generic — and dropping it would be
+                // wrong anyway: `var g = f` on an uncalled `f` still needs the
+                // symbol.
                 //
                 // The body is unreachable by construction — every call unifies
                 // the argument and pins the receiver, including a call through a
                 // value (`var g = f` then `g([1, 2])` prints `2`) — so it lowers
                 // to an unconditional `panic` stating that invariant. Not to the
-                // Unit singleton, which REP-40 refuses, and not to a diagnostic,
-                // which ADR-093 promised it would not be (ADR-137 decision 3).
+                // Unit singleton, and not to a diagnostic (ADR-137 decision 3).
                 if b.db
                     .var_id_of(b.db.follow(praxis_hir::expr_ty(receiver)))
                     .is_some()
@@ -1514,9 +1495,9 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                     return dst;
                 }
                 // What is left is a compiler bug rather than a user error, which
-                // is why this is an ICE and not a diagnostic (ADR-093 deleted
-                // lowering's `Y110`; a wrong answer or a type error at this point
-                // would misattribute a compiler fault to the program): either the
+                // is why this is an ICE and not a diagnostic (lowering emits no
+                // `Y110`; a wrong answer or a type error at this point would
+                // misattribute a compiler fault to the program): either the
                 // catalog lowers `{name}` as an intrinsic and no
                 // `classify_link`/`classify_sink` arm claims it, or inference
                 // never resolved a call whose receiver *is* concrete — in which
@@ -1536,7 +1517,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // and whose lowering is a `RuntimeSymbol` is called on the receiver
             // *materialized as a `Vec`*, never on the receiver local: the three
             // barriers need the whole sequence in a real `VecPayload` before
-            // they can answer, and their receiver may now be any of ten things.
+            // they can answer, and their receiver may be any of ten things.
             arg_locals.push(if *receiver_is_iterable {
                 emit_iter_vec(b, receiver, MirType::Opaque)
             } else {
@@ -1548,9 +1529,9 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // A wrapper whose manifest row answers the **scalar channel** is not
             // a call this arm can emit: `Inst::Call`'s `dst` is a `Gc` local,
             // and putting a raw `0`/`1` in one would hand the collector an
-            // integer to dereference (P0-03). The manifest is the authority for
-            // which wrappers those are — `AbiRet::RawI64` — so the question is
-            // asked of it rather than of a symbol list this file would have to
+            // integer to dereference. The manifest is the authority for which
+            // wrappers those are — `AbiRet::RawI64` — so the question is asked
+            // of it rather than of a symbol list this file would have to
             // keep in step with `MethodLowering::ScalarPrimitive` (ADR-118
             // decision 6).
             if symbol.sig().ret == praxis_stdlib::abi::AbiRet::RawI64 {
@@ -1565,23 +1546,22 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
                 LocalDebugKind::Temp,
                 Some(praxis_hir::expr_span(e)),
             );
-            // **REP-53.** Some method calls fault (`v.get(i)` out of bounds);
-            // most do not. This site used to check after *all* of them, which
-            // put a `praxis_check_fault` call and a branch after every
-            // `v.len()` — and made `praxis_runtime::abi`'s
-            // `panic_fault_is_observable` premise false, since it reasons that
-            // a `Pure`/`Allocates` wrapper is never followed by a check. The
-            // symbol is in hand and its manifest row is the answer;
+            // Some method calls fault (`v.get(i)` out of bounds); most do not.
+            // Checking after *all* of them would put a `praxis_check_fault` call
+            // and a branch after every `v.len()`, and would falsify
+            // `praxis_runtime::abi`'s `panic_fault_is_observable` premise, which
+            // reasons that a `Pure`/`Allocates` wrapper is never followed by a
+            // check. The symbol is in hand and its manifest row is the answer;
             // `call_runtime` reads it.
             b.call_runtime(dst, symbol, arg_locals);
             dst
         }
         TypedExpr::Tuple { elements, ty, .. } => {
-            // M7 Part 2: tuples now materialize as real objects. Lower each
-            // element to a `Gc` local in positional order, then emit an `Alloc`
-            // with `AllocKind::Tuple`. The codegen builds the `TupleSchema`
-            // from the tuple's static type (the element-type sequence) and
-            // embeds its address as an immediate in the allocation call.
+            // Tuples materialize as real objects. Lower each element to a `Gc`
+            // local in positional order, then emit an `Alloc` with
+            // `AllocKind::Tuple`. The codegen builds the `TupleSchema` from the
+            // tuple's static type (the element-type sequence) and embeds its
+            // address as an immediate in the allocation call.
             let element_locals: Vec<LocalId> =
                 elements.iter().map(|el| lower_expr_gc(b, el)).collect();
             let dst = b.alloc_gc(
@@ -1600,10 +1580,10 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             dst
         }
         TypedExpr::ListLit { elements, ty, .. } => lower_list_lit(b, elements, *ty, e),
-        // M6: `read`/`parse` lower to a runtime call against the parser plan.
+        // `read`/`parse` lower to a runtime call against the parser plan.
         TypedExpr::Read { plan, ty, .. } => lower_read(b, *plan, *ty),
         TypedExpr::Parse { text, plan, ty, .. } => lower_parse(b, text, *plan, *ty),
-        // M7: nominal record literal + field access.
+        // Nominal record literal + field access.
         TypedExpr::RecordLit {
             record_def_id,
             fields,
@@ -1614,8 +1594,8 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             field_idx,
             ..
         } => lower_field_get(b, receiver, *field_idx),
-        // `p.0` — a tuple element (REP-08). A different runtime symbol from a
-        // record field's, which is why it is a different instruction.
+        // `p.0` — a tuple element. A different runtime symbol from a record
+        // field's, which is why it is a different instruction.
         TypedExpr::TupleIndex {
             receiver,
             index,
@@ -1631,7 +1611,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             });
             dst
         }
-        // M7: enum variant construction.
+        // Enum variant construction.
         TypedExpr::EnumVariant {
             enum_def_id,
             variant_idx,
@@ -1639,11 +1619,11 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             ty,
             ..
         } => lower_enum_variant(b, *enum_def_id, *variant_idx, *ty, args),
-        // M7-WS5: match expression — lowered to a tag-compare branch chain.
+        // Match expression — lowered to a tag-compare branch chain.
         TypedExpr::Match {
             scrutinee, arms, ..
         } => lower_match(b, scrutinee, arms),
-        // M7-WS7: closure literal — allocate the closure value. Each capture's
+        // Closure literal — allocate the closure value. Each capture's
         // current value is the captured binding's local; the synthetic function
         // (emitted separately by `lower_module`) is named by `fn_name`.
         TypedExpr::Closure {
@@ -1656,16 +1636,10 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // symbol capture analysis recorded is the symbol `lower_closure_fn`'s
             // prologue binds, so by the time a nested literal is allocated inside
             // a synthetic function, every name that function captured is one of
-            // its locals.
-            //
-            // This used to fall back to the `Unit` singleton, and that fallback
-            // is where handover 31 item 1 turned an under-recorded capture list
-            // into three different runtime failures: an env slot holding `Unit`
-            // read back as an `Int` panicked out of `praxis_int_load`, the same
-            // slot dereferenced as a `VarCell` was a SIGSEGV, and read back as a
-            // `Text` it was a well-typed program answering `Unit` with nothing in
-            // the output to say so. A silent wrong answer is the worst of the
-            // three, so the disagreement is loud now.
+            // its locals. A disagreement is an ICE rather than a `Unit`
+            // fallback: an env slot holding `Unit` is a SIGSEGV when it is
+            // dereferenced as a `VarCell` and a silently wrong answer when it is
+            // read back as a `Text`.
             let cap_locals: Vec<LocalId> = captures
                 .iter()
                 .map(|cap| {
@@ -1697,12 +1671,11 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
 /// Lower a `read parser_expr`: get the input buffer, then run the plan.
 fn lower_read(b: &mut Builder<'_>, plan: praxis_hir::PlanId, result_ty: Type) -> LocalId {
     // 1. Get the input buffer from the runtime context. This is where §7.10's
-    //    "the first `read` lazily reads standard input once" happens (REP-51):
-    //    the call reads the host's input if nothing has yet, so it allocates
-    //    and — on input that is not UTF-8 (§4.3) — it can fault. `praxis_get_input`
-    //    holds the host's raw bytes and validates them *itself* (ADR-111); it
-    //    used to inherit the fault from `praxis_alloc_text`, which meant every
-    //    text *literal* carried a check for it too. Its manifest row says both
+    //    "the first `read` lazily reads standard input once" happens: the call
+    //    reads the host's input if nothing has yet, so it allocates and — on
+    //    input that is not UTF-8 (§4.3) — it can fault. `praxis_get_input` holds
+    //    the host's raw bytes and validates them *itself* (ADR-111), so a text
+    //    *literal* carries no check for that fault. Its manifest row says both
     //    effects, and the check below is what makes the fault land here rather
     //    than at the next unrelated one.
     let input = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
@@ -1825,8 +1798,8 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
             // guarantee that `ctx.small_ints` holds this value — the compiler
             // cannot emit a table read for a slot the table does not have. The
             // range test and the constant are one step deliberately: asking
-            // and then constructing separately is what let `run_parser_plan`
-            // be a plausible place to construct without asking.
+            // and then constructing separately would leave a caller free to
+            // construct without asking.
             if let Some(konst) = GcConst::small_int(*n) {
                 // Not a safepoint, and `b.push` rather than `b.emit` says so:
                 // `Builder::emit` exists to decide whether a fault check
@@ -1855,11 +1828,10 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
             dst
         }
         Lit::Bool(v) => {
-            // There are two `Bool` values and the runtime minted both at
-            // startup, so a literal is a load and has been all along — what it
-            // used to cost was the extern call and the shadow-frame spill that
-            // `Inst::Alloc`'s unconditional safepoint status put in front of it,
-            // at a point the manifest itself calls `Effect::Pure`.
+            // There are two `Bool` values and the runtime mints both at startup,
+            // so a literal is a load out of the context and not an allocation:
+            // no extern call and no safepoint, at a point the manifest itself
+            // calls `Effect::Pure`.
             let dst = b.alloc_gc(MirType::Known(b.bool_ty), None, LocalDebugKind::Temp, span);
             b.push(Inst::ConstGc {
                 dst,
@@ -1869,27 +1841,19 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
         }
         Lit::Text(s) => {
             let dst = b.alloc_gc(MirType::Known(b.text_ty), None, LocalDebugKind::Temp, span);
-            // **This arm used to carry ADR-088's cost and now carries none of
-            // it (ADR-111, REP-67).** `praxis_alloc_text` was
-            // `AllocatesAndFaults` because it validated the bytes it was handed
-            // and set `INVALID_TEXT`; the bytes a *literal* hands it are a Rust
-            // `&str` unbroken from `Lit::Text(String)` here to
-            // `Generation::alloc_str` in the backend, so the fault could not
-            // fire at this call site and 41 corpus sites emitted a check that
-            // could never be taken. ADR-088 §3 refused to carve an exception
-            // into the verifier for it — a rule with a hole in its very first
-            // arm is not a rule — and registered the real cure instead, which is
-            // to move the judgement to the one caller that holds bytes the
-            // compiler did not write. That is `praxis_get_input`, and it is
-            // done: the row is `Allocates` and the `Alloc` below is genuinely
-            // non-faulting.
+            // **The `Alloc` below is non-faulting (ADR-111).** UTF-8 validation
+            // lives in `praxis_get_input`, the one caller holding bytes the
+            // compiler did not write; the bytes a *literal* hands
+            // `praxis_alloc_text` are a Rust `&str` unbroken from
+            // `Lit::Text(String)` here to `Generation::alloc_str` in the
+            // backend, so its row is `Effect::Allocates`.
             //
-            // Nothing here says so. `b.emit` reads the manifest and stops
-            // pushing the check on its own; `verify::check_fault_observed`'s
-            // converse arm now *rejects* one. And the hoist below is admitted by
-            // the same fact — see `box_invariant_literal`'s first precondition,
-            // which asks `Inst::can_fault` rather than carrying a list of kinds
-            // exactly so that flipping a manifest row is the whole change.
+            // Nothing here says so. `b.emit` reads the manifest and pushes no
+            // check on its own; `verify::check_fault_observed`'s converse arm
+            // *rejects* one. And the hoist below is admitted by the same fact —
+            // see `box_invariant_literal`'s first precondition, which asks
+            // `Inst::can_fault` rather than carrying a list of kinds exactly so
+            // that flipping a manifest row is the whole change.
             //
             // The shareability half (ADR-108 §3) holds for `Text` the way it
             // holds for a non-NaN `Float`, and more simply: a `Text` payload is
@@ -1908,7 +1872,7 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
             // which is what `praxis_alloc_char` consults, so `Some` is a
             // guarantee that `ctx.small_chars` holds this code point and the
             // backend may read the slot. Two loads for `'#'`, where `"#"[0]`
-            // was a `praxis_text_get` per evaluation.
+            // is a `praxis_text_get` per evaluation.
             if let Some(konst) = GcConst::small_char(*c) {
                 // Not a safepoint, and `b.push` rather than `b.emit` says so:
                 // this reads a table, allocates nothing and cannot fault.
@@ -1955,8 +1919,7 @@ fn lower_lit_gc(b: &mut Builder<'_>, value: &Lit, span: Option<(u32, u32)>) -> L
         }
         Lit::Unit => {
             // The Unit value (§4.3): the immortal singleton, read out of the
-            // context. As for `Lit::Bool` — this never allocated; it only paid
-            // for looking like it did.
+            // context. A load, not an allocation, as for `Lit::Bool`.
             let dst = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, span);
             b.push(Inst::ConstGc {
                 dst,
@@ -1998,8 +1961,8 @@ fn float_literal_may_be_shared(f: f64) -> bool {
 /// `String` the backend embeds with `Generation::alloc_str`. The two are one
 /// function because there is exactly one decision here (which block do these
 /// instructions go in) and it must be made once: a separate text-only helper
-/// would be a second copy of the `can_fault` gate, and a gate stated twice is
-/// the drift MIR-10 exists to prevent.
+/// would be a second copy of the `can_fault` gate, and a gate stated twice
+/// drifts.
 ///
 /// This is the whole of the loop-invariant-code-motion this compiler has, and
 /// its scope is what makes it need none of the machinery a general pass would:
@@ -2025,11 +1988,9 @@ fn float_literal_may_be_shared(f: f64) -> bool {
 ///    makes both unobservable — it can trigger a collection and nothing else,
 ///    and when a collection happens is not language-visible. `AllocKind::Char`
 ///    is what this excludes today: `praxis_alloc_char` validates the Unicode
-///    scalar, so its row is `AllocatesAndFaults`. `AllocKind::Text` *was* in
-///    that group and no longer is — ADR-111 moved its validation to
-///    `praxis_get_input`, its row became `Effect::Allocates`, and the rule below
-///    admitted it with no edit to this function. That is the point of asking the
-///    manifest instead of carrying a list of kinds.
+///    scalar, so its row is `AllocatesAndFaults`. Which kinds are excluded is
+///    the manifest's answer and not a list carried here, so flipping a row is
+///    the whole change.
 /// 2. *Shareable.* One allocation now stands for every evaluation, so the
 ///    object is shared across iterations. ADR-100 §Context is the argument that
 ///    this is unobservable for a scalar box — no identity operator, `==`
@@ -2083,11 +2044,10 @@ enum CompareVia {
 /// Which comparison lowering `ty`'s values take.
 ///
 /// The unresolved and unexpected cases answer `Descriptor` rather than
-/// `Scalar(Int)` deliberately: an eight-byte payload load was the fallback for
-/// everything that was not a `Float`, and it is exactly how `Text` came to be
-/// compared by its `TextPayload` discriminant — under which *every* pair of
-/// owned strings was equal (P0-12). Dispatching through the descriptor is wrong
-/// for no type: at worst it faults.
+/// `Scalar(Int)` deliberately: an eight-byte payload load as the catch-all would
+/// compare a `Text` by its `TextPayload` discriminant, under which *every* pair
+/// of owned strings is equal. Dispatching through the descriptor is wrong for no
+/// type: at worst it faults.
 fn compare_kind(b: &Builder<'_>, ty: praxis_types::Type) -> CompareVia {
     use praxis_types::data::TypeData;
     use praxis_types::ScalarType;
@@ -2109,10 +2069,10 @@ fn compare_kind(b: &Builder<'_>, ty: praxis_types::Type) -> CompareVia {
 ///
 /// The sibling of [`compare_kind`], and it exists for that function's reason:
 /// the answer is a property of the operand *type*, so it belongs in one place
-/// rather than being re-derived at each site that needs it. REP-64 is what the
-/// second half of that rule not being followed cost — the binary operators
-/// asked and the two compound-assignment paths did not, so `f += 2.0` added two
-/// IEEE-754 **bit patterns** as integers and boxed the sum back as a `Float`.
+/// rather than being re-derived at each site that needs it. A site that decides
+/// for itself and gets it wrong is silent — taking the `Int` channel for
+/// `f += 2.0` adds two IEEE-754 **bit patterns** as integers and boxes the sum
+/// back as a `Float`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ArithVia {
     /// Checked `i64` arithmetic on the scalar channel: faults on overflow and
@@ -2152,12 +2112,10 @@ fn arith_kind(b: &Builder<'_>, ty: praxis_types::Type) -> ArithVia {
 ///
 /// **One function for both compound-assignment paths** — `x += …` on a binding
 /// and `m[k] += …` through a subscript ([`TypedStmt::IndexAssign`], ADR-064).
-/// The choice the two make is the same choice, and REP-64 is what making it
-/// twice cost: neither copy asked whether the operands were `Float`, so both
-/// took the `Int` channel and `var f = 1.0; f += 2.0` printed
-/// `9218868437227405312` — `f64::to_bits(1.0) + f64::to_bits(2.0)`, reinterpreted
-/// as a `Float`. Every operator and both target shapes were affected; the plain
-/// binary `+` was not, because it had asked since §4.12 landed.
+/// The choice the two make is the same choice, and a copy that stops asking
+/// [`arith_kind`] is silently wrong for every operator and both target shapes:
+/// `var f = 1.0; f += 2.0` would print `9218868437227405312` —
+/// `f64::to_bits(1.0) + f64::to_bits(2.0)`, reinterpreted as a `Float`.
 ///
 /// `None` means there is nothing to lower and the statement is dropped: `%` is
 /// not defined for `Float` (§4.12), and neither is any operator but `+` for
@@ -2280,12 +2238,12 @@ fn lower_materialize_bool(
 /// integer in a rootable slot, which is a wrong answer the tests would find
 /// only by chance.
 ///
-/// The box is deliberate and it is not a defeat. `Materialize{Bool}` has not
-/// allocated since ADR-040 decision 4 — it is `emit_inline_bool`'s two loads
-/// and a `select` — and a consumer that wanted the predicate rather than the
-/// object (`if`, `while`, `!`) unboxes it in the same block, which is the pair
-/// W8-S0's block-local forwarding deletes outright. What this function removes
-/// unconditionally, today, is the `Inst::Call`: with it, the safepoint and the
+/// The box is deliberate and it is not a defeat. `Materialize{Bool}` does not
+/// allocate (ADR-040 decision 4) — it is `emit_inline_bool`'s two loads and a
+/// `select` — and a consumer that wanted the predicate rather than the object
+/// (`if`, `while`, `!`) unboxes it in the same block, which is the pair
+/// block-local forwarding deletes outright (ADR-120). What this function removes
+/// unconditionally is the `Inst::Call`: with it, the safepoint and the
 /// ~17-instruction shadow-frame spill in front of it.
 fn lower_scalar_primitive(
     b: &mut Builder<'_>,
@@ -2339,7 +2297,7 @@ fn lower_float_binop(
 
 /// Lower a Float negation on a `GcRef` operand, returning the scalar
 /// (bit-pattern) result. IEEE-754 `negate`: no fault, and — unlike a
-/// subtraction from zero — exact at both zeros (REP-50).
+/// subtraction from zero — exact at both zeros.
 fn lower_float_neg(b: &mut Builder<'_>, operand_gc: LocalId) -> LocalId {
     let src = lower_extract_float(b, operand_gc);
     let dst = b.alloc_scalar(ScalarKind::Float);
@@ -2395,8 +2353,7 @@ fn lower_value_cmp(b: &mut Builder<'_>, lhs: LocalId, rhs: LocalId) -> LocalId {
     dst
 }
 
-/// Lower a short-circuiting logical operator: `lhs || rhs` or `lhs && rhs`
-/// (REP-07).
+/// Lower a short-circuiting logical operator: `lhs || rhs` or `lhs && rhs`.
 ///
 /// Both are one shape with the *answer* on the skipping side flipped:
 ///
@@ -2550,13 +2507,14 @@ fn lower_while(b: &mut Builder<'_>, cond: &TypedExpr, body: &praxis_hir::TypedBl
     b.cur = exit;
 }
 
-/// `for binding in iter { body }` (M8-WS6, §4.11). Lowers to an index loop over
-/// the source: a header tests `i < len`, the body binds the member at `i` to the
+/// `for binding in iter { body }` (§4.11). Lowers to an index loop over the
+/// source: a header tests `i < len`, the body binds the member at `i` to the
 /// loop variable, runs, increments `i`, and jumps back.
 ///
-/// *What* it indexes is [`IterPlan`]'s answer (REP-15, ADR-066). Three iterables
-/// index themselves; the other seven are walked through a **snapshot** taken
-/// once before the header, so the loop body always indexes a `Vec`.
+/// *What* it indexes is [`IterPlan`]'s answer (ADR-066). Four of the eleven
+/// iterables index themselves; the other seven are walked through a
+/// **snapshot** taken once before the header, so the loop body always indexes a
+/// `Vec`.
 fn lower_for(
     b: &mut Builder<'_>,
     binding: &praxis_hir::TypedPattern,
@@ -2612,20 +2570,20 @@ fn lower_for(
     b.cur = body_blk;
     // Bind the loop variable: `binding = iter.get(idx_gc)`. The item and the
     // loop variable are the iterator's element type, which the typed tree
-    // carries on the `For` node (`item_ty`). Both slots used to be `Opaque`, so
-    // the debugger showed a `for` binding with no type at all.
+    // carries on the `For` node (`item_ty`) — so the debugger can name the
+    // binding's type.
     let item_gc = emit_iter_item(b, src, idx_gc, MirType::Known(item_ty));
     // The loop variable's slot: allocate one if the `for` binding has no slot
     // yet (it is introduced by the loop, not a `var` statement). Reads of the
     // binding inside the body resolve to this slot via `b.locals`.
     // A `for x in xs` names its slot: ADR-125 makes the loop variable a binding
     // in exactly the sense a `var` is, so it carries the same name/kind/span the
-    // `TypedStmt::Var` site passes and the crash snapshot prints it the same way
-    // (it used to print `? = 3`). A `for (a, b) in ps` or a `for _ in r` names
-    // nothing here: the slot holds the whole item, the names are the
-    // components', and calling the container a binding would put a row in
-    // `locals:` that the source never wrote — so it is a temp, tagged with the
-    // iterated expression's span so it reads `<tmp#N: (Int, Int)> @ "ps"`.
+    // `TypedStmt::Var` site passes and the crash snapshot prints it the same
+    // way. A `for (a, b) in ps` or a `for _ in r` names nothing here: the slot
+    // holds the whole item, the names are the components', and calling the
+    // container a binding would put a row in `locals:` that the source never
+    // wrote — so it is a temp, tagged with the iterated expression's span so it
+    // reads `<tmp#N: (Int, Int)> @ "ps"`.
     let named = match binding {
         praxis_hir::TypedPattern::Bind {
             symbol, name, span, ..
@@ -2670,10 +2628,10 @@ fn lower_for(
     if let Some((symbol, _, span)) = named.as_ref().filter(|_| escapes) {
         bind_cell(b, *symbol, slot, Some(*span));
     }
-    // A destructuring binding reads its components out of that same slot
-    // (REP-25). The pattern is irrefutable — HIR reported one that can fail — so
-    // there is no test and no branch: this is the binding half of
-    // `emit_pattern_test` with the testing half removed.
+    // A destructuring binding reads its components out of that same slot. The
+    // pattern is irrefutable — HIR reported one that can fail — so there is no
+    // test and no branch: this is the binding half of `emit_pattern_test` with
+    // the testing half removed.
     bind_components(b, slot, binding);
     let _ = lower_block_body(b, body);
     b.loop_stack.pop();
@@ -2710,13 +2668,13 @@ fn lower_for(
     b.cur = exit;
 }
 
-/// `loop { body }` (M8-WS6, §4.11). An infinite loop; `break` is the only exit.
+/// `loop { body }` (§4.11). An infinite loop; `break` is the only exit.
 ///
-/// Returns the slot holding the loop's value (TY-21). A `loop` whose `break`s
+/// Returns the slot holding the loop's value (ADR-053). A `loop` whose `break`s
 /// carry a value gets a result slot each of them writes before jumping, exactly
-/// as an `if`'s branches write theirs; a `Unit`-valued loop keeps the literal it
-/// always had, and a `Never`-valued one (no reachable `break`) has an
-/// unreachable exit, so its "value" is a placeholder no execution reads.
+/// as an `if`'s branches write theirs; a `Unit`-valued loop yields the literal,
+/// and a `Never`-valued one (no reachable `break`) has an unreachable exit, so
+/// its "value" is a placeholder no execution reads.
 fn lower_loop(
     b: &mut Builder<'_>,
     body: &praxis_hir::TypedBlock,
@@ -2750,11 +2708,11 @@ fn lower_loop(
     result.unwrap_or_else(|| lower_lit_gc(b, &Lit::Unit, espan))
 }
 
-/// `break [expr]` (M8-WS6, §4.11). Jump to the enclosing loop's break target,
-/// writing the loop's result slot on the way out when it has one (TY-21).
+/// `break [expr]` (§4.11). Jump to the enclosing loop's break target, writing
+/// the loop's result slot on the way out when it has one (ADR-053).
 ///
 /// The enclosing loop is guaranteed: a `break` with none is `Y012`, reported by
-/// inference (TY-20), and no MIR is built for a program that has one.
+/// inference, and no MIR is built for a program that has one.
 fn lower_break(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
     let ctx = *b
         .loop_stack
@@ -2780,8 +2738,8 @@ fn lower_break(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
     jump_and_go_dead(b, ctx.break_target);
 }
 
-/// `continue` (M8-WS6, §4.11). Jump to the enclosing loop's continue target.
-/// As for `break`, the enclosing loop is guaranteed by TY-20's `Y012`.
+/// `continue` (§4.11). Jump to the enclosing loop's continue target. As for
+/// `break`, the enclosing loop is guaranteed by inference's `Y012`.
 fn lower_continue(b: &mut Builder<'_>) {
     let ctx = *b
         .loop_stack
@@ -2790,7 +2748,7 @@ fn lower_continue(b: &mut Builder<'_>) {
     jump_and_go_dead(b, ctx.continue_target);
 }
 
-/// `return [expr]` (M8-WS6, §4.11). Write the value (or Unit) into the function
+/// `return [expr]` (§4.11). Write the value (or Unit) into the function
 /// return slot, then terminate with `Return`.
 fn lower_return(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
     let ret = b.func.return_local;
@@ -2803,7 +2761,7 @@ fn lower_return(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
 }
 
 // ===========================================================================
-// M8-WS11: cross-combinator pipeline fusion (§6.3).
+// Cross-combinator pipeline fusion (§6.3).
 //
 // The whole pipeline chain is already visible as a tree at MIR-lowering time:
 // each combinator's `receiver` is itself a `TypedExpr::MethodCall` (or a
@@ -2813,15 +2771,14 @@ fn lower_return(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
 // source threading each element through the chain and into the sink.
 // `v.map(f).filter(p).sum()` → one loop, zero intermediate Vecs.
 //
-// Design note — the chain is recursive because the semantics are (MIR-06). A
-// `flat_map` does not transform an element, it replaces the element with a
-// *sequence*, and everything after it runs once per inner element. A flat
-// `Vec<Stage>` cannot say that, so the emitter used to special-case the first
-// `flat_map` and re-enter the element-wise stage loop for the remainder — which
-// meant a *second* `flat_map` arrived at a stage arm that could not exist and
-// panicked the compiler. `Chain::Splice { f, rest }` holds the remainder
-// *inside* the splice and `emit_plan` recurses into it, so there is no
-// element-wise arm left for a splice to fall into.
+// Design note — the chain is recursive because the semantics are. A `flat_map`
+// does not transform an element, it replaces the element with a *sequence*, and
+// everything after it runs once per inner element. A flat `Vec<Stage>` cannot
+// say that, and an emitter that special-cased the first `flat_map` and re-entered
+// an element-wise stage loop for the remainder would have no arm for a *second*
+// one. `Chain::Splice { f, rest }` holds the remainder *inside* the splice and
+// `emit_plan` recurses into it, so there is no element-wise arm left for a
+// splice to fall into.
 //
 // Design note — inline emission. Each step emits its branches directly into the
 // current block rather than returning a control-flow enum: a step that drops
@@ -2833,25 +2790,17 @@ fn lower_return(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
 //
 // Design note — an argument is a field, not a side channel. Every closure and
 // second source is lowered once, before the loop, and stored *on* its `Plan`
-// node. The emitter used to carry them in one positional iterator shared
-// between the outer stage loop and the flat_map splice, with a written contract
-// that each stage advance it by exactly the right amount; a chain that got that
-// wrong would have mis-paired closures silently.
+// node, so no positional iterator shared between the outer stage loop and the
+// flat_map splice can mis-pair closures silently.
 //
-// Design note — there is no second lowerer. The per-combinator eager lowerers
-// (`lower_pipeline_combinator` + the `lower_seq_*` family + `emit_index_loop`)
-// stood here as ADR-029 decision 1's incremental-safety net, kept "as a fallback
-// for any chain the recognizer declines". They are gone (REP-40). Every
-// registered `MethodLowering::Intrinsic` name is classified by `classify_link`
-// or `classify_sink` — `intrinsics_are_all_recognized_so_there_is_no_second_\
-// lowering` walks the catalog and asserts exactly that — so the net caught
-// nothing a well-typed program could fall into, and what it *did* hold was
-// wrong: `lower_seq_fold` returned the seed without ever invoking the closure,
-// and the `_` arm answered the Unit singleton. A net that gives a wrong answer
-// in silence is worse than no net, because the failure it converts a compiler
-// bug into is the program's. A declined chain is now an ICE that names the
-// method (`lower_expr_gc`'s `MethodCall` arm), which is a compiler bug report
-// rather than a wrong number.
+// Design note — there is no second lowerer. Every registered
+// `MethodLowering::Intrinsic` name is classified by `classify_link` or
+// `classify_sink` — `intrinsics_are_all_recognized_so_there_is_no_second_\
+// lowering` walks the catalog and asserts exactly that — so no eager
+// per-combinator fallback is needed for a chain the recognizer declines. A
+// declined chain is an ICE that names the method (`lower_expr_gc`'s
+// `MethodCall` arm), which is a compiler bug report rather than a wrong number
+// answered in silence.
 // ===========================================================================
 
 /// A streaming pipeline stage: transform *one* element, possibly skipping it or
@@ -2861,7 +2810,7 @@ fn lower_return(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
 /// it replaces the element with a sequence and runs the rest of the chain once
 /// per member — a nesting, which is [`Chain::Splice`]. Keeping it out of `Stage`
 /// is what makes "a splice reached the element-wise emitter" unrepresentable
-/// rather than an `unreachable!` (MIR-06).
+/// rather than an `unreachable!`.
 #[derive(Clone)]
 enum Stage {
     /// `(T) -> U` — replace the element with the closure's result.
@@ -2872,14 +2821,14 @@ enum Stage {
     FilterMap(Box<TypedExpr>),
     /// Keep at most `n` leading elements, then stop. `n` is any `Int`
     /// expression; the catalog types the parameter `Int` and says nothing about
-    /// literals, so neither does this (MIR-03).
+    /// literals, so neither does this.
     Take(Box<TypedExpr>),
     /// Drop the first `n` elements. `n` is any `Int` expression.
     Skip(Box<TypedExpr>),
     /// Stop at the first element that fails the predicate.
     TakeWhile(Box<TypedExpr>),
     /// Replace the element with `(index, element)` tuples. `pair_ty` is the pair
-    /// type, read off the call node (MIR-05).
+    /// type, read off the call node.
     Enumerate { pair_ty: MirType },
     /// Pair each element with the corresponding element of `other`, stopping at
     /// the shorter length. `pair_ty` is the pair type.
@@ -2910,9 +2859,10 @@ enum Sink {
     MaxBy(Box<TypedExpr>),
     Any(Box<TypedExpr>),
     All(Box<TypedExpr>),
-    /// Index of the first element satisfying the predicate, or -1 on miss.
+    /// The first element satisfying the predicate, as an `Option` (ADR-082).
     Find(Box<TypedExpr>),
-    /// Same semantics as `Find` (named alias per §6.3).
+    /// The *index* of the first element satisfying the predicate, as an
+    /// `Option` — the other of §6.3's two searches (ADR-082).
     Position(Box<TypedExpr>),
     Fold {
         init: Box<TypedExpr>,
@@ -2939,7 +2889,7 @@ enum Sink {
 /// followed by the rest of the chain; `Splice` is a `flat_map` whose `rest` runs
 /// once per member of the inner Vec; `Sink` terminates.
 ///
-/// The nesting is the point (MIR-06): what follows a `flat_map` is *inside* it,
+/// The nesting is the point: what follows a `flat_map` is *inside* it,
 /// which is exactly what the emitter needs to know and what a flat list of
 /// stages could not express.
 enum Chain {
@@ -2969,7 +2919,7 @@ struct PipelinePlan {
     source: Box<TypedExpr>,
     /// The element type flowing out of the source (before any stage). Used as
     /// the source item slot's type; `Known` whenever the source is a typed
-    /// single-element collection (F15) and [`MirType::Opaque`] otherwise — a
+    /// single-element collection and [`MirType::Opaque`] otherwise — a
     /// `Map`/`Counter` source, or one whose element type is still an inference
     /// variable.
     source_item_ty: MirType,
@@ -2983,7 +2933,7 @@ struct PipelinePlan {
 /// eagerly.
 ///
 /// `ty` is the call node's own result type, which only the two pair-building
-/// stages read (MIR-05): `enumerate`'s is `Vec[(Int, T)]` and `zip`'s is
+/// stages read: `enumerate`'s is `Vec[(Int, T)]` and `zip`'s is
 /// `Vec[(T, U)]`, so the pair type they allocate is one element-of away.
 fn classify_link(
     db: &praxis_types::TypeDb,
@@ -3011,7 +2961,7 @@ fn classify_link(
 }
 
 /// The pair type a fused `enumerate`/`zip` allocates: the element of the call's
-/// own `Vec[(…, …)]` result type (MIR-05).
+/// own `Vec[(…, …)]` result type.
 ///
 /// [`MirType::Opaque`] when the call's result is not a single-argument
 /// collection — which the catalog's rows make impossible for these two, but the
@@ -3033,8 +2983,8 @@ fn pair_ty_of(db: &praxis_types::TypeDb, ty: Type) -> MirType {
 ///
 /// **`Sink::Collect` has no arm here, and ADR-126 is why.** It is the sink the
 /// caller *appends* when a chain ends on a stage, never one a name selects: the
-/// `collect` method is gone from the catalog, so a call carrying that name no
-/// longer reaches MIR at all (inference reports `Y110` first).
+/// catalog has no `collect` method, so a call carrying that name never reaches
+/// MIR (inference reports `Y110` first).
 fn classify_sink(name: &str, args: &[TypedExpr]) -> Option<Sink> {
     use praxis_types::CollectionCtor as C;
     Some(match (name, args) {
@@ -3073,12 +3023,12 @@ fn classify_sink(name: &str, args: &[TypedExpr]) -> Option<Sink> {
 /// Recognize a pipeline chain rooted at `expr`. Returns `Some(plan)` if `expr`
 /// is a `MethodCall` whose outermost call is a recognized sink, or a recognized
 /// streaming stage (in which case a `Collect` is appended so the chain yields a
-/// Vec — the eager `v.map(f)` behavior, and since ADR-126 the *only* way that
-/// sink is selected); and
-/// whose receiver chain is a sequence of recognized streaming stages. Any
-/// non-pipeline `MethodCall` receiver (e.g. `.len()`, `.push(x)`) terminates the
-/// walk — that inner call lowers eagerly via the existing path, and *its* result
-/// becomes this chain's source (recursively fusing if it too is a pipeline).
+/// Vec — the eager `v.map(f)` behavior, and the *only* way that sink is selected,
+/// ADR-126); and whose receiver chain is a sequence of recognized streaming
+/// stages. Any non-pipeline `MethodCall` receiver (e.g. `.len()`, `.push(x)`)
+/// terminates the walk — that inner call lowers eagerly via the existing path,
+/// and *its* result becomes this chain's source (recursively fusing if it too is
+/// a pipeline).
 fn recognize_pipeline(db: &praxis_types::TypeDb, expr: &TypedExpr) -> Option<PipelinePlan> {
     let TypedExpr::MethodCall {
         receiver,
@@ -3093,7 +3043,7 @@ fn recognize_pipeline(db: &praxis_types::TypeDb, expr: &TypedExpr) -> Option<Pip
     // The outermost call is either a terminal sink, or a streaming stage that
     // needs an implicit collect to produce a Vec (e.g. `var out = v.map(f)`).
     //
-    // `count(pred)` is the one call that is **both** (REP-18, §3.3's
+    // `count(pred)` is the one call that is **both** (§3.3's
     // `counts.values().count(|n| n >= 2)`): it is exactly `filter(pred).count()`,
     // so it is recognized as that pair rather than as a sink of its own. No new
     // sink lowering, and it fuses into the same single loop the two-call spelling
@@ -3150,7 +3100,7 @@ fn recognize_pipeline(db: &praxis_types::TypeDb, expr: &TypedExpr) -> Option<Pip
         };
     }
     // The item flowing *out of the source* is the source collection's element
-    // type, which the typed tree now carries (F15).
+    // type, which the typed tree carries.
     let source_item_ty = match b_db_element_of(db, praxis_hir::expr_ty(cur)) {
         Some(t) => MirType::Known(t),
         None => MirType::Opaque,
@@ -3174,9 +3124,9 @@ fn b_db_element_of(db: &praxis_types::TypeDb, t: Type) -> Option<Type> {
     }
 }
 
-/// Lower a recognized pipeline as a single fused loop (M8-WS11, §6.3). Emits the
-/// loop scaffold directly (header / body / increment / exit) rather than reusing
-/// `emit_index_loop`, so streaming stages can `continue` (jump to the increment)
+/// Lower a recognized pipeline as a single fused loop (§6.3). Emits its own
+/// loop scaffold (header / body / increment / exit) rather than borrowing
+/// [`lower_for`]'s, so streaming stages can `continue` (jump to the increment)
 /// and short-circuit sinks/stages can `break` (jump to exit) cleanly.
 fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     let PipelinePlan {
@@ -3190,19 +3140,18 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     // **`to_vec()` with nothing in front of it is the materialization itself**
     // (ADR-127 decision 4), and there is no loop to fuse: a `Vec` receiver
     // answers *the same reference*, a receiver with a snapshot symbol answers it
-    // in one call, and the rest are walked. Since ADR-126 deleted `collect`,
-    // `Chain::Sink(Collect)` with no stages is reachable only from `to_vec`, so
-    // this cannot swallow a `v.map(f)`'s implicit collect.
+    // in one call, and the rest are walked. `collect` is not a catalog method
+    // (ADR-126), so `Chain::Sink(Collect)` with no stages is reachable only from
+    // `to_vec` and this cannot swallow a `v.map(f)`'s implicit collect.
     if matches!(chain, Chain::Sink(Sink::Collect)) {
         return emit_iter_vec(b, &source, MirType::Known(result_ty));
     }
 
     // Open the source once; it lives for the loop's duration. **This is the
-    // whole of ADR-127 decision 2 at the pipeline door.** It used to be a
-    // `lower_expr_gc` and a hardcoded `praxis_vec_len`/`praxis_vec_get` pair,
-    // which is the read `IterPlan` exists to prevent: a `Set`'s payload through
-    // `praxis_vec_get` hung or killed the process, and a `MinHeap`'s was a
-    // silently wrong answer.
+    // whole of ADR-127 decision 2 at the pipeline door.** A hardcoded
+    // `praxis_vec_len`/`praxis_vec_get` pair is the read `IterPlan` exists to
+    // prevent: a `Set`'s payload through `praxis_vec_get` hangs or kills the
+    // process, and a `MinHeap`'s is a silently wrong answer.
     let src = emit_iter_source(b, &source);
     // A Gc Int index counter (persists across blocks, like the for-loop counter).
     let idx = alloc_zeroed_counter(b);
@@ -3244,7 +3193,7 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
 
     // `find`/`position` report a position, so like the stages that consume one
     // they get a dense counter — allocated here, before the scaffold, so a
-    // splice cannot re-zero it (MIR-04, MIR-07).
+    // splice cannot re-zero it.
     let sink_position = match &sink {
         Sink::Find(_) | Sink::Position(_) => Some(alloc_zeroed_counter(b)),
         _ => None,
@@ -3254,8 +3203,8 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     //
     // `exit` is *the* pipeline exit, and there is exactly one however deeply the
     // chain nests: a splice adds an inner header/body/increment, but never an
-    // inner place to stop the stream (MIR-08). No `LoopCtx` is pushed for either
-    // loop — a user `break`/`continue` cannot appear in a fused body, because
+    // inner place to stop the stream. No `LoopCtx` is pushed for either loop —
+    // a user `break`/`continue` cannot appear in a fused body, because
     // every expression the chain contains is lowered above this line (a closure
     // body is a separate MIR function), so a loop stack here would only be a
     // second, weaker way to name the targets the emitter already carries.
@@ -3307,14 +3256,14 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
 /// iterator, and a stage that needs a position owns the counter that gives it
 /// one.
 ///
-/// **A stage's index is the sequence that reaches it** (MIR-04). Four stages
-/// ask "which element is this?" and the honest answer is different for each of
-/// them: after a `filter`, `take(2)` means the first two *surviving* elements,
-/// and `enumerate` numbers 0, 1, 2 without gaps. There used to be one index —
-/// the source cursor — and all four read it, so `v.filter(even).take(2)` took
-/// whatever survived among source positions 0 and 1. Each of them carries its
-/// own `count` slot now, bumped once per element that arrives, and the source
-/// cursor is not in scope here at all.
+/// **A stage's index is the sequence that reaches it.** Four stages ask "which
+/// element is this?" and the honest answer is different for each of them: after
+/// a `filter`, `take(2)` means the first two *surviving* elements, and
+/// `enumerate` numbers 0, 1, 2 without gaps. Reading one shared source cursor
+/// instead would make `v.filter(even).take(2)` take whatever survived among
+/// source positions 0 and 1. Each stage carries its own `count` slot, bumped
+/// once per element that arrives, and the source cursor is not in scope here at
+/// all.
 enum Step {
     Map(LocalId),
     Filter(LocalId),
@@ -3361,7 +3310,7 @@ struct SinkPlan<'a> {
     /// `find`/`position` report an index, so they are position-consuming like
     /// the four stages that are, and they get a dense counter for the same
     /// reason: the answer is the position in the sequence that reached the
-    /// sink, not in the source (MIR-04).
+    /// sink, not in the source.
     position: Option<LocalId>,
 }
 
@@ -3393,12 +3342,11 @@ fn alloc_zeroed_counter(b: &mut Builder<'_>) -> LocalId {
 /// Order matters and is the chain's own: source-side stages first, exactly as
 /// the eager spelling would evaluate them.
 ///
-/// The counters are allocated **here**, which is before the loop scaffold, and
-/// that placement is MIR-07 (there is nothing else to it). A counter zeroed
-/// inside the outer loop body would restart for every inner Vec of a
-/// `flat_map`, which is what the old inner index did: `take(1)` after a
-/// `flat_map` kept the first element of *each* inner sequence. Zeroed once, a
-/// counter counts the flattened stream by construction.
+/// The counters are allocated **here**, before the loop scaffold, and that
+/// placement is the whole of it. A counter zeroed inside the outer loop body
+/// would restart for every inner Vec of a `flat_map`, so `take(1)` after a
+/// `flat_map` would keep the first element of *each* inner sequence. Zeroed
+/// once, a counter counts the flattened stream by construction.
 fn lower_chain(b: &mut Builder<'_>, chain: &Chain) -> Plan {
     match chain {
         Chain::Then(stage, rest) => {
@@ -3449,8 +3397,8 @@ fn lower_chain(b: &mut Builder<'_>, chain: &Chain) -> Plan {
 /// Note what is **not** a parameter: the loop's index. A source cursor is the
 /// business of the loop that owns it — the header's bounds check and the
 /// `praxis_vec_get` that loads the element — and no stage may read it. Each
-/// stage that needs a position carries its own dense counter (MIR-04), and
-/// making the cursor unreachable from here is what keeps it that way.
+/// stage that needs a position carries its own dense counter, and making the
+/// cursor unreachable from here is what keeps it that way.
 fn emit_plan(
     b: &mut Builder<'_>,
     plan: &Plan,
@@ -3485,9 +3433,9 @@ fn emit_plan(
 /// stops (`take`, `take_while`, `zip` past the shorter length) has already
 /// branched those paths away.
 ///
-/// The two targets are different things, and MIR-08 is what happens when they
-/// are conflated: `continue_target` advances the *innermost* sequence (a splice
-/// rebinds it), while `pipeline_exit` ends the whole chain from any depth.
+/// The two targets are different things and must not be conflated:
+/// `continue_target` advances the *innermost* sequence (a splice rebinds it),
+/// while `pipeline_exit` ends the whole chain from any depth.
 fn emit_step(
     b: &mut Builder<'_>,
     step: &Step,
@@ -3508,19 +3456,13 @@ fn emit_step(
         }
         Step::FilterMap(f) => {
             // `filter_map(f)` is a `filter` and a `map` at once, and the thing
-            // it filters *on* is the closure's answer: `f` is `(T) -> Option[U]`
-            // (REP-38), a `None` drops the element and a `Some` carries its
-            // payload on down the chain.
-            //
-            // This used to be `invoke_closure` alone, with a comment saying
-            // there was no way to tell the two apart — the row typed the
-            // closure `(T) -> U` for an unconstrained `U`, so nothing at
-            // runtime distinguished "mapped to nothing" from "mapped to
-            // something". S18's `Option` is what closes that: the answer is a
-            // two-variant enum, so the test is a tag compare, and it is the
-            // same `EnumTag`/`EnumPayloadGet` pair a `match` on `Option`
-            // emits — `emit_pattern_test`'s `EnumVariant` arm, unrolled for the
-            // one variant set this stage knows statically.
+            // it filters *on* is the closure's answer: `f` is `(T) -> Option[U]`,
+            // a `None` drops the element and a `Some` carries its payload on
+            // down the chain. The answer being a two-variant enum is what makes
+            // the test possible at all — it is a tag compare, the same
+            // `EnumTag`/`EnumPayloadGet` pair a `match` on `Option` emits
+            // (`emit_pattern_test`'s `EnumVariant` arm), unrolled for the one
+            // variant set this stage knows statically.
             let opt = invoke_closure(b, *f, vec![item]);
             let tag = b.alloc_scalar(ScalarKind::Int);
             b.push(Inst::EnumTag { dst: tag, src: opt });
@@ -3561,8 +3503,7 @@ fn emit_step(
         Step::Take { bound, count } => {
             // If this stage has already passed `n` elements → stop the stream;
             // else fall through. A bound of zero or less stops before the first
-            // element, and a negative `skip` drops nothing: same comparison the
-            // literal-only path used, so the edge cases are the ones it had.
+            // element, and a negative `skip` drops nothing.
             let seen = take_position(b, *count);
             let stop = position_cmp_bound(b, seen, *bound, CmpOp::Ge);
             let keep_blk = b.func.new_block();
@@ -3598,9 +3539,9 @@ fn emit_step(
                     // The catalog declares `enumerate`'s result `Vec[(Int, T)]`,
                     // so the pair's type is a fact the chain already carries and
                     // the backend can resolve a real element descriptor for each
-                    // half (MIR-05). `Opaque` here now means only "the element
-                    // type is still an inference variable", which ADR-066
-                    // decision 5 answers with a null schema slot.
+                    // half. `Opaque` here means only "the element type is still
+                    // an inference variable", which ADR-066 decision 5 answers
+                    // with a null schema slot.
                     ty: *pair_ty,
                     elements: vec![idx_copy, item],
                 },
@@ -3641,10 +3582,10 @@ fn emit_step(
 /// Emit a `flat_map` splice: an inner index loop over `inner_vec`, with the rest
 /// of the chain — stages *and* sink — emitted inside its body.
 ///
-/// The recursion is the whole point (MIR-06). `rest` may itself begin with
-/// another splice, and it lands here again with its own inner loop; nothing in
-/// the emitter special-cases "the first flat_map" and nothing has to claim that
-/// a second one cannot occur.
+/// The recursion is the whole point. `rest` may itself begin with another
+/// splice, and it lands here again with its own inner loop; nothing in the
+/// emitter special-cases "the first flat_map" and nothing has to claim that a
+/// second one cannot occur.
 ///
 /// When the inner loop runs out, control falls to `outer_continue` — the next
 /// element of whatever sequence is feeding this splice.
@@ -3676,15 +3617,15 @@ fn emit_splice(
     // The rest of the chain, per inner element. "Continue" now means the inner
     // increment — the element that advances is the inner one — but the exit is
     // still the pipeline's: a `take` or an `any` that fires in here has answered
-    // for the whole chain, not for this inner Vec (MIR-08). `inner_idx` is this
-    // loop's own cursor and goes no further than its bounds check and its
+    // for the whole chain, not for this inner Vec. `inner_idx` is this loop's own
+    // cursor and goes no further than its bounds check and its
     // `praxis_vec_get`; the stages downstream count the flattened stream through
-    // counters that were zeroed before the outer loop (MIR-07).
+    // counters that were zeroed before the outer loop.
     emit_plan(b, rest, inner_item, sink, inner_incr, pipeline_exit);
 
     // Inner increment block: `inner_idx += 1`, jump to the inner header. (NOT
     // the header directly from the body — jumping there skips the increment and
-    // spins the loop, the same M8-WS11 bug the outer loop guards against.)
+    // spins the loop, as it would in the outer loop.)
     b.cur = inner_incr;
     emit_increment(b, inner_idx);
     b.jump(header);
@@ -3698,7 +3639,7 @@ fn emit_splice(
 /// Read a stage's dense counter and bump it, returning the value *before* the
 /// bump as an Int scalar: the number of elements that reached this stage ahead
 /// of this one, which is this element's position in the stage's own input
-/// sequence (MIR-04).
+/// sequence.
 ///
 /// Read-then-increment, so the first element to arrive is at position zero.
 fn take_position(b: &mut Builder<'_>, count: LocalId) -> LocalId {
@@ -3715,13 +3656,7 @@ fn take_position(b: &mut Builder<'_>, count: LocalId) -> LocalId {
 /// loop carries: a scalar live across the body's safepoints is exactly what
 /// ADR-015 §10.3 says not to build, and the extract is a load.
 ///
-/// This replaced an `idx <op> <literal>` helper, twice over. The bound used to
-/// have to *be* a literal — `classify_stage` matched `take`/`skip` only against
-/// `Lit::Int`, and any other well-typed `Int` expression made the recognizer
-/// decline the whole chain, which fell through to an eager lowerer with no
-/// `take` arm and returned the Unit singleton for the enclosing chain to
-/// misread as a Vec (MIR-03). And the left-hand side used to be the source
-/// cursor rather than the stage's own count (MIR-04).
+/// `position` is the stage's own dense count, never the source cursor.
 fn position_cmp_bound(
     b: &mut Builder<'_>,
     position: LocalId,
@@ -3772,8 +3707,7 @@ fn emit_bounds_check(
 ) {
     let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     // `praxis_vec_len` is `Effect::Allocates` — it boxes its answer and cannot
-    // fault. The check this used to emit ran once per element, and it is what
-    // observed a fused `sum`'s overflow *one iteration late* (ADR-088).
+    // fault, so no check follows it (ADR-088).
     b.call_runtime(len_dst, RuntimeSymbol::VecLen, vec![src]);
     emit_index_less_than(b, idx, len_dst, then_blk, els_blk);
 }
@@ -3831,15 +3765,12 @@ fn sink_alloc(
             });
             (Some(acc), None, None)
         }
-        // **REP-39, ADR-082.** `find` answers the matching *element* and
-        // `position` its index — two different questions, which is why §6.3
-        // lists them as two operations. They shared one arm and one `-1`
-        // accumulator, which made `find` an exact duplicate of `position` and
-        // put an in-band sentinel under both: `-1` is a legal element of a
-        // `Vec[Int]` and a legal index of nothing, so a hit and a miss were
-        // indistinguishable. Both carry a seen-flag now and answer `Option`,
-        // and the accumulator differs because the answer does — a `Gc` slot for
-        // the element, a scalar for the index.
+        // **ADR-082.** `find` answers the matching *element* and `position` its
+        // index — two different questions, which is why §6.3 lists them as two
+        // operations. Both carry a seen-flag and answer `Option` rather than an
+        // in-band `-1`, which is a legal element of a `Vec[Int]` and a legal
+        // index besides; the accumulator differs because the answer does — a
+        // `Gc` slot for the element, a scalar for the index.
         Sink::Find(_) => {
             let acc = seeded_gc_accumulator(b);
             let seen = b.alloc_scalar(ScalarKind::Bool);
@@ -3898,7 +3829,7 @@ fn sink_alloc(
         }
         Sink::Fold { .. } => {
             // acc = init (a Gc slot carrying a closure-produced value across
-            // iterations). This closes the M8 `fold` stub.
+            // iterations).
             let acc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
             if let Some(init) = sink_init_slot {
                 b.push(Inst::MoveGc {
@@ -3925,16 +3856,16 @@ fn sink_alloc(
 }
 
 /// A `Gc` accumulator slot for a sink that seeds from the *first* element,
-/// initialized to the Unit singleton (MIR-09).
+/// initialized to the Unit singleton.
 ///
-/// The initializer is not decoration. `reduce`/`min_by`/`max_by` only ever
-/// wrote this slot from inside the loop body, so on an empty sequence nothing
-/// wrote it at all — and the slot is a `Gc` local, which means the liveness
-/// pass roots it at the loop header's safepoints and the backend spills
-/// whatever the register happened to hold into the shadow frame for the
-/// collector to dereference. Holding a valid `GcRef` from the start makes that
-/// unrepresentable; [`emit_empty_collection_guard`] is what turns "we never got
-/// a first element" into an answer.
+/// The initializer is not decoration. `reduce`/`min_by`/`max_by` write this slot
+/// only from inside the loop body, so on an empty sequence nothing writes it at
+/// all — and it is a `Gc` local, which means the liveness pass roots it at the
+/// loop header's safepoints and the backend spills whatever the register happens
+/// to hold into the shadow frame for the collector to dereference. Holding a
+/// valid `GcRef` from the start makes that unrepresentable;
+/// [`emit_empty_collection_guard`] is what turns "we never got a first element"
+/// into an answer.
 fn seeded_gc_accumulator(b: &mut Builder<'_>) -> LocalId {
     let acc = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
     b.push(Inst::ConstGc {
@@ -3944,7 +3875,7 @@ fn seeded_gc_accumulator(b: &mut Builder<'_>) -> LocalId {
     acc
 }
 
-/// Raise [`FaultKind::EmptyCollection`] when `seen` is false (MIR-09).
+/// Raise [`FaultKind::EmptyCollection`] when `seen` is false.
 ///
 /// Emitted at the exit of a sink that has no answer for an empty sequence.
 /// The raise is followed by the ordinary fault check, so control leaves through
@@ -4018,7 +3949,7 @@ fn move_scalar(b: &mut Builder<'_>, dst: LocalId, src: LocalId) {
 /// `all` once false, `find`/`position` on a hit. It is the *whole* chain's exit
 /// even when this element arrived through a splice: a sink that stopped only the
 /// inner loop would go on evaluating its predicate on elements after the answer
-/// was decided, and would let a later match overwrite `find`'s (MIR-08).
+/// was decided, and would let a later match overwrite `find`'s.
 /// `continue_target` is the innermost increment, which is where `reduce`'s
 /// first-element seed goes: seeding advances the stream by one element, it does
 /// not end it.
@@ -4053,15 +3984,11 @@ fn emit_sink_body(
                 rhs: item_scalar,
                 overflow: Overflow::Checked,
             });
-            // **The accumulator ADR-044 named as the reason this rule could not
-            // exist.** It is `Checked` — a `sum` genuinely can overflow — and it
-            // had no check, so the fault was observed one iteration later, by
-            // the loop header's `praxis_vec_len` check, which REP-53 has now
-            // deleted. Per-element is what §10.4's "immediately after" means,
-            // and it is what makes the overflow divert *at the addition*: the
-            // crash snapshot then shows the operands that overflowed rather than
-            // the next element's. The cost is roughly the check just deleted
-            // from the same loop's header.
+            // The accumulator is `Checked` — a `sum` genuinely can overflow —
+            // and the check is per element, which is what §10.4's "immediately
+            // after" means: the overflow diverts *at the addition*, so the crash
+            // snapshot shows the operands that overflowed rather than the next
+            // element's.
             b.check_fault();
         }
         Sink::Count => {
@@ -4165,9 +4092,9 @@ fn emit_sink_body(
             jump_and_go_dead(b, pipeline_exit);
             b.cur = cont_blk;
         }
-        // **REP-39.** One search, two answers. Both stop at the first match and
-        // both raise the seen-flag; what they record differs, and that is the
-        // whole difference between the two operations §6.3 names.
+        // One search, two answers. Both stop at the first match and both raise
+        // the seen-flag; what they record differs, and that is the whole
+        // difference between the two operations §6.3 names.
         Sink::Find(_) | Sink::Position(_) => {
             let count = position.expect("find/position carry a dense counter");
             let seen = seen_flag.expect("find/position carry a seen flag");
@@ -4237,12 +4164,11 @@ fn emit_sink_body(
             });
         }
         Sink::Collect => {
-            // **REP-52.** `praxis_vec_push` is `AllocatesAndFaults`: it raises
+            // `praxis_vec_push` is `AllocatesAndFaults`: it raises
             // `TYPE_MISMATCH` through `adopt_or_reject` when the pushed value's
-            // descriptor disagrees with the Vec's. Every sibling sink arm and
-            // the eager `v.push(x)` path checked; this one did not, and the
-            // fault would have been observed at whatever the next check happened
-            // to be. `call_runtime` reads the row.
+            // descriptor disagrees with the Vec's, so the push must be checked
+            // here rather than at whatever the next check happens to be —
+            // `call_runtime` reads the row.
             //
             // No source program reaches that fault today: `alloc_empty_vec`
             // gives the collect target a null element descriptor, so it adopts
@@ -4304,11 +4230,11 @@ fn invert_bool(b: &mut Builder<'_>, x: LocalId) -> LocalId {
 /// Terminate the current block with a jump to `target` and leave `b.cur` on a
 /// fresh dead block, so a caller that keeps emitting has somewhere to append.
 ///
-/// This replaced a pair of `break_loop`/`continue_loop` helpers that read
-/// `b.loop_stack.last()`. Reading the *innermost* loop is exactly what a
-/// pipeline must not do: a chain has one exit however deeply it nests, and the
-/// innermost stack frame inside a `flat_map` splice named the inner loop's exit
-/// (MIR-08). The emitter carries both targets explicitly now.
+/// The target is a parameter and never `b.loop_stack.last()`. Reading the
+/// *innermost* loop is exactly what a pipeline must not do: a chain has one exit
+/// however deeply it nests, and the innermost stack frame inside a `flat_map`
+/// splice names the inner loop's exit. The emitter carries both targets
+/// explicitly.
 ///
 /// `break` and `continue` (§4.11) leave the same way, which is why they call
 /// this rather than open-coding it: the dead block is not optional bookkeeping,
@@ -4342,9 +4268,9 @@ fn sink_finish(
         Sink::Collect | Sink::CollectInto(_) => collect_target.unwrap(),
         // `fold` always has an answer: its accumulator starts at `init`.
         Sink::Fold { .. } => acc_gc.unwrap(),
-        // MIR-09. These three seed from the first element, so on an empty
-        // sequence there is no answer and the accumulator was never written.
-        // Fault rather than hand back an unwritten `Gc` slot.
+        // These three seed from the first element, so on an empty sequence there
+        // is no answer and the accumulator is never written. Fault rather than
+        // hand back an unwritten `Gc` slot.
         Sink::Reduce(_) | Sink::MinBy(_) | Sink::MaxBy(_) => {
             let acc = acc_gc.unwrap();
             emit_empty_collection_guard(b, seen_flag.expect("seeded sinks carry a seen flag"));
@@ -4362,14 +4288,13 @@ fn sink_finish(
             });
             dst
         }
-        // **D1.** `min`/`max` are the scalar siblings of the three above and
-        // share the empty case. Their accumulator is *seeded* with `0` rather
-        // than left unwritten, so the empty sequence had a defined answer — and
-        // `0` is a **wrong** answer, not a missing one: it is smaller than every
-        // element of `[3, 4]` and larger than every element of `[-3, -4]`, so a
-        // caller cannot tell it from a real minimum. D1 settled that they join
-        // the three seeded sinks rather than becoming `Option`, because an empty
-        // `min` is a caller mistake and not the ordinary absence §4.7 is about.
+        // `min`/`max` are the scalar siblings of the three above and share the
+        // empty case, so the guard runs even though their accumulator is *seeded*
+        // with `0`: that seed is a **wrong** answer rather than a missing one —
+        // smaller than every element of `[3, 4]` and larger than every element
+        // of `[-3, -4]`, so a caller cannot tell it from a real minimum. They
+        // fault rather than answering `Option`, because an empty `min` is a
+        // caller mistake and not the ordinary absence §4.7 is about.
         Sink::Min | Sink::Max => {
             emit_empty_collection_guard(b, seen_flag.expect("min/max carry a seen flag"));
             let acc = acc_scalar.unwrap();
@@ -4397,11 +4322,11 @@ fn sink_finish(
             });
             dst
         }
-        // **REP-39, ADR-082.** A search that found nothing answers `None`, not a
-        // number. `-1` was in band for both: a legal element of a `Vec[Int]` and
-        // a legal `Int` besides, so no program could tell a hit from a miss —
-        // and `find`, whose element type is `Text` as often as not, could not
-        // reach its answer at all.
+        // **ADR-082.** A search that found nothing answers `None`, not a number.
+        // `-1` is in band for both — a legal element of a `Vec[Int]` and a legal
+        // `Int` besides — so no program could tell a hit from a miss, and
+        // `find`, whose element type is `Text` as often as not, could not reach
+        // its answer at all.
         Sink::Find(_) => {
             let found = acc_gc.expect("find carries a Gc accumulator");
             emit_option_of(b, seen_flag.expect("find carries a seen flag"), found, ty)
@@ -4422,7 +4347,7 @@ fn sink_finish(
 }
 
 /// `if seen { Some(value) } else { None }`, as the sink's `Option`-typed answer
-/// (REP-39, ADR-082).
+/// (ADR-082).
 ///
 /// `result_ty` is the sink's own static type — `Option[Text]`, not `Option` —
 /// because the backend resolves the `Some` payload's descriptor from it.
@@ -4478,29 +4403,18 @@ const OPTION_NONE_VARIANT: u32 = praxis_runtime::enums::OPTION_NONE_TAG as u32;
 /// pipeline's own result type when the lowering has one.
 ///
 /// This is an `AllocKind::Collection`, like every other collection
-/// construction. Before P0-03 it hand-rolled a `praxis_vec_new` call whose
-/// element-descriptor argument was the integer `0` moved into a `Gc` slot — the
-/// second and last site where a raw non-pointer word inhabited a rootable slot.
-/// The element type stays [`MirType::Opaque`] here, which the backend turns
-/// into the same null descriptor the wrapper already expects: the result Vec
+/// construction. The element type stays [`MirType::Opaque`] here, which the
+/// backend turns into the null descriptor the wrapper expects: the result Vec
 /// adopts each pushed value's descriptor on first push.
 ///
-/// The *reason* it is not derived from `result_ty` has changed, twice. S15
-/// could not read it because the method catalog described `enumerate` and `zip`
-/// wrongly — both rows declared `result: Vec[T]`, the receiver's own element
-/// type — so a chain ending in either had a result type that would have named
-/// the wrong element descriptor. TY-31 fixed the rows and S21's MIR-05 made the
-/// fused lowering read them, so `result_ty` is both `Known` and *right* at every
-/// call site now.
-///
-/// What is left is a smaller claim: the null descriptor is not a gap, it is how
-/// a `Vec` is built. `praxis_vec_new` adopts the first pushed value's
-/// descriptor, so an empty collect-target has no descriptor to state and the
-/// element type would only be re-derived at the first push. Deriving it here
-/// would be a change to collection construction — one that has to answer what
-/// happens when the two disagree — and belongs with whatever makes the element
-/// descriptor authoritative rather than adopted. See `praxis_mir::verify`'s
-/// note on H10.
+/// The null descriptor is not a gap, it is how a `Vec` is built.
+/// `praxis_vec_new` adopts the first pushed value's descriptor, so an empty
+/// collect-target has no descriptor to state and the element type would only be
+/// re-derived at the first push. Deriving it from `result_ty` here would be a
+/// change to collection construction — one that has to answer what happens when
+/// the two disagree — and belongs with whatever makes the element descriptor
+/// authoritative rather than adopted. See `praxis_mir::verify`'s note on the
+/// same hazard.
 fn alloc_empty_vec(b: &mut Builder<'_>, result_ty: MirType) -> LocalId {
     let result = b.alloc_gc(result_ty, None, LocalDebugKind::Temp, None);
     b.alloc(
@@ -4552,10 +4466,10 @@ fn alloc_collect_target(
 /// The wrapper a [`Sink::CollectInto`] calls once per element, and whether the
 /// item is a **pair** it takes apart first (ADR-127 decision 4).
 ///
-/// Each is a wrapper that already exists, which is what makes the four
-/// collections the ask did not name cost a table entry apiece. `Grid` is the one
-/// collection with no row, because a grid needs a width and a flat item sequence
-/// does not carry one; `Range` and `Seq` are not constructible at all.
+/// Each is a wrapper that already exists, so a collection costs one table entry
+/// here. `Grid` is the one collection with no row, because a grid needs a width
+/// and a flat item sequence does not carry one; `Range` and `Seq` are not
+/// constructible at all.
 fn collect_into_wrapper(ctor: praxis_types::CollectionCtor) -> (RuntimeSymbol, bool) {
     use praxis_types::CollectionCtor as C;
     match ctor {
@@ -4575,7 +4489,7 @@ fn collect_into_wrapper(ctor: praxis_types::CollectionCtor) -> (RuntimeSymbol, b
     }
 }
 
-/// How a `for` reaches the members of the thing it iterates (REP-15, ADR-066).
+/// How a `for` reaches the members of the thing it iterates (ADR-066).
 ///
 /// Only four of the eleven iterables answer "the member at `i`" in constant
 /// time (`Vec`, `Deque`, `Range`, and `Text`). The rest have no nth member to
@@ -4584,11 +4498,11 @@ fn collect_into_wrapper(ctor: praxis_types::CollectionCtor) -> (RuntimeSymbol, b
 /// take a *key*. So the loop takes a **snapshot** — one runtime call before the
 /// header, answering a `Vec` — and indexes that.
 ///
-/// The distinction this enum makes is the one the defect was made of: reading a
-/// `Set`'s payload through `praxis_vec_get` was a wrong-type read that hung or
-/// killed the process, and a `MinHeap`'s was a silently wrong answer. There is no
-/// default arm here for the same reason — a new collection ctor is a compile
-/// error until someone says how it iterates.
+/// The distinction this enum makes is load-bearing: reading a `Set`'s payload
+/// through `praxis_vec_get` is a wrong-type read that hangs or kills the
+/// process, and a `MinHeap`'s is a silently wrong answer. There is no default
+/// arm here for the same reason — a new collection ctor is a compile error until
+/// someone says how it iterates.
 #[derive(Clone, Copy)]
 enum IterPlan {
     /// The iterable indexes itself in constant time: `(len, get)`.
@@ -4598,7 +4512,7 @@ enum IterPlan {
     },
     /// One call materializes every member as a `Vec`, and the loop walks that.
     Snapshot(RuntimeSymbol),
-    /// Two **index-aligned** calls materialize the keys and the values (REP-18's
+    /// Two **index-aligned** calls materialize the keys and the values (the two
     /// rows share one ordering, which is what makes them aligned), and the loop
     /// pairs them per step into the `(K, V)` tuple the item type names.
     Paired {
@@ -4632,7 +4546,7 @@ impl IterPlan {
 ///
 /// Any other static type cannot reach here from a well-typed program —
 /// `capability::iter_item` answers `None` for one and the `for` is a `Y005` — so
-/// the fallback is the shape MIR has always assumed rather than a panic.
+/// the fallback is the `Vec` shape rather than a panic.
 fn iter_plan(db: &TypeDb, iter: &TypedExpr) -> IterPlan {
     use praxis_types::data::TypeData;
     use praxis_types::CollectionCtor as C;
@@ -4693,8 +4607,8 @@ fn iter_plan(db: &TypeDb, iter: &TypedExpr) -> IterPlan {
 ///
 /// Produced by [`emit_iter_source`] and consumed by [`emit_iter_bounds_check`]
 /// and [`emit_iter_item`]. The three together are the whole of "how a collection
-/// is walked", and they are what a `for` and a fused pipeline now share — so the
-/// two cannot disagree about the order, or about what a member is.
+/// is walked", and they are what a `for` and a fused pipeline share — so the two
+/// cannot disagree about the order, or about what a member is.
 #[derive(Clone, Copy)]
 struct IterSource {
     plan: IterPlan,
@@ -4781,10 +4695,10 @@ fn emit_iter_item(b: &mut Builder<'_>, src: IterSource, idx: LocalId, item_ty: M
 ///
 /// `sorted`, `unique` and `frequencies` are `RuntimeSymbol` rows rather than
 /// intrinsics — they need the whole sequence before they can answer, so they are
-/// wrapper calls over a `VecPayload` — and since their receiver became
-/// `Iterable` it may be any of ten things. Getting this wrong in the other
-/// direction is the defect [`IterPlan`] was built out of, so the materialization
-/// is not optional and a test asserts it per row.
+/// wrapper calls over a `VecPayload` — and their receiver is `Iterable`, so it
+/// may be any of ten things. Handing one of the other nine straight to a
+/// `VecPayload` reader is the wrong-type read [`IterPlan`] exists to prevent, so
+/// the materialization is not optional and a test asserts it per row.
 ///
 /// Three shapes, cheapest first:
 ///
@@ -4982,7 +4896,7 @@ fn lower_list_lit(b: &mut Builder<'_>, elements: &[TypedExpr], ty: Type, e: &Typ
     // The element type, from the literal's own `Vec[T]`. An element type that is
     // still an inference variable — `var v = []`, whose use decides it — reaches
     // the backend as a null descriptor, which is what `praxis_vec_new`'s
-    // "unknown element" contract already means (H10).
+    // "unknown element" contract means.
     let args: Vec<MirType> = match b.db.data(b.db.follow(ty)) {
         TypeData::Collection {
             ctor: CollectionCtor::Vec,
@@ -5024,7 +4938,7 @@ fn lower_list_lit(b: &mut Builder<'_>, elements: &[TypedExpr], ty: Type, e: &Typ
 /// so it must be passed in already lowered rather than derived here.
 ///
 /// `Seq` is intentionally rejected — it is compiler-internal and never
-/// constructed from source (§6.3, M8 WS8).
+/// constructed from source (§6.3).
 fn collection_alloc_kind(
     b: &Builder<'_>,
     ctor: praxis_types::CollectionCtor,
@@ -5037,7 +4951,7 @@ fn collection_alloc_kind(
     // one; for Map there are two. If the result type does not match the ctor's
     // shape (a malformed call), fall back to an empty arg list — the codegen
     // reads a missing argument as an unknown element type and passes a null
-    // descriptor, same as before.
+    // descriptor.
     let args: Vec<MirType> = match b.db.data(b.db.follow(result_ty)) {
         TypeData::Collection {
             ctor: c,
@@ -5054,8 +4968,7 @@ fn collection_alloc_kind(
 /// not name — `Vec(3)` and `Grid(2, 3)` are `Y024` against the sized arity, and
 /// `Set(3, 0)` is `Y024` against the nullary one — so an unrecognized shape here
 /// is not a program a user can write, and lowering it as `Empty` (which drops
-/// the arguments, exactly as every constructor call did before ADR-146) is the
-/// degradation rather than a panic.
+/// the arguments) is the degradation rather than a panic.
 ///
 /// The operands are lowered here, before the caller emits the `Alloc`, because
 /// an argument expression may itself allocate and the `Alloc`'s destination
@@ -5080,7 +4993,7 @@ fn lower_collection_init(
     }
 }
 
-/// Lower a record literal `Name { field: expr, … }` (M7, §4.5). Lowers each
+/// Lower a record literal `Name { field: expr, … }` (§4.5). Lowers each
 /// field initializer to a `Gc` local, then emits an `Alloc` with
 /// `AllocKind::Record`. The codegen builds the `RecordSchema` from the def-id
 /// and embeds its address as an immediate in the allocation call.
@@ -5103,7 +5016,7 @@ fn lower_record_lit(
     dst
 }
 
-/// Lower a field access `receiver.field` (M7, §4.5). Emits a `LoadField`
+/// Lower a field access `receiver.field` (§4.5). Emits a `LoadField`
 /// instruction that reads the field's `GcRef` out of the record payload.
 fn lower_field_get(b: &mut Builder<'_>, receiver: &TypedExpr, field_idx: u32) -> LocalId {
     let src = lower_expr_gc(b, receiver);
@@ -5116,7 +5029,7 @@ fn lower_field_get(b: &mut Builder<'_>, receiver: &TypedExpr, field_idx: u32) ->
     dst
 }
 
-/// Lower an enum variant construction (M7, §4.6). Lowers payload args to `Gc`
+/// Lower an enum variant construction (§4.6). Lowers payload args to `Gc`
 /// locals, then emits an `Alloc` with `AllocKind::Enum`.
 fn lower_enum_variant(
     b: &mut Builder<'_>,
@@ -5140,7 +5053,7 @@ fn lower_enum_variant(
     dst
 }
 
-/// Lower a `match scrutinee { arms }` expression (M7, §4.6) to a decision tree
+/// Lower a `match scrutinee { arms }` expression (§4.6) to a decision tree
 /// of tests. Handles the full recursive pattern grammar (§4.6): wildcard, literal,
 /// variable bind, and enum variant with nested sub-patterns.
 ///
@@ -5214,7 +5127,7 @@ fn emit_pattern_test(
         } => {
             // Always matches. A name that is only ever *read* can alias the
             // scrutinee's local outright — no slot, no copy. One that is written
-            // cannot: since ADR-125 every binding is assignable, and for a plain
+            // cannot: every binding is assignable (ADR-125), and for a plain
             // `match v { n => … }` the scrutinee's local is `v`'s own, so a write
             // through `n` would land in `v`.
             if b.bindings.escaping.contains(symbol) {
@@ -5232,12 +5145,11 @@ fn emit_pattern_test(
                 });
                 b.locals.insert(*symbol, slot);
             } else {
-                // The aliasing branch, and the one that hid a `match` arm's
-                // payload: `Some(p)` extracted the payload into a nameless temp
-                // and bound `p` to it, so the snapshot listed it under `temps:`
-                // as `<tmp#7> = 77` rather than as the binding it is. Retitling
-                // the slot is what names it — and `Function::adopt_binding_name`
-                // is what keeps `match v { n => … }` from renaming `v`'s slot,
+                // The aliasing branch. `Some(p)` extracts the payload into a
+                // nameless temp and binds `p` to it, so the slot is retitled to
+                // carry the binding's name — otherwise the snapshot would list
+                // it under `temps:` as `<tmp#7> = 77`. `adopt_binding_name` is
+                // what keeps `match v { n => … }` from renaming `v`'s slot,
                 // since there the scrutinee already belongs to a binding.
                 b.func
                     .adopt_binding_name(scrut, name, MirType::Known(*ty), *span);
@@ -5251,25 +5163,16 @@ fn emit_pattern_test(
             // a native scalar compare; Text uses structural equality.
             let lit_gc = lower_lit_gc(b, value, None);
             match value {
-                // Both operands are read at the payload's *own* width. `Bool`
-                // used to share the `Int` arm, which emitted an
-                // `ExtractScalar { scalar: Int }` — `praxis_int_load`, an
-                // eight-byte read — against a **one**-byte `BoolPayload`. The
-                // other seven bytes are the block's alignment padding, so
-                // `true` and `false` were told apart by uninitialized memory
-                // and compared equal whenever two immortals happened to have
-                // matching padding (REP-49; REP-37 is the same defect in the
-                // graph oracle). `praxis_bool_load` reads the byte.
+                // Both operands are read at the payload's *own* width. A `Bool`
+                // through the `Int` arm would be an `ExtractScalar { scalar:
+                // Int }` — `praxis_int_load`, an eight-byte read — against a
+                // **one**-byte `BoolPayload`, whose other seven bytes are the
+                // block's alignment padding: `true` and `false` told apart by
+                // uninitialized memory. `praxis_bool_load` reads the byte.
                 //
-                // `Char` had a worse arm than either: an unconditional
-                // `Terminator::Jump { target: on_success }`, commented
-                // "defensive". It was unreachable while there was no character
-                // literal, and the day one landed every `Char` pattern would
-                // have matched every scrutinee — a wrong answer `check`,
-                // coverage and `verify` all call clean. It belongs here, where
-                // it is the same extract-then-compare `c == '#'` already
-                // lowered to via `compare_kind`'s `CompareVia::Scalar(Char)`,
-                // so the two spellings emit the same instructions (ADR-141).
+                // `Char` is the same extract-then-compare that `c == '#'`
+                // lowers to via `compare_kind`'s `CompareVia::Scalar(Char)`, so
+                // the two spellings emit the same instructions (ADR-141).
                 Lit::Int(_) | Lit::Bool(_) | Lit::Char(_) => {
                     let kind = match value {
                         Lit::Bool(_) => ScalarKind::Bool,
@@ -5355,10 +5258,10 @@ fn emit_pattern_test(
                 on_fail,
             );
         }
-        // `(a, b)` and `P { x, y }` (REP-10). Neither tests the value itself: a
-        // tuple type and a record type have one constructor each, so the shape
-        // always matches and the whole test is the components'. The only
-        // difference between them is which instruction reads a component.
+        // `(a, b)` and `P { x, y }`. Neither tests the value itself: a tuple
+        // type and a record type have one constructor each, so the shape always
+        // matches and the whole test is the components'. The only difference
+        // between them is which instruction reads a component.
         TypedPattern::Tuple { subpatterns, .. } => {
             emit_subpattern_tests(
                 b,
@@ -5385,7 +5288,7 @@ fn emit_pattern_test(
 }
 
 /// Which part of a composite value a sub-pattern is tested against, and so which
-/// instruction reads it (REP-10).
+/// instruction reads it.
 ///
 /// The three are one walk because the chaining is identical — every component
 /// must match, and any failure leaves by the same edge — and three copies of
@@ -5421,7 +5324,7 @@ impl Component {
 }
 
 /// Bind the names an **irrefutable** pattern holds, reading whatever components
-/// it names out of `src` (REP-25).
+/// it names out of `src`.
 ///
 /// The binding half of [`emit_pattern_test`] with the testing half removed: a
 /// `for` header has no second arm, so a pattern that can fail never reaches here
@@ -5562,27 +5465,21 @@ mod tests {
     use crate::test_support::Lowered;
 
     /// The door these tests read through, over the crate's one front-end driver
-    /// ([`crate::test_support::lower_src_to_mir`]). It used to be a second copy
-    /// of that driver, which is how it came to be the only one of the three
-    /// that skipped monomorphization.
-    /// **The builder's own output**, not the finished article.
+    /// ([`crate::test_support::lower_src_to_mir`]): **the builder's own
+    /// output**, not the finished article.
     ///
     /// Every test in this module asks what `lower_*` *emitted*, so it must read
-    /// MIR before the two passes that rewrite it. That was the same thing until
-    /// ADR-121: `forward` only ever deleted a box/unbox pair the builder had
-    /// just written, so no assertion here could see the difference. Promotion
-    /// can — it deletes the hoisted `Alloc` five of ADR-108's tests check the
-    /// position of, and the `ExtractScalar`/`Materialize` two more name
-    /// directly. See `test_support::lower_src_to_mir_unoptimized`.
+    /// MIR before the two passes that rewrite it. Promotion (ADR-121) deletes
+    /// the hoisted `Alloc` five of ADR-108's tests check the position of, and
+    /// the `ExtractScalar`/`Materialize` two more name directly. See
+    /// `test_support::lower_src_to_mir_unoptimized`.
     ///
-    /// **It hands back the whole [`Lowered`], not a `(funcs, analysis)` pair.**
-    /// Destructuring stranded [`Lowered::function`], whose panic names the
-    /// functions the module *does* have, and this module wrote
-    /// `find(|f| f.name == "main")` by hand thirty-nine times instead — under
-    /// two different `expect` strings. A test that wants only the list still
-    /// says `lower_src_to_mir(src).funcs`; one that wants a function by name,
-    /// a block by the source it lowers ([`Lowered::block_over`]) or the loop
-    /// around it ([`Lowered::innermost_loop_over`]) keeps the receiver.
+    /// **It hands back the whole [`Lowered`], not a `(funcs, analysis)` pair**,
+    /// so [`Lowered::function`] — whose panic names the functions the module
+    /// *does* have — stays reachable. A test that wants only the list says
+    /// `lower_src_to_mir(src).funcs`; one that wants a function by name, a block
+    /// by the source it lowers ([`Lowered::block_over`]) or the loop around it
+    /// ([`Lowered::innermost_loop_over`]) keeps the receiver.
     fn lower_src_to_mir(src: &str) -> Lowered {
         crate::test_support::lower_src_to_mir_unoptimized(src)
     }
@@ -5602,10 +5499,8 @@ mod tests {
         crate::test_support::lower_src_to_mir_forwarded(src)
     }
 
-    /// **P0-02, the half F15 unblocked.** A `for` binding's slot and the item
-    /// it holds are the iterator's element type. Both were `MirType::Opaque` —
-    /// the honest answer while lowering had no per-use type to give them, and a
-    /// `for` binding the debugger showed with no type at all.
+    /// A `for` binding's slot and the item it holds carry the iterator's element
+    /// type, so the debugger has a type column to print for the binding.
     #[test]
     fn a_for_bindings_slot_carries_the_iterators_element_type() {
         let lowered = lower_src_to_mir(
@@ -5624,7 +5519,7 @@ mod tests {
             "the item and the binding slot are `Int`: {named:?}"
         );
         // The binding's own slot is one of them: `x` reads as `Int` in the
-        // debugger, where it used to have no type column at all.
+        // debugger.
         let ints = named.iter().filter(|t| *t == "Int").count();
         assert!(
             ints >= 2,
@@ -5645,8 +5540,7 @@ mod tests {
     }
 
     /// **ADR-139.** A `for` variable is a binding in exactly the sense a `var`
-    /// is (ADR-125), so its slot carries the name the programmer wrote. It used
-    /// to carry `None`, and the crash snapshot printed the row as `? = 3`.
+    /// is (ADR-125), so its slot carries the name the programmer wrote.
     #[test]
     fn a_for_bindings_slot_carries_its_written_name() {
         let funcs = lower_src_to_mir(
@@ -5672,9 +5566,8 @@ mod tests {
     }
 
     /// **ADR-139.** A `match` arm's payload aliases the slot the payload was
-    /// extracted into, so naming it means retitling that slot. It used to stay
-    /// a nameless temp, which put `payload` in the snapshot's `temps:` section
-    /// as `<tmp#7> = 77` — present, but unnameable and untyped.
+    /// extracted into, so naming it means retitling that slot — otherwise
+    /// `payload` renders as a nameless, untyped temp.
     #[test]
     fn a_match_arm_payload_is_a_named_user_local() {
         let funcs = lower_src_to_mir(
@@ -5709,8 +5602,7 @@ mod tests {
 
     /// **ADR-139.** A destructuring `for` names its components and *not* its
     /// container: the programmer wrote `a` and `b`, and the slot holding the
-    /// whole `(a, b)` is a compiler temp. All three used to be anonymous
-    /// bindings, so one loop put three `? = …` rows in the snapshot.
+    /// whole `(a, b)` is a compiler temp.
     #[test]
     fn a_destructuring_for_names_each_component_and_not_the_item() {
         let lowered = lower_src_to_mir(
@@ -5752,9 +5644,8 @@ mod tests {
     }
 
     /// **ADR-139.** A destructuring closure parameter's slot holds the whole
-    /// argument, and the programmer named the components. It used to be a
-    /// binding whose name was the *pattern's source text*, so a frame listed
-    /// `(a, b): (Int, Int) = (1, 2)` beside the `a` and `b` it decomposes into.
+    /// argument and is a temp; the bindings are the components the programmer
+    /// named. No slot is ever named by a pattern's source text.
     #[test]
     fn a_destructuring_closure_parameter_is_not_a_binding() {
         let funcs = lower_src_to_mir(
@@ -5808,8 +5699,8 @@ mod tests {
         }
     }
 
-    /// **P0-02.** A closure value's local is its `Func` type, and an indirect
-    /// call's result is the call's. Neither had a type before F15 recorded one.
+    /// A closure value's local carries its `Func` type, and an indirect call's
+    /// result carries the call's.
     #[test]
     fn a_closure_and_its_indirect_call_carry_their_types() {
         let lowered = lower_src_to_mir("fn f() -> Int {\n  var g = |n| n + 1\n  g(41)\n}");
@@ -5825,13 +5716,13 @@ mod tests {
         );
     }
 
-    /// **REP-01, ADR-061.** A top-level `fn` in value position allocates a
-    /// closure over an adapter, and the adapter is one per function however many
-    /// times it is used.
+    /// **ADR-061.** A top-level `fn` in value position allocates a closure over
+    /// an adapter, and the adapter is one per function however many times it is
+    /// used.
     ///
-    /// The adapter is the part the plan's sketch did not have: a closure's
-    /// synthetic function takes the closure as a hidden first argument and a
-    /// top-level `fn` does not, so handing the `fn`'s own address to
+    /// The adapter is what bridges the two conventions: a closure's synthetic
+    /// function takes the closure as a hidden first argument and a top-level
+    /// `fn` does not, so handing the `fn`'s own address to
     /// `praxis_alloc_closure` would shift every argument one slot left. Its
     /// params are `[closure_self, forwarded…]` and its body is one direct call.
     #[test]
@@ -5878,8 +5769,7 @@ mod tests {
         );
         assert_eq!(args, &vec![adapter.params[1]], "the forwarded parameter");
 
-        // And the use site is a closure allocation with an empty environment,
-        // not the `Unit` a `Path` to a `fn` used to lower to.
+        // And the use site is a closure allocation with an empty environment.
         let main = lowered.function("main");
         let allocs: Vec<&AllocKind> = main
             .blocks
@@ -6008,10 +5898,10 @@ mod tests {
     /// An `Int` literal the runtime interns lowers to [`Inst::ConstGc`], and
     /// that instruction is **not** a GC safepoint.
     ///
-    /// This is §3.5's whole fix at the MIR level: `1` in a loop body used to be
-    /// `ConstInt` + `Alloc { Int }`, and the `Alloc` made the site a safepoint —
-    /// a call to `praxis_alloc_int` with every live root spilled into the shadow
-    /// frame before it, on every iteration.
+    /// That is §3.5 at the MIR level: lowering `1` as `ConstInt` + `Alloc { Int }`
+    /// would make the site a safepoint — a call to `praxis_alloc_int` with every
+    /// live root spilled into the shadow frame before it, on every iteration of
+    /// whatever loop it sits in.
     #[test]
     fn a_small_int_literal_is_a_const_gc_and_not_a_safepoint() {
         let funcs = lower_src_to_mir("fn main() -> Int { 1 }").funcs;
@@ -6026,10 +5916,10 @@ mod tests {
         let (dst, konst) = konst.expect("an in-range Int literal lowers to ConstGc");
         assert_eq!(konst, GcConst::SmallInt(1));
         // The value still lands in a `Gc` slot: `ConstGc` is a `Gc`-destination
-        // constant, not the `ConstInt`-into-a-rootable-slot shape P0-03 was.
+        // constant, not a raw `ConstInt` into a rootable slot.
         assert_eq!(f.locals[dst.0 as usize].kind, LocalKind::Gc);
 
-        // Nothing allocates an Int here any more...
+        // Nothing allocates an Int here...
         assert!(
             !f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(
                 i,
@@ -6141,16 +6031,8 @@ mod tests {
     fn lowers_unit_literal_to_the_unit_singleton() {
         // A `Unit`-returning `main` with an empty body synthesizes a `Lit::Unit`
         // tail. That tail must produce the immortal `Unit` into a slot that
-        // carries the Unit type — not an `Int(0)` masquerading as Unit. This is
-        // the MIR-side guard for the type-lie fix: a `Unit`-typed expression
-        // holds a genuine Unit value.
-        //
-        // It used to be an `Alloc { AllocKind::Unit }`, which never allocated
-        // (`praxis_alloc_unit` answers `ctx.unit_ref` and its manifest row is
-        // `Effect::Pure`) but was still a call and still spilled the shadow
-        // frame, because `is_gc_safepoint` matches `Inst::Alloc` unconditionally.
-        // It is an `Inst::ConstGc` now. What this test is about — the *type* of
-        // the slot — is unchanged.
+        // carries the Unit type — not an `Int(0)` masquerading as Unit. A
+        // `Unit`-typed expression holds a genuine Unit value.
         let lowered = lower_src_to_mir("fn main() -> Unit { var x = 1 }");
         let analysis = &lowered.analysis;
         let f = &lowered.funcs[0];
@@ -6188,9 +6070,10 @@ mod tests {
         // representable: liveness can then spill e.g. integer `1` as if it
         // were a heap pointer, and a later collection will dereference 0x1.
         //
-        // Both raw-word sites are covered: the closure prologue's capture
-        // index, and the pipeline's `praxis_vec_new` null element descriptor
-        // (the integer `0` moved into a `Gc` slot to ride the argument list).
+        // Two programs, so both places a raw word could reach a rootable slot
+        // are covered: the closure prologue's capture index, and a pipeline's
+        // collect target, whose null element descriptor rides the allocation as
+        // an immediate rather than as a `0` in a `Gc` argument slot.
         for src in [
             "fn main() -> Int {\n  var a = 10\n  var b = 20\n  var f = |x| x + a + b\n  f(12)\n}\n",
             "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.map(|x| x * 2).sum()\n}\n",
@@ -6227,9 +6110,9 @@ mod tests {
     #[test]
     fn a_closure_prologue_reads_its_captures_by_immediate_index() {
         // The capture index is an instruction immediate, like `LoadField`'s
-        // field index — not a value that has to be built in a local first. This
-        // is what makes P0-03's illegal state unconstructible rather than
-        // merely absent: there is no longer a slot for the index to live in.
+        // field index — not a value that has to be built in a local first. That
+        // makes a raw integer in a rootable slot unconstructible rather than
+        // merely absent: there is no slot for the index to live in.
         let funcs = lower_src_to_mir(
             "fn main() -> Int {\n  var a = 10\n  var b = 20\n  var f = |x| x + a + b\n  f(12)\n}\n",
         )
@@ -6269,11 +6152,11 @@ mod tests {
     /// Whether `inst` produces the `Unit` singleton, in **either** of the two
     /// forms lowering can take.
     ///
-    /// `Lit::Unit` used to be an `Alloc { AllocKind::Unit }` and is an
-    /// `Inst::ConstGc { GcConst::Unit }` now. The two tests below are looking
-    /// for a Unit that should not be there at all, so a predicate that knew only
-    /// the old form would pass vacuously and stop guarding anything — which is
-    /// exactly the failure mode a "no X appears" assertion has.
+    /// `Lit::Unit` lowers to `Inst::ConstGc { GcConst::Unit }`;
+    /// `Alloc { AllocKind::Unit }` is the other spelling. The two tests below
+    /// are looking for a Unit that should not be there at all, so a predicate
+    /// that knew only one form could pass vacuously and stop guarding
+    /// anything — the failure mode every "no X appears" assertion has.
     fn produces_unit(inst: &Inst) -> bool {
         matches!(
             inst,
@@ -6289,9 +6172,10 @@ mod tests {
 
     #[test]
     fn dynamic_take_argument_does_not_silently_lower_to_unit() {
-        // `take` is typed to accept any Int expression, not literals only. The
-        // intrinsic fallback must preserve that contract instead of returning
-        // Unit and letting the outer pipeline reinterpret Unit as a Vec.
+        // `take` is typed to accept any Int expression, not literals only, so
+        // the recognizer must fuse a non-literal bound rather than decline the
+        // chain: a lowering that answered Unit would leave the outer pipeline
+        // reinterpreting that Unit as a Vec.
         let lowered = lower_src_to_mir(
             "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var n = 2\n  v.take(n).sum()\n}\n",
         );
@@ -6347,9 +6231,9 @@ mod tests {
         );
     }
 
-    /// **MIR-03's evaluation order.** A `take`/`skip` bound is an expression, so
-    /// *when* it runs is part of the contract: once, before the loop, like every
-    /// other pipeline argument — not once per element.
+    /// **Evaluation order.** A `take`/`skip` bound is an expression, so *when*
+    /// it runs is part of the contract: once, before the loop, like every other
+    /// pipeline argument — not once per element.
     ///
     /// No behavioural test can see this for a pure bound, which is why it is
     /// asserted on the MIR: one call to the user function, and it is emitted
@@ -6428,15 +6312,11 @@ mod tests {
 
     #[test]
     fn pipeline_runtime_call_destinations_retain_vec_and_unit_types() {
-        // The eager pipeline lowerers used to type every slot they minted `Int`:
-        // the result Vec, and the Unit each `praxis_vec_push` returns. Both are
-        // statically known, and a slot that lies about its type feeds the wrong
-        // descriptor into debug metadata and schema construction.
-        //
-        // The Vec half moved from a hand-rolled `praxis_vec_new` call to an
-        // `AllocKind::Collection` when P0-03 removed the null-descriptor
-        // integer from its `Gc` argument slot, so the assertion covers the
-        // allocation form rather than the call form.
+        // Both the result Vec and the Unit each `praxis_vec_push` returns are
+        // statically known types, and a slot that lies about its type feeds the
+        // wrong descriptor into debug metadata and schema construction. The Vec
+        // is an `AllocKind::Collection`, so the assertion covers the allocation
+        // form rather than a call form.
         let lowered =
             lower_src_to_mir("fn main() {\n  var v = Vec()\n  v.push(1)\n  v.map(|x| x)\n}\n");
         let analysis = &lowered.analysis;
@@ -6747,8 +6627,8 @@ mod tests {
             "zip must carry a two-element tuple type into codegen, got {tuple_ty:?}"
         );
     }
-    /// **REP-16's MIR shape.** A compound store through a subscript emits one
-    /// read, one store, and lowers its receiver and indices **once**.
+    /// **The subscript store's MIR shape.** A compound store emits one read,
+    /// one store, and lowers its receiver and indices **once**.
     ///
     /// The instruction counts are the assertion a behavioural test cannot make:
     /// a desugaring into `c[k] = c[k] + 1` produces the same *answer* for a
@@ -6789,7 +6669,7 @@ mod tests {
     /// side-effect-free receiver and lowers it twice. And the read must be a
     /// `LoadField` rather than a `Call` — the index rides as an immediate on
     /// both, because boxing it to ride an argument list would put an integer in
-    /// a slot the collector may dereference (P0-03).
+    /// a slot the collector may dereference.
     #[test]
     fn a_field_store_writes_one_slot_and_a_compound_one_reads_it_first() {
         let field_ops = |src: &str| -> (Vec<u32>, Vec<u32>) {
@@ -6853,9 +6733,9 @@ mod tests {
         assert_eq!(picks, 1, "the receiver of a compound field store runs once");
     }
 
-    /// **REP-64's MIR shape.** A compound assignment whose operands are
-    /// `Float`s emits `FloatBinOp`, never `IntBinOp` — at every operator and
-    /// through every target shape the language has.
+    /// **The compound assignment's MIR shape.** One whose operands are `Float`s
+    /// emits `FloatBinOp`, never `IntBinOp` — at every operator and through
+    /// every target shape the language has.
     ///
     /// The instruction kind is the assertion, and it is the one a behavioural
     /// test states only indirectly: a `Float` rides the uniform `i64` scalar
@@ -6863,7 +6743,8 @@ mod tests {
     /// type error anywhere downstream — it is arithmetic on the pattern, and the
     /// answer is a perfectly well-formed `Float` that no program asked for.
     /// `Materialize` moves with it: an `Int` materialization boxes the result
-    /// with `Int`'s descriptor, so the value was mislabelled as well as wrong.
+    /// with `Int`'s descriptor, so the value would be mislabelled as well as
+    /// wrong.
     #[test]
     fn a_float_compound_assignment_lowers_to_float_arithmetic() {
         // (source, the target shape it exercises)
@@ -6957,9 +6838,9 @@ mod tests {
         );
     }
 
-    /// **REP-15's MIR shape** (ADR-066). A `for` over a collection that cannot
-    /// index itself takes **one** snapshot, **before** the loop — and a `for`
-    /// over one that can takes none.
+    /// **The `for` walk's MIR shape** (ADR-066). A `for` over a collection that
+    /// cannot index itself takes **one** snapshot, **before** the loop — and a
+    /// `for` over one that can takes none.
     ///
     /// The instruction counts are the assertion a behavioural test cannot make.
     /// A snapshot per step gives the same answer for every program in the suite
@@ -7055,8 +6936,8 @@ mod tests {
             .count();
         assert_eq!(tuples, 1, "the pair is built once per step, in the body");
 
-        // The regression a careless fix would cause: an indexable collection
-        // must not be copied to be walked.
+        // The other side of the rule: an indexable collection must not be copied
+        // to be walked.
         for (src, snapshot_free) in [
             (
                 "var v = Vec()\n  v.push(1)\n  for x in v { t = t + x }",
@@ -7089,8 +6970,8 @@ mod tests {
         }
     }
 
-    /// **REP-10.** A record pattern reads a field and a tuple pattern reads an
-    /// element — and neither tests a tag first.
+    /// A record pattern reads a field and a tuple pattern reads an element — and
+    /// neither tests a tag first.
     ///
     /// This is the assertion a behavioural test cannot make. Both composites have
     /// **one constructor**, so the shape always matches and the whole test is the
@@ -7172,25 +7053,25 @@ mod tests {
         assert_eq!(nested.fields, vec![0, 1]);
     }
 
-    /// **REP-49's gate.** A `Bool` pattern reads its scrutinee at a `Bool`'s
-    /// width.
+    /// A `Bool` pattern reads its scrutinee at a `Bool`'s width.
     ///
-    /// `Lit::Bool` shared the `Lit::Int` arm, so `match b { true => … }` emitted
+    /// Sharing the `Lit::Int` arm would make `match b { true => … }` emit
     /// `ExtractScalar { scalar: Int }` — `praxis_int_load`, an **eight**-byte
     /// read — against a payload that is **one** byte. The other seven are the
     /// block's alignment padding, which the allocator never writes, so the two
-    /// immortal singletons were told apart by whatever malloc had left there.
+    /// immortal singletons would be told apart by whatever malloc left there.
     ///
     /// This is the assertion a behavioural test cannot make. `match true`
     /// answers correctly whenever the two paddings *differ*, and comparing
     /// `true` against itself reads one address twice and is right for the wrong
-    /// reason — so the observable answer is right on most runs and wrong on the
-    /// ones where the padding happens to match. The instruction is the fact.
+    /// reason — so the observable answer would be right on most runs and wrong
+    /// on the ones where the padding happens to match. The instruction is the
+    /// fact.
     ///
-    /// Since ADR-102 the `ScalarKind` this pins also selects the width of an
-    /// **inline** load in generated code, not just which wrapper is called. The
-    /// same defect would now be an eight-byte read emitted directly into the
-    /// function body, past a descriptor check that proved `Bool`.
+    /// The `ScalarKind` this pins also selects the width of an **inline** load
+    /// in generated code (ADR-102), not just which wrapper is called: a wrong
+    /// width is an eight-byte read emitted straight into the function body, past
+    /// a descriptor check that proved `Bool`.
     #[test]
     fn a_bool_pattern_reads_its_scrutinee_at_a_bools_width() {
         let extracts = |src: &str| -> Vec<ScalarKind> {
@@ -7219,8 +7100,7 @@ mod tests {
             "a Bool payload is one byte and `praxis_int_load` reads eight: {bools:?}"
         );
 
-        // The `Int` half of the same arm is unchanged — the fix is a width, not
-        // a rewrite of literal matching.
+        // The `Int` half of the same arm reads at `Int`'s width.
         let ints = extracts("fn main() -> Int {\n  var n = 1\n  match n { 1 => 10, _ => 0 }\n}");
         assert!(
             ints.iter().all(|k| *k == ScalarKind::Int),
@@ -7228,13 +7108,13 @@ mod tests {
         );
     }
 
-    /// **REP-21.** An updating store is **one** call and no read.
+    /// An updating store is **one** call and no read.
     ///
     /// The assertion a behavioural test cannot make: a read of a *present* key
     /// would succeed and leave the answer right, so nothing would show that
     /// `d[k] min= v` had quietly become the read-modify-write §6.2 says it is
-    /// not. On an absent key the same read faults (§4.7) — which is the bug this
-    /// pins, one step before it is observable.
+    /// not. On an absent key the same read faults (§4.7), which is that mistake
+    /// one step after it is pinned here.
     #[test]
     fn an_updating_store_is_one_call_and_reads_nothing() {
         let calls = |src: &str, sym: RuntimeSymbol| -> usize {
@@ -7260,9 +7140,8 @@ mod tests {
         assert_eq!(calls(MIN, RuntimeSymbol::MapUpdateMax), 0);
         assert_eq!(calls(MAX, RuntimeSymbol::MapUpdateMin), 0);
 
-        // A `+=` through the same subscript still reads first — the compound
-        // operators are untouched, which is the regression a shared path would
-        // cause.
+        // A `+=` through the same subscript still reads first: the compound
+        // operators do not share the updating store's path.
         let compound =
             "fn main() -> Int {\n  var d = Map()\n  d[\"a\"] = 1\n  d[\"a\"] += 2\n  d[\"a\"]\n}";
         assert_eq!(
@@ -7278,13 +7157,11 @@ mod tests {
     /// same prologue and body-head a `for` uses, so the two cannot disagree
     /// about the order or about what a member is.
     ///
-    /// `lower_pipeline` opened its source with a hardcoded
-    /// `praxis_vec_len`/`praxis_vec_get` pair, and `iter_plan`'s own doc says
-    /// what that pair does to a `Set`: "reading a `Set`'s payload through
-    /// `praxis_vec_get` was a wrong-type read that hung or killed the process,
-    /// and a `MinHeap`'s was a silently wrong answer." The instruction counts are
-    /// the assertion a behavioural test cannot make — the wrong-type read
-    /// *sometimes* returns.
+    /// Opening the source with a hardcoded `praxis_vec_len`/`praxis_vec_get`
+    /// pair is what [`IterPlan`] exists to prevent: a `Set`'s payload read that
+    /// way hangs or kills the process, and a `MinHeap`'s is a silently wrong
+    /// answer. The instruction counts are the assertion a behavioural test
+    /// cannot make — the wrong-type read *sometimes* returns.
     #[test]
     fn a_fused_pipeline_opens_its_source_the_way_a_for_does() {
         // A `Set` is snapshotted once, before the header, and the loop walks the
@@ -7327,8 +7204,7 @@ mod tests {
         assert_eq!(runtime_calls(main, RuntimeSymbol::TextGet), 1);
         assert_eq!(runtime_calls(main, RuntimeSymbol::VecGet), 0);
 
-        // And a `Vec` source stays allocation-free: nothing about `v.map(f)`
-        // changed.
+        // And a `Vec` source stays allocation-free: it is walked in place.
         let lowered = lower_src_to_mir(
             "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.map(|x| x * 2).sum()\n}",
         );
@@ -7350,11 +7226,11 @@ mod tests {
     /// as a `Vec`*, never on the receiver local.
     ///
     /// Each is a `RuntimeSymbol` row over a real `VecPayload`, and their
-    /// receiver is now `Iterable`. Leaving them on `Vec[T]` was the alternative
-    /// and it was rejected because it makes `set.map(f).sorted()` legal and
-    /// `set.sorted()` a `Y110` — a rule nobody can hold in their head. Getting it
-    /// wrong in the other direction is the defect `IterPlan` was built out of, so
-    /// the materialization is not optional and this is what says so per row.
+    /// receiver is `Iterable` rather than `Vec[T]` — restricting it to `Vec[T]`
+    /// would make `set.map(f).sorted()` legal and `set.sorted()` a `Y110`, a
+    /// rule nobody can hold in their head. Handing a non-`Vec` straight to the
+    /// wrapper is the wrong-type read `IterPlan` exists to prevent, so the
+    /// materialization is not optional and this is what says so per row.
     ///
     /// The two groupings (ADR-149) are here for the same reason and one more:
     /// they take an argument, so the row that would get this wrong is one where
@@ -7406,8 +7282,8 @@ mod tests {
                 "…and pushes each member into the `Vec` the wrapper needs ({name})"
             );
 
-            // **A `Vec` receiver copies nothing.** The identity is what keeps
-            // `v.sorted()` the one call it has always been.
+            // **A `Vec` receiver copies nothing.** The identity keeps
+            // `v.sorted()` a single call.
             let src =
                 format!("fn main() -> Unit {{\n  var v = Vec()\n  v.push(1)\n  out(v.{name})\n}}");
             let lowered = lower_src_to_mir(&src);
@@ -7467,10 +7343,9 @@ mod tests {
             "a key and a value, from the item the source yields"
         );
 
-        // **`to_vec` on a `Vec` is the identity**, and that is not `collect`
-        // coming back: it answers the same reference, so there is no push and no
-        // second allocation. On the other nine receivers it is the only route to
-        // a `Vec` at all.
+        // **`to_vec` on a `Vec` is the identity**: it answers the same
+        // reference, so there is no push and no second allocation. On the other
+        // nine receivers it is the only route to a `Vec` at all.
         let lowered = lower_src_to_mir(
             "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.to_vec().count()\n}",
         );
@@ -7508,9 +7383,8 @@ mod tests {
     /// Every runtime call to `sym` in `f`, for the shape tests in this module.
     ///
     /// A `mod tests` has no submodules, so this one item is in scope for all of
-    /// them. It stood beside three byte-identical closures and two open-coded
-    /// scans, which is four answers to "how many `praxis_set_items` does this
-    /// function call".
+    /// them — one answer to "how many `praxis_set_items` does this function
+    /// call", not one per test.
     fn runtime_calls(f: &Function, sym: RuntimeSymbol) -> usize {
         f.blocks
             .iter()
@@ -7527,18 +7401,12 @@ mod tests {
             .count()
     }
 
-    /// **REP-40.** There is no second pipeline lowering, and this test is what
-    /// makes deleting the first one safe.
+    /// There is no second pipeline lowering, and this test is what makes that safe.
     ///
-    /// The eager per-combinator lowerers stood beside the fused recognizer as
-    /// ADR-029's "safety net for any chain the recognizer declines". What the
-    /// net actually held was `lower_seq_fold`, which returned the seed and never
-    /// invoked the closure, and a `_` arm that answered the Unit singleton — so
-    /// a chain that reached it got a *wrong answer in silence*, which is the one
-    /// failure mode a net must not add. Deleting it moves the obligation here:
-    /// a row the catalog lowers as an intrinsic has no runtime symbol, so the
+    /// A row the catalog lowers as an intrinsic has no runtime symbol, so the
     /// recognizer is its only lowering, and a row the recognizer does not
-    /// classify has none at all.
+    /// classify has none at all. An eager per-combinator fallback would be worse
+    /// than none: a chain reaching it would get a *wrong answer in silence*.
     ///
     /// The recognizer classifies on the name and arity, so the arguments are
     /// stand-ins; what is under test is that no `Intrinsic` row falls through.
@@ -7579,12 +7447,9 @@ mod tests {
         // A catalog that stopped registering intrinsics would make the loop
         // vacuous, and the assertion above would then prove nothing.
         //
-        // The floor **re-based at ADR-127**. It was written against 47 intrinsic
-        // rows, of which 23 were the `Seq` half that nothing could ever reach;
-        // the generic receiver deleted those and added the eight conversions, so
-        // the count is what it is now rather than what a duplicated table made
-        // it. `sorted_by_key` is not in it: it is a barrier, so it is a
-        // `RuntimeSymbol` row and the loop above skips it.
+        // The floor counts the streaming combinators, the sinks and the eight
+        // conversions. `sorted_by_key` is not among them: it is a barrier, so it
+        // is a `RuntimeSymbol` row and the loop above skips it.
         assert!(
             checked >= 31,
             "expected the pipeline combinators to be intrinsic rows; saw {checked}"
@@ -7596,10 +7461,8 @@ mod tests {
     /// A parser plan's id rides the uniform ABI as an `Int` — and it takes the
     /// interned form through [`lower_lit_gc`], not through a second opinion.
     ///
-    /// `run_parser_plan` hand-wrote `ConstInt` + `Alloc { Int }`, so every
-    /// `read`/`parse` allocated a box for a number the compiler knew. The
-    /// tempting patch — `GcConst::SmallInt(plan.get())` — is the one that must
-    /// not be written: plan ids come from a process-wide arena bounded by
+    /// The tempting shortcut — `GcConst::SmallInt(plan.get())` — is the one that
+    /// must not be written: plan ids come from a process-wide arena bounded by
     /// `MAX_PLANS = 1 << 20`, so the 1025th plan a process registers would name
     /// a slot the table does not have and panic `load_gc_const`.
     ///
@@ -7645,8 +7508,7 @@ mod tests {
             "a ConstGc::SmallInt must name a slot the table has; {id} does not"
         );
 
-        // And the boxing it replaced is gone: nothing in this function
-        // allocates an `Int` any more.
+        // And nothing in this function allocates an `Int`.
         assert!(
             !f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(
                 i,
@@ -7694,19 +7556,14 @@ mod tests {
 
     // ---- The character literal (ADR-141) -----------------------------------
 
-    /// **The bug the syntax would otherwise have shipped on top of.**
+    /// A `Char` pattern **decides**: `emit_pattern_test`'s `Lit::Char` arm
+    /// compares payloads and branches.
     ///
-    /// `lower_pattern_test`'s `Lit::Char` arm was an unconditional
-    /// `Terminator::Jump { target: on_success }` with a comment calling itself
-    /// "defensive": every `Char` pattern matched every scrutinee. It was
-    /// unreachable while no char literal could be written, and invisible to
-    /// `check`, to coverage and to `verify` the moment one could — so
-    /// `match c { '#' => 1, '.' => 2, _ => 3 }` would have compiled, checked
-    /// clean and answered `1` for every character.
-    ///
-    /// The structural assertion, which fails without a JIT: the block that ends
-    /// a `Char` pattern test branches on a comparison. A defensive arm that
-    /// jumps to success is not defensive.
+    /// An arm that jumped unconditionally to `on_success` would make
+    /// `match c { '#' => 1, '.' => 2, _ => 3 }` compile, check clean and answer
+    /// `1` for every character — invisible to `check`, to coverage and to
+    /// `verify` alike. Hence the structural assertion, which needs no JIT: the
+    /// block that ends a `Char` pattern test branches on a comparison.
     #[test]
     fn a_char_pattern_emits_a_comparison_and_not_a_jump() {
         let lowered = lower_src_forwarded(
@@ -7714,7 +7571,7 @@ mod tests {
         );
         let f = lowered.function("f");
 
-        // One `IntCmp { Eq }` per literal arm — the stub emitted none.
+        // One `IntCmp { Eq }` per literal arm.
         let cmps = f
             .blocks
             .iter()
@@ -7723,10 +7580,10 @@ mod tests {
             .count();
         assert_eq!(cmps, 2, "one comparison per Char arm");
 
-        // Each comparison reads the scrutinee's payload at `Char`'s own width —
-        // REP-49 is this shape read at the wrong one. The *literal* side is one
-        // read per arm too, and `forward` has already folded both to immediates
-        // by this point, which is why there are two of these and not four.
+        // Each comparison reads the scrutinee's payload at `Char`'s own width.
+        // The *literal* side is one read per arm too, and `forward` has already
+        // folded both to immediates by this point, which is why there are two of
+        // these and not four.
         let char_extracts = f
             .blocks
             .iter()
@@ -7743,8 +7600,7 @@ mod tests {
             .count();
         assert_eq!(char_extracts, 2, "the scrutinee, once per Char arm");
 
-        // And the block each comparison ends branches — the assertion that
-        // fails against the stub, which terminated with a `Jump`.
+        // And the block each comparison ends branches rather than jumping.
         let branch_terms = f
             .blocks
             .iter()
@@ -7756,11 +7612,10 @@ mod tests {
         );
     }
 
-    /// **Gate 2, at the compiler boundary.** An ASCII `'#'` is an
-    /// `Inst::ConstGc` — the table base and one element, two loads — and not a
-    /// `praxis_alloc_char` call with the `CheckFault` ADR-088 puts after it.
-    /// Without this half the literal is *slower* than the `"#"[0]` it replaces,
-    /// which was one call and no guard.
+    /// An ASCII `'#'` is an `Inst::ConstGc` — the table base and one element,
+    /// two loads — and not a `praxis_alloc_char` call with the `CheckFault`
+    /// ADR-088 puts after it. Without this the literal would be *slower* than
+    /// the `"#"[0]` spelling, which is one call and no guard.
     #[test]
     fn an_ascii_char_literal_is_a_const_gc() {
         let const_gcs = |src: &str| -> Vec<GcConst> {
@@ -7792,7 +7647,7 @@ mod tests {
             ))),
             "and it does not also allocate"
         );
-        // The spelling it replaces, for contrast: one `praxis_text_get` per
+        // The `"#"[0]` spelling, for contrast: one `praxis_text_get` per
         // evaluation, folded by nothing.
         let lowered = lower_src_to_mir("fn main() -> Int { \"#\"[0].to_int() }");
         let subscript = lowered.function("main");
@@ -7972,20 +7827,14 @@ fn f(n: Int, x0: Float) -> Float {
     }
 
     /// **ADR-111.** A `Text` literal in a loop **is** hoisted, and the reason is
-    /// read off the ABI manifest rather than written down here.
+    /// read off the ABI manifest rather than written down here:
+    /// `praxis_alloc_text`'s row is `Effect::Allocates`, so
+    /// `box_invariant_literal`'s `Inst::can_fault` gate admits it. Flip the row
+    /// and this test — not an edit to `box_invariant_literal` — is what says so.
     ///
-    /// This test is the inverse of the one it replaces, and the inversion is the
-    /// whole point. `a_text_literal_in_a_loop_is_not_hoisted_because_its_alloc_can_fault`
-    /// asserted the exclusion and named its cause: `praxis_alloc_text` validated
-    /// its bytes, so its row was `AllocatesAndFaults`, so
-    /// `box_invariant_literal`'s `Inst::can_fault` gate refused it — and it said
-    /// that when P-4b moved the validation out of the wrapper, this test is the
-    /// one that would say so. It does. **No line of `box_invariant_literal`
-    /// changed**; a manifest row did, and the hoist followed.
-    ///
-    /// What this buys is bigger than the check it also removes. A hoisted `Text`
-    /// literal costs one `Box<str>` allocation, one memcpy, one GC block and one
-    /// sweep-time drop *per loop entry* instead of per iteration.
+    /// A hoisted `Text` literal costs one `Box<str>` allocation, one memcpy, one
+    /// GC block and one sweep-time drop *per loop entry* instead of per
+    /// iteration.
     #[test]
     fn a_text_literal_in_a_loop_is_hoisted_now_that_its_alloc_cannot_fault() {
         let mut funcs = lower_src_to_mir(
@@ -8045,10 +7894,9 @@ fn f(n: Int, x0: Float) -> Float {
     /// literal's allocation is not a fault-check site at all — in a loop or out
     /// of one.
     ///
-    /// ADR-102's "the instruction is the fact" rule applies with full force
-    /// here: no test that *runs* a program can see this change. The wrapper
-    /// answers the same `Text` either way, and the check it removes was one that
-    /// could never be taken — 41 of them across the tracked corpus. The MIR is
+    /// "The instruction is the fact" (ADR-102) applies with full force here: no
+    /// test that *runs* a program can see this. The wrapper answers the same
+    /// `Text` either way, and a check after it could never be taken. The MIR is
     /// the only place the difference exists, so the MIR is where it is asserted.
     ///
     /// `verify` is run because it is the other half: with the row `Allocates`,
@@ -8131,8 +7979,7 @@ fn f(n: Int, x0: Float) -> Float {
     /// A `Float` literal outside every loop is emitted where it is written.
     ///
     /// The hoist is a loop optimization and nothing else: with no enclosing loop
-    /// there is no preheader, and the emission must be byte-for-byte what it was
-    /// before ADR-108.
+    /// there is no preheader, and the literal is emitted where it is written.
     #[test]
     fn a_float_literal_outside_a_loop_is_not_moved() {
         let mut funcs = lower_src_to_mir("fn f() -> Float { 2.0 }").funcs;
@@ -8222,7 +8069,7 @@ fn f(n: Int, x0: Float) -> Float {
         );
         // The result is re-boxed for `lower_expr_gc`'s contract and unboxed
         // again by `lower_if`, **in the same block** — which is exactly the
-        // shape W8-S0's block-local forwarding deletes, and it deletes it:
+        // shape block-local forwarding deletes (ADR-120), and it deletes it:
         // this block's whole census is `{BitsetContains: 1}` (ADR-118
         // decision 9). Asserted per block rather than over the loop, because
         // the loop header holds a second `Materialize{Bool}`/`ExtractScalar
@@ -8326,8 +8173,8 @@ fn f(n: Int, x0: Float) -> Float {
     }
 
     /// `Grid(w, h, fill)` is the three-operand variant and names its own
-    /// wrapper. The empty form beside it is unchanged, which is the half that
-    /// says the new field did not move the old path.
+    /// wrapper; the empty form beside it names the nullary one and carries no
+    /// operands.
     #[test]
     fn a_sized_grid_lowers_to_the_grid_wrapper_and_an_empty_one_still_does_not() {
         let lowered = lower_src_to_mir(

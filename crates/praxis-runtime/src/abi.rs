@@ -30,316 +30,54 @@ use crate::{
 };
 pub use praxis_stdlib::abi::{AbiKind, AbiRet, AbiSig, Effect, RuntimeSymbol};
 
-/// The runtime ABI version for this build. Bump this whenever the layout of
-/// [`RuntimeContext`](crate::RuntimeContext), the calling convention, or the
-/// signature set of `praxis_*` runtime wrappers changes in an incompatible way.
+/// The runtime ABI version for this build. Bump it whenever a program compiled
+/// against one version could be misled by a runtime of another.
 ///
-/// v2 (M5): `RuntimeContext` gained the `roots: *mut ShadowFrame` field for the
-/// compiler-managed shadow-stack spill (ADR-019), and the `praxis_push_shadow_frame`
-/// / `praxis_pop_shadow_frame` extern helpers were added. (Both are retired in
-/// v15 below; the field is now `shadow`.)
-/// v3 (M7 Part 1): record/enum object model — `praxis_alloc_record`,
-/// `praxis_record_set_field`, `praxis_record_field`, `praxis_alloc_enum`,
-/// `praxis_enum_set_payload`, `praxis_enum_tag`, `praxis_enum_payload`.
-/// v4 (M7 Part 2, WS6): tuple object model and structural equality —
-/// `praxis_alloc_tuple`, `praxis_tuple_set`, `praxis_tuple_get`, `praxis_struct_eq`.
-/// v5 (M7 Part 2, WS7): closure object model — `praxis_alloc_closure`,
-/// `praxis_closure_set_capture`, `praxis_closure_fn_ptr`, `praxis_closure_capture`.
-/// v6 (M7 Part 3, WS7b): mutable-capture cells — `praxis_alloc_var_cell`,
-/// `praxis_var_cell_get`, `praxis_var_cell_set`. (`praxis_closure_fn_ptr` also
-/// gained a `ctx` param for ABI uniformity in WS7a, kept within v5's window.)
-/// v7 (M8 WS1): collection construction now carries the real element descriptor
-/// (closing the M7 `Vec[T]()` null-descriptor carryover). The construction path
-/// is generalized across all M8 collection kinds as they land (Deque/Map/Set/
-/// Counter/Heap/BitSet/complete Grid); each adds its own `praxis_<kind>_*`
-/// wrappers within this version window.
-/// v8 (repair S4): `GcHeader` repacked from 16 to 24 bytes — it gained
-/// `payload_offset` (the single object-layout authority, replacing three
-/// independent copies of the calculation) and `heap_id` (allocation
-/// provenance). Generated code reads the header to reach an enum payload, so
-/// this is an incompatible layout change.
-/// v10 (repair S6): `RuntimeContext` gained `true_ref` and `false_ref`, the
-/// cached `Bool` immortals, so `praxis_alloc_bool` hands back a singleton
-/// instead of minting a fresh unreclaimable immortal per call. Appended after
-/// `native_roots`.
-/// v9 (repair S5): `RuntimeContext` gained `native_roots`, the head of the
-/// native root-frame chain, so the runtime's own Rust helpers can root what
-/// they hold across an allocation. Appended after `crash_snapshot`, so every
-/// generated-code-read offset is unchanged — but the struct's size changed and
-/// the automatic collector's root set is now the whole `RuntimeRoots`, which is
-/// a behavioural contract generated code depends on.
-/// v11 (repair S7): `Fault` lost its `pending: bool`, so the struct behind
-/// `RuntimeContext.pending_fault` is one `FaultKind` wide. Generated code did
-/// not read the field at the time — it called `praxis_check_fault` — but the
-/// type is `#[repr(C)]` and reachable from the context, so the shape change was
-/// declared rather than assumed. That caution paid: as of v17 generated code
-/// *does* read it, so this entry is exactly the layout a v17-compiled program
-/// would misread if run against a v10 runtime. `FaultKind` also gained
-/// `InvalidChar` and `InvalidText`, the two kinds that previously had to be
-/// raised as `None` (RT-17).
-/// v12 (repair S9): `DebugLocal.value` is an `Option<GcRef>`, and generated
-/// code's meaning for the word changed with it. The struct's *layout* is
-/// unchanged — the `NonNull` niche keeps it one machine word — but "no value
-/// yet" moved from `NonNull::dangling()` (a sentinel the runtime wrote and the
-/// hosts compared against by pointer identity) to the all-zero `None`, and
-/// generated code now writes zero into a shadow slot whose local has died
-/// (MIR-01). A runtime of the previous version would read either of those zeros
-/// as a real reference (F18, MIR-16).
-/// v13 (repair S17): `FaultKind` gained `Panic` and `AssertFailed`, the two
-/// kinds §9.1 lists that had no encoding, and `RuntimeContext` gained
-/// `fault_message` — the slot `praxis_panic`/`praxis_assert` write the
-/// program's message into. Appended after `false_ref`, so every
-/// generated-code-read offset is unchanged; the struct's size is not.
-/// v14 (repair S18): `EnumPayload` gained a leading `schema: *const EnumSchema`
-/// — an enum value now records which enum *type* it is (RT-13) — so the `tag`
-/// moved from offset 0 to offset 8 and generated code reads it through
-/// `offset_of!` rather than a literal. `praxis_alloc_enum` changed shape with
-/// it: `(ctx, schema, tag)`, with the arity read from the schema instead of
-/// passed beside it. `FaultKind` also gained `EmptyRange` and `NoAnswer`, the
-/// two kinds three S17 ADRs recorded as owed (ADR-058, ADR-059, ADR-060), and
-/// four raises that had been borrowing `InvalidSize` moved onto them. A runtime
-/// of the previous version would read an enum's schema pointer as its tag.
-/// v15 (§3.5): `RuntimeContext` gained `small_ints`, the base of the interned
-/// small-`Int` table (`crates/praxis-runtime/src/small_int.rs`), so an `Int` in
-/// that range is one immortal object per value rather than a fresh box per
-/// evaluation. Appended after `fault_message`, so every generated-code-read
-/// offset is unchanged — but unlike `parse_detail`, `crash_snapshot` and
-/// `fault_message`, generated code *does* read this one: `Inst::ConstGc` lowers
-/// an in-range `Int` literal to a load of this base plus a compile-time element
-/// offset, replacing a call to `praxis_alloc_int` and the shadow-frame spill
-/// that call's safepoint required. A runtime of the previous version has no such
-/// field, so code compiled against v15 would read whatever follows the struct.
+/// Three classes of change owe a bump:
 ///
-/// v16 (finding §3.3, ADR-101): the shadow stack is one contiguous region owned
-/// by the `Runtime` instead of a chain of per-call `Box<ShadowFrame>`s. v2's
-/// `RuntimeContext.roots: *mut ShadowFrame` became `shadow: *mut
-/// ShadowStackHeader` — the same position and the same width, so every other
-/// generated-code-read offset is unchanged, but pointing at a `{ top, base,
-/// limit }` header rather than at the top frame of a chain. A runtime of the
-/// previous version would read a stack header as a frame, taking `top` for a
-/// `parent` pointer. The prologue and epilogue are now inline Cranelift — a
-/// bump and a restore, with the recursion-depth guard ahead of them — so
-/// `praxis_push_shadow_frame` and `praxis_pop_shadow_frame` no longer exist,
-/// in the manifest or in the runtime.
+/// * **Layout, calling convention, or signature.** Any move of a field
+///   generated code reads; any change to a `praxis_*` wrapper's parameters or
+///   return type; and any change to the *size* of
+///   [`RuntimeContext`](crate::RuntimeContext), because a host that built a
+///   context of the previous size would have this runtime read past its end.
+/// * **Meaning, with the layout unchanged.** A field or wrapper whose bits stay
+///   where they were but stand for something else: a slot whose "absent" value
+///   moves from a sentinel to all-zero `None`; a counter that counted calls up
+///   to a limit now counting a native-stack budget down; a wrapper whose
+///   manifest [`Effect`] row changes, and with it whether the caller must emit a
+///   `CheckFault` after it.
+/// * **A new dependency of generated code.** Nothing moves, but the compiler
+///   starts reading a field it never read, so repacking that field becomes a
+///   generated-code change from then on.
 ///
-/// v17 (finding §3.4, ADR-102): generated code reads two `#[repr(C)]` fields
-/// it never read before. `Inst::CheckFault` loads `RuntimeContext.pending_fault`
-/// and then the `FaultKind` at `Fault::KIND_OFFSET`, instead of calling
-/// `praxis_check_fault`; `Inst::ExtractScalar` loads a `GcHeader`'s descriptor
-/// at `GcHeader::DESCRIPTOR_OFFSET` and compares it against a scalar
-/// descriptor's address before reading the payload inline, instead of calling
-/// `praxis_int_load` and friends. **No layout, calling convention or wrapper
-/// signature changed** — every wrapper still exists, still has its manifest row
-/// and its address arm, and is still what the inline path's cold block calls.
-/// What changed is the *set of things generated code depends on*, which is the
-/// same reason v12 was bumped for a meaning change with no layout change: a
-/// program compiled against v17 run against a runtime whose `Fault` still
-/// carried v10's `pending: bool` would read that bool as the kind, and one
-/// whose `GcHeader` put something else first would compare the wrong word.
-/// Repacking `Fault`, `FaultKind` or `GcHeader`'s leading field now owes a bump.
+/// All three are about what generated code or a host can observe, so a field
+/// with no reader outside `praxis-runtime` whose displacement and width do not
+/// move owes nothing, however much the thing it points at changes.
+/// `RuntimeContext.native_roots` is the one such field: its writers are
+/// `Runtime::context` and `NativeScope`, its only reader is
+/// `RuntimeRoots::from_context`, and no `offset_of!` in
+/// `crates/praxis-codegen-cranelift/src/lower.rs` names it (ADR-114).
 ///
-/// v18 (finding §3.2, ADR-104): the crash debugger's per-call frame stops being
-/// a heap allocation. `RuntimeContext.debug_top: *mut DebugFrame` — the top of a
-/// chain of `Box`ed frames — becomes `debug_frames: *mut DebugFrameStackHeader`,
-/// the same position and the same width (ADR-101 did exactly this to `roots`),
-/// pointing at a `{ top, base, limit }` header whose slots are
-/// `{ meta, values }` pairs; and `debug_values: *mut DebugValueStackHeader` is
-/// appended after `small_ints`, so every offset above is unchanged. A runtime of
-/// the previous version would read a stack header as a frame, taking `top` for a
-/// `parent` pointer. Everything a frame carried that does not vary per call —
-/// the function name, the source span, the `DebugLocalMeta` array — is now a
-/// static `FunctionDebugMeta` the prologue names with one immediate, so
-/// `praxis_push_debug_frame`, `praxis_pop_debug_frame` and
-/// `praxis_set_frame_source_span` no longer exist, in the manifest or in the
-/// runtime, and `DebugFrame` is gone with them. `DebugLocal`, `SnapshotFrame`
-/// and `CrashSnapshot` are unchanged: the snapshot walker rejoins the static and
-/// per-call halves, which is what keeps `praxis-debugger` untouched.
-///
-/// v19 gathers every change listed below, and they ship together. A version is
-/// a statement about a build, and these are one build, so they share one bump
-/// rather than taking one each. (How many there are is deliberately not written
-/// here: entries kept arriving while this window was open, and a count would
-/// have gone stale on the next one.)
-///
-/// v19 (ADR-105): `RuntimeContext.recursion_depth: u32` becomes
-/// `stack_left: u32` — the same position and the same width, a different
-/// quantity, and the opposite direction. It counted calls up to a limit
-/// generated code carried; it now holds what is *left* of a native-stack budget
-/// the context arrived with, and every prologue subtracts its own
-/// `frame_cost(slots)`. This is the same class of bump as v12 and v17: nothing
-/// about the layout moved, but a program compiled against v18 subtracts nothing
-/// and compares against a constant that is no longer the limit, so against a v19
-/// runtime it would recurse until the native stack ran out — which is the abort
-/// ADR-105 removes, restored by a mismatched build.
-///
-/// v19 (ADR-107): `RuntimeContext` gained `small_chars`, the base of the
-/// interned ASCII-`Char` table (`crates/praxis-runtime/src/small_char.rs`), so a
-/// `Char` in `0..=127` is one immortal object per code point rather than a fresh
-/// box per `t[i]`, per step of `for c in t`, and per grid cell a parse reads.
-/// Appended after `debug_values`, so every generated-code-read offset is
-/// unchanged. **Generated code does not read this one** — the language has no
-/// character literal, so there is no `GcConst::Char` and nothing lowers to a load
-/// of this base; its readers are `char_ref` and the parser interpreter, both
-/// inside the runtime. The bump is therefore the struct-size rule that v9
-/// (`native_roots`) and v13 (`fault_message`) were bumped for, not v15's
-/// read-by-generated-code case: a host that built a `RuntimeContext` of the
-/// previous size and handed it to this runtime would have the parser read past
-/// the end of it.
-///
-/// v19 (ADR-109): `GcHeader` loses `size`, a field with no readers, going from
-/// 24 bytes to 16. No source moves — `payload_offset_for` is the single `const`
-/// authority and `Inst::EnumTag` and `emit_scalar_load` still call it — but the
-/// immediates they fold change from 24 to 16, so a runtime and a compiler from
-/// either side of this disagree about where every payload begins.
-///
-/// v19 (ADR-111): `praxis_alloc_text`'s manifest row moves from
-/// `AllocatesAndFaults` to `Allocates`, and with it the contract an embedder
-/// calling that wrapper is held to. No layout, no signature and no
-/// generated-code-read offset changes — this is the v12/v17 class of bump, a
-/// meaning change with no layout change — and it is owed in both directions.
-/// Code compiled against v19 emits **no** `CheckFault` after a text literal's
-/// `Inst::Alloc`, so run against a v18 runtime, which still validates and raises
-/// `InvalidText`, a fault would be set into a slot nothing at that site reads
-/// and observed later at some unrelated check. In the other direction, a host
-/// that calls `praxis_alloc_text` with untrusted bytes now gets a process abort
-/// where v18 gave it a recoverable fault: the UTF-8 requirement the wrapper's
-/// `# Safety` block always stated is enforced as a precondition instead of being
-/// laundered into a lossy conversion. The fault did not disappear —
-/// `praxis_get_input` validates the host's bytes and raises `InvalidText` there,
-/// which is where `lower_read` already emits the check.
-///
-/// v19 (ADR-113): generated code reads **`Heap`'s field layout**, which it never
-/// did before — through `RuntimeContext.heap`, at
+/// What generated code reads today — and therefore what the third class now
+/// covers — is: [`RuntimeContext`](crate::RuntimeContext)'s own `shadow`,
+/// `stack_left`, `pending_fault`, `unit_ref`, `true_ref`, `false_ref`,
+/// `small_ints`, `small_chars`, `descriptors`, `debug_frames`, `debug_values`
+/// and `heap`; [`Fault::KIND_OFFSET`](crate::Fault::KIND_OFFSET) and
+/// [`GcHeader::DESCRIPTOR_OFFSET`](crate::GcHeader::DESCRIPTOR_OFFSET);
+/// `EnumPayload::tag`; the two pacing words at
 /// [`Heap::BYTES_SINCE_COLLECT_OFFSET`](crate::Heap::BYTES_SINCE_COLLECT_OFFSET)
-/// and [`Heap::COLLECT_THRESHOLD_OFFSET`](crate::Heap::COLLECT_THRESHOLD_OFFSET).
-/// `Inst::Materialize { Int }` and `Inst::Alloc { AllocKind::Int }` now load
-/// those two words, compare them (which is `Heap::collection_is_due` inline),
-/// and on the branch where no collection is due answer an in-range value from
-/// `RuntimeContext.small_ints` directly, instead of calling `praxis_alloc_int`.
-/// **No layout, calling convention or wrapper signature changed** — the wrapper
-/// still exists, still has its `Effect::Allocates` row and its address arm, and
-/// is still what both cold branches call. This is the v12/v17 class of bump, a
-/// meaning change with no layout change, and it is the reason ADR-112 could
-/// truthfully say "nothing in generated code reads a `Heap` field offset" and
-/// this record cannot: repacking `Heap` is now a generated-code change, and a
-/// program compiled against this version run against a runtime whose `Heap` put
-/// `pages` or `live_count` at those displacements would compare two pointers and
-/// decide from them whether the collector had been offered a turn.
+/// and [`Heap::COLLECT_THRESHOLD_OFFSET`](crate::Heap::COLLECT_THRESHOLD_OFFSET),
+/// plus `Heap::live_count`; `PageHeader`'s and `GcHeader`'s fields, which the
+/// inline claim path both reads and writes; and `VecPayload`'s and
+/// `BitSetPayload`'s leading words, reached through
+/// [`ReprCVec`](crate::ReprCVec). A debug value slot's word is an
+/// `Option<GcRef>` only when the `DebugLocalMeta` beside it says so: a temp
+/// whose box was elided stores its payload raw (ADR-120).
 ///
-/// v19 (ADR-114): `RuntimeContext.native_roots` stops being the head of a chain
-/// of per-scope `Box<NativeRootFrame>`s and becomes a pointer to the runtime's
-/// one [`NativeRootStore`](crate::roots::NativeRootStore) — same position, same
-/// width, a different thing entirely pointed at. **That is the shape v15
-/// (`roots` → `shadow`) and v18 (`debug_top` → `debug_frames`) each bumped for,
-/// and this one deliberately does not**, because those two fields are read and
-/// bump-allocated by every generated prologue and this one has no reader outside
-/// `praxis-runtime` at all: its writers are `Runtime::context` and
-/// `NativeScope`, its only reader is `RuntimeRoots::from_context`, and none of
-/// the `offset_of!`s in `crates/praxis-codegen-cranelift/src/lower.rs` names it.
-/// The struct's size and every generated-code-read displacement are unchanged,
-/// so the v9 struct-size rule that put `native_roots` in this list in the first
-/// place does not fire either. What a host that hand-built a v18 context and
-/// handed it to this runtime would suffer is exactly what it suffered before —
-/// [`RuntimeContext::placeholder`](crate::RuntimeContext::placeholder) is the
-/// only public constructor, and it writes a null here.
-///
-/// v20 gathers the round's backend changes for v19's reason: they ship in one
-/// build, and a version is a statement about a build. **The numeral is bumped
-/// once, by ADR-116** — the round had four packages with a claim on it, and
-/// four independent bumps in four worktrees is one merge that silently keeps
-/// the last. Every other package appends prose under its own line below and
-/// touches no digit. A line that still carries a status word was never written.
-///
-/// v20 (ADR-116): `RuntimeContext` gains `descriptors`, every built-in
-/// descriptor's address indexed by
-/// [`BuiltinTypeId`](crate::descriptor::BuiltinTypeId), and ADR-102's inline
-/// type proof loads its slot from there instead of comparing against an
-/// `iconst` of the descriptor's address. Appended after `small_chars`, so every
-/// offset above is unchanged — but the struct grows by
-/// `22 × size_of::<*const TypeDescriptor>()`, which is the v9/v13 struct-size
-/// rule, and generated code reads it, which is v15's rule. Both fire. A program
-/// compiled against v20 and run against a v19 runtime would read 176 bytes past
-/// the end of a context nobody sized for a table and compare the header's
-/// descriptor against whatever was there; the proof would fail, take the cold
-/// arm, and `praxis_int_load` would abort on a value of the right type. The
-/// direction that matters more is that **the compiler no longer carries a
-/// descriptor address at all** — it names a slot index — so what a mismatched
-/// pair can now disagree about is which slot `Int` is in, and that is an enum
-/// discriminant `builtins_are_indexed_by_their_id` pins.
-///
-/// v20 (ADR-118, W4b): `praxis_bitset_contains` **changes its return type**,
-/// from `GcRef` to `i64`. Its manifest row moves from `-> Gc` to `-> RawI64`
-/// and MIR carries it as `Inst::BitsetContains` — a `Scalar(Bool)` result and,
-/// because the row is `Effect::Pure`, not a GC safepoint — rather than as an
-/// `Inst::Call` whose answer has to be unboxed again on the next instruction.
-///
-/// This is a **signature** change, which is the strongest form of break in this
-/// list. It is not the v12/v17 "meaning changed, layout did not" class and it
-/// is not v15's "generated code reads a new field": a v19 caller linked against
-/// a v20 runtime takes the `0`/`1` this now answers and dereferences it as a
-/// `GcRef`, and a v20 caller against a v19 runtime takes a pointer and reads it
-/// as a truth value. Both are immediate, and neither is subtle enough to
-/// survive a test — which is the only comfortable thing about it.
-///
-/// v20 (ADR-118, W4b, part 2): generated code now reads **two collection
-/// payloads' field layouts**, which it never did before. `VecPayload`'s element
-/// pointer and length (`payload+8` and `payload+16`, through
-/// [`ReprCVec`](crate::ReprCVec)) and `BitSetPayload`'s words pointer and word
-/// count (`payload+0` and `payload+8`, likewise) are baked into the loads
-/// `praxis_vec_get`, `praxis_vec_len` and `praxis_bitset_contains`'s inline arms
-/// emit. W4a pinned the first pair with `const _` assertions and deliberately
-/// did **not** bump for it, because nothing in generated code read them yet;
-/// that sentence is now false, which is the v12/v17 class of bump exactly.
-/// Repacking either payload, or reordering `ReprCVec`'s three words, is a
-/// generated-code change from here.
-///
-/// `BitSetPayload.words` also changes type — `Vec<u64>` to `ReprCVec<u64>` —
-/// which is the same three words in a pinned order at the same size, so no
-/// descriptor, size class or `owned_bytes` charge moves. That is a `praxis-runtime`
-/// internal and would owe nothing on its own; it is here because the
-/// displacements above are read off it.
-///
-/// The numeral is not touched by either line: ADR-116 owns v20's digit for the
-/// round.
-///
-/// v20 (ADR-119, W10): generated code **claims and initializes a block itself**,
-/// so it now reads *and writes* `PageHeader` and `GcHeader` field layouts, which
-/// it had never done at all.
-///
-/// It reads `cursor`, `last_word`, `allocated` and `live_count` off a page taken
-/// from `Heap.partial[c]`; it writes a whole `GcHeader` — the descriptor
-/// pointer, the recorded `payload_offset` and the owning `heap_id`; it reads and
-/// writes `Heap.live_count` and `Heap.bytes_since_collect`; and it folds a size
-/// class's stride, its `first_block` and its payload displacement as immediates,
-/// so those three are compile-time facts about a class rather than loads.
-///
-/// This is the v12/v17 class and v15's at the same time: the meaning of what
-/// generated code may assume about a page changed, *and* it reads fields it
-/// never read. A v20-compiled program run against a v19 runtime whose
-/// `PageHeader` was packed differently would take bits out of the wrong bitmap
-/// words and lay headers at wrong addresses **inside a live page**. That is
-/// silent and it is a wild write, which is the worst entry in this list and the
-/// reason ADR-119 argues the widened export surface rather than filing it here —
-/// ADR-113 decision 2 called its two offsets "the whole export surface, and its
-/// narrowness is deliberate", and that sentence is now false.
-///
-/// The numeral is not touched: ADR-116 owns v20's digit for the round.
-///
-/// v20 (ADR-120 part 2, W8-S0b): the scalar debug slot. `DebugLocalMeta` gains
-/// `slot_kind: DebugSlotKind`, and with it **a debug value slot's word stops
-/// always being an `Option<GcRef>`**: a temp whose box ADR-120's forwarding
-/// elided has its payload stored raw, and the metadata beside the slot is the
-/// only thing that says so.
-///
-/// This is v12's entry again, one turn further. The struct's *size and offsets*
-/// are irrelevant to generated code — `DebugLocalMeta` is built in Rust,
-/// interned in the JIT generation arena, and `lower.rs` emits no `offset_of`
-/// against it; what a prologue stores is the address of the enclosing
-/// `FunctionDebugMeta`. What is versioned is the **meaning of the word**, as it
-/// was at v12: a v20-compiled program stores an `f64` bit pattern into a slot
-/// that a v19 runtime's `clear_reclaimed` would dereference as a `GcHeader`
-/// after every sweep (ADR-106's weak arm). That mismatch is silent and it is a
-/// wild read, which is exactly the class this changelog exists to make loud.
+/// One numeral per build, not one per change — a version is a statement about a
+/// build, so several packages landing in the same round share a single bump,
+/// owned by one of them, rather than taking four bumps in four worktrees that a
+/// merge would silently reduce to the last.
 pub const RUNTIME_ABI_VERSION: u32 = 20;
 
 /// Assert that the compiler's expected ABI version matches this build's.
@@ -365,16 +103,15 @@ pub fn assert_abi_version() {
 const COMPILER_EXPECTED_ABI_VERSION: u32 = 20;
 
 // ---------------------------------------------------------------------------
-// The runtime symbol table (F4).
+// The runtime symbol table.
 // ---------------------------------------------------------------------------
 
 /// The address of a runtime wrapper, for the JIT to resolve an import to.
 ///
 /// This match is the **only** symbol→address table in the workspace, and it is
 /// exhaustive over [`RuntimeSymbol`]: adding a row to the manifest without
-/// giving it an address here is a compile error, which is the property the old
-/// name-keyed resolver could not have. There is no fallback — the JIT never
-/// reaches `dlsym`, so a symbol the compiler failed to register cannot
+/// giving it an address here is a compile error. There is no fallback — the JIT
+/// never reaches `dlsym`, so a symbol the compiler failed to register cannot
 /// accidentally "work" because it happens to be linked in.
 #[must_use]
 pub fn address(symbol: RuntimeSymbol) -> *const u8 {
@@ -582,7 +319,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
 }
 
 // ---------------------------------------------------------------------------
-// The panic backstop (§9.2, §10.4, D12)
+// The panic backstop (§9.2, §10.4)
 // ---------------------------------------------------------------------------
 
 /// The defined dummy a wrapper returns when it has raised a fault and has no
@@ -643,9 +380,8 @@ impl<T> AbiSentinel for *const T {
 /// The kind is [`FaultKind::Panic`](crate::FaultKind::Panic), with a message
 /// naming the wrapper. It is deliberately not a new `FaultKind::Internal`: a
 /// new kind is a `#[repr(C)]` layout change that costs an ABI bump (ADR-075),
-/// S20 has no other reason to spend one, and `Panic` plus a message that names
-/// the function carries strictly more information for the crash report (§9.4)
-/// than a bare kind would.
+/// and `Panic` plus a message that names the function carries strictly more
+/// information for the crash report (§9.4) than a bare kind would.
 ///
 /// # Safety
 /// `ctx` must be null or point at a live, wired `RuntimeContext`.
@@ -673,11 +409,8 @@ pub(crate) unsafe fn abi_panic_escaped<T: AbiSentinel>(
         // faultable — so for a wrapper the manifest declares non-faulting there
         // is *no* check by construction, and returning `unit_sentinel` would
         // hand a `Unit` into a slot generated code believes holds a Record, a
-        // Tuple or a closure. That is the descriptor/payload confusion this
-        // repair has spent stages closing, and it would be *introduced* by the
-        // backstop meant to prevent worse. The pre-guard outcome for these was
-        // a process abort; it still is, with a message first, which is strictly
-        // more than the abort gave.
+        // Tuple or a closure. Aborting with the message is the only answer that
+        // does not introduce a descriptor/payload confusion.
         eprintln!("{message}");
         std::process::abort();
     }
@@ -694,11 +427,8 @@ pub(crate) unsafe fn abi_panic_escaped<T: AbiSentinel>(
 /// `praxis_mir::verify`'s rule, not a claim restated here** — its
 /// `RedundantFaultCheck` variant rejects a check after an instruction that
 /// cannot fault, so this function's premise is enforced rather than assumed
-/// (MIR-10, ADR-088). Before that rule existed, lowering emitted a check after
-/// *everything*, and this premise was simply false for `Allocates` wrappers
-/// like `praxis_vec_len`. A wrapper the manifest does not name at all (the
-/// shadow-frame and debug entry points) is in the same position and is treated
-/// the same way.
+/// (ADR-088). A wrapper the manifest does not name at all is in the same
+/// position and is treated the same way.
 ///
 /// The converse is *not* claimed here: a declared-faulting wrapper's call sites
 /// are MIR's business. What this rules out is the class where the check is
@@ -707,7 +437,7 @@ fn panic_fault_is_observable(wrapper: &str) -> bool {
     praxis_stdlib::abi::RuntimeSymbol::from_name(wrapper).is_some_and(|s| s.faults())
 }
 
-/// Wrap an `extern "C"` wrapper's body so a panic becomes a fault (D12).
+/// Wrap an `extern "C"` wrapper's body so a panic becomes a fault.
 ///
 /// Every `#[no_mangle] extern "C" fn` in this crate has its body inside one of
 /// these, and `every_no_mangle_wrapper_is_behind_the_panic_guard` is the test
@@ -736,9 +466,8 @@ pub(crate) use abi_guard;
 /// Raise `fault` on `ctx`'s fault slot (§10.4). Does nothing if the context's
 /// fault pointer is null (a misuse, but never panics across the ABI).
 ///
-/// Takes a [`RaisedFault`], not a `FaultKind`: two wrappers used to pass
-/// `FaultKind::None` for want of a kind that described them, leaving generated
-/// code branching to its fault path while the host reported "no fault" (RT-17).
+/// Takes a [`RaisedFault`], not a `FaultKind`: every raise names a kind that
+/// describes it, and "no fault" is not spellable here.
 unsafe fn set_fault(ctx: *mut RuntimeContext, fault: RaisedFault) {
     if let Some(slot) = unsafe { (*ctx).pending_fault.as_mut() } {
         slot.set(fault);
@@ -762,17 +491,6 @@ unsafe fn heap<'a>(ctx: *mut RuntimeContext) -> &'a Heap {
     unsafe { &*(*ctx).heap }
 }
 
-/// Trigger a collection on allocation pressure, rooting from the context's
-/// shadow stack (§12.4, ADR-019, ADR-101). Called by every allocating
-/// `praxis_*` wrapper. Safe to call with a null/unwired context (no-op).
-///
-/// The roots are every arm of [`RuntimeRoots`](crate::roots::RuntimeRoots) —
-/// the shadow stack, the ambient input buffer, a parse failure's partial value,
-/// a runtime-owned crash snapshot, and the native root store. This used to
-/// read `ctx.roots` alone **and return early when it was null**, which meant
-/// nothing was collected at all during host-driven allocation or anywhere in
-/// the parser interpreter, and that the other four owners were invisible to
-/// automatic GC even when a frame was pushed (P0-06).
 #[inline]
 /// Charge the pacer for a collection's buffer growing (ADR-121).
 ///
@@ -785,20 +503,17 @@ unsafe fn heap<'a>(ctx: *mut RuntimeContext) -> &'a Heap {
 /// # Why every growing wrapper has to call this
 ///
 /// `Heap::alloc_raw` charges `stride + owned_bytes_of(payload)` once, at
-/// construction, and left later growth uncharged on a premise its own comment
-/// states: "its elements are themselves paced allocations, so the residual
-/// under-count is the spine, not the contents." **ADR-121 falsified that.**
-/// When every scalar the program computed was a heap object, an
-/// allocation-light program did not exist — the arithmetic feeding a `push`
-/// paced the collector even when the `push` did not. Promotion deletes exactly
-/// those allocations, and `bfs` fell from 41 collections to 6 with a *smaller*
-/// GC page heap and a peak resident set of 224 MiB against 61.
+/// construction. Leaving later growth uncharged relies on the elements
+/// themselves being paced allocations, so that the residual under-count is only
+/// the spine — and scalar promotion deletes exactly those element allocations,
+/// so an allocation-light program that grows a large buffer paces nothing.
+/// Uncharged, `bfs` runs 6 collections instead of 41 and reaches a peak
+/// resident set of 224 MiB against 61 (ADR-121).
 ///
-/// So the rule is now: **a wrapper that can grow a buffer charges the growth.**
-/// `growing_wrappers_charge_the_pacer` enumerates the ABI and fails if a new
-/// one appears without a charge, because the failure mode is silent — a program
-/// that simply stops collecting, which reads as a leak nobody connects to the
-/// wrapper that was added.
+/// So the rule is: **a wrapper that can grow a buffer charges the growth.** The
+/// `growth_charging_tests` module below has one case per such wrapper, because
+/// the failure mode is silent — a program that simply stops collecting, which
+/// reads as a leak nobody connects to the wrapper that was added.
 fn charge_growth(ctx: *mut RuntimeContext, before: usize, after: usize) {
     let Some(grown) = after.checked_sub(before).filter(|g| *g != 0) else {
         return;
@@ -811,6 +526,18 @@ fn charge_growth(ctx: *mut RuntimeContext, before: usize, after: usize) {
     unsafe { heap(ctx).charge_owned_growth(grown) };
 }
 
+/// Trigger a collection on allocation pressure, rooting from the context
+/// (§12.4, ADR-019, ADR-101). Called by every allocating `praxis_*` wrapper.
+/// Safe to call with a null/unwired context (no-op).
+///
+/// The roots are every **strong** arm of
+/// [`RuntimeRoots`](crate::roots::RuntimeRoots) — the shadow stack, the ambient
+/// input buffer, a parse failure's partial value, a runtime-owned crash
+/// snapshot, and the native root store. All five, not the shadow stack alone:
+/// host-driven allocation and the parser interpreter push no shadow frame, and
+/// the other four owners are reachable regardless. The debug arm is
+/// deliberately *weak* (ADR-106): it names storage without keeping it alive, so
+/// it is cleared after the sweep rather than traced here.
 unsafe fn maybe_collect(ctx: *mut RuntimeContext) {
     if ctx.is_null() {
         return;
@@ -820,15 +547,15 @@ unsafe fn maybe_collect(ctx: *mut RuntimeContext) {
     unsafe { heap(ctx).maybe_collect(&roots) };
 }
 
-/// Pace the collector and mint the token one allocation needs (P0-08b).
+/// Pace the collector and mint the token one allocation needs.
 ///
 /// Every `praxis_*` wrapper reaches the heap through [`gc_alloc`] or
 /// [`gc_alloc_owned`], which call this — and even a wrapper that reached
 /// `Heap::alloc` directly would have to come through here, because the token
-/// has no other producer. That is the whole point: fourteen wrappers used to
-/// gc-allocate without pacing, so a program whose pressure came from `Text`,
-/// `.len()` or checked arithmetic could run arbitrarily long without the
-/// collector ever being offered a turn.
+/// has no other producer. That is the whole point: an allocation that skipped
+/// the pacer would let a program whose pressure comes from `Text`, `.len()` or
+/// checked arithmetic run arbitrarily long without the collector ever being
+/// offered a turn.
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`. Every allocating
@@ -847,16 +574,10 @@ unsafe fn safepoint<'a>(ctx: *mut RuntimeContext) -> (&'a Heap, Safepoint<'a>) {
 ///
 /// The descriptor arrives as a [`Payload<T>`] — `scalars::INT_PAYLOAD`, not
 /// `&scalars::INT` — so `value`'s Rust type is checked against it here, at the
-/// call. This signature *is* REP-02's fix.
-///
-/// While the descriptor was a bare reference and `T` was free,
-/// `gc_alloc(ctx, &scalars::INT, 0)` compiled — a Rust integer literal defaults
-/// to `i32` — and aborted the process from inside `extern "C"` with "payload
-/// size mismatch for descriptor Int", a non-unwinding panic across the ABI that
-/// §10.4 forbids. Two things changed: a value of the wrong type is now an
-/// `E0308` at the call, and an *untyped* literal infers as the payload type
-/// instead of defaulting, so REP-02's own reproduction is correct code rather
-/// than a rejected one.
+/// call: a value of the wrong type is an `E0308`, and an *untyped* literal
+/// infers as the payload type instead of defaulting to `i32`. A bare descriptor
+/// reference with `T` free would let a width mismatch reach the heap and abort
+/// the process from inside `extern "C"`, which §10.4 forbids.
 ///
 /// # Safety
 /// `ctx` must be live and wired.
@@ -871,8 +592,8 @@ unsafe fn gc_alloc<T: Copy>(ctx: *mut RuntimeContext, payload: Payload<T>, value
 ///
 /// [`gc_alloc`]'s counterpart for the payloads no [`Payload<T>`] can describe.
 /// The type is named **once**, as `P`: [`Heap::alloc_payload`] derives the size,
-/// the alignment and the write from it, where every one of these wrappers used
-/// to restate all three and keep them in agreement by hand.
+/// the alignment and the write from it, so no wrapper restates all three and
+/// keeps them in agreement by hand.
 ///
 /// The payload arrives as a producer rather than a value, and that is
 /// load-bearing: `init` runs *after* [`safepoint`] has given the collector its
@@ -900,11 +621,11 @@ unsafe fn gc_alloc_owned<P>(
 /// The immortal `Bool` for `value`, off the context's cached singletons.
 ///
 /// Never an allocation: there are exactly two `Bool` values and the runtime
-/// minted both at startup. Every wrapper that answers a predicate used to call
-/// `alloc_immortal` instead, consuming unregistered arena storage — permanently
-/// — once per comparison, `contains`, `is_empty` or emptiness check a program
-/// evaluated (RT-03). It is also what makes those rows honestly `Effect::Pure`:
-/// nothing here can collect, so the call site is not a safepoint.
+/// minted both at startup, so every comparison, `contains` and `is_empty` a
+/// program evaluates answers with a singleton rather than consuming arena
+/// storage permanently. It is also what makes those manifest rows honestly
+/// `Effect::Pure`: nothing here can collect, so the call site is not a
+/// safepoint.
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`.
@@ -972,7 +693,7 @@ unsafe fn int_ref(ctx: *mut RuntimeContext, value: i64) -> GcRef {
 /// `praxis_alloc_char` and `praxis_int_to_char`; [`praxis_text_get`], which is
 /// both `t[i]` and every step of `for c in t`; and [`default_cell`], which is a
 /// `Grid[Char]`'s fill. `praxis_text_get` is the one that matters for real code:
-/// an AoC-shaped program that walks a line of text used to box a fresh 32-byte
+/// an AoC-shaped program that walks a line of text would otherwise box a fresh
 /// object per character read, and every character of such a line is ASCII.
 ///
 /// # It paces even when it does not allocate
@@ -1022,13 +743,9 @@ unsafe fn char_ref(ctx: *mut RuntimeContext, code: u32) -> GcRef {
 /// shape: there is nothing interned to answer from — every `Text` is a distinct
 /// object — so this always allocates, and always paces.
 ///
-/// Eight wrappers restated this allocation, and three of them handed
-/// `TextPayload::owned` a `.clone()` of a `String` they were about to drop: a
-/// second heap copy of the whole text on every `to_text` and every `concat`,
-/// which existed only because the block had been pasted rather than called.
-/// `impl Into<Box<str>>` is what lets all eight share one: a `String` from a
-/// renderer, a `Box<str>` the caller already built ([`praxis_alloc_text`]), a
-/// `&str`.
+/// `impl Into<Box<str>>` is what lets every text-producing wrapper share this
+/// one allocation without a defensive `.clone()`: a `String` from a renderer, a
+/// `Box<str>` the caller already built ([`praxis_alloc_text`]), a `&str`.
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`.
@@ -1047,17 +764,12 @@ unsafe fn text_ref(ctx: *mut RuntimeContext, s: impl Into<Box<str>>) -> GcRef {
 ///
 /// This is the reader to reach for whenever a wrapper receives a `GcRef` it did
 /// not itself allocate — a value handed back by a program's closure, most of
-/// all. Two mistakes are impossible through it and were both possible without
-/// it: reading a value of the wrong *type* (the identity check answers `None`,
-/// and the caller decides whether that is a `TypeMismatch` fault), and reading
-/// the right type at the wrong *width* (the width is `size_of::<T>()`, which
-/// [`Payload::new`] proved is the descriptor's width when the handle was
-/// declared).
-///
-/// REP-37 is why it exists: `ClosureOracle::is_goal` read a `Bool` — a
-/// **one**-byte payload — with `int_payload`, an eight-byte read, so every
-/// graph goal predicate consumed seven bytes of arena padding past the object
-/// and answered whatever the allocator had left there.
+/// all. Two mistakes are impossible through it: reading a value of the wrong
+/// *type* (the identity check answers `None`, and the caller decides whether
+/// that is a `TypeMismatch` fault), and reading the right type at the wrong
+/// *width* (the width is `size_of::<T>()`, which [`Payload::new`] proved is the
+/// descriptor's width when the handle was declared). Reading a one-byte `Bool`
+/// payload with an eight-byte `int_payload` is the class it rules out.
 ///
 /// # Safety
 /// `r` must be a valid `GcRef` into a live heap.
@@ -1074,37 +786,25 @@ unsafe fn read_scalar<T: Copy>(r: GcRef, handle: crate::descriptor::Payload<T>) 
 /// Read the `i64` payload of an `Int` `GcRef`. Used by every arithmetic wrapper.
 ///
 /// Prefer [`read_scalar`] for any value whose type is not already established:
-/// this reads eight bytes, and the width check below is all that stands between
-/// it and a narrower payload (REP-37).
+/// this reads eight bytes, and the descriptor check is all that stands between
+/// it and a narrower payload.
 ///
-/// # The width check is a branch, not a `debug_assert` (REP-56)
+/// # The width check is a branch, not a `debug_assert`
 ///
-/// It **was** a `debug_assert_eq!`, and a `debug_assert` is not a bound: it is
-/// compiled out of a release build, and what was left there was
-/// `unsafe { *r.payload::<i64>() }` against a descriptor **zero bytes wide**.
-/// REP-56 reaches this from a program that passes `praxis check` — a `choice`
-/// payload record's field read lowers as a `Unit` — so a release `praxis run`
-/// answered a different number on every run (an ASLR-varying pointer, `rc=0`,
-/// no diagnostic) off an 8-byte out-of-bounds heap read, while the same source
-/// in a debug build reported the assertion and aborted. Two profiles, two
-/// answers, and the wrong one was the one users get. `just ci` never builds
-/// release, so nothing in the gate could see it.
-///
-/// So the check is now an ordinary branch and it holds in every profile: the
-/// read cannot happen. What happens instead is ADR-080's defined panic path —
+/// A `debug_assert` is not a bound — it compiles out of a release build, leaving
+/// an eight-byte read against a descriptor that may be narrower or zero bytes
+/// wide, so the two profiles would answer differently and the wrong one is the
+/// one users get. As an ordinary branch it holds in every profile: the read
+/// cannot happen. What happens instead is ADR-080's defined panic path —
 /// `abi_guard` catches it, raises `RaisedFault::PANIC` with a message naming
 /// the wrapper, and either faults into the crash debugger (a wrapper the
 /// manifest declares faultable) or prints that message and aborts (one it does
-/// not, which is `praxis_int_load`'s case). A defined abort is not a *good*
-/// answer to REP-56 — the good answer is that the payload record's type reaches
-/// the field read, and since ADR-091 it does — but it is the right *backstop*,
-/// and the release build now behaves like the debug build instead of reading
-/// past the object. The guard stays because it is a memory-safety check on a raw
-/// read, not a stand-in for a type system.
+/// not, which is `praxis_int_load`'s case). The guard is a memory-safety check
+/// on a raw read, not a stand-in for a type system.
 ///
-/// Its own call sites are unchanged: this stays `-> i64` rather than becoming
-/// fallible, because sixty-odd wrappers read through it and a `ctx`-threading
-/// signature change is a larger edit than the one memory-safety needs.
+/// This stays `-> i64` rather than becoming fallible: sixty-odd wrappers read
+/// through it, and a `ctx`-threading signature change is a larger edit than the
+/// one memory safety needs.
 #[inline]
 unsafe fn int_payload(r: GcRef) -> i64 {
     // SAFETY: `read_scalar` proves `r`'s descriptor *is* `INT` before reading,
@@ -1117,22 +817,17 @@ unsafe fn int_payload(r: GcRef) -> i64 {
 }
 
 /// The refusal every scalar reader shares, out of line so the check costs a
-/// never-taken branch on the hot path (REP-56).
+/// never-taken branch on the hot path.
 ///
-/// `#[cold]` and `#[inline(never)]` are what let the check be unconditional —
-/// and it must be unconditional, because the first repair of this made it a
-/// `debug_assert`. That compiles out, so a `praxis check`-clean program did an
-/// eight-byte out-of-bounds heap read and printed a different random number on
-/// every run, while a debug build reported the assertion and aborted. Two
-/// profiles, two answers, and the wrong one was the one users get. `just ci`
-/// never builds release, so nothing in the gate could see it.
+/// `#[cold]` and `#[inline(never)]` are what let the check be unconditional, and
+/// it must be unconditional: a `debug_assert` compiles out, so a release build
+/// would do an out-of-bounds heap read where a debug build aborted.
 ///
 /// A panic here is ADR-080's defined path: `abi_guard!` catches it, raises
 /// `RaisedFault::PANIC` naming the wrapper, and either faults into the crash
-/// debugger or prints the message and aborts. A defined abort is not a *good*
-/// answer to REP-56 — the good answer is that the payload record's type reaches
-/// the field read, and since ADR-091 it does — but it is the right backstop: a
-/// raw scalar read must prove its own width whatever the type system believes.
+/// debugger or prints the message and aborts. That is the backstop, not the
+/// primary defence — a raw scalar read must prove its own width whatever the
+/// type system believes.
 #[cold]
 #[inline(never)]
 fn scalar_type_mismatch(what: &'static str, want: &'static str, found: &'static str) -> ! {
@@ -1142,18 +837,14 @@ fn scalar_type_mismatch(what: &'static str, want: &'static str, found: &'static 
 /// [`praxis_alloc_text`]'s refusal when its buffer is not UTF-8 — a violated
 /// precondition, not a runtime condition (ADR-111).
 ///
-/// **Why this is a panic and not a fault.** `praxis_alloc_text`'s `# Safety`
-/// block has always said the bytes must be valid UTF-8, and the body used to
-/// treat a violation as `FaultKind::InvalidText` plus a lossy conversion — a
-/// contract and an implementation that contradicted each other, with the
-/// implementation's half costing a `CheckFault` after all 41 text literals in
-/// the corpus for a fault no generated call site could raise. One of the two had
-/// to go. The precondition is the one that is actually true: the compiler's
-/// bytes are a Rust `&str` unbroken from `Lit::Text(String)` through
-/// `AllocKind::Text { value: String }` to `Generation::alloc_str`, and the one
-/// caller in this crate that holds raw *host* bytes — [`praxis_get_input`] —
-/// validates them itself and raises `InvalidText` there, where the `read` can
-/// observe it.
+/// **Why this is a panic and not a fault.** The precondition is the one that is
+/// actually true: the compiler's bytes are a Rust `&str` unbroken from
+/// `Lit::Text(String)` through `AllocKind::Text { value: String }` to
+/// `Generation::alloc_str`, and the one caller in this crate that holds raw
+/// *host* bytes — [`praxis_get_input`] — validates them itself and raises
+/// `InvalidText` there, where the `read` can observe it. Spelling it as a fault
+/// instead would cost a `CheckFault` after every text literal for a fault no
+/// generated call site can raise.
 ///
 /// **Why the `from_utf8` call above stays, in every profile.** This is
 /// [`scalar_type_mismatch`]'s argument verbatim and it is why that function is
@@ -1161,18 +852,17 @@ fn scalar_type_mismatch(what: &'static str, want: &'static str, found: &'static 
 /// release build. What would be left in release is a `Box<str>` built from bytes
 /// that are not UTF-8, which [`crate::text::text_str`] later hands out as a
 /// `&str` — so the two profiles would answer differently and the wrong one is
-/// the one users get (REP-56's shape exactly). `from_utf8_unchecked` is the same
-/// hole with the check deleted rather than compiled out. The unconditional
-/// branch costs a never-taken jump to this cold callee, which is the price
-/// ADR-102 §1 already established for the inline scalar loads.
+/// the one users get. `from_utf8_unchecked` is the same hole with the check
+/// deleted rather than compiled out. The unconditional branch costs a
+/// never-taken jump to this cold callee, which is the price ADR-102 §1 already
+/// established for the inline scalar loads.
 ///
-/// **It must not reach `set_fault`, and that is enforced.** REP-45's
+/// **It must not reach `set_fault`, and that is enforced.**
 /// `a_wrapper_that_can_raise_a_fault_declares_that_it_faults` computes a textual
 /// fixed point over this file: a body that can reach `set_fault`, directly or
 /// through a helper defined here, must belong to a symbol whose manifest row
-/// says it faults. `AllocText`'s row is now `Effect::Allocates`, so a refusal
-/// spelled as a fault would fail that test — which is the sweep proving the
-/// fault relocated to `praxis_get_input` rather than merely disappearing.
+/// says it faults. `AllocText`'s row is `Effect::Allocates`, so a refusal
+/// spelled as a fault would fail that test.
 ///
 /// The end-to-end path on a violation is ADR-080's: panic → `abi_guard!`
 /// catches → `panic_fault_is_observable("praxis_alloc_text")` reads the
@@ -1189,11 +879,9 @@ fn text_bytes_are_not_utf8(len: usize) -> ! {
     );
 }
 
-/// The Unit sentinel GcRef from the context's input source slot. (Unit is an
-/// immortal; in M4 we reuse the input_source field which the runtime sets to
-/// The Unit GcRef returned on fault paths as the "defined dummy" (§10.4). Reads
-/// the cached immortal `unit_ref` from the context — stable for the program
-/// lifetime regardless of whether `input_source` holds the read-in buffer.
+/// The Unit `GcRef` returned on fault paths as the "defined dummy" (§10.4).
+/// Reads the cached immortal `unit_ref` from the context, which is stable for
+/// the program's lifetime.
 #[inline]
 unsafe fn unit_sentinel(ctx: *mut RuntimeContext) -> GcRef {
     unsafe { (*ctx).unit_ref }
@@ -1204,11 +892,10 @@ unsafe fn unit_sentinel(ctx: *mut RuntimeContext) -> GcRef {
 ///
 /// **The one place a source index becomes a `usize`.** The `< 0` test has to
 /// run before the cast: a negative `i64` casts to a value near `usize::MAX` and
-/// would sail straight past a bare length comparison. That is RT-07's defect on
-/// the indexing side — the construction side guards the same hazard with a
-/// named [`GridExtent`](crate::collections::GridExtent) — and it was previously
-/// restated by hand at every accessor, so a single copy that dropped the guard
-/// would have been invisible.
+/// would sail straight past a bare length comparison. Every accessor shares this
+/// one copy, so no single site can drop the guard invisibly. The construction
+/// side guards the same hazard with a named
+/// [`GridExtent`](crate::collections::GridExtent).
 ///
 /// `Vec` and `Deque` indexing is one language rule applied to two containers,
 /// so they share this rather than each spelling it out.
@@ -1311,9 +998,7 @@ pub unsafe extern "C" fn praxis_alloc_int(ctx: *mut RuntimeContext, value: i64) 
 pub unsafe extern "C" fn praxis_alloc_bool(ctx: *mut RuntimeContext, value: i64) -> GcRef {
     abi_guard!("praxis_alloc_bool", ctx, {
         // There are two `Bool` values, and the runtime allocated both at startup.
-        // This used to mint a *fresh* immortal per call — unregistered arena storage
-        // no collection can ever reclaim, one per comparison a program evaluates
-        // (RT-03). `value != 0` is true; `0` is false.
+        // `value != 0` is true; `0` is false.
         // SAFETY: caller upholds ctx validity.
         let c = unsafe { &*ctx };
         if value != 0 {
@@ -1331,15 +1016,13 @@ pub unsafe extern "C" fn praxis_alloc_bool(ctx: *mut RuntimeContext, value: i64)
 #[no_mangle]
 pub unsafe extern "C" fn praxis_alloc_unit(ctx: *mut RuntimeContext) -> GcRef {
     abi_guard!("praxis_alloc_unit", ctx, {
-        // The one `Unit` value, cached on the context since M6 for the fault path.
-        // As for `praxis_alloc_bool`, allocating a fresh immortal per call leaked
-        // arena storage permanently (RT-03).
+        // The one `Unit` value, cached on the context for the fault path.
         // SAFETY: caller upholds ctx validity.
         unsafe { (*ctx).unit_ref }
     })
 }
 
-/// Allocate a boxed `Char` from a Unicode scalar value (§4.3, M6). The `value`
+/// Allocate a boxed `Char` from a Unicode scalar value (§4.3). The `value`
 /// is the `u32` code point carried as `i64` (the uniform scalar ABI width). If
 /// the code point is not a valid scalar, the fault is set and the Unit sentinel
 /// is returned (no panic crosses the ABI).
@@ -1361,11 +1044,11 @@ pub unsafe extern "C" fn praxis_alloc_char(ctx: *mut RuntimeContext, value: i64)
 /// and `praxis_int_to_char` (`Int.to_char()`, ADR-086) — and a rule stated at both
 /// goes stale at one.
 ///
-/// **Range-check before narrowing.** `value as u32` truncates, so `0x1_0000_0041`
-/// became `0x41` and a program that computed a nonsense code point silently got
-/// `'A'` (RT-18). The scalar ABI is 64 bits wide; a code point is not, and the
-/// conversion has to say so rather than wrap. The surrogate range is rejected for
-/// the same reason: `char::from_u32` is what decides, not a width.
+/// **Range-check before narrowing.** `value as u32` truncates, so
+/// `0x1_0000_0041` would silently become `'A'`. The scalar ABI is 64 bits wide;
+/// a code point is not, and the conversion has to say so rather than wrap. The
+/// surrogate range is rejected for the same reason: `char::from_u32` is what
+/// decides, not a width.
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`.
@@ -1413,12 +1096,11 @@ pub unsafe extern "C" fn praxis_alloc_text(
             // SAFETY: caller guarantees `bytes..bytes+len` is a valid, UTF-8 buffer.
             unsafe { std::slice::from_raw_parts(bytes, len) }
         };
-        // The check is unconditional and stays so in every profile: it is the
-        // backstop on a raw read, the same standing `read_scalar` has, and its
-        // argument is written out at `text_bytes_are_not_utf8`. What a violation
-        // *does* is the part that changed — it refuses instead of recovering
-        // lossily behind a fault nobody at a generated call site could observe
-        // (ADR-111, REP-67).
+        // The check is unconditional in every profile: it is the backstop on a
+        // raw read, the same standing `read_scalar` has, and its argument is
+        // written out at `text_bytes_are_not_utf8`. A violation refuses rather
+        // than recovering lossily behind a fault nobody at a generated call site
+        // could observe (ADR-111).
         let owned: Box<str> = match std::str::from_utf8(slice) {
             Ok(s) => s.into(),
             Err(_) => text_bytes_are_not_utf8(len),
@@ -1463,7 +1145,7 @@ pub unsafe extern "C" fn praxis_bool_load(_ctx: *mut RuntimeContext, r: GcRef) -
     })
 }
 
-/// Read a `Char` payload as its `u32` code point widened to `i64` (§4.3, M6).
+/// Read a `Char` payload as its `u32` code point widened to `i64` (§4.3).
 ///
 /// # Safety
 /// `r` must be a valid `Char` `GcRef`.
@@ -1503,15 +1185,10 @@ pub unsafe extern "C" fn praxis_alloc_float(ctx: *mut RuntimeContext, value: i64
 #[no_mangle]
 pub unsafe extern "C" fn praxis_float_load(_ctx: *mut RuntimeContext, r: GcRef) -> i64 {
     abi_guard!("praxis_float_load", _ctx, {
-        // Through `float_payload`, which goes through `read_scalar` — this was
-        // the last scalar reader in the file that dereferenced the payload on
-        // the caller's word alone. It slipped past
-        // `every_scalar_payload_read_goes_through_the_bounded_reader` on a
-        // spelling: that gate forbids the literal `*r.payload::<f64>()`, and
-        // this bound the pointer to a `var` first. REP-56's lesson is the read
-        // must prove its own width, not that one phrasing of it must.
+        // Through `float_payload`, which goes through `read_scalar`: the read
+        // proves its own width rather than taking the caller's word for it.
         //
-        // It matters more since ADR-102: generated code now reads a `Float`
+        // It matters more since ADR-102: generated code reads a `Float`
         // payload inline behind a descriptor check, and this wrapper is the
         // cold path that check branches to. If it read unchecked, the two
         // would disagree about what a wrong descriptor means — the inline
@@ -1559,7 +1236,7 @@ pub unsafe extern "C" fn praxis_int_to_float(ctx: *mut RuntimeContext, r: GcRef)
 ///
 /// This reads through [`read_scalar`] with the `Char` handle rather than
 /// `int_payload`, because a `Char` payload is **four** bytes and an `i64` read
-/// would take eight of them (REP-37).
+/// would take eight of them.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Char` `GcRef`.
@@ -1831,8 +1508,7 @@ pub unsafe extern "C" fn praxis_int_to_text(ctx: *mut RuntimeContext, r: GcRef) 
 ///
 /// Reads through [`read_scalar`] with the `Char` handle rather than
 /// `int_payload`, because a `Char` payload is **four** bytes and an `i64` read
-/// would take eight of them (REP-37) — the same care [`praxis_char_to_int`]
-/// takes.
+/// would take eight of them — the same care [`praxis_char_to_int`] takes.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Char` `GcRef`.
@@ -1982,7 +1658,7 @@ pub unsafe extern "C" fn praxis_int_neg(ctx: *mut RuntimeContext, r: GcRef) -> G
 }
 
 // ---------------------------------------------------------------------------
-// §4.12's explicit overflow alternatives (REP-46): three modes —
+// §4.12's explicit overflow alternatives: three modes —
 // `wrapping_`, `saturating_`, `checked_` — over `add`, `sub` and `mul`.
 //
 // §4.12 states the family and its two closures (no `_div`/`_rem`, no
@@ -2031,10 +1707,8 @@ pub unsafe extern "C" fn praxis_int_saturating_add(
 /// `a.checked_add(b)` (§4.12): `Option[Int]` — `None` where the checked `+`
 /// would fault.
 ///
-/// It answers a real `Option` (S18/ADR-076): the absence is the *answer* here,
-/// not an error channel, which is exactly §4.7's distinction. Before S18 this
-/// row could not have been written at all, which is why §4.12 documented three
-/// alternatives and the catalog had none.
+/// It answers a real `Option` (ADR-076): the absence is the *answer* here, not
+/// an error channel, which is exactly §4.7's distinction.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
@@ -2119,8 +1793,7 @@ pub unsafe extern "C" fn praxis_int_checked_sub(
 ///
 /// This is the one of the nine a program could not write for itself: with every
 /// arithmetic operator checked and no bitwise operators in the language, there
-/// is no in-language spelling of modular multiplication. That is the measurement
-/// that decided REP-46 (see §4.12).
+/// is no in-language spelling of modular multiplication (§4.12).
 ///
 /// # Safety
 /// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
@@ -2271,11 +1944,10 @@ pub unsafe extern "C" fn praxis_int_max(
 ///
 /// **Faults when `low > high`.** The range is empty, so there is no value to
 /// return and no answer that is not a guess — clamping to an empty range is a
-/// mistake in the program, not in the data, and TY-28 already settled that the
-/// repair reports those rather than inventing a number. (Rust's `Ord::clamp`
-/// panics on the same input; a panic across `extern "C"` is what §10.4 forbids,
-/// so it is a fault.) The kind is `EmptyRange` — the kind ADR-058 recorded as
-/// owed to whichever stage next spent an ABI bump, which S18 does.
+/// mistake in the program, not in the data, and a mistake is reported rather
+/// than answered with an invented number. (Rust's `Ord::clamp` panics on the
+/// same input; a panic across `extern "C"` is what §10.4 forbids, so it is a
+/// fault.) The kind is `EmptyRange` (ADR-058).
 ///
 /// # Safety
 /// `ctx` must be live and wired; all three operands must be valid `Int`
@@ -2417,11 +2089,11 @@ int_cmp!(praxis_int_ge, >=);
 
 /// Return 1 if a fault is pending on `ctx`, else 0 (§10.4).
 ///
-/// **Generated code no longer calls this.** Since ADR-102 an `Inst::CheckFault`
-/// is a load of `ctx.pending_fault`, a load of the kind at
-/// [`Fault::KIND_OFFSET`](crate::Fault::KIND_OFFSET) and a `brif` — the same
-/// question, without the call, the `catch_unwind` region and the `Result`
-/// discriminant, on a path that used to run once per faultable instruction.
+/// **Generated code does not call this.** An `Inst::CheckFault` is a load of
+/// `ctx.pending_fault`, a load of the kind at
+/// [`Fault::KIND_OFFSET`](crate::Fault::KIND_OFFSET) and a `brif` (ADR-102) —
+/// the same question, without the call, the `catch_unwind` region and the
+/// `Result` discriminant, on a path that runs once per faultable instruction.
 ///
 /// The wrapper stays: it is the named ABI entry point for a host asking the
 /// question from Rust (the JIT test harness does), it keeps its manifest row and
@@ -2447,10 +2119,10 @@ pub unsafe extern "C" fn praxis_check_fault(ctx: *mut RuntimeContext) -> i64 {
 }
 
 /// Raise a [`FaultKind::StackOverflow`] fault on `ctx` (§9.2, §17.4). Called by
-/// the generated prologue guard when `recursion_depth` exceeds
-/// [`MAX_RECURSION_DEPTH`], so the host survives deep recursion instead of
-/// overflowing the native stack. The prologue then unwinds to its fault
-/// epilogue (pop frame + return Unit) — same path as any other fault.
+/// the generated prologue guard when `ctx.stack_left` is less than this frame's
+/// [`frame_cost`](crate::frame_cost), so the host survives deep recursion
+/// instead of overflowing the native stack. The prologue then unwinds to its
+/// fault epilogue (pop frame + return Unit) — same path as any other fault.
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`.
@@ -2465,12 +2137,11 @@ pub unsafe extern "C" fn praxis_raise_stack_overflow(ctx: *mut RuntimeContext) {
 ///
 /// `reduce`, `min_by` and `max_by` have no answer for an empty sequence: they
 /// seed their accumulator from the first element, and there is no first
-/// element. The lowering used to hand back the accumulator anyway — a `Gc` slot
-/// no instruction had ever written, so the caller received whatever the
-/// register held, materialized as a `GcRef` that is `NonNull` by type and
-/// arbitrary in fact (MIR-09). This is the defined failure instead; a fault
-/// is what the other empty-collection accessors (`Deque.pop_front`, heap
-/// `pop`/`peek`) already raise for the same reason.
+/// element. Handing back an unwritten accumulator slot would materialize
+/// whatever the register held as a `GcRef` that is `NonNull` by type and
+/// arbitrary in fact; this is the defined failure instead, and a fault is what
+/// the other empty-collection accessors (`Deque.pop_front`, heap `pop`/`peek`)
+/// already raise for the same reason.
 ///
 /// Unconditional, unlike the two arithmetic raise wrappers: the emptiness test
 /// is a branch generated code has to make anyway (the seen-flag gates the whole
@@ -2496,18 +2167,16 @@ pub unsafe extern "C" fn praxis_raise_empty_collection(ctx: *mut RuntimeContext)
 /// how it reports one. It allocates nothing, so an arithmetic site is not a GC
 /// safepoint and spills no roots.
 ///
-/// **The call site branches; this is the cold path.** It used to be called
-/// unconditionally, and this doc used to say that "taking the condition rather
-/// than branching around the call keeps arithmetic to a single basic block".
-/// That was true and it was the wrong trade: a branch does not clobber
-/// registers and a call does, so the unconditional call forced a spill and
-/// reload of every live value around an arithmetic op that never faults.
-/// ADR-102 made it a `brif` to a cold block; `raise_on_cold_path` in the
-/// backend carries the full argument.
+/// **The call site branches; this is the cold path.** Calling unconditionally
+/// and letting `condition` decide would keep arithmetic to a single basic
+/// block, but a branch does not clobber registers and a call does, so it would
+/// force a spill and reload of every live value around an arithmetic op that
+/// never faults. The site is a `brif` to a cold block (ADR-102);
+/// `raise_on_cold_path` in the backend carries the full argument.
 ///
-/// The signature is unchanged, and the cold block passes a constant `1` — which
-/// is honest, since it is reached only when the predicate held, and keeps the
-/// test below a true statement rather than dead code.
+/// The cold block passes a constant `1` — honest, since it is reached only when
+/// the predicate held, and it keeps the test below a true statement rather than
+/// dead code.
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`.
@@ -2541,8 +2210,8 @@ pub unsafe extern "C" fn praxis_raise_div_by_zero_if(ctx: *mut RuntimeContext, c
 // `vec_payload`, `map_payload_mut`, … — and the name is the descriptor
 // assertion the wrapper is making, which is why the nine kinds keep nine
 // (shared, mut) pairs rather than calling `payload::<P>()` inline. The two
-// casts underneath were written out nine times over; they live here once, and
-// each named accessor is the one line that spells its payload type.
+// casts underneath live here once, and each named accessor is the one line
+// that spells its payload type.
 // ---------------------------------------------------------------------------
 
 /// Read a `P` payload out of a `GcRef` as a shared ref.
@@ -2574,14 +2243,12 @@ unsafe fn payload_mut<'s, P>(r: Rooted<'s>) -> &'s mut P {
 }
 
 // ---------------------------------------------------------------------------
-// Vec[T] collection methods (§11.1, §11.2, §11.5, M5).
+// Vec[T] collection methods (§11.1, §11.2, §11.5).
 //
-// `VecPayload` stores a `Box<[GcRef]>` (immutable length). `push` therefore
-// *reallocates*: it copies the existing elements into a grown `Vec`, appends
-// the new value, and returns a fresh `GcRef` to a new `VecPayload`. The old
-// vec is left to the collector. Per §11.5 reallocation safety, we never retain
-// an interior pointer into the Rust vector across a capacity-mutating op; the
-// new payload is built in full before the box is sealed.
+// `VecPayload` stores a growable [`ReprCVec<GcRef>`](crate::ReprCVec), so
+// `push` mutates the existing payload in place and the receiver's `GcRef` stays
+// valid across it. Per §11.5 reallocation safety, no interior pointer into that
+// buffer is retained across a capacity-mutating op.
 // ---------------------------------------------------------------------------
 
 /// Read the `VecPayload` out of a `GcRef` as a shared ref, asserting it is a Vec.
@@ -2611,7 +2278,7 @@ unsafe fn vec_payload_mut<'s>(r: Rooted<'s>) -> &'s mut VecPayload {
 /// collection between the allocation and the last push would reclaim it.
 ///
 /// `element_descriptor` may be **null**: the source collection's label is what
-/// its own construction site knew, and that may have been nothing (REP-41). A
+/// its own construction site knew, and that may have been nothing. A
 /// `Vec`'s null means "empty" — `vec_format` reads it that way — so a null label
 /// with members present would answer `[]`. The first member's own descriptor is
 /// what the `Vec` adopts instead, which is exactly what `praxis_vec_push` does.
@@ -2653,8 +2320,8 @@ pub unsafe extern "C" fn praxis_vec_new(
 ) -> GcRef {
     abi_guard!("praxis_vec_new", ctx, {
         // A null descriptor is kept null: it means "the caller has no static
-        // element type", which is a thing this payload can hold (P0-11). Spelling
-        // it `INT` is what made an empty `Vec[Float]` claim to hold `Int`s.
+        // element type", which is a thing this payload can hold. Spelling it
+        // `INT` instead would make an empty `Vec[Float]` claim to hold `Int`s.
         // SAFETY: VecPayload is VEC's payload type.
         unsafe {
             gc_alloc_owned(ctx, &crate::collections::VEC, || VecPayload {
@@ -2670,15 +2337,15 @@ pub unsafe extern "C" fn praxis_vec_new(
 ///
 /// Faults `InvalidSize` if `count` is negative or exceeds
 /// [`VecExtent::MAX_ITEMS`](crate::collections::VecExtent::MAX_ITEMS): the count
-/// arrives from source and would otherwise become a `usize` cast, which is
-/// RT-07's defect one dimension down (ADR-041 decision 1).
+/// arrives from source and would otherwise become a `usize` cast, where a
+/// negative value lands near `usize::MAX` (ADR-041 decision 1).
 ///
 /// Faults `TypeMismatch` if the caller declared an element type that the fill is
 /// not, through the same [`adopt_or_reject`] `push` uses — a `Vec[Int]` filled
 /// with a `Float` is a mislabelled element descriptor, and every later
-/// `equals`/`hash`/`format` would read the payloads as the wrong type (P0-11). A
-/// null static descriptor adopts the fill's, which is what "the caller has no
-/// static element type" already means here.
+/// `equals`/`hash`/`format` would read the payloads as the wrong type. A null
+/// static descriptor adopts the fill's, which is what "the caller has no static
+/// element type" already means here.
 ///
 /// **`fill` is stored `count` times, not copied `count` times.** Every slot is
 /// the same `GcRef`, so `Vec(3, Vec())` is three names for one inner `Vec`.
@@ -2733,7 +2400,7 @@ pub unsafe extern "C" fn praxis_vec_filled(
     })
 }
 
-/// Allocate a nominal record (M7, §4.5) with all fields initialized to Unit.
+/// Allocate a nominal record (§4.5) with all fields initialized to Unit.
 /// The `schema_ptr` points at a `'static RecordSchema` (built and leaked by the
 /// codegen from the record def). Fields are filled in declaration order via
 /// [`praxis_record_set_field`] after allocation. Returns the record `GcRef`.
@@ -2767,7 +2434,7 @@ pub unsafe extern "C" fn praxis_alloc_record(
     })
 }
 
-/// Set field `idx` of `record` to `value` (M7, §4.5). Used by the codegen to
+/// Set field `idx` of `record` to `value` (§4.5). Used by the codegen to
 /// fill in fields after [`praxis_alloc_record`]. Returns the record (the
 /// receiver is mutated in place).
 ///
@@ -2794,7 +2461,7 @@ pub unsafe extern "C" fn praxis_record_set_field(
     })
 }
 
-/// Read field `idx` out of a record `GcRef` (M7, §4.5). Returns the field's
+/// Read field `idx` out of a record `GcRef` (§4.5). Returns the field's
 /// `GcRef` value. Returns Unit if the record is malformed or the index is out
 /// of bounds (defensive; the type checker prevents this in well-typed code).
 ///
@@ -2818,7 +2485,7 @@ pub unsafe extern "C" fn praxis_record_field(
     })
 }
 
-/// Allocate an enum value (M7, §4.6) of the type `schema_ptr` describes, with
+/// Allocate an enum value (§4.6) of the type `schema_ptr` describes, with
 /// variant `tag` and every payload slot initialized to Unit. Payload values are
 /// filled via [`praxis_enum_set_payload`] after allocation. Returns the enum
 /// `GcRef`.
@@ -2900,7 +2567,7 @@ pub(crate) unsafe fn option_none(ctx: *mut RuntimeContext) -> GcRef {
     }
 }
 
-/// Set payload slot `idx` of `enum_value` to `value` (M7, §4.6). Returns the
+/// Set payload slot `idx` of `enum_value` to `value` (§4.6). Returns the
 /// enum value (mutated in place).
 ///
 /// # Safety
@@ -2924,7 +2591,7 @@ pub unsafe extern "C" fn praxis_enum_set_payload(
     })
 }
 
-/// Read the variant tag (discriminant) of an enum value (M7, §4.6). Returns the
+/// Read the variant tag (discriminant) of an enum value (§4.6). Returns the
 /// tag as a boxed `Int` `GcRef` (the uniform ABI convention), so the `match`
 /// lowering can extract the scalar and compare. Used by `match` to branch.
 ///
@@ -2944,7 +2611,7 @@ pub unsafe extern "C" fn praxis_enum_tag(ctx: *mut RuntimeContext, enum_value: G
     })
 }
 
-/// Read payload slot `idx` of an enum value (M7, §4.6). Returns the slot's
+/// Read payload slot `idx` of an enum value (§4.6). Returns the slot's
 /// `GcRef`. Used by `match` to bind variant payload variables.
 ///
 /// # Safety
@@ -2966,7 +2633,7 @@ pub unsafe extern "C" fn praxis_enum_payload(
     })
 }
 
-/// Allocate a tuple (M7, §4.5 structural tuples) with all element slots
+/// Allocate a tuple (§4.5 structural tuples) with all element slots
 /// initialized to Unit. The `schema_ptr` points at a `'static TupleSchema`
 /// (built and leaked by the codegen from the tuple's element-type sequence).
 /// Elements are filled in positional order via [`praxis_tuple_set`] after
@@ -2999,7 +2666,7 @@ pub unsafe extern "C" fn praxis_alloc_tuple(
     })
 }
 
-/// Set element `idx` of `tuple` to `value` (M7, §4.5). Used by the codegen to
+/// Set element `idx` of `tuple` to `value` (§4.5). Used by the codegen to
 /// fill in elements after [`praxis_alloc_tuple`]. Returns the tuple (the
 /// receiver is mutated in place).
 ///
@@ -3025,7 +2692,7 @@ pub unsafe extern "C" fn praxis_tuple_set(
     })
 }
 
-/// Read element `idx` out of a tuple `GcRef` (M7, §4.5). Returns the element's
+/// Read element `idx` out of a tuple `GcRef` (§4.5). Returns the element's
 /// `GcRef` value. Returns Unit if the tuple is malformed or the index is out of
 /// bounds (defensive; the type checker prevents this in well-typed code).
 ///
@@ -3049,7 +2716,7 @@ pub unsafe extern "C" fn praxis_tuple_get(
     })
 }
 
-/// Structural equality between two GC values (§5.5, M7). Reads the descriptor
+/// Structural equality between two GC values (§5.5). Reads the descriptor
 /// from `a` and dispatches to its `equals` callback, which recurses element/field
 /// wise for composite types (records, tuples, enums, collections). Returns 1 for
 /// equal, 0 for not equal. Returns 0 if `a`'s type is not equatable (functions
@@ -3098,7 +2765,7 @@ pub unsafe extern "C" fn praxis_struct_eq(ctx: *mut RuntimeContext, a: GcRef, b:
 ///
 /// This is the ordering counterpart of [`praxis_struct_eq`], and it exists for
 /// the same reason: a `Text` is a pointer-and-length structure, so ordering one
-/// by loading its first eight payload bytes compared *addresses* (P0-12).
+/// by loading its first eight payload bytes would compare *addresses*.
 ///
 /// Raises `FaultKind::TypeMismatch` and answers `0` when the two operands are
 /// not the same runtime type, or when the type has no `compare`. The type
@@ -3106,12 +2773,11 @@ pub unsafe extern "C" fn praxis_struct_eq(ctx: *mut RuntimeContext, a: GcRef, b:
 /// compiler bug — reported as a fault rather than a callback dispatched on a
 /// foreign layout.
 ///
-/// The second guard is weaker than it was. ADR-138 populated `compare` on every
-/// type a `Map` key can be, including tuples and records, so a *miscompile* that
-/// lowered `(1, 2) < (1, 3)` to this wrapper would now be answered instead of
-/// faulted. `capability::supports_ord` still refuses it at `praxis check`, so no
-/// well-typed program reaches here either way; what is lost is a backstop, and
-/// it is named so nobody has to rediscover it.
+/// The second guard is a weak backstop, and deliberately named as one: ADR-138
+/// populated `compare` on every type a `Map` key can be, including tuples and
+/// records, so a *miscompile* that lowered `(1, 2) < (1, 3)` to this wrapper
+/// would be answered rather than faulted. `capability::supports_ord` refuses it
+/// at `praxis check`, so no well-typed program reaches here either way.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `a` and `b` must be valid `GcRef`s.
@@ -3145,7 +2811,7 @@ pub unsafe extern "C" fn praxis_value_cmp(ctx: *mut RuntimeContext, a: GcRef, b:
     })
 }
 
-/// Allocate a closure value (M7, §4.10) with `fn_ptr` as its entry point and
+/// Allocate a closure value (§4.10) with `fn_ptr` as its entry point and
 /// `n_captures` environment slots initialized to Unit. Captures are filled via
 /// [`praxis_closure_set_capture`] after allocation. Returns the closure `GcRef`.
 ///
@@ -3170,7 +2836,7 @@ pub unsafe extern "C" fn praxis_alloc_closure(
     })
 }
 
-/// Set capture slot `idx` of `closure` to `value` (M7, §4.10). Returns the
+/// Set capture slot `idx` of `closure` to `value` (§4.10). Returns the
 /// closure (mutated in place).
 ///
 /// # Safety
@@ -3194,7 +2860,7 @@ pub unsafe extern "C" fn praxis_closure_set_capture(
     })
 }
 
-/// Read the function pointer out of a closure `GcRef` (M7, §4.10). Used by the
+/// Read the function pointer out of a closure `GcRef` (§4.10). Used by the
 /// indirect-call lowering to obtain the entry point before a native call.
 ///
 /// `ctx` is accepted (and unused) for ABI uniformity with every other `praxis_*`
@@ -3217,7 +2883,7 @@ pub unsafe extern "C" fn praxis_closure_fn_ptr(
     })
 }
 
-/// Read capture slot `idx` out of a closure `GcRef` (M7, §4.10). Used by the
+/// Read capture slot `idx` out of a closure `GcRef` (§4.10). Used by the
 /// closure's synthetic function to load its captured values from the env.
 ///
 /// # Safety
@@ -3239,7 +2905,7 @@ pub unsafe extern "C" fn praxis_closure_capture(
     })
 }
 
-/// Allocate a `VarCell` holding `value` (M7-WS7b, §4.10). The cell is the shared
+/// Allocate a `VarCell` holding `value` (§4.10). The cell is the shared
 /// mutable storage for a captured `var` binding: the binding site and every
 /// closure that captures the `var` refer to the same cell. Returns the cell
 /// `GcRef`.
@@ -3258,7 +2924,7 @@ pub unsafe extern "C" fn praxis_alloc_var_cell(ctx: *mut RuntimeContext, value: 
     })
 }
 
-/// Read the current value out of a `VarCell` (M7-WS7b, §4.10). Used by `Path`
+/// Read the current value out of a `VarCell` (§4.10). Used by `Path`
 /// reads of a captured `var` (the local holds the cell; this derefs it).
 ///
 /// # Safety
@@ -3273,7 +2939,7 @@ pub unsafe extern "C" fn praxis_var_cell_get(ctx: *mut RuntimeContext, cell: GcR
     })
 }
 
-/// Store `value` into a `VarCell` (M7-WS7b, §4.10). Used by `Assign` to a
+/// Store `value` into a `VarCell` (§4.10). Used by `Assign` to a
 /// captured `var`. Returns the cell (mutated in place).
 ///
 /// # Safety
@@ -3323,9 +2989,9 @@ pub unsafe extern "C" fn praxis_vec_push(
         // value's — the `forall T. () -> Vec[T]` builtin leaves `T` generalized
         // until first use, so construction genuinely has nothing to record. A
         // vector that *was* told rejects a mismatch instead of retagging itself:
-        // retagging turned an explicitly typed `Vec[Int]` into a `Vec[Float]` on
-        // one bad push, and every later `equals`/`hash`/`format` then read the
-        // remaining `Int` payloads as `f64` (P0-11).
+        // retagging would turn an explicitly typed `Vec[Int]` into a `Vec[Float]`
+        // on one bad push, and every later `equals`/`hash`/`format` would then
+        // read the remaining `Int` payloads as `f64`.
         if !unsafe { adopt_or_reject(ctx, &mut p.element_descriptor, value) } {
             return unsafe { unit_sentinel(ctx) };
         }
@@ -3418,7 +3084,7 @@ pub unsafe extern "C" fn praxis_vec_get(
 /// The element descriptor goes through the same [`adopt_or_reject`] every push
 /// does, so a store into a vector that was never told its element type adopts
 /// the first value's, and one into a `Vec[Int]` raises `TypeMismatch` rather
-/// than retagging the collection (P0-11's rule, at the second door).
+/// than retagging the collection — `push`'s rule, at the second door.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`; `index`
@@ -3482,8 +3148,8 @@ pub unsafe extern "C" fn praxis_vec_is_empty(ctx: *mut RuntimeContext, vec: GcRe
 /// (§6.3). The receiver is not touched.
 ///
 /// Ordering goes through the element descriptor's `compare` callback — the same
-/// callback [`praxis_value_cmp`] uses, and for the same reason (P0-12): a `Text`
-/// is a pointer-and-length structure, so ordering one by its first eight payload
+/// callback [`praxis_value_cmp`] uses, and for the same reason: a `Text` is a
+/// pointer-and-length structure, so ordering one by its first eight payload
 /// bytes compares *addresses*. That sorts `Vec[Int]` correctly and `Vec[Text]`
 /// into allocation order, which is the failure that looks like it works.
 ///
@@ -3497,9 +3163,9 @@ pub unsafe extern "C" fn praxis_vec_is_empty(ctx: *mut RuntimeContext, vec: GcRe
 /// dispatched on a foreign layout. As [`praxis_value_cmp`], the second guard
 /// covers fewer types since ADR-138 populated `compare` on the composites.
 ///
-/// This is the callback a `Set` and a `Map` now order their keys through too
+/// It is the callback a `Set` and a `Map` order their keys through too
 /// (ADR-138), which is what makes `out(s)` and `out(s.sorted())` print one
-/// sequence — before, one was numeric and the other lexicographic.
+/// sequence rather than one numeric and one lexicographic.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
@@ -3514,8 +3180,8 @@ pub unsafe extern "C" fn praxis_vec_sorted(ctx: *mut RuntimeContext, vec: GcRef)
         // faulting on a `compare` it would never have called.
         if items.len() > 1 {
             // The elements' *own* descriptors decide, not the Vec's label: the
-            // label may be null (the construction site knew no element type —
-            // REP-41) while every member is a perfectly good `Text`.
+            // label may be null (the construction site knew no element type)
+            // while every member is a perfectly good `Text`.
             let desc = items[0].descriptor();
             if !items.iter().all(|i| std::ptr::eq(i.descriptor(), desc)) {
                 unsafe { set_fault(ctx, RaisedFault::TYPE_MISMATCH) };
@@ -3559,7 +3225,7 @@ pub unsafe extern "C" fn praxis_vec_sorted(ctx: *mut RuntimeContext, vec: GcRef)
 /// sort orders the (key, element) pairs — which is what makes it n calls. The
 /// keys are held in a `Vec<GcRef>` the collector cannot see, so they are rooted
 /// in a native scope: extraction allocates, and a collection triggered by the
-/// *next* call would otherwise free the key the previous one produced (P0-07).
+/// *next* call would otherwise free the key the previous one produced.
 ///
 /// Ordering goes through the same `compare` callback [`praxis_value_cmp`] uses,
 /// so the `Ord` bound the catalog row puts on the *key* is the rule this
@@ -3691,14 +3357,14 @@ unsafe fn call_unary_closure(
 /// First-occurrence order rather than sorted-and-deduped: `unique` is listed
 /// separately from `sorted` in §6.3, so composing them has to be the user's
 /// choice, and an order that depends on a hash map's iteration would make the
-/// same program answer differently on two runs (RT-16, and here the order is the
-/// program's *answer*, not only its printing).
+/// same program answer differently on two runs — and here the order is the
+/// program's *answer*, not only its printing.
 ///
 /// Sameness is [`DynamicKey`]'s — the descriptor's `hash` and `equals`
 /// callbacks, which is what "the same value" means everywhere else in this
 /// runtime (§5.5, §11.3). The catalog row's `HashStable` bound is what keeps a
 /// mutable element out; a key that can change after it is stored cannot be found
-/// again (D4).
+/// again.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
@@ -3731,7 +3397,7 @@ pub unsafe extern "C" fn praxis_vec_unique(ctx: *mut RuntimeContext, vec: GcRef)
 /// here to read.
 ///
 /// The element label is copied through unchanged, the null a construction site
-/// that knew no element type leaves included (REP-41).
+/// that knew no element type leaves included.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
@@ -3777,7 +3443,7 @@ fn group_size(n: i64) -> Option<usize> {
 /// `push`. What is chosen here is only that it is written down: letting
 /// [`vec_of`] infer it from the first group would answer `VEC` for
 /// `[1].chunks(2)` and *null* for `[].chunks(2)` — one type with two labels, and
-/// the null is the one `vec_format` renders as `[]` (P0-11, REP-41).
+/// the null is the one `vec_format` renders as `[]`.
 ///
 /// That is [`praxis_grid_positions`]'s argument, not a new one: it passes
 /// `&tuples::TUPLE` for the same reason, and `Grid(0, 0, 1).positions()` is the
@@ -3954,7 +3620,7 @@ pub unsafe extern "C" fn praxis_vec_join(
 ///
 /// Each code point is read through [`read_scalar`] with the `Char` handle, never
 /// a bare payload read: the payload is **four** bytes and an `i64` read would
-/// take eight of them (REP-37). A foreign element is `TypeMismatch` and the Unit
+/// take eight of them. A foreign element is `TypeMismatch` and the Unit
 /// sentinel, for [`praxis_vec_join`]'s reason.
 ///
 /// # Safety
@@ -3991,8 +3657,8 @@ pub unsafe extern "C" fn praxis_vec_to_text(ctx: *mut RuntimeContext, vec: GcRef
 /// the result that has a key rule.
 ///
 /// The counter's key descriptor is the source `Vec`'s element label, which may
-/// be null when the construction site knew no element type (REP-41) — the same
-/// null [`praxis_counter_new`] already accepts and means "not told yet".
+/// be null when the construction site knew no element type — the same null
+/// [`praxis_counter_new`] already accepts and means "not told yet".
 ///
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
@@ -4044,7 +3710,7 @@ pub unsafe extern "C" fn praxis_vec_frequencies(ctx: *mut RuntimeContext, vec: G
 }
 
 // ---------------------------------------------------------------------------
-// Deque[T] methods (M8-WS2, §6.1). Mirrors the Vec surface but adds the
+// Deque[T] methods (§6.1). Mirrors the Vec surface but adds the
 // front/back distinction: `push_front`/`push_back`/`pop_front`/`pop_back`.
 // `pop_*` fault on an empty deque (§9.1 `EmptyCollection`).
 // ---------------------------------------------------------------------------
@@ -4260,7 +3926,7 @@ pub unsafe extern "C" fn praxis_deque_is_empty(ctx: *mut RuntimeContext, deque: 
 }
 
 // ---------------------------------------------------------------------------
-// Map[K, V] / Set[T] / Counter[T] (M8-WS3, §6.1, §11.3).
+// Map[K, V] / Set[T] / Counter[T] (§6.1, §11.3).
 //
 // All three reuse Rust hash collections behind opaque GC objects. Keys are
 // wrapped in `DynamicKey`, which delegates Rust `Hash`/`Eq` to the descriptor's
@@ -4297,9 +3963,9 @@ unsafe fn counter_payload_mut<'s>(r: Rooted<'s>) -> &'s mut CounterPayload {
 }
 
 /// Allocate an empty `Map[K, V]`. `key_descriptor` is the key type the
-/// construction site knew, or **null** when it knew none — which is kept null
-/// (REP-41), the way `praxis_vec_new` keeps it. Spelling an unknown type `INT`
-/// is a claim, and every reader that believed it read the wrong type.
+/// construction site knew, or **null** when it knew none — which is kept null,
+/// the way `praxis_vec_new` keeps it. Spelling an unknown type `INT` is a claim,
+/// and every reader that believed it would read the wrong type.
 ///
 /// # Safety
 /// `ctx` must be live and wired. `key_descriptor` must be a valid pointer to a
@@ -4311,9 +3977,9 @@ pub unsafe extern "C" fn praxis_map_new(
 ) -> GcRef {
     abi_guard!("praxis_map_new", ctx, {
         // The `Map` row carries one type argument, so the value type never reaches
-        // this wrapper at all — it is unknown here by construction, and says so
-        // (REP-42). `praxis_map_insert` adopts the first inserted value's own
-        // descriptor, which is how a `Vec` learns its element type.
+        // this wrapper at all — it is unknown here by construction, and says so.
+        // `praxis_map_insert` adopts the first inserted value's own descriptor,
+        // which is how a `Vec` learns its element type.
         let value_descriptor: *const TypeDescriptor = std::ptr::null();
         // SAFETY: MapPayload is MAP's payload type.
         unsafe {
@@ -4342,11 +4008,10 @@ pub unsafe extern "C" fn praxis_map_insert(
         unsafe { maybe_collect(ctx) };
         let scope = unsafe { NativeScope::new(ctx) };
         let p = unsafe { map_payload_mut(scope.root(map)) };
-        // Learn the value type from the first value inserted, the way a `Vec` learns
-        // its element type from the first `push` (REP-42). The old rule was "adopt
-        // if the label still says `INT`", which could not tell a `Map` that really
-        // holds `Int`s from one that had never been told anything — because `INT`
-        // was what "never been told" was spelled as.
+        // Learn the value type from the first value inserted, the way a `Vec`
+        // learns its element type from the first `push`. Null is the encoding of
+        // "never been told", so it is distinguishable from a `Map` that really
+        // holds `Int`s.
         //
         // A later value of a different type un-learns it rather than faulting: the
         // type checker makes a `Map` homogeneous, so this is unreachable for a
@@ -4372,9 +4037,9 @@ pub unsafe extern "C" fn praxis_map_insert(
 ///
 /// §5.7 writes the signature `Map[K,V].get(K) -> Option[V]` and §4.7 opens
 /// "Option[T] represents normal domain-level absence. It is not an error
-/// channel." This used to answer the Unit sentinel under a `V` static type
-/// (RT-14): the program had a value it could not distinguish from a real one
-/// without `contains`, and the type system said it was a `V`.
+/// channel." Answering the Unit sentinel under a `V` static type instead would
+/// hand the program a value it could not distinguish from a real one without
+/// `contains`, while the type system insisted it was a `V`.
 ///
 /// The `Option` is built through the runtime's own `option_schema`, whose
 /// `Some` slot is unknown — `V` is learned from the value found, never from a
@@ -4409,8 +4074,8 @@ pub unsafe extern "C" fn praxis_map_get(ctx: *mut RuntimeContext, map: GcRef, ke
 ///
 /// The fault is [`FaultKind::IndexOutOfBounds`](crate::FaultKind::IndexOutOfBounds)
 /// — an index the collection does not hold, which is what its doc already
-/// describes. A dedicated `MissingKey` kind would read better and is owed to the
-/// next stage that spends an ABI bump, exactly as `clamp`'s empty range is.
+/// describes. A dedicated `MissingKey` kind would read better, and adding one is
+/// a `#[repr(C)]` change that costs an ABI bump (ADR-075).
 ///
 /// # Safety
 /// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`; `key`
@@ -4480,11 +4145,11 @@ pub unsafe extern "C" fn praxis_map_len(ctx: *mut RuntimeContext, map: GcRef) ->
     })
 }
 
-/// `m.keys()` — every key, as a `Vec[K]` (REP-18). Ordered like
+/// `m.keys()` — every key, as a `Vec[K]`. Ordered like
 /// [`praxis_counter_keys`], and index-aligned with [`praxis_map_values`].
 ///
-/// This and `values()` are the only way to enumerate a `Map` today: `for kv in m`
-/// has no lowering at all (REP-15).
+/// This and `values()` are the only way to enumerate a `Map`: `for kv in m` has
+/// no lowering.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`.
@@ -4497,7 +4162,7 @@ pub unsafe extern "C" fn praxis_map_keys(ctx: *mut RuntimeContext, map: GcRef) -
     })
 }
 
-/// `m.values()` — every value, as a `Vec[V]` (REP-18). See [`praxis_map_keys`].
+/// `m.values()` — every value, as a `Vec[V]`. See [`praxis_map_keys`].
 ///
 /// # Safety
 /// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`.
@@ -4591,7 +4256,7 @@ pub unsafe extern "C" fn praxis_map_update_max(
 // --- Set[T] -----------------------------------------------------------------
 
 /// Allocate an empty `Set[T]`. `element_descriptor` is the element type the
-/// construction site knew, or **null** when it knew none — kept null (REP-41).
+/// construction site knew, or **null** when it knew none — kept null.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
@@ -4693,7 +4358,7 @@ pub unsafe extern "C" fn praxis_set_is_empty(ctx: *mut RuntimeContext, set: GcRe
 }
 
 /// Every member, as a `Vec[T]` in [`crate::maps::ordered_members`] order — the
-/// snapshot `for x in s` iterates (REP-15, ADR-066).
+/// snapshot `for x in s` iterates (ADR-066).
 ///
 /// There is no `praxis_set_get`, and this is why: a `HashSet` has no nth member,
 /// so an indexed accessor would be a linear scan per step and the loop would be
@@ -4715,7 +4380,7 @@ pub unsafe extern "C" fn praxis_set_items(ctx: *mut RuntimeContext, set: GcRef) 
 // --- Counter[T] -------------------------------------------------------------
 
 /// Allocate an empty `Counter[T]`. `key_descriptor` is the key type the
-/// construction site knew, or **null** when it knew none — kept null (REP-41).
+/// construction site knew, or **null** when it knew none — kept null.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `key_descriptor` must be a valid pointer to a
@@ -4825,13 +4490,13 @@ pub unsafe extern "C" fn praxis_counter_set(
     })
 }
 
-/// `c.keys()` — every key, as a `Vec[T]` (REP-18).
+/// `c.keys()` — every key, as a `Vec[T]`.
 ///
 /// Ordered by the key's own `compare` (ADR-138), so it is the *same* order
-/// [`praxis_counter_values`] uses and the two are index-aligned. A `HashMap`'s own
-/// order is randomized per process, so returning it would make the same program
-/// answer differently on two runs (RT-16 in a place where the value depends on it,
-/// not only the printing).
+/// [`praxis_counter_values`] uses and the two are index-aligned. A `HashMap`'s
+/// own order is randomized per process, so returning it would make the same
+/// program answer differently on two runs — and here the order is the program's
+/// *answer*, not only its printing.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `counter` must be a valid `Counter` `GcRef`.
@@ -4844,7 +4509,7 @@ pub unsafe extern "C" fn praxis_counter_keys(ctx: *mut RuntimeContext, counter: 
     })
 }
 
-/// `c.values()` — every count, as a `Vec[Int]` (REP-18).
+/// `c.values()` — every count, as a `Vec[Int]`.
 ///
 /// §3.3's representative program is `counts.values().count(|n| n >= 2)`. Ordered
 /// like [`praxis_counter_keys`]; see it for why the order is fixed.
@@ -4887,7 +4552,7 @@ pub unsafe extern "C" fn praxis_counter_is_empty(
 }
 
 // ---------------------------------------------------------------------------
-// MinHeap[T] / MaxHeap[T] (M8-WS4, §6.1, §11.2).
+// MinHeap[T] / MaxHeap[T] (§6.1, §11.2).
 //
 // `MaxHeap` maps directly to Rust's max-`BinaryHeap`; `MinHeap` wraps entries in
 // `Reverse` so the smallest surfaces first. `pop`/`peek` fault `EmptyCollection`
@@ -4914,7 +4579,7 @@ unsafe fn min_heap_payload(r: GcRef) -> &'static MinHeapPayload {
 }
 
 /// Allocate an empty `MaxHeap[T]`. A null `element_descriptor` — the codegen's
-/// "no static element type" — is kept null (REP-41).
+/// "no static element type" — is kept null.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
@@ -5009,12 +4674,11 @@ pub unsafe extern "C" fn praxis_max_heap_len(ctx: *mut RuntimeContext, heap_ref:
 }
 
 /// Every element, as a `Vec[T]` in [`crate::heaps::in_pop_order`] — the snapshot
-/// `for x in h` iterates (REP-15, ADR-066). The heap is **not** drained.
+/// `for x in h` iterates (ADR-066). The heap is **not** drained.
 ///
 /// A heap's backing array is heap-ordered only at its root, so an indexed
-/// accessor over it would answer in insertion-history order; that is what made
-/// `for x in h` over `[3, 1, 2]` sum to a nine-digit number before this existed
-/// — it was reading the array as a `Vec`'s.
+/// accessor over it would answer in insertion-history order — reading the array
+/// as if it were a `Vec`'s.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `heap_ref` must be a valid `MaxHeap` `GcRef`.
@@ -5045,7 +4709,7 @@ pub unsafe extern "C" fn praxis_max_heap_is_empty(
 // --- MinHeap (mirrors MaxHeap with Reverse wrapping) -----------------------
 
 /// Allocate an empty `MinHeap[T]`. A null `element_descriptor` — the codegen's
-/// "no static element type" — is kept null (REP-41).
+/// "no static element type" — is kept null.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
@@ -5170,7 +4834,7 @@ pub unsafe extern "C" fn praxis_min_heap_is_empty(
 }
 
 // ---------------------------------------------------------------------------
-// BitSet (M8-WS5, §6.1). A compact set of non-negative integers.
+// BitSet (§6.1). A compact set of non-negative integers.
 // ---------------------------------------------------------------------------
 
 use crate::bitset::{BitIndex, BitSetPayload};
@@ -5200,7 +4864,7 @@ pub unsafe extern "C" fn praxis_bitset_new(ctx: *mut RuntimeContext) -> GcRef {
 }
 
 /// Set bit `value`; returns Unit. Faults `InvalidSize` if `value` is negative
-/// or above [`BitIndex::MAX`] — a member this set cannot hold (RT-07).
+/// or above [`BitIndex::MAX`] — a member this set cannot hold.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `bs` must be a valid `BitSet` `GcRef`; `value`
@@ -5257,12 +4921,12 @@ pub unsafe extern "C" fn praxis_bitset_remove(
 /// True iff bit `value` is set, as a raw `0`/`1` in the scalar channel. A value
 /// the set cannot hold is simply absent — the query is total.
 ///
-/// **It answers an `i64` and not a boxed `Bool` (ADR-118 decision 6.)** Every
-/// caller unboxed it again on the next instruction: `if bs.contains(x)` is a
-/// `Materialize{Bool}` followed by an `ExtractScalar{Bool}` followed by the
-/// branch that wanted the predicate. `praxis_struct_eq` and `praxis_value_cmp`
-/// already answer the scalar channel for the same reason, and MIR now carries
-/// this one as [`Inst::BitsetContains`](praxis_mir::Inst::BitsetContains) — a
+/// **It answers an `i64` and not a boxed `Bool` (ADR-118 decision 6.)** A boxed
+/// answer would be unboxed again on the next instruction — `if bs.contains(x)`
+/// as a `Materialize{Bool}`, an `ExtractScalar{Bool}` and then the branch that
+/// wanted the predicate. `praxis_struct_eq` and `praxis_value_cmp` answer the
+/// scalar channel for the same reason, and MIR carries this one as
+/// [`Inst::BitsetContains`](praxis_mir::Inst::BitsetContains) — a
 /// `Scalar(Bool)` result, and, because it neither allocates nor faults, not a
 /// GC safepoint.
 ///
@@ -5298,7 +4962,7 @@ pub unsafe extern "C" fn praxis_bitset_len(ctx: *mut RuntimeContext, bs: GcRef) 
 }
 
 /// Every member, as a `Vec[Int]` **ascending** — the snapshot `for i in b`
-/// iterates (REP-15, ADR-066).
+/// iterates (ADR-066).
 ///
 /// This is the one iterable whose members are not objects: they are bit
 /// positions, so each one is boxed here rather than copied from the payload.
@@ -5311,7 +4975,7 @@ pub unsafe extern "C" fn praxis_bitset_items(ctx: *mut RuntimeContext, bs: GcRef
         // The members are read out before the first allocation: `vec_of` allocates
         // per element, and a collection during the walk would move nothing here
         // (the bits are not objects) but would leave the borrow of the payload
-        // spanning a safepoint, which is the shape P0-07 forbids.
+        // spanning a safepoint, which is not allowed.
         let members: Vec<i64> = unsafe { bitset_payload(bs) }.members().collect();
         let result = unsafe { praxis_vec_new(ctx, &scalars::INT as *const _) };
         let scope = unsafe { NativeScope::new(ctx) };
@@ -5337,10 +5001,9 @@ pub unsafe extern "C" fn praxis_bitset_is_empty(ctx: *mut RuntimeContext, bs: Gc
 }
 
 // ---------------------------------------------------------------------------
-// Grid[T] methods (M8-WS5, §6.4). The payload (GridPayload) already exists from
-// M6 (row-major Vec<GcRef> + width). M8 adds the full method surface.
-// Coordinates are (x, y) with x rightward, y downward (§6.4). Indexing stays
-// behind runtime wrappers (§11.5 realloc safety).
+// Grid[T] methods (§6.4). `GridPayload` is a row-major `Vec<GcRef>` plus a
+// width. Coordinates are (x, y) with x rightward, y downward (§6.4). Indexing
+// stays behind runtime wrappers (§11.5 realloc safety).
 // ---------------------------------------------------------------------------
 
 use crate::collections::{GridExtent, GridPayload};
@@ -5388,8 +5051,8 @@ fn grid_height(items_len: usize, width: usize) -> usize {
 /// outside a `width × height` grid.
 ///
 /// The offsets are `checked_add` because `px`/`py` come out of a user-supplied
-/// point tuple: `(i64::MAX, 0).neighbors4()` overflowed the addition and
-/// panicked *inside* `extern "C"` (RT-07). A coordinate that overflows is
+/// point tuple, so `(i64::MAX, 0).neighbors4()` would otherwise overflow the
+/// addition and panic *inside* `extern "C"`. A coordinate that overflows is
 /// outside every grid — `GridExtent` bounds the extents far below `i64::MAX` —
 /// so "outside" is the whole answer, not a special case.
 fn grid_neighbor(
@@ -5430,17 +5093,17 @@ unsafe fn default_cell(
             B::Bool => Some(bool_ref(ctx, false)),
             B::Int => Some(int_ref(ctx, 0_i64)),
             B::Byte => Some(gc_alloc(ctx, scalars::BYTE_PAYLOAD, 0_u8)),
-            // `0_u32`, not `'\0'`: a `Char`'s payload is the scalar *value*, and
-            // a Rust `char` only happened to fit because it shares `u32`'s
-            // layout. REP-02's signature is what said so. NUL is inside the
-            // interned range, so this is the immortal, like the `Int` arm above.
+            // `0_u32`, not `'\0'`: a `Char`'s payload is the scalar *value*,
+            // and a Rust `char` only fits because it shares `u32`'s layout. NUL
+            // is inside the interned range, so this is the immortal, like the
+            // `Int` arm above.
             B::Char => Some(char_ref(ctx, 0_u32)),
             B::Float => Some(gc_alloc(ctx, scalars::FLOAT_PAYLOAD, 0.0_f64)),
             // `(null, 0)` meets `praxis_alloc_text`'s UTF-8 precondition
             // trivially: the wrapper's own `bytes.is_null() || len == 0` branch
             // turns it into the empty slice, and the empty slice is UTF-8.
-            // Worth saying since ADR-111 made that precondition load-bearing —
-            // a violation here would abort, not fault. `alloc_text_empty_string_round_trips`
+            // The precondition is load-bearing (ADR-111): a violation here
+            // would abort, not fault. `alloc_text_empty_string_round_trips`
             // pins the branch this depends on.
             B::Text => Some(praxis_alloc_text(ctx, std::ptr::null(), 0)),
             // A composite has no zero value the runtime can invent: a
@@ -5473,8 +5136,8 @@ unsafe fn default_cell(
 /// grids directly; this wrapper is for source `Grid[T]()` + a follow-up fill.)
 ///
 /// Faults `InvalidSize` if either extent is negative or the grid would exceed
-/// [`GridExtent::MAX_CELLS`] — the sizes arrive from source and used to become a
-/// `usize` cast (RT-07).
+/// [`GridExtent::MAX_CELLS`] — the sizes arrive from source, where a negative
+/// value would otherwise land near `usize::MAX` on the cast.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
@@ -5494,7 +5157,7 @@ pub unsafe extern "C" fn praxis_grid_new(
         // Every cell of a `Grid[T]` must *be* a `T`. Filling with the Unit sentinel
         // under a `T` element descriptor is the same lie as a mislabelled element
         // descriptor, one level down: `get`, `format`, `equals` and `hash` all
-        // dispatch `T`'s callbacks against a zero-sized Unit payload (P0-11).
+        // dispatch `T`'s callbacks against a zero-sized Unit payload.
         let cells = if extent.cells() == 0 {
             Vec::new()
         } else {
@@ -5530,7 +5193,7 @@ pub unsafe extern "C" fn praxis_grid_new(
 /// fill removes the question — the caller supplied a value of the cell type —
 /// so a grid of collections is constructible here and not there. The descriptor
 /// is still reconciled through [`adopt_or_reject`], so a *declared* cell type
-/// the fill does not match is `TypeMismatch` rather than a silent retag (P0-11).
+/// the fill does not match is `TypeMismatch` rather than a silent retag.
 ///
 /// Every cell is the same `GcRef`, exactly as [`praxis_vec_filled`]'s are; see
 /// its comment for why that is the language's existing rule rather than a new
@@ -5843,9 +5506,9 @@ pub unsafe extern "C" fn praxis_grid_column(
 /// `Some((x, y))` for the first position whose cell equals `value`, or `None`
 /// (§4.7).
 ///
-/// This used to answer the Unit sentinel under a `(Int, Int)` static type
-/// (RT-15). `find_all` needs no equivalent: a `Vec` already encodes "nothing
-/// matched" as emptiness.
+/// An `Option` rather than a sentinel: the Unit sentinel under a `(Int, Int)`
+/// static type is indistinguishable from a real answer. `find_all` needs no
+/// equivalent — a `Vec` already encodes "nothing matched" as emptiness.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `grid` and `value` must be valid `GcRef`s.
@@ -6013,7 +5676,7 @@ pub unsafe extern "C" fn praxis_grid_rotate_right(ctx: *mut RuntimeContext, grid
 }
 
 // ---------------------------------------------------------------------------
-// Text methods (§4.3, M5).
+// Text methods (§4.3).
 //
 // `Text` is an immutable UTF-8 payload (`Box<str>`). The methods are pure
 // (no allocation beyond the result object) and never fault.
@@ -6040,13 +5703,13 @@ unsafe fn text_payload(r: GcRef) -> *const crate::text::TextPayload {
 
 /// The number of Unicode scalar values (chars) in `text`, as a boxed `Int`.
 ///
-/// **O(1) after the text or its owner has been counted once** (ADR-115). This
-/// used to be `text_str(text).chars().count()`, which was two passes over every
-/// byte — `text_str` re-validates the UTF-8 the payload is already known to
-/// hold, and `chars().count()` then decodes it — and it is called *once per
-/// iteration* of `for c in t`, because `lower_for` puts the plan's `len` call in
-/// the loop **header** (`praxis-mir/src/build.rs`, `lower_for`). That is the
-/// half of handover 25's F-8 that F-8 did not name.
+/// **O(1) after the text or its owner has been counted once** (ADR-115). The
+/// count is cached rather than recomputed as `text_str(text).chars().count()`,
+/// which is two passes over every byte — `text_str` re-validates the UTF-8 the
+/// payload is already known to hold, and `chars().count()` then decodes it —
+/// and this is called *once per iteration* of `for c in t`, because `lower_for`
+/// puts the plan's `len` call in the loop **header**
+/// (`praxis-mir/src/build.rs`, `lower_for`).
 ///
 /// # Safety
 /// `ctx` must be live and wired; `text` must be a valid `Text` `GcRef`.
@@ -6085,9 +5748,8 @@ fn whole_trimmed(s: &str, run: fn(&[u8]) -> (&str, usize)) -> Option<&str> {
 /// The `Int` `text` spells, as `Some(n)`, or `None` when it spells no `Int`
 /// (ADR-136).
 ///
-/// `Y001`'s help on `var count: Int = raw` has named `.int()` since it was
-/// written, and `Text` did not have it: half of the most common mistake in a
-/// puzzle program's help line sent the reader to a method that reported `Y110`.
+/// `Y001`'s help on `var count: Int = raw` names `.int()`, so this is the method
+/// that help sends the reader to.
 ///
 /// `Option[Int]` and not `Int`, for §4.7's reason: a text that is not a number
 /// is *absence*, not a fault. Input arrives as text and is routinely not what
@@ -6164,8 +5826,8 @@ pub unsafe extern "C" fn praxis_text_float(ctx: *mut RuntimeContext, text: GcRef
 /// True iff `text` has no chars, as a boxed `Bool`.
 ///
 /// Asks the bytes rather than a `&str`: `text_str` validates the whole payload
-/// to hand back a `&str`, which made an O(1) question O(n) (ADR-115). A text is
-/// empty iff it has no bytes — no scalar encodes to zero of them.
+/// to hand back a `&str`, which would make an O(1) question O(n) (ADR-115). A
+/// text is empty iff it has no bytes — no scalar encodes to zero of them.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `text` must be a valid `Text` `GcRef`.
@@ -6265,11 +5927,10 @@ pub unsafe extern "C" fn praxis_text_get(
         }
         // **The byte index is the character index exactly when every scalar is
         // one byte, and `text_ascii_bytes` answers that in O(1)** (ADR-115).
-        // The fallback is the old `chars().nth(i)` and it is still O(i), which
-        // is the honest position: a multi-byte text has no random access
-        // without either a wider representation or a cursor, and ADR-115
-        // declines the cursor with its arithmetic. `idx` is non-negative above,
-        // so the `as usize` cannot wrap.
+        // The fallback is `chars().nth(i)`, which is O(i): a multi-byte text
+        // has no random access without either a wider representation or a
+        // cursor, and ADR-115 declines the cursor with its arithmetic. `idx` is
+        // non-negative above, so the `as usize` cannot wrap.
         // SAFETY: caller guarantees `text` is Text.
         if let Some(bytes) = unsafe { crate::text::text_ascii_bytes(payload) } {
             return match bytes.get(idx as usize) {
@@ -6294,8 +5955,8 @@ pub unsafe extern "C" fn praxis_text_get(
                 //
                 // This is the interning's largest site (ADR-107): the same call
                 // is `t[i]` and every step of `for c in t` (the `iter_plan`
-                // lowering), so a program that walks a line of ASCII text used to
-                // box one 32-byte object per character.
+                // lowering), so a program that walks a line of ASCII text would
+                // otherwise box one object per character.
                 unsafe { char_ref(ctx, ch as u32) }
             }
             None => {
@@ -6307,7 +5968,7 @@ pub unsafe extern "C" fn praxis_text_get(
 }
 
 // ---------------------------------------------------------------------------
-// `out(...)` — write a value to stdout followed by a newline (§16.1, M5).
+// `out(...)` — write a value to stdout followed by a newline (§16.1).
 // ---------------------------------------------------------------------------
 
 /// Format `value` through its descriptor and write it to stdout followed by a
@@ -6468,10 +6129,9 @@ pub unsafe extern "C" fn praxis_range_new_inclusive(
 /// over every integer there is.
 ///
 /// The kind is `IntOverflow`, which is what `gcd`, `lcm` and A\*'s path cost
-/// already answer for a result with no `Int`. ADR-059 wanted it in the
-/// empty-range kind alongside `clamp`; S18 declined, because the range this
-/// fires on is the *fullest* one there is and "empty range" would be a fault
-/// message that lies about it. ADR-075 records the disagreement.
+/// already answer for a result with no `Int`. It is deliberately not
+/// `EmptyRange`: the range this fires on is the *fullest* one there is, so that
+/// message would lie about it (ADR-059, ADR-075).
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Range` `GcRef`.
@@ -6517,7 +6177,7 @@ pub unsafe extern "C" fn praxis_range_get(
 }
 
 // ---------------------------------------------------------------------------
-// Input parser (§7, M6).
+// Input parser (§7).
 //
 // `read` / `parse` lower to runtime calls that fetch the input buffer and run
 // a compiled parser plan against it. The plan is compiled at HIR time and
@@ -6534,14 +6194,13 @@ pub unsafe extern "C" fn praxis_range_get(
 /// "once" is structural rather than a flag — and the result is installed as
 /// `input_source`, which every later `read` reuses.
 ///
-/// The host reading its input *up front* is what REP-51 was: a program with no
-/// `read` in it still consumed standard input, so `praxis run` against an open
-/// pipe blocked forever. Nothing before a program's first `read` touches the
-/// host's input now.
+/// Nothing before a program's first `read` touches the host's input. Reading it
+/// up front would make a program with no `read` in it still consume standard
+/// input, so `praxis run` against an open pipe would block forever.
 ///
 /// A host that installs no reader — every JIT test, and the crash debugger's
 /// re-run path, which installs the buffer directly to keep re-runs identical
-/// (§9.7) — reaches the same `input_source` read this always was.
+/// (§9.7) — reaches the plain `input_source` read below.
 ///
 /// **A reader that answers zero bytes has given empty input, not no input.** Its
 /// answer is installed as `input_source` whatever its length, so `read` runs
@@ -6550,7 +6209,7 @@ pub unsafe extern "C" fn praxis_range_get(
 /// requires content faults at `0..0` naming what it expected. That is what §7.11
 /// asks a mismatch to carry, and a fault raised before any buffer existed can
 /// carry none of it: it has no input span to name. A zero-byte `--input` file is
-/// the same decision, made at `praxis-cli/src/run.rs` (REP-60, ADR-087).
+/// the same decision, made at `praxis-cli/src/run.rs` (ADR-087).
 ///
 /// The one remaining Unit-source state belongs to a host that installs **neither**
 /// a buffer nor a reader — every JIT test, every embedder. `praxis_run_parser`'s
@@ -6561,10 +6220,10 @@ pub unsafe extern "C" fn praxis_range_get(
 /// [`FaultKind::InvalidText`](crate::FaultKind::InvalidText)** (ADR-111). A
 /// reader's bytes are the host's, not the compiler's, so they are checked here
 /// and `INVALID_TEXT` is raised here — where `lower_read`'s `CheckFault` makes
-/// it divert at the `read`. It used to be raised inside `praxis_alloc_text`,
-/// which cost a check after every text *literal* for a fault a literal cannot
-/// produce; that wrapper now trusts its caller, and this is the caller that has
-/// to earn the trust.
+/// it divert at the `read`. Raising it inside `praxis_alloc_text` instead would
+/// cost a check after every text *literal* for a fault a literal cannot
+/// produce; that wrapper trusts its caller, and this is the caller that has to
+/// earn the trust.
 ///
 /// `praxis run` cannot reach the fault: `lazy_stdin::read` goes through
 /// `std::io::read_to_string` and exits 2 on non-UTF-8 stdin before the runtime
@@ -6579,15 +6238,11 @@ pub unsafe extern "C" fn praxis_get_input(ctx: *mut RuntimeContext) -> GcRef {
             let bytes = read();
             // **This is the one place in the runtime that holds raw host bytes,
             // so it is the one place the UTF-8 judgement §4.3 assigns belongs**
-            // (ADR-111). It used to live inside `praxis_alloc_text`, which made
-            // that wrapper's row `AllocatesAndFaults` and put a `CheckFault`
-            // after every text *literal* for a fault the compiler's own bytes
-            // could never raise. Here the fault is real: a host's `InputReader`
-            // is infallible about I/O by design (`crate::input`) and says
-            // nothing about encoding, so these bytes are exactly as trustworthy
-            // as the host. `GetInput`'s row already said `AllocatesAndFaults`
-            // and `lower_read` already emits the check, so `InvalidText` still
-            // diverts *at the `read`* with no MIR or manifest change.
+            // (ADR-111). Here the fault is real: a host's `InputReader` is
+            // infallible about I/O by design (`crate::input`) and says nothing
+            // about encoding, so these bytes are exactly as trustworthy as the
+            // host. `GetInput`'s row is `AllocatesAndFaults` and `lower_read`
+            // emits the check, so `InvalidText` diverts *at the `read`*.
             //
             // The Unit sentinel is the defined dummy (§10.4); `input_source`
             // holds it until a buffer is installed, so answering it below is
@@ -6612,7 +6267,7 @@ pub unsafe extern "C" fn praxis_get_input(ctx: *mut RuntimeContext) -> GcRef {
 }
 
 /// Run a compiled parser plan against `input`, returning the parsed result as a
-/// `GcRef` (§7.1, M6). `plan_index_gc` is a boxed `Int` whose payload is the
+/// `GcRef` (§7.1). `plan_index_gc` is a boxed `Int` whose payload is the
 /// plan's index in the HIR's global slab.
 ///
 /// On a parse mismatch (or a non-Text `input`), sets `FaultKind::ParseFailed`
@@ -6630,9 +6285,9 @@ pub unsafe extern "C" fn praxis_get_input(ctx: *mut RuntimeContext) -> GcRef {
 /// parse, so it has nothing to report — and fabricating a [`ParseFail`] there
 /// would be worse than silence: with no buffer there is no input span, and an
 /// invented `expected` would make an embedder's host bug read as a parse failure
-/// at an offset that does not exist. Clearing is what stops it reporting a
-/// *previous* parse's offset, which is what it did before (REP-60): it was the
-/// one entry into the parser that skipped `run_plan`'s clear.
+/// at an offset that does not exist. Clearing is also what stops it reporting a
+/// *previous* parse's offset: this is the one entry into the parser that does
+/// not go through `run_plan`'s own clear.
 ///
 /// # Safety
 /// `ctx` must be live and wired; `plan_index_gc` must be a valid `Int`; `input`
@@ -6654,7 +6309,7 @@ pub unsafe extern "C" fn praxis_run_parser(
             return unsafe { unit_sentinel(ctx) };
         }
         let idx = unsafe { int_payload(plan_index_gc) };
-        // Delegate to the parser interpreter (WS7). It validates the id, reads the
+        // Delegate to the parser interpreter. It validates the id, reads the
         // plan from the process-wide arena, runs it against the input bytes, and
         // allocates the result.
         match crate::parser::run_plan_by_id(ctx, idx, input) {
@@ -6685,7 +6340,7 @@ pub unsafe extern "C" fn praxis_run_parser(
 /// The scope is what makes the walks safe: a state lives in a Rust visited set
 /// or queue, which the collector cannot see, and every closure call may
 /// allocate. `retain` roots each state the moment the walk decides to remember
-/// it, so a collection triggered inside the *next* call finds it (P0-07).
+/// it, so a collection triggered inside the *next* call finds it.
 struct ClosureOracle<'s, 'c> {
     ctx: *mut RuntimeContext,
     scope: &'s NativeScope<'c>,
@@ -6800,16 +6455,11 @@ impl crate::graph::GraphOracle for ClosureOracle<'_, '_> {
     fn is_goal(&mut self, state: GcRef) -> Result<bool, crate::graph::Aborted> {
         // SAFETY: as above, at the `(T) -> Bool` operand.
         let result = unsafe { self.call(self.goal, &[state])? };
-        // `Bool` is an immortal singleton pair (RT-03), so the answer is which
-        // singleton came back — but the payload is what the descriptor
-        // describes, and reading it is what a non-`Bool` would corrupt.
-        //
-        // A `Bool`'s payload is **one byte**. Reading it as an `i64` — which is
-        // what this did — takes seven further bytes of the block's alignment
-        // padding, which the bump allocator never initialized, so the answer
-        // was whatever malloc had left there and could differ between runs.
-        // `read_scalar` checks the descriptor and takes the width from
-        // `BOOL_PAYLOAD`'s own type, so neither half is written here any more.
+        // A `Bool`'s payload is **one byte**. Reading it as an `i64` would take
+        // seven further bytes of the block's alignment padding, which the bump
+        // allocator never initialized. `read_scalar` checks the descriptor and
+        // takes the width from `BOOL_PAYLOAD`'s own type, so neither half is
+        // written here.
         //
         // SAFETY: `result` is a `GcRef` the oracle's own call just produced.
         match unsafe { read_scalar(result, scalars::BOOL_PAYLOAD) } {
@@ -7144,17 +6794,15 @@ mod tests {
 
     /// The version number this build declares.
     ///
-    /// Named for the version rather than for a change, because a version gathers
-    /// several of them — v19 held ADR-105's `stack_left`, ADR-107's
-    /// interned-`Char` table, ADR-109's 16-byte `GcHeader` and ADR-111's
-    /// `praxis_alloc_text` contract — and naming one would make the others look
-    /// like they arrived unversioned. The changelog on [`RUNTIME_ABI_VERSION`]
-    /// is where the list lives; this only asserts that the constant and the
-    /// changelog were updated together.
+    /// Named for the version rather than for any one change, because a version
+    /// is a statement about a build and several changes share one bump. This
+    /// pins the numeral so a build cannot ship a layout change without moving
+    /// it.
     ///
     /// `gc::tests::the_folded_payload_offset_moved_at_v19_and_is_pinned_here`
-    /// asserts the other direction, pinning the payload offset *to* this number,
-    /// so a layout change and the version that declares it cannot drift apart.
+    /// asserts the other direction, pinning the payload offset *to* a version
+    /// number, so a layout change and the version that declares it cannot drift
+    /// apart.
     #[test]
     fn version_is_twenty_for_the_batch_this_build_ships() {
         assert_eq!(RUNTIME_ABI_VERSION, 20);
@@ -7165,24 +6813,21 @@ mod tests {
         assert_abi_version();
     }
 
-    /// **REP-56's release half.** [`int_payload`]'s width check must be a real
-    /// branch, not a `debug_assert` — the read has to be bounded in the profile
-    /// users actually run.
+    /// [`int_payload`]'s width check must be a real branch, not a
+    /// `debug_assert` — the read has to be bounded in the profile users
+    /// actually run.
     ///
-    /// `debug_assert_eq!` is compiled out of a release build. What was left
-    /// there was `unsafe { *r.payload::<i64>() }` against a descriptor **zero
-    /// bytes wide**: an 8-byte out-of-bounds heap read, reachable from a program
-    /// that passes `praxis check` (REP-56), answering a different number on
-    /// every run with `rc=0` and no diagnostic. The debug build reported it and
-    /// aborted, so the two profiles disagreed and the wrong one shipped.
+    /// `debug_assert_eq!` is compiled out of a release build, leaving
+    /// `unsafe { *r.payload::<i64>() }` against a descriptor that may be zero
+    /// bytes wide: an 8-byte out-of-bounds heap read, reachable from a program
+    /// that passes `praxis check`.
     ///
     /// **This is a source gate on purpose, and it is the only kind that works
     /// here.** The defect is a difference *between profiles*, and `cargo test`
     /// builds exactly one of them — a behavioural test is green under
-    /// `debug_assertions` whether the check is conditional or not, which is
-    /// precisely how this survived twenty-one stages of a green suite and a
-    /// `just ci` that never builds release. The companion below asserts the
-    /// branch actually refuses; this asserts it is still *there* at `-O`.
+    /// `debug_assertions` whether the check is conditional or not. The companion
+    /// below asserts the branch actually refuses; this asserts it is still
+    /// *there* at `-O`.
     ///
     /// It reads the file rather than the function because there is nothing in a
     /// compiled artifact to ask. `every_no_mangle_wrapper_is_behind_the_panic_guard`
@@ -7193,11 +6838,9 @@ mod tests {
 
         // 1. The reader itself checks before it reads, and the check is an
         //    ordinary branch — not a `debug_assert`, which compiles out of a
-        //    release build. That distinction IS the finding: with the check
-        //    compiled out, a `praxis check`-clean program did an out-of-bounds
-        //    read and printed a different random number every run, while debug
-        //    aborted cleanly. `just ci` never builds release, so nothing in the
-        //    gate could see it.
+        //    release build. That distinction is the point: with the check
+        //    compiled out, a `praxis check`-clean program does an out-of-bounds
+        //    read where a debug build aborts cleanly.
         const SIGNATURE: &str =
             "unsafe fn read_scalar<T: Copy>(r: GcRef, handle: crate::descriptor::Payload<T>) -> Option<T> {";
         let at = source
@@ -7221,11 +6864,9 @@ mod tests {
              it (REP-37, REP-56).\nbody was:{body}"
         );
 
-        // 2. Nothing else in this file reads a scalar payload directly. This is
-        //    the half that matters, and the half the first repair missed: it
-        //    bounded `int_payload` and left `float_payload`, `praxis_char_load`
-        //    and `praxis_bool_load` reading unchecked, because a gate that names
-        //    one function can only ever gate that function.
+        // 2. Nothing else in this file reads a scalar payload directly. This
+        //    is the half that matters: a gate that names one function can only
+        //    ever gate that function, and every scalar reader needs bounding.
         //
         //    Scanned over the crate's own code only: `include_str!` hands us this
         //    test too, whose list below would otherwise match itself, and
@@ -7238,13 +6879,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         //
-        //    The patterns are the *bare* calls, not the dereferenced ones, and
-        //    that is the second thing this gate has now been widened for.
-        //    `praxis_float_load` read `var p: *mut f64 = r.payload::<f64>();`
-        //    and dereferenced `p` on the next line — unchecked, and green here,
-        //    because the list named `*r.payload::<f64>()` and a `var` breaks the
-        //    spelling without breaking the defect. Forbidding the call means no
-        //    phrasing of it passes. `payload::<u8>()` stays legal: it is how
+        //    The patterns are the *bare* calls, not the dereferenced ones:
+        //    binding `r.payload::<f64>()` to a local and dereferencing it on the
+        //    next line breaks the spelling `*r.payload::<f64>()` without
+        //    breaking the defect. Forbidding the call means no phrasing of it
+        //    passes. `payload::<u8>()` stays legal: it is how
         //    `read_scalar` itself reaches the bytes, and how every *compound*
         //    payload (record, tuple, closure) is reached — those are cast to a
         //    struct the descriptor already vouched for, not read at a width.
@@ -7284,12 +6923,11 @@ mod tests {
     /// release build, so debug aborts and release builds a `Box<str>` of
     /// non-UTF-8 bytes that `text_str` later hands out as a `&str`) or into
     /// `from_utf8_unchecked` (the same hole, with the check deleted rather than
-    /// compiled out). Both are REP-56's shape: two profiles, two answers, and
-    /// `just ci` never builds the one users get.
+    /// compiled out). Both give two profiles two answers, and `just ci` never
+    /// builds the one users get.
     ///
-    /// A behavioural test cannot see this. Under `cfg(debug_assertions)` a
-    /// `debug_assert` version passes every test the branch version passes, which
-    /// is precisely how REP-56 survived twenty-one stages of a green suite.
+    /// A behavioural test cannot see this: under `cfg(debug_assertions)` a
+    /// `debug_assert` version passes every test the branch version passes.
     #[test]
     fn the_text_precondition_backstop_is_unconditional_in_every_profile() {
         let source = include_str!("abi.rs");
@@ -7321,7 +6959,7 @@ mod tests {
              `text_bytes_are_not_utf8`, which costs a never-taken branch \
              (ADR-111).\nbody was:{body}"
         );
-        // And the refusal is not a fault. If it were, REP-45's sweep would
+        // And the refusal is not a fault. If it were, the fault sweep would
         // classify the wrapper as faulting and correctly refuse the
         // `Allocates` row — this says so at the site rather than leaving the
         // failure to be diagnosed three tests away.
@@ -7336,8 +6974,8 @@ mod tests {
     /// The companion to the source gate above: the branch it insists on is real,
     /// and it refuses rather than reading.
     ///
-    /// A `Unit` is zero bytes wide, which is exactly the shape REP-56 delivers
-    /// here. The refusal is a panic, which is ADR-080's defined path — inside a
+    /// A `Unit` is zero bytes wide, which is the shape that must be refused.
+    /// The refusal is a panic, which is ADR-080's defined path — inside a
     /// wrapper `abi_guard!` turns it into a `Panic` fault (or a message and an
     /// abort where the manifest makes that fault unobservable). What must not
     /// happen, in any profile, is the read.
@@ -7509,7 +7147,7 @@ mod tests {
 
             // The validity rule is untouched by the table: an interned slot is
             // reached only after `checked_alloc_char` has approved the value, so
-            // a code point that is not a scalar still faults (RT-18).
+            // a code point that is not a scalar still faults.
             for bad in [-1_i64, 0xD800, 0x11_0000, 0x1_0000_0041] {
                 let _ = praxis_alloc_char(ctx, bad);
                 assert_eq!(
@@ -7637,8 +7275,8 @@ mod tests {
     /// character and an uninterned multi-byte one.
     ///
     /// The multi-byte case is the one that would catch reading the four-byte
-    /// payload as an `i64` (REP-37): `'é'` is `0xE9`, and eight bytes from a
-    /// four-byte payload picks up whatever follows it.
+    /// payload as an `i64`: `'é'` is `0xE9`, and eight bytes from a four-byte
+    /// payload picks up whatever follows it.
     #[test]
     fn char_to_text_renders_exactly_what_out_renders() {
         let mut rt = Runtime::new();
@@ -8020,7 +7658,7 @@ mod tests {
     /// there would be none to read, and `[1, 2].windows(5)` would carry a null
     /// where `[1, 2].windows(2)` carries `VEC` — one type with two labels, and
     /// the null is the one `vec_format` renders as `[]` and `push` treats as
-    /// "adopt whatever arrives" (P0-11).
+    /// "adopt whatever arrives".
     #[test]
     fn a_grouping_labels_the_outer_vec_even_when_it_is_empty() {
         let mut rt = Runtime::new();
@@ -8392,10 +8030,9 @@ mod tests {
 
     #[test]
     fn repeated_bool_allocation_mints_no_new_objects() {
-        // RT-03's actual harm: every `praxis_alloc_bool` call allocated a fresh
-        // *immortal*, which is unregistered storage no collection can reclaim.
-        // A program evaluating a comparison in a loop leaked one Bool per
-        // iteration. There are two Bools; a hundred calls must name two objects.
+        // A fresh *immortal* per call would be unregistered storage no
+        // collection can reclaim, leaking one Bool per loop iteration. There
+        // are two Bools; a hundred calls must name two objects.
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         let mut seen = std::collections::HashSet::new();
@@ -8411,11 +8048,10 @@ mod tests {
     }
 
     /// Every wrapper that answers a *predicate* hands back one of the two `Bool`
-    /// singletons. This is the rest of RT-03: `praxis_alloc_bool` was only the
-    /// most obvious of two dozen sites minting a fresh immortal per call, and
-    /// the comparisons and `is_empty`/`contains` family are the ones a real
-    /// program calls in a loop. It is also what makes their `Effect::Pure` rows
-    /// honest — nothing here can collect, so the call site is not a safepoint.
+    /// singletons — the comparisons and the `is_empty`/`contains` family, which
+    /// are what a real program calls in a loop. It is also what makes their
+    /// `Effect::Pure` rows honest: nothing here can collect, so the call site is
+    /// not a safepoint.
     #[test]
     fn predicate_wrappers_return_bool_singletons_and_allocate_nothing() {
         let mut rt = Runtime::new();
@@ -8461,12 +8097,11 @@ mod tests {
         unsafe { drop_ctx(ctx) };
     }
 
-    /// The other half of P0-08b: the wrappers that box a *derived* scalar —
-    /// `Text` construction, the `.len()` family, `Grid` extents, checked
-    /// arithmetic — gc-allocated without ever calling `maybe_collect`. A program
-    /// whose pressure came from those (a text-processing loop, say) could run
-    /// arbitrarily long with the collector never offered a turn. Each is driven
-    /// here until its own pacing collects.
+    /// Every wrapper that boxes a *derived* scalar — `Text` construction, the
+    /// `.len()` family, `Grid` extents, checked arithmetic — paces the
+    /// collector. Without that, a program whose pressure comes from those (a
+    /// text-processing loop, say) could run arbitrarily long with the collector
+    /// never offered a turn. Each is driven here until its own pacing collects.
     ///
     /// **Every receiver is sized past the interned range on purpose.** The first
     /// four wrappers answer a *length*, and a length inside
@@ -8665,13 +8300,10 @@ mod tests {
     /// A range whose member count has no `Int` faults with `IntOverflow`,
     /// answering the Unit sentinel like every other faulting wrapper.
     ///
-    /// There was no test for this at all until S18 re-pointed the kind. ADR-059
-    /// assigned the case to the empty-range kind it and ADR-058 were both owed;
-    /// S18 declined and gave it `IntOverflow` instead, because
-    /// `Int::MIN..Int::MAX` is the *widest* range expressible and "empty range"
+    /// The kind is `IntOverflow` and not `EmptyRange` (ADR-059, ADR-075):
+    /// `Int::MIN..Int::MAX` is the *widest* range expressible, so "empty range"
     /// would be a fault message that contradicts the input. `gcd`, `lcm` and
-    /// A\*'s path cost already answer `IntOverflow` for a result with no `Int`
-    /// (ADR-075).
+    /// A\*'s path cost answer `IntOverflow` for a result with no `Int` too.
     #[test]
     fn a_range_whose_count_has_no_int_faults_rather_than_wrapping_negative() {
         let mut rt = Runtime::new();
@@ -8831,8 +8463,8 @@ mod tests {
 
     #[test]
     fn subtraction_overflow_sets_fault() {
-        // The add/sub/mul overflow paths are symmetric; only `add` was exercised
-        // before. Sub: `Int::MIN - 1` overflows.
+        // The add/sub/mul overflow paths are symmetric. Sub: `Int::MIN - 1`
+        // overflows.
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx wired; operands are valid Ints.
@@ -8998,10 +8630,8 @@ mod tests {
 
     #[test]
     fn alloc_bool_round_trips_value() {
-        // The ABI wrapper allocates a Bool through the immortal path (never
-        // reclaimed); its value is what matters. Pointer-identity with the
-        // pre-allocated singleton is a runtime-internal optimization the
-        // wrappers need not preserve (Bool equality is structural, §5.5).
+        // This pins the *value*; `bool_and_unit_abi_allocations_reuse_runtime_singletons`
+        // pins the identity. Bool equality is structural (§5.5).
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx wired.
@@ -9021,7 +8651,7 @@ mod tests {
         assert_eq!(f.kind(), FaultKind::None);
     }
 
-    // --- Vec[T] collection wrappers (M5) -----------------------------------
+    // --- Vec[T] collection wrappers ----------------------------------------
 
     #[test]
     fn vec_new_is_empty() {
@@ -9082,7 +8712,7 @@ mod tests {
     /// So each assertion is about what appending would get wrong: the length is
     /// unchanged, the neighbours are unchanged, an index one past the end faults
     /// instead of growing the collection, and a value of the wrong type is
-    /// refused rather than retagging an explicitly typed collection (P0-11).
+    /// refused rather than retagging an explicitly typed collection.
     #[test]
     fn a_sequence_store_replaces_and_never_appends() {
         let mut rt = Runtime::new();
@@ -9214,8 +8844,8 @@ mod tests {
 
     #[test]
     fn vec_get_negative_index_faults() {
-        // The `idx < 0` guard in `praxis_vec_get` (the documented IndexOutOfBounds
-        // path) was never exercised — only the `idx >= len` path was.
+        // The `idx < 0` guard in `praxis_vec_get`: a negative index is out of
+        // bounds, not a wrapped-around large one.
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx wired.
@@ -9234,8 +8864,8 @@ mod tests {
 
     #[test]
     fn text_get_negative_index_faults() {
-        // Companion to vec_get_negative_index_faults: the `idx < 0` guard in
-        // `praxis_text_get` was likewise untested.
+        // Companion to `vec_get_negative_index_faults`, for `praxis_text_get`'s
+        // own `idx < 0` guard.
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx wired.
@@ -9255,21 +8885,17 @@ mod tests {
     ///
     /// The catalog's twin (`the_two_text_reads_answer_a_char`) is pure data and
     /// cannot see this; this is pure runtime and cannot see that. Both halves
-    /// are needed, and they must land together: a tree with one and not the
-    /// other routes a `Char`-typed value into `praxis_char_load`, whose
-    /// `read_scalar` answers `None` against the `INT` descriptor and panics.
-    ///
-    /// Observed red with the fix removed: the object carries the `INT`
-    /// descriptor, so `ptr::eq` fails and `as_char`'s own descriptor assertion
-    /// panics.
+    /// are needed, and they must hold together: with only one, a `Char`-typed
+    /// value routes into `praxis_char_load`, whose `read_scalar` answers `None`
+    /// against the `INT` descriptor and panics.
     #[test]
     fn text_get_answers_a_char_object() {
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx wired.
         unsafe {
-            // The user's report: `"sddddd"[4]` printed `100`, the code point of
-            // `d`, because the value was right and the type was wrong.
+            // `"sddddd"[4]` must be `'d'` and not `100`: an object carrying the
+            // `INT` descriptor would have the right value and the wrong type.
             let s = "sddddd";
             let text = praxis_alloc_text(ctx, s.as_ptr(), s.len());
             let four = praxis_alloc_int(ctx, 4);
@@ -9374,10 +9000,9 @@ mod tests {
     /// **ADR-086's narrowing half.** `Int.to_char()` reaches the same
     /// range check `praxis_alloc_char` does, because they share one helper.
     ///
-    /// Observed red against a wrapper that forwards `value as u32` without the
-    /// check: `0x1_0000_0041` answers `'A'` instead of faulting — the exact
-    /// RT-18 regression the guard was added for. That is the case that proves
-    /// the new door reaches the existing guard rather than restating it.
+    /// A wrapper that forwarded `value as u32` without the check would answer
+    /// `'A'` for `0x1_0000_0041` instead of faulting, which is the case that
+    /// proves this door reaches the shared guard rather than restating it.
     #[test]
     fn int_to_char_rejects_what_is_not_a_scalar_value() {
         let mut rt = Runtime::new();
@@ -9407,8 +9032,8 @@ mod tests {
 
     #[test]
     fn alloc_text_empty_string_round_trips() {
-        // The `len == 0` branch in `praxis_alloc_text` (treats an empty buffer as
-        // the empty slice) was not exercised. An empty Text must format as "".
+        // The `len == 0` branch in `praxis_alloc_text` treats an empty buffer as
+        // the empty slice. An empty Text must format as "".
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx wired; null pointer + zero length is the documented empty path.
@@ -9421,8 +9046,8 @@ mod tests {
 
     #[test]
     fn vec_new_with_null_descriptor_defaults_to_int() {
-        // A null element descriptor to `praxis_vec_new` falls back to Int (the
-        // documented `Vec()` construction path). The vec must be usable.
+        // A null element descriptor is kept null — "the caller has no static
+        // element type" — and the vec must still be usable.
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx wired; null descriptor is the handled default case.
@@ -9465,9 +9090,9 @@ mod tests {
             unit.as_ptr(),
             "the ABI must range-check the i64 code point before converting it to u32"
         );
-        // And the fault it raises must name itself. `praxis_alloc_char` used to
-        // raise `FaultKind::None`, so the host reported "no fault" while
-        // generated code took its fault path (RT-17).
+        // And the fault it raises must name itself: a `FaultKind::None` here
+        // would have the host report "no fault" while generated code took its
+        // fault path.
         assert_eq!(rt.fault(), FaultKind::InvalidChar);
         assert!(rt.has_pending_fault());
     }
@@ -9489,15 +9114,12 @@ mod tests {
     /// **ADR-111.** Input that is not UTF-8 faults at the `read`, because that
     /// is where the bytes stop being the compiler's and start being the host's.
     ///
-    /// This is the rewrite of `alloc_text_reports_invalid_utf8_as_its_own_fault_kind`,
-    /// which fed `praxis_alloc_text` the same four bytes directly. That test
-    /// would now *abort the test process* rather than fail, because a violated
-    /// precondition is a panic through `abi_guard!` and `praxis_alloc_text`'s
-    /// row no longer makes the resulting `Panic` fault observable — a harness
-    /// crash that reads like a toolchain problem. The property worth keeping is
-    /// not "the wrapper tolerates bad bytes"; it is that a program reading
-    /// non-UTF-8 input gets `InvalidText` at its `read`, and that is what this
-    /// asserts.
+    /// Asserted through `praxis_get_input` and never by feeding
+    /// `praxis_alloc_text` bad bytes directly: that is a violated precondition,
+    /// so it panics through `abi_guard!`, and `praxis_alloc_text`'s
+    /// `Allocates` row makes the resulting `Panic` fault unobservable — the
+    /// process aborts instead of failing. The property is that a program
+    /// reading non-UTF-8 input gets `InvalidText` at its `read`.
     ///
     /// `praxis run` cannot reach this: `lazy_stdin::read` goes through
     /// `std::io::read_to_string` and exits 2 on non-UTF-8 stdin before the
@@ -9624,11 +9246,12 @@ mod tests {
         );
     }
 
-    /// RT-07. Each of these extents used to reach `vec![unit; (w as usize) * (h
-    /// as usize)]`: `-1` became `usize::MAX`, and the products either overflowed
-    /// (a capacity panic across `extern "C"`) or asked the host for terabytes (an
-    /// OOM abort). The wrapper must answer with a fault, and the heap must be
-    /// untouched — a partly-built grid is as bad as a crash.
+    /// An extent must be validated before it becomes a `usize`. Unchecked,
+    /// `vec![unit; (w as usize) * (h as usize)]` turns `-1` into `usize::MAX`,
+    /// and the products either overflow (a capacity panic across `extern "C"`)
+    /// or ask the host for terabytes (an OOM abort). The wrapper must answer
+    /// with a fault, and the heap must be untouched — a partly-built grid is as
+    /// bad as a crash.
     #[test]
     fn a_negative_or_absurd_grid_extent_faults_instead_of_allocating() {
         let absurd = GridExtent::MAX_CELLS as i64 + 1;
@@ -9759,7 +9382,8 @@ mod tests {
 
     /// A declared element type the fill is not is a `TypeMismatch`, through the
     /// same `adopt_or_reject` a `push` goes through — not a silent retag of the
-    /// collection to the fill's type, which is the P0-11 defect one level down.
+    /// collection to the fill's type, which is the mislabelling defect one
+    /// level down.
     /// A *null* static descriptor adopts instead, which is what "the caller has
     /// no static element type" already means for `praxis_vec_new`.
     #[test]
@@ -9836,8 +9460,8 @@ mod tests {
     }
 
     /// `Grid(w, h, fill)` takes the extents `praxis_grid_new` refuses, through
-    /// the same `GridExtent::new` — a fill changes nothing about the arithmetic
-    /// RT-07 was about.
+    /// the same `GridExtent::new` — a fill changes nothing about the
+    /// arithmetic.
     #[test]
     fn grid_filled_refuses_the_extents_grid_new_refuses() {
         let absurd = GridExtent::MAX_CELLS as i64 + 1;
@@ -9875,9 +9499,9 @@ mod tests {
         }
     }
 
-    /// RT-07. `bs.insert(10^18)` asked `Vec::resize` for 10^16 words — an OOM
-    /// abort from inside `extern "C"`. A member the set cannot hold is now a
-    /// fault, and a negative one no longer vanishes silently.
+    /// A member the set cannot hold is a fault, and a negative one does not
+    /// vanish silently. Unchecked, `bs.insert(10^18)` would ask `Vec::resize`
+    /// for 10^16 words — an OOM abort from inside `extern "C"`.
     #[test]
     fn a_bitset_member_outside_the_representable_range_faults() {
         for member in [-1_i64, i64::MIN, i64::MAX, BitIndex::MAX + 1] {
@@ -9908,12 +9532,11 @@ mod tests {
     /// carries (ADR-118 part 2).
     ///
     /// `a_backend_can_read_the_length_and_the_elements_out_of_a_live_payload`
-    /// in `collections.rs` is this test for `Vec`, and part 1 of the record
-    /// calls it the thing W4b's first emitted load has to agree with. This is
-    /// the second payload's copy of that agreement.
+    /// in `collections.rs` is this test for `Vec`; this is the second payload's
+    /// copy of the same agreement between the emitted load and the layout.
     ///
-    /// Arm-B only: under `std-vec-payload` there is no site to name, which is
-    /// how that arm now fails the *build* rather than miscompiling a load.
+    /// Compiled out under `std-vec-payload`: that arm has no site to name, so
+    /// naming one fails the *build* rather than miscompiling a load.
     #[cfg(not(feature = "std-vec-payload"))]
     #[test]
     fn the_inline_bitset_site_addresses_a_live_bitsets_words() {
@@ -9971,8 +9594,8 @@ mod tests {
             let bs = praxis_bitset_new(ctx);
             let huge = praxis_alloc_int(ctx, i64::MAX);
             let _ = praxis_bitset_remove(ctx, bs, huge);
-            // The answer is the scalar channel's `0`/`1` since ADR-118
-            // decision 6, so there is no box to load it back out of.
+            // The answer is the scalar channel's `0`/`1` (ADR-118 decision 6),
+            // so there is no box to load it back out of.
             let answer = praxis_bitset_contains(ctx, bs, huge);
             (answer != 0, bitset_payload(bs).words.len())
         };
@@ -9983,8 +9606,8 @@ mod tests {
         assert_eq!(rt.fault(), FaultKind::None, "a query does not fault");
     }
 
-    /// RT-07. `(i64::MAX, i64::MAX).neighbors4()` overflowed the offset addition
-    /// and panicked across `extern "C"`. Every such neighbour is outside every
+    /// `(i64::MAX, i64::MAX).neighbors4()` must not overflow the offset addition
+    /// and panic across `extern "C"`. Every such neighbour is outside every
     /// grid, so the answer is an empty Vec.
     #[test]
     fn neighbors_of_an_extreme_point_are_empty_rather_than_a_panic() {
@@ -10021,9 +9644,9 @@ mod tests {
         assert_eq!(rt.fault(), FaultKind::None);
     }
 
-    /// **REP-16 at the unit level.** `map[key]` faults on an absent key where
-    /// `.get` answers, and `praxis_counter_set` replaces a count where
-    /// `praxis_counter_inc` only adds one.
+    /// `map[key]` faults on an absent key where `.get` answers, and
+    /// `praxis_counter_set` replaces a count where `praxis_counter_inc` only
+    /// adds one.
     ///
     /// Here as well as in the JIT tests because §4.7's choice is the *runtime's*
     /// to make: the two map wrappers differ in one line, and a compiler that
@@ -10081,15 +9704,13 @@ mod tests {
         assert_eq!(rt.fault(), FaultKind::None);
     }
 
-    /// S18 exit criterion (RT-14). `Map.get` is statically value-typed, so an
-    /// absent key cannot answer the Unit sentinel — a value whose static type is
-    /// `V` and whose runtime descriptor is `Unit` is exactly the confusion the
-    /// repair exists to close.
+    /// `Map.get` is statically value-typed, so an absent key cannot answer the
+    /// Unit sentinel: a value whose static type is `V` and whose runtime
+    /// descriptor is `Unit` is a type confusion the program cannot detect.
     ///
-    /// Strengthened past the `!= UNIT` it was ignored with: the answer is an
-    /// `Option`, so the test says which one — the `None` variant of the
-    /// runtime's own `option_schema`, which is what makes it match a program's
-    /// `None` arm.
+    /// The assertion names the variant, not merely `!= UNIT`: the answer is the
+    /// `None` of the runtime's own `option_schema`, which is what makes it match
+    /// a program's `None` arm.
     #[test]
     fn absent_map_get_does_not_return_an_untyped_unit_sentinel() {
         let mut rt = Runtime::new();
@@ -10159,14 +9780,11 @@ mod tests {
     /// The heap cannot be asked for this shape. Under the page allocator
     /// (ADR-103) a `Bool` lands on the ladder's bottom rung, so its block is
     /// rounded up to an 8-byte boundary and the seven bytes after the one-byte
-    /// payload are slack no object ever writes — a fresh page is `mmap`ped
-    /// zero, so the eight-byte read REP-37 removed answered *correctly* in
-    /// every measurement of the real allocator. (The `bumpalo` arena this
-    /// replaced had the same property for a different reason: it rounded the
-    /// next block's base up to eight and never wrote the gap. The fixture is
-    /// unaffected by the swap because it depends on neither.) Owning the storage
-    /// turns the padding from an accident into a fixture, which is the only way
-    /// the read can be measured rather than sampled.
+    /// payload are slack no object ever writes — and a fresh page is `mmap`ped
+    /// zero, so an eight-byte read of a heap `Bool` answers *correctly* by
+    /// accident. Owning the storage turns the padding from an accident into a
+    /// fixture, which is the only way the read can be measured rather than
+    /// sampled.
     ///
     /// The header carries a **freshly minted** `HeapId`, so the collector's
     /// provenance check (`Heap::mark`) skips this object instead of colouring
@@ -10217,10 +9835,10 @@ mod tests {
         dirty_padded_false()
     }
 
-    /// **REP-37's gate.** `ClosureOracle::is_goal` read the closure's `Bool`
-    /// answer with `int_payload` — an eight-byte read — but a `Bool`'s payload
-    /// is **one** byte (`BoolPayload = u8`, and `BOOL` is built from it), so
-    /// the answer took seven further bytes from past the object.
+    /// `ClosureOracle::is_goal` must read the closure's `Bool` answer at a
+    /// `Bool`'s width: the payload is **one** byte (`BoolPayload = u8`, and
+    /// `BOOL` is built from it), so an eight-byte read would take seven further
+    /// bytes from past the object.
     ///
     /// Every `bfs_distance` / `a_star` / `flood_fill` goal predicate goes
     /// through that read, so this walk is the whole class: the goal answers
@@ -10233,14 +9851,13 @@ mod tests {
     /// therefore `Some(0)`; a read at *any* offset past byte zero answers
     /// `0xFF`, likewise `Some(0)`. Only one byte at offset zero answers `None`,
     /// so the test fails if either the width or the offset is wrong. Asking the
-    /// heap for this shape does not work — see [`DirtyPaddedBool`] — which is
-    /// why the walk that stood here before passed with the fix removed.
+    /// heap for this shape does not work — see [`DirtyPaddedBool`].
     ///
     /// [`read_scalar`] is what makes both mistakes unspellable at the call
-    /// site, and `int_payload`'s width check is what stops the next
-    /// site from making them — in every profile, since REP-56;
-    /// `read_scalar_answers_none_for_a_foreign_descriptor`
-    /// pins the reader itself.
+    /// site, and `int_payload`'s width check — an ordinary branch, so it holds
+    /// in every profile — is what stops the next site from making them;
+    /// `read_scalar_answers_none_for_a_foreign_descriptor` pins the reader
+    /// itself.
     #[test]
     fn a_graph_goal_predicate_reads_a_bool_at_a_bool_s_width() {
         // The fixture is only a gate while its padding is dirty: state that
@@ -10278,9 +9895,9 @@ mod tests {
     }
 
     /// The same walk against the immortal `false` every real program's closure
-    /// answers — a companion, not a gate: it passes with REP-37's fix removed,
-    /// because the arena leaves a `Bool`'s slack bytes zero. It rules out a
-    /// "fix" that only reads the fixture correctly.
+    /// answers — a companion, not a gate: a wrong-width read passes it, because
+    /// the allocator leaves a `Bool`'s slack bytes zero. It rules out a reader
+    /// that only handles the fixture correctly.
     #[test]
     fn a_graph_goal_predicate_that_is_false_everywhere_finds_nothing() {
         let mut rt = Runtime::new();
@@ -10297,10 +9914,10 @@ mod tests {
         unsafe { drop_ctx(ctx) };
     }
 
-    /// The reader itself, both directions. `read_scalar` is what makes the two
-    /// mistakes `is_goal` made unspellable, so its own contract is pinned here:
-    /// the right type reads at the right width, and a foreign type answers
-    /// `None` instead of reinterpreting the bytes.
+    /// The reader itself, both directions. `read_scalar` is what makes a
+    /// wrong-type or wrong-width read unspellable at a call site, so its own
+    /// contract is pinned here: the right type reads at the right width, and a
+    /// foreign type answers `None` instead of reinterpreting the bytes.
     #[test]
     fn read_scalar_answers_none_for_a_foreign_descriptor() {
         let mut rt = Runtime::new();
@@ -10326,7 +9943,7 @@ mod tests {
         unsafe { (*(value.payload::<u8>() as *const crate::enums::EnumPayload)).tag }
     }
 
-    /// S18 exit criterion (RT-15). The same rule under a *tuple* static type:
+    /// The same rule under a *tuple* static type:
     /// `Grid.find` answers `(Int, Int)`, so "nothing matched" cannot be the Unit
     /// sentinel wearing that type.
     #[test]
@@ -10359,10 +9976,9 @@ mod tests {
 
     // --- GC pacing (§12.4, ADR-019) ----------------------------------------
     //
-    // `maybe_collect` is the load-bearing mechanism for the M5 shadow-stack
+    // `maybe_collect` is the load-bearing mechanism for the shadow-stack
     // spill: the alloc wrappers call it so collection happens automatically
-    // inside JIT'd code. The threshold/doubling logic was only tested
-    // indirectly (through the heavy-allocation integration tests).
+    // inside JIT'd code.
 
     #[test]
     fn maybe_collect_skips_below_threshold() {
@@ -10386,12 +10002,9 @@ mod tests {
 
     #[test]
     fn maybe_collect_runs_under_pressure() {
-        // Allocating past the 64 KiB threshold collects. This used to allocate
-        // 3000 Ints and *then* call `maybe_collect` by hand, because the
-        // automatic path returned early whenever the shadow arm was null —
-        // exactly the case here, with no generated frame on the stack. With
-        // that early return gone (P0-06) the allocation loop collects on its
-        // own, and the helper asserts it happens within 10,000 allocations.
+        // Allocating past the 64 KiB threshold collects on its own, with no
+        // generated frame on the stack and no hand-written `maybe_collect`
+        // call. The helper asserts it happens within 10,000 allocations.
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         // SAFETY: ctx wired.
@@ -10546,15 +10159,14 @@ mod tests {
     fn nested_allocating_helpers_root_intermediate_results() {
         // `Grid.positions` builds its result Vec in a Rust local and fills it by
         // calling `alloc_point`, which allocates three times per point. Every
-        // one of those is a safepoint, and until P0-07 nothing rooted the result
-        // Vec, the points already in it, or the tuple `alloc_point` was midway
-        // through filling — the shadow stack only sees what generated code
-        // spilled, and this is all native code.
+        // one of those is a safepoint, and the shadow stack only sees what
+        // generated code spilled — this is all native code, so the result Vec,
+        // the points already in it and the tuple `alloc_point` is midway
+        // through filling are rooted by the helper's own `NativeScope`.
         //
-        // This calls the real helper rather than inlining a sketch of it: the
-        // fix is that the helper opens a `NativeScope`, not that a bare Rust
-        // local became magically visible to the collector, and reading the
-        // points back afterwards is what proves nothing was reclaimed.
+        // This calls the real helper rather than inlining a sketch of it, and
+        // reading the points back afterwards is what proves nothing was
+        // reclaimed.
         // The grid is wide enough that the helper's own point allocations cross
         // the pacing threshold partway through the loop — the collection has to
         // happen *inside* the helper for this to test anything.
@@ -10607,26 +10219,22 @@ mod tests {
         assert_eq!(unsafe { praxis_check_fault(std::ptr::null_mut()) }, 0);
     }
 
-    // There is no `push_shadow_frame_on_null_context_returns_null` any more:
-    // the wrapper it guarded is gone, and the inline prologue that replaced it
-    // deliberately does not null-check the context (ADR-101 — the check cost
-    // every call in the language, and `Runtime::context` is the only producer
-    // of a context generated code is handed). `RuntimeContext::placeholder`
-    // carries the obligation in its doc instead.
+    // The inline prologue deliberately does not null-check the context
+    // (ADR-101): the check would cost every call in the language, and
+    // `Runtime::context` is the only producer of a context generated code is
+    // handed. `RuntimeContext::placeholder` carries the obligation in its doc.
 
-    // --- REP-41: a null element type stays unknown -------------------------
+    // --- a null element type stays unknown ---------------------------------
 
-    /// **REP-41.** A collection built with no static element type must not
-    /// claim to hold `Int`s, and what it holds must render as what it is.
+    /// A collection built with no static element type must not claim to hold
+    /// `Int`s, and what it holds must render as what it is.
     ///
     /// The codegen passes a **null** descriptor for `var c = Counter()` — its
     /// contract above `collection_element_descriptor_for` says so, and says
-    /// every `praxis_*_new` wrapper reads it that way. Five did not: `Set`,
-    /// `Counter`, `Map`'s key and the two heaps each replaced the null with
-    /// `&INT`, which is not a default but a false claim, and unlike `Vec` none
-    /// of them ever corrected it. The label was then dispatched through — a
-    /// `Text` key hashed and printed as an `i64`, a `Float` element printed as
-    /// the integer its bits spell.
+    /// every `praxis_*_new` wrapper reads it that way. Replacing the null with
+    /// `&INT` is not a default but a false claim, and the label is dispatched
+    /// through: a `Text` key would hash and print as an `i64`, a `Float`
+    /// element as the integer its bits spell.
     ///
     /// Both halves are asserted because either alone passes a wrong fix: the
     /// absent label is the representation, the rendering is the answer.
@@ -10656,7 +10264,7 @@ mod tests {
 
             // …and the values come back out as themselves. A `Text` key through
             // a `Counter`, a `Float` through a `MinHeap`: neither is an `Int`,
-            // and both used to print as one.
+            // and a guessed `Int` label would print both as one.
             let key = praxis_alloc_text(ctx, "ab".as_ptr(), 2);
             praxis_counter_inc(ctx, counter, key);
             let keys = praxis_counter_keys(ctx, counter);
@@ -10681,16 +10289,14 @@ mod tests {
         unsafe { drop_ctx(ctx) };
     }
 
-    /// **REP-42.** A `Map` does not claim its values are `Int`s.
+    /// A `Map` does not claim its values are `Int`s.
     ///
     /// `praxis_map_new` takes one descriptor — the key's — because the `MapNew`
-    /// row carries one type argument, and it wrote `INT` into the value slot
-    /// unconditionally with a comment calling that "sound for now". It was not a
-    /// default but a claim, and it was the same word as "unknown", so the
-    /// adoption that followed could not tell a `Map` that really holds `Int`s
-    /// from one that had never been told anything. The progress doc records the
-    /// consequence that shaped REP-18: a `Map[Text, Text]`'s pair read its value
-    /// as an `i64`, which is why `keys()`/`values()` are built in MIR.
+    /// row carries one type argument, so the value slot starts **null**.
+    /// Writing `INT` there would be a claim rather than a default, and it would
+    /// be the same word as "unknown", so the adoption that follows could not
+    /// tell a `Map` that really holds `Int`s from one that had never been told
+    /// anything — and a `Map[Text, Text]`'s value would be read as an `i64`.
     #[test]
     fn a_map_does_not_claim_its_values_are_ints() {
         let mut rt = Runtime::new();
@@ -10702,9 +10308,10 @@ mod tests {
                 map_payload(empty).value().is_none(),
                 "an empty Map has been told nothing about its values"
             );
-            // …so the `Vec` its `values()` answers is not labelled `Int` either,
-            // which is what made an empty `Map[Text, Text]`'s values unequal to
-            // an empty `Vec[Text]` (`vec_equals` compares element labels).
+            // …so the `Vec` its `values()` answers is not labelled `Int`
+            // either. A guessed `Int` there would make an empty
+            // `Map[Text, Text]`'s values unequal to an empty `Vec[Text]`,
+            // because `vec_equals` compares element labels.
             let none_yet = praxis_map_values(ctx, empty);
             assert!(vec_payload(none_yet).element().is_none());
 
@@ -10720,8 +10327,9 @@ mod tests {
             praxis_map_values(ctx, empty).format(&mut rendered);
             assert_eq!(rendered, "[vv]");
 
-            // A `Map` that really does hold `Int`s says so — the assertion the
-            // old spelling could not make, because `INT` was also its "unknown".
+            // A `Map` that really does hold `Int`s says so — an assertion only
+            // a null "unknown" makes possible, since a hardcoded `INT` would be
+            // the same word as "never been told".
             let ints = praxis_map_new(ctx, &crate::text::TEXT);
             let ik = praxis_alloc_text(ctx, "n".as_ptr(), 1);
             praxis_map_insert(ctx, ints, ik, praxis_alloc_int(ctx, 7));
@@ -10734,25 +10342,18 @@ mod tests {
         unsafe { drop_ctx(ctx) };
     }
 
-    /// **REP-42's collateral, and its gate.** An unlearned label is not a
-    /// label, so it cannot make two empty collections unequal.
+    /// An unlearned label is not a label, so it cannot make two empty
+    /// collections unequal.
     ///
-    /// REP-42 made `praxis_map_new` stop hardcoding `INT`, which is right — but
-    /// `same_element` was pointer identity, so a never-inserted `Map`'s
-    /// `values()` (no label) stopped comparing equal to an equally-typed empty
-    /// `Vec[Int]` (label `Int`). A reviewer measured the change against the
-    /// merge base: `true` before, `false` after.
+    /// `same_element` is not pointer identity, because a never-inserted `Map`'s
+    /// `values()` carries no label and an equally-typed empty `Vec[Int]`
+    /// carries `Int`. ADR-066 decision 5 is the rule: a null slot means the
+    /// *value's own* descriptor answers, and a collection with no label has no
+    /// values, so nothing is left to disagree. Reinstating a guessed descriptor
+    /// is the fix this rejects.
     ///
-    /// The old `true` was an accident of the hardcoded `INT` rather than a
-    /// rule — the same program over a `Map[Text, Text]` answered `false` on
-    /// both — so this is not "restore the old answer". It is ADR-066 decision
-    /// 5: a null slot means the *value's own* descriptor answers, and a
-    /// collection with no label has no values, so nothing is left to disagree.
-    /// Reinstating a guessed descriptor is the fix this rejects; it is the
-    /// defect REP-41 and REP-42 both were.
-    ///
-    /// RT-10 is untouched, and the last case says so: two collections that have
-    /// each been told their element type must still agree.
+    /// The last case is the limit: two collections that have each been told
+    /// their element type must still disagree when the types differ.
     #[test]
     fn an_unlearned_element_label_does_not_make_two_empty_collections_unequal() {
         use crate::collections::same_element;
@@ -10764,13 +10365,13 @@ mod tests {
         assert!(same_element(int, unlearned), "and in the other order");
         assert!(same_element(unlearned, unlearned));
         assert!(same_element(int, int));
-        // RT-10's rule, which this must not weaken: two *learned* labels that
-        // differ are two different collections, empty or not.
+        // The rule this must not weaken: two *learned* labels that differ are
+        // two different collections, empty or not.
         assert!(!same_element(int, text));
 
-        // End to end, at the shape the reviewer measured: a `Map` never
-        // inserted into has no value label, and its `values()` is an empty
-        // `Vec` that is equal to an empty `Vec` however that one was labelled.
+        // End to end: a `Map` never inserted into has no value label, and its
+        // `values()` is an empty `Vec` that is equal to an empty `Vec` however
+        // that one was labelled.
         let mut rt = Runtime::new();
         let ctx = wired_ctx(&mut rt);
         // SAFETY: `ctx` is wired; every argument below is a wrapper's own.
@@ -10798,7 +10399,7 @@ mod tests {
         unsafe { drop_ctx(ctx) };
     }
 
-    // --- REP-45: the manifest's fault column is checked against the code ----
+    // --- the manifest's fault column is checked against the code -----------
 
     /// Every function defined in this file, as `(name, body)`.
     ///
@@ -10814,14 +10415,11 @@ mod tests {
     /// The code of one line, with any `//` comment removed.
     ///
     /// The sweep reads what the **compiler** sees, not what a reader wrote
-    /// beside it. Before this, `body` was the raw line and the fixed point
-    /// matched `set_fault(` as a plain substring, so a comment inside a wrapper
-    /// naming the helper — "this used to call `set_fault(…)`" — classified that
-    /// wrapper as faulting and failed the assertion for a wrapper that cannot
-    /// fault. A sweep a comment can fool is a sweep that gets edited around
-    /// rather than satisfied, which is the failure mode the whole invariant
-    /// exists to prevent. Currently only latent: no `praxis_*` body names the
-    /// helper in prose today.
+    /// beside it. The fixed point matches `set_fault(` as a plain substring, so
+    /// a comment inside a wrapper naming the helper would otherwise classify
+    /// that wrapper as faulting. A sweep a comment can fool is a sweep that gets
+    /// edited around rather than satisfied, which is the failure mode the whole
+    /// invariant exists to prevent.
     ///
     /// A `//` inside a string or `char` literal is **not** a comment — `"//"`
     /// and `'/'` both occur in this file — so the scan tracks which it is in.
@@ -10918,24 +10516,20 @@ mod tests {
         out
     }
 
-    /// **REP-45.** A wrapper that can raise a fault says so in the manifest.
+    /// A wrapper that can raise a fault says so in the manifest.
     ///
-    /// `VecPush` and the two `DequePush*` rows were declared `Allocates` — which
-    /// makes `RuntimeSymbol::faults()` answer `false` — while all three call
-    /// `adopt_or_reject`, which ends in `set_fault(ctx, TYPE_MISMATCH)`. The
-    /// identical wrapper `praxis_grid_set` makes the same call and *is* declared
-    /// `Faults`, so the manifest was internally inconsistent about one
-    /// operation. The consequence is not cosmetic: on a rejection the element is
-    /// silently dropped, the wrapper answers the Unit sentinel, and the fault is
+    /// A row declared `Allocates` makes `RuntimeSymbol::faults()` answer
+    /// `false`, so no `CheckFault` follows the call. If such a wrapper can reach
+    /// `set_fault` the consequence is not cosmetic: the operation is silently
+    /// abandoned, the wrapper answers the Unit sentinel, and the fault is
     /// observed by some later unrelated check — at the wrong source location,
-    /// after the program has computed and possibly printed an answer from a
-    /// collection that quietly lost a value.
+    /// after the program has computed and possibly printed an answer.
     ///
-    /// A hand-corrected row drifts again, so this is the invariant instead, in
-    /// the shape S18 used for the catalog: the file is read at compile time,
-    /// each `praxis_*` wrapper's body is walked, and any body that can reach
-    /// `set_fault` — directly or through a helper defined here, transitively —
-    /// must belong to a symbol whose row says `faults()`.
+    /// A hand-corrected row drifts again, so this is the invariant instead: the
+    /// file is read at compile time, each `praxis_*` wrapper's body is walked,
+    /// and any body that can reach `set_fault` — directly or through a helper
+    /// defined here, transitively — must belong to a symbol whose row says
+    /// `faults()`.
     ///
     /// One direction only. A row may declare a fault the reader cannot see: the
     /// arithmetic wrappers are generated by `checked_int_binop!` and have no
@@ -10993,8 +10587,8 @@ mod tests {
             checked >= 20,
             "expected the fault-raising wrappers to be found; saw {checked}"
         );
-        // And the three rows this test was written for must be among the
-        // wrappers it can see, or it would have been green on the defect.
+        // These three reach `set_fault` only through a helper, so they are the
+        // shape the transitive scan has to be able to see.
         for name in [
             "praxis_vec_push",
             "praxis_deque_push_front",
@@ -11006,13 +10600,12 @@ mod tests {
                  that cannot see that cannot hold the invariant"
             );
         }
-        // **ADR-111 relocated a fault, and this is how the sweep proves it
-        // moved rather than vanished.** `praxis_alloc_text` used to raise
-        // `InvalidText` for bytes it was handed; it now trusts its caller, and
-        // the one caller holding raw host bytes raises it instead. Asserting
-        // the *destination* is visible to the scan is what makes the
-        // disappearance of the source meaningful — without it, deleting the
-        // validation outright would leave this test just as green.
+        // **`InvalidText` lives at exactly one site (ADR-111).**
+        // `praxis_alloc_text` trusts its caller; the one caller holding raw host
+        // bytes raises the fault instead. Asserting the destination is visible
+        // to the scan is what distinguishes a relocated fault from a deleted
+        // one — without it, deleting the validation outright would leave this
+        // test just as green.
         assert!(
             faulting.contains("praxis_get_input"),
             "`praxis_get_input` validates the host's input and raises \
@@ -11027,11 +10620,10 @@ mod tests {
         );
     }
     /// **The sweep above reads code, not prose.** Its classification is a
-    /// substring match, so before [`code_only`] a *comment* inside a wrapper
-    /// naming the helper — the most natural thing to write while removing a
-    /// fault — classified that wrapper as faulting and failed the invariant for
-    /// a wrapper that cannot fault. A sweep a comment can fool is a sweep that
-    /// gets edited around rather than satisfied.
+    /// substring match, so without [`code_only`] a *comment* inside a wrapper
+    /// naming the helper would classify that wrapper as faulting and fail the
+    /// invariant for a wrapper that cannot fault. A sweep a comment can fool is
+    /// a sweep that gets edited around rather than satisfied.
     ///
     /// Synthetic source, because the real file must not contain the shape: the
     /// point is that it may, safely.
@@ -11094,10 +10686,10 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
         );
     }
 
-    // --- the panic backstop (D12) -----------------------------------------
+    // --- the panic backstop ------------------------------------------------
 
-    /// **D12.** Every `#[no_mangle] extern "C"` function in this crate has its
-    /// body inside `abi_guard!`.
+    /// Every `#[no_mangle] extern "C"` function in this crate has its body
+    /// inside `abi_guard!`.
     ///
     /// Per-wrapper totality is the contract: a wrapper validates its arguments
     /// and reports a bad one as a fault, so the guard never fires. This is the
@@ -11110,13 +10702,12 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
     /// wrapped", which is a property of the *set* of entry points; a test that
     /// called them one by one would be a test of the ones somebody remembered.
     ///
-    /// **The file set is discovered, not declared.** It used to be a
-    /// hand-written four-entry `include_str!` array, which made the guarantee
-    /// "every entry point in a file somebody remembered to list" — a wrapper in
-    /// a new module was never scanned, and the `wrappers > 100` floor still
-    /// passed on the files that were. That is precisely the drift this test
-    /// exists to prevent, so the walk covers **every crate's `src/`**, not only
-    /// this one: nothing says a future `#[no_mangle]` has to live here.
+    /// **The file set is discovered, not declared.** A hand-written list of
+    /// files would make the guarantee "every entry point in a file somebody
+    /// remembered to list", and the `wrappers > 100` floor would still pass on
+    /// the files that were listed. So the walk covers **every crate's `src/`**,
+    /// not only this one: nothing says a future `#[no_mangle]` has to live
+    /// here.
     #[test]
     fn every_no_mangle_wrapper_is_behind_the_panic_guard() {
         /// Every `.rs` file under `dir`, recursively, in a stable order.
@@ -11146,8 +10737,7 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
         let mut sources: Vec<(String, String)> = Vec::new();
         rust_sources(&crates_dir, &mut sources);
         // A guard against the walk silently covering nothing — a wrong root
-        // would otherwise pass by finding no `#[no_mangle]` at all, which is
-        // the same failure the declared list had.
+        // would otherwise pass by finding no `#[no_mangle]` at all.
         assert!(
             sources.len() > 50,
             "the walk of {} found only {} Rust files, so it is not reading the workspace",
@@ -11171,9 +10761,9 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
                     k += 1;
                 }
                 // Inclusive of `k`: a one-line signature puts `fn name(` on the
-                // very line that opens the body, and an exclusive range named
-                // it `<unnamed>` — the least useful thing to say in the message
-                // that tells someone which wrapper they forgot.
+                // very line that opens the body, so an exclusive range would
+                // report `<unnamed>` in the message that tells someone which
+                // wrapper they forgot.
                 let name = lines[n..=k.min(lines.len() - 1)]
                     .iter()
                     .find_map(|l| l.split("fn ").nth(1))
@@ -11229,9 +10819,9 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
         assert_eq!(value, 7, "the guard is transparent when nothing panics");
 
         // A **faulting** wrapper: its call sites can carry a `CheckFault`, so
-        // generated code will observe the fault before it looks at the value,
-        // and the defined dummy is the right answer. The name has to be a real
-        // manifest symbol now — see `panic_fault_is_observable`, which is what
+        // generated code observes the fault before it looks at the value, and
+        // the defined dummy is the right answer. The name has to be a real
+        // manifest symbol — see `panic_fault_is_observable`, which is what
         // decides whether the dummy is returned at all.
         let mut runtime = crate::Runtime::new();
         let mut ctx = runtime.context();
@@ -11265,14 +10855,12 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
     /// Generated code tests the fault slot only where MIR emitted a
     /// `CheckFault`, and **`praxis_mir::verify` is what makes that true of a
     /// non-faulting wrapper** — its `RedundantFaultCheck` rule rejects a check
-    /// after an instruction that cannot fault (MIR-10, ADR-088). Until that
-    /// rule landed, lowering checked after everything and the "by construction"
-    /// below was aspiration. So for the wrappers the manifest declares
-    /// non-faulting there is no check, and returning `unit_sentinel` there would
-    /// hand a `Unit` into a slot generated code believes holds a Record, a
-    /// Tuple or a closure — the descriptor/payload confusion this repair has
-    /// spent stages closing, introduced by the backstop meant to prevent worse.
-    /// Those abort instead, which is what they did before the guard existed.
+    /// after an instruction that cannot fault (ADR-088). So for the wrappers the
+    /// manifest declares non-faulting there is no check, and returning
+    /// `unit_sentinel` there would hand a `Unit` into a slot generated code
+    /// believes holds a Record, a Tuple or a closure — a descriptor/payload
+    /// confusion introduced by the backstop meant to prevent worse. Those abort
+    /// instead.
     ///
     /// This test states the classification. The abort itself cannot be asserted
     /// in-process, which is exactly why the rule has to be a total function of
@@ -11305,19 +10893,15 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
              ({pure} non-faulting, {faulting} faulting)"
         );
 
-        // `praxis_push_shadow_frame` used to stand here: an entry point the
-        // manifest deliberately did not name, in the same position as a
-        // non-faulting wrapper because nothing could have emitted a check after
-        // it. ADR-101 inlined it and its pop, and with them gone every
-        // `#[no_mangle]` wrapper in this crate is manifested — so the only
-        // remaining unobservable case is a name that is not a wrapper at all.
+        // Every `#[no_mangle]` wrapper in this crate is manifested, so the only
+        // unobservable case left is a name that is not a wrapper at all.
         assert!(
             !panic_fault_is_observable("praxis_not_a_wrapper_at_all"),
             "an unknown name is never treated as observable"
         );
     }
 
-    // ---- Process input (§7.10, REP-60) ----
+    // ---- Process input (§7.10) ----
 
     /// A reader that answers nothing. A `fn` and not a closure because
     /// [`crate::input::InputReader`] is a plain `fn` pointer.
@@ -11335,24 +10919,16 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
         unsafe { crate::text::text_bytes(r.payload::<crate::text::TextPayload>() as *const _) }
     }
 
-    /// **REP-60's gate at the enforcement site.** A reader that answers zero
-    /// bytes has given *empty input*, not no input, so its answer is installed
-    /// as `input_source` whatever its length.
+    /// A reader that answers zero bytes has given *empty input*, not no input,
+    /// so its answer is installed as `input_source` whatever its length.
     ///
-    /// `praxis_get_input` allocated the buffer only `if !bytes.is_empty()`, so
-    /// empty standard input left `input_source` at the immortal Unit and
-    /// `praxis_run_parser`'s §6.3 descriptor guard faulted *before* the parser
-    /// ran — a `ParseFailed` with no input span, no `expected` and no `actual`,
-    /// which is none of the six fields §7.11 says a mismatch carries. A fault
-    /// raised before any buffer exists cannot carry them; the buffer is what
-    /// makes the diagnostic possible at all (ADR-087).
-    ///
-    /// Nothing exercised `praxis_get_input` directly before this, which is part
-    /// of why the guard survived: the only witness was a CLI end-to-end run, and
-    /// the `--input` path had already been repaired.
-    ///
-    /// **Observed red** before the repair: the returned descriptor was Unit's,
-    /// not `TEXT`'s.
+    /// Allocating the buffer only `if !bytes.is_empty()` would leave empty
+    /// standard input at the immortal Unit, so `praxis_run_parser`'s §6.3
+    /// descriptor guard would fault *before* the parser ran — a `ParseFailed`
+    /// with no input span, no `expected` and no `actual`, which is none of the
+    /// six fields §7.11 says a mismatch carries. A fault raised before any
+    /// buffer exists cannot carry them; the buffer is what makes the diagnostic
+    /// possible at all (ADR-087).
     #[test]
     fn a_reader_that_answers_zero_bytes_installs_an_empty_text() {
         let mut rt = Runtime::new();
@@ -11381,8 +10957,7 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
         unsafe { drop_ctx(ctx) };
     }
 
-    /// **A mutation companion, not a gate** — green before the repair and green
-    /// after, and its job is to stay that way.
+    /// **A mutation companion, not a gate.**
     ///
     /// The cheapest wrong repair is to allocate a `Text` unconditionally in
     /// `praxis_get_input`, which passes the gate above and quietly deletes the
@@ -11422,27 +10997,21 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
 
     /// **The guard must not report a parse that never ran.**
     ///
-    /// `praxis_run_parser` returns early for a non-Text `input` (§6.3), which is
-    /// correct — `run_plan` would reinterpret the payload as a `TextPayload` —
-    /// but the early return skipped the `clear_parse_detail` every other entry
-    /// into the parser performs. So a host that reached the guard after an
-    /// earlier mismatch printed *that* mismatch's offset and expectation for a
-    /// parse that never started.
+    /// `praxis_run_parser` returns early for a non-Text `input` (§6.3) —
+    /// `run_plan` would otherwise reinterpret the payload as a `TextPayload` —
+    /// and that early return must still perform the `clear_parse_detail` every
+    /// other entry into the parser performs. Without it, a host reaching the
+    /// guard after an earlier mismatch reports *that* mismatch's offset and
+    /// expectation for a parse that never started.
     ///
-    /// Not reproducible end to end: a fault is terminal within one `praxis run`,
-    /// so the reachable shape is an embedder calling `main` twice (or the crash
-    /// debugger's `restart`). This test is the reproduction, at the level where
-    /// the hazard exists.
+    /// Not reachable end to end: a fault is terminal within one `praxis run`,
+    /// so the shape is an embedder calling `main` twice (or the crash debugger's
+    /// `restart`). This test pins it at the level where the hazard exists.
     ///
     /// Fabricating a `ParseFail` here instead would be worse than clearing: with
     /// no buffer there is no input span, and an invented `expected` would make
     /// an embedder's host bug read as a parse failure at an offset that does not
     /// exist.
-    ///
-    /// **Observed red** before the repair: the fault was `ParseFailed`
-    /// (correctly), and `parse_detail().is_set()` was `true` with
-    /// `input_span == (7, 7)` and `expected == "int"` — the seeded failure,
-    /// surviving into a parse that never ran.
     #[test]
     fn the_non_text_guard_does_not_report_a_previous_parses_failure() {
         let mut rt = Runtime::new();
@@ -11477,16 +11046,14 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
 #[cfg(test)]
 mod growth_charging_tests {
     //! **Every wrapper that can grow a collection's buffer charges the pacer**
-    //! (ADR-121). See [`super::charge_growth`] for why this stopped being
-    //! optional.
+    //! (ADR-121). See [`super::charge_growth`] for why.
     //!
     //! The values pushed are all inside `small_int`'s interned range, and that
     //! is the whole design of these tests rather than a convenience: an interned
     //! `Int` is an immortal the allocator never charges for, so the *only* thing
     //! that can move `bytes_since_collect` here is the spine. Push
     //! `UNINTERNED + i` instead and every one of these passes whether or not the
-    //! growth is charged, because the elements would be paying for it — which is
-    //! precisely the premise `Heap::alloc_raw` was relying on and ADR-121 broke.
+    //! growth is charged, because the elements would be paying for it.
 
     use super::tests::{drop_ctx, wired_ctx};
     use super::*;

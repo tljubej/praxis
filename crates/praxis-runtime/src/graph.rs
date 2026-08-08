@@ -1,4 +1,4 @@
-//! The six graph walks behind §6.5's prelude helpers (TY-33 unit 3, ADR-060).
+//! The six graph walks behind §6.5's prelude helpers (ADR-060).
 //!
 //! §6.5 asks for "closure-based algorithms that do not require materializing a
 //! graph object": the caller supplies a start state and a function from a state

@@ -2,30 +2,23 @@
 //! emitted, on stderr, out of the real compile path.
 //!
 //! **Why this is in the tree rather than in a diff someone keeps re-applying.**
-//! Handover 25 §3 priced the whole optimization plan off one measurement — 156
-//! CLIF instructions and 216 aarch64 instructions per iteration of a
-//! two-statement loop, four of which were the arithmetic — and that number came
-//! from an `eprintln` added by hand and reverted with the branch. Five of the
-//! packages in handover 26's plan (W4b, W6, W7, W10, W12) state their headline
-//! as an instruction count, because a change that removes three instructions
-//! from a loop body is a *deterministic* result the clock on this laptop cannot
-//! resolve (26 §6). Without a hook each of them adds and reverts the same edit
-//! to the same file, and no two of their counts are comparable.
+//! Optimization work is priced in instruction counts, because a change that
+//! removes three instructions from a loop body is a *deterministic* result the
+//! clock on this laptop cannot resolve. A count that comes from an `eprintln`
+//! added by hand and reverted with the branch is a count nobody else can
+//! reproduce, and no two such counts are comparable.
 //!
 //! **Stderr, and that is load-bearing.** The A/B protocol diffs a benchmark's
 //! stdout byte-for-byte between the two arms and voids the measurement when it
-//! differs (26 §6). A dump on stdout would void exactly the runs it exists to
-//! explain.
+//! differs. A dump on stdout would void exactly the runs it exists to explain.
 //!
 //! **The counts come with the dump.** Counting instructions out of raw CLIF by
-//! hand is how the 156/216 figures ended up unreproducible in the first place;
-//! the header lines below are the answer, per block, so a later package quotes
-//! one line instead of a scroll of IR.
+//! hand is how a figure becomes unreproducible; the header lines below are the
+//! answer, per block, so a record quotes one line instead of a scroll of IR.
 //!
 //! # The baseline, and how a per-iteration count is read off a dump
 //!
-//! Handover 25 §3's loop, which is the program every instruction count in
-//! handover 26's plan is quoted against:
+//! The loop every instruction count is quoted against:
 //!
 //! ```text
 //! var i = 0
@@ -46,11 +39,9 @@
 //! | CLIF | 311 in 55 blocks | **171** over 35 blocks |
 //! | vcode | 458 in 67 blocks + prologue, 1960 bytes | **215** over 38 blocks |
 //!
-//! **The two block counts are the same denominator**, which they were not until
-//! this note was written: the vcode header used to say 68 because it counted the
-//! synthetic `prologue` entry as a block. The prologue is the instructions before
-//! the first label and belongs to no lowered block, so it is now reported beside
-//! the count rather than inside it. The instruction totals were always right.
+//! **The two block counts are the same denominator.** The prologue is the
+//! instructions before the first label and belongs to no lowered block, so it is
+//! reported beside the block count rather than inside it.
 //!
 //! A **per-iteration** count is a walk over the per-block header line, and the
 //! rule is: the loop is the one strongly connected component of the CFG with
@@ -59,24 +50,19 @@
 //! The fault epilogue and the loop exit fall out because they return, so they
 //! are outside the component; the out-of-line wrapper calls fall out because
 //! they are marked `cold` in the CLIF and are emitted after every hot block in
-//! the vcode. Handover 25's own figures for the same shape were 156 CLIF and
-//! **216** aarch64 — the second is one instruction from what this reproduces,
-//! which is as much agreement as two hand-written copies of a loop can give.
+//! the vcode.
 //!
-//! **The walk is `benchmarks/periter.py`, and it is in the tree because two
-//! separate hand-written walkers of this rule were wrong.** The first read the
-//! vcode's per-block counts through the *CLIF* graph — "the CFG" above means
-//! that IR's own, and a CLIF block and a vcode block that share a number are
-//! unrelated, which `vcode_block_counts` below says in the other direction ("the
-//! two dumps are comparable in total, not row by row"). On the loop above at
-//! `2491140` that answers **130** where the walk over the vcode's own graph
-//! answers **115**; ADR-118 part 2 caught it. The second built each graph
-//! correctly and had no set of *cold* vcode blocks, so at a branch where the
-//! out-of-line wrapper call is emitted before the inline arm it walked through
-//! the wrapper; that is the one whose numbers reached a record, and ADR-117 and
-//! ADR-120 carry the corrections. The tool sits beside `ab.py` for the reason
-//! this hook is in the tree at all: so the next package quoting a count does not
-//! write its own.
+//! **The walk is `benchmarks/periter.py`**, beside `ab.py`, so that the next
+//! record quoting a count does not write its own — and because the rule has two
+//! traps a hand-written walker falls into. First, **"the CFG" means the graph of
+//! the IR being counted**: a CLIF block and a vcode block that share a number
+//! are unrelated, which `vcode_block_counts` below says in the other direction
+//! ("the two dumps are comparable in total, not row by row"), and reading the
+//! vcode's per-block counts through the CLIF graph answers **130** on the loop
+//! above where the walk over the vcode's own graph answers **115** (ADR-118
+//! part 2 records both numbers). Second, the walk needs the set of *cold* vcode
+//! blocks: at a branch where the out-of-line wrapper call is emitted before the
+//! inline arm, a walker without it takes the wrapper for the hot path.
 //!
 //! **The rule has an exception, and it is not a defect in the rule.** "Take the
 //! successor that is inside the component and is not cold" assumes there is one
@@ -105,23 +91,20 @@ const VCODE_VAR: &str = "PRAXIS_DUMP_VCODE";
 
 /// The environment variable selecting the per-function slot census (ADR-128).
 ///
-/// **It is in the tree for the reason this module is.** Every number in ADR-128's
-/// measurement table — the frame width, the largest co-live root set, what greedy
-/// colouring achieves, the debugger's visible set, the count of locals carrying
-/// neither a name nor a span — came from a throwaway `praxis-cli` example that
-/// ran the front end and reported the columns per function. It was not in the
-/// tree, so every one of those figures was a measurement the next reader had to
-/// re-derive by hand-editing the compiler. That is exactly how the 156/216
-/// instruction counts of handover 25 §3 became unreproducible.
+/// **It is in the tree for the reason this module is.** Every number in
+/// ADR-128's measurement table — the frame width, the largest co-live root set,
+/// what greedy colouring achieves, the debugger's visible set, the count of
+/// locals carrying neither a name nor a span — is re-derivable from a run,
+/// rather than by hand-editing the compiler and reverting the edit.
 const SLOTS_VAR: &str = "PRAXIS_DUMP_SLOTS";
 
 /// Which functions one `PRAXIS_DUMP_*` variable selects.
 ///
 /// A whole-program dump is the wrong default for anything but a one-function
-/// microbenchmark — `<entry>` alone is ~470 instructions (handover 25 §3), and
-/// the interesting question is almost always about one loop in one function. So
-/// the variable takes names as well as `1`, and the by-name form is what the
-/// measurement packages should use.
+/// microbenchmark — `<entry>` alone is ~470 instructions, and the interesting
+/// question is almost always about one loop in one function. So the variable
+/// takes names as well as `1`, and the by-name form is what a measurement
+/// should use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DumpSelection {
     /// Unset, empty, or a list that named nothing. Costs one branch per
@@ -238,13 +221,13 @@ pub(crate) struct SlotCensus {
     ///
     /// **This is decision 5's set as its own gate defines it**, and it is much
     /// smaller than `nameless`. The gate is "a local may be dropped only if no
-    /// snapshot loses a line a user could have used", and the debugger's renderer
-    /// draws the line elsewhere than the ADR assumed: `render_frame_locals` keeps
-    /// a temp that has *a value or a span*, and the type column comes from the
-    /// local's `MirType`, not from the span. So a nameless, spanless local that
-    /// is ever written still renders — with a type and a value — and dropping it
-    /// would delete a line. Only a local nothing can ever write is invisible
-    /// already, and only those may go.
+    /// snapshot loses a line a user could have used", and the debugger's
+    /// renderer draws that line at *value or span*: `render_frame_locals` keeps
+    /// a temp that has either, and the type column comes from the local's
+    /// `MirType`, not from the span. So a nameless, spanless local that is ever
+    /// written still renders — with a type and a value — and dropping it would
+    /// delete a line. Only a local nothing can ever write is invisible already,
+    /// and only those may go.
     pub unrenderable: u32,
 }
 
@@ -298,25 +281,22 @@ pub(crate) fn wants_vcode(name: &str) -> bool {
 /// window in which either text exists: `clear_context` drops both the function
 /// and the compiled code on the next line.
 ///
-/// **What `define_function` did to `ctx.func` first — and since
-/// [`CRANELIFT_FLAGS`](crate::module::CRANELIFT_FLAGS) became
-/// `opt_level = "speed"`, that is genuinely "optimized".** It reaches
-/// `Context::compile` → `compile_stencil` → `Context::optimize`: unreachable-block
-/// elimination, constant-block-parameter removal (`remove_constant_phis`),
+/// **What `define_function` did to `ctx.func` first — and at
+/// [`CRANELIFT_FLAGS`](crate::module::CRANELIFT_FLAGS)' `opt_level = "speed"`,
+/// that is genuinely "optimized".** It reaches `Context::compile` →
+/// `compile_stencil` → `Context::optimize`: unreachable-block elimination,
+/// constant-block-parameter removal (`remove_constant_phis`),
 /// `resolve_all_aliases` — **and the mid-end egraph pass**, which is behind
-/// `if opt_level != OptLevel::None` and therefore now runs. It folds, GVNs and
-/// rewrites. NaN canonicalization still does not, its flag defaulting off. There
-/// is no separate CLIF legalization pass either: legalization happens inside
+/// `if opt_level != OptLevel::None` and therefore runs. It folds, GVNs and
+/// rewrites. NaN canonicalization does not, its flag defaulting off. There is no
+/// separate CLIF legalization pass either: legalization happens inside
 /// `isa.compile_function`, on the way to vcode, and never touches this text.
 ///
-/// This paragraph said the opposite until ADR-128, and had done since the fifth
-/// `opt_level` measurement (`module.rs`) moved the flag out from under it. The
-/// difference is not cosmetic for anyone quoting a count: **the CLIF dumped here
-/// is post-mid-end**, so an instruction it does not show may have been folded
-/// away rather than never emitted, and a package attributing a count to its own
-/// lowering has to allow for that. What survives unchanged is the other
-/// direction — a block or a `jump` argument the lowering emitted may be missing
-/// here.
+/// The difference is not cosmetic for anyone quoting a count: **the CLIF dumped
+/// here is post-mid-end**, so an instruction it does not show may have been
+/// folded away rather than never emitted, and a count attributed to a lowering
+/// has to allow for that. The other direction holds too — a block or a `jump`
+/// argument the lowering emitted may be missing here.
 pub(crate) fn emit(name: &str, ctx: &codegen::Context) {
     let hooks = hooks();
     if !hooks.selects(name) {
@@ -394,15 +374,15 @@ fn render(
 /// The two header lines: the totals, then the per-block breakdown.
 ///
 /// Both are prefixed `;; praxis-dump` so a dump can be `grep`ped out of a run's
-/// stderr, and the per-block line is one line because that is what a package
+/// stderr, and the per-block line is one line because that is what a record
 /// quoting "the loop body went from 216 to 202" pastes.
 ///
 /// **`blocks` is passed in rather than taken as `counts.len()`**, because the
-/// vcode breakdown carries one entry — the prologue — that is not a block. Five
-/// of handover 26's packages compare a CLIF block count against a vcode block
-/// count, and counting the prologue made those two different denominators. When
-/// the two disagree the header says `N blocks + prologue`, so a reader has both
-/// the comparable number and the entry that explains the extra row below it.
+/// vcode breakdown carries one entry — the prologue — that is not a block. A
+/// CLIF block count is compared against a vcode block count, and counting the
+/// prologue would make those two different denominators. When the two disagree
+/// the header says `N blocks + prologue`, so a reader has both the comparable
+/// number and the entry that explains the extra row below it.
 fn summarize(
     out: &mut String,
     what: &str,
@@ -460,8 +440,7 @@ const PSEUDO_ENTRIES: &[&str] = &["unwind ", "dummy_use ", "nop-zero-len", "emit
 /// The instructions before the first label are the function prologue, which
 /// belongs to no lowered block: it gets a row in the breakdown, because its
 /// instructions are real and are in the total, but it is not counted as a block.
-/// It used to be, which made every vcode dump read one block high — `458
-/// instructions in 68 blocks` for a function of 67 blocks and a prologue.
+/// Counting it would make every vcode dump read one block high.
 fn vcode_block_counts(vcode: &str) -> (Vec<(String, usize)>, usize) {
     let mut counts: Vec<(String, usize)> = Vec::new();
     let mut blocks = 0;
@@ -517,7 +496,7 @@ mod tests {
     }
 
     /// Anything else is a comma-separated list of function names, which is how
-    /// a measurement package asks about one loop in a real program.
+    /// a measurement asks about one loop in a real program.
     #[test]
     fn a_value_that_is_not_one_or_all_names_functions() {
         let sel = DumpSelection::parse(Some("<entry>, helper"));

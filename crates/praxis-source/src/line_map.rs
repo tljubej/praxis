@@ -145,7 +145,7 @@ impl LineMap {
     /// the terminator and tells the caller to trim it — this is that trim, and
     /// the only copy of it. The terminator set has to stay in step with the
     /// scanner in [`LineMap::new`], so the rule lives beside the scanner: a
-    /// future change there is one edit, not three that can silently desync.
+    /// change there is one edit rather than several that can silently desync.
     ///
     /// Takes the bytes rather than reading `self.text` so that a caller which
     /// already holds the source trims against the very bytes it is about to
@@ -332,9 +332,9 @@ mod tests {
         assert_eq!(off, BytePos(2), "column past line end clamps");
     }
 
-    /// The rule used to be written out three times — here, in `snippet`, and in
-    /// the LSP's position mapping. Pinned at the one surviving copy, because a
-    /// change to `LineMap::new`'s scanner has to move in step with it.
+    /// Exactly one terminator is trimmed, whatever its spelling. Pinned at the
+    /// single copy of the rule, because a change to `LineMap::new`'s scanner has
+    /// to move in step with it.
     #[test]
     fn trimming_takes_exactly_one_terminator() {
         for (text, start, end, want) in [

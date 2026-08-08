@@ -2,15 +2,10 @@
 //!
 //! Everything the compiler needs to know about a runtime wrapper — its exact
 //! symbol name, its parameter and return kinds, and whether calling it can
-//! allocate or fault — is **one row** in [`runtime_symbols!`] below. Before
-//! this manifest that knowledge was spread over five places (a `Symbol` enum,
-//! an arity-derived signature synthesizer, a JIT registration list, a
-//! name→pointer resolver and a MIR string literal), and they had already
-//! drifted: the registration list was missing symbols that a `dlsym` fallback
-//! silently found, and the arity-only signature fed an `i64` immediate into a
-//! `u32` parameter.
+//! allocate or fault — is **one row** in [`runtime_symbols!`] below, so no two
+//! places can drift about a symbol's signature or its effects.
 //!
-//! A call target is now a [`RuntimeSymbol`], not a string. Adding a wrapper
+//! A call target is a [`RuntimeSymbol`], not a string. Adding a wrapper
 //! means adding a row here and one arm to `praxis_runtime::abi::address`; both
 //! are exhaustive matches, so anything else that must change is a compile
 //! error rather than a runtime surprise.
@@ -40,18 +35,16 @@ pub enum AbiKind {
 
 /// What a wrapper returns.
 ///
-/// The `Gc`/`GcUnit` split is the one fact `AbiRet` did not carry, and its
-/// absence is what let RT-14 and RT-15 exist: `praxis_map_get` and
-/// `praxis_grid_find` were declared `-> Gc` and answered the Unit sentinel on a
-/// miss, while their catalog rows promised a `V` and an `(Int, Int)`. Nothing in
-/// the workspace could relate the two, because "a `GcRef`" said nothing about
-/// whether the reference could be Unit.
+/// The `Gc`/`GcUnit` split is what relates a wrapper to its catalog row: "a
+/// `GcRef`" alone says nothing about whether the reference can be Unit, so a
+/// wrapper declared `-> Gc` that answers the Unit sentinel on a miss would hand
+/// the program a value whose static type is `V` and whose runtime descriptor is
+/// `Unit`.
 ///
-/// **There is deliberately no third arm.** "May be Unit, may be a value" *is*
-/// RT-14/RT-15, and its absence from this enum is what makes the defect
-/// unrepresentable rather than merely fixed. A wrapper whose answer is
-/// sometimes absent says so in its result *type* — `Option[T]` (§4.7) — or it
-/// faults.
+/// **There is deliberately no third arm.** "May be Unit, may be a value" is the
+/// defect, and its absence from this enum is what makes it unrepresentable. A
+/// wrapper whose answer is sometimes absent says so in its result *type* —
+/// `Option[T]` (§4.7) — or it faults.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum AbiRet {
     /// A `GcRef` carrying the wrapper's **answer**: a value of the result type
@@ -459,13 +452,11 @@ runtime_symbols! {
     WriteStdout = "praxis_write_stdout": (Ctx, Gc) -> GcUnit, Pure;
 }
 
-/// Build-time coverage of the effect table (P0-08c).
+/// Build-time coverage of the effect table.
 ///
-/// The allocation effect used to live on `MethodEntry.allocates`, a hand-written
-/// `bool` per catalog row that had already drifted from the wrapper it described
-/// (`Vec.len` said `false`; `praxis_vec_len` boxes its result and can collect).
-/// The field is deleted; the manifest is the one answer, and this walks every
-/// row of it *at compile time* so a symbol can neither be added without an
+/// The manifest is the one answer to "does calling this allocate or fault" — a
+/// per-catalog-row `bool` would be a second one, free to drift — and this walks
+/// every row *at compile time* so a symbol can neither be added without an
 /// effect nor left out of [`RuntimeSymbol::ALL`], which is what the rest of the
 /// workspace iterates.
 ///
@@ -500,10 +491,9 @@ const _: () = {
         // `GcUnit` gets no check here on purpose. The invariant it exists for
         // relates a manifest row to a *catalog* row — a non-faulting wrapper
         // with a non-`Unit` result type must not be able to answer the sentinel
-        // (RT-14/RT-15) — and the catalog is built at run time, so the check
-        // lives in `builtins::tests::a_non_faulting_row_with_a_value_result_\
-        // cannot_answer_the_unit_sentinel`. An assertion here that restated
-        // something already true would say nothing.
+        // — and the catalog is built at run time, so the check lives in
+        // `builtins::tests::a_non_faulting_row_with_a_value_result_\
+        // cannot_answer_the_unit_sentinel`.
 
         i += 1;
     }
@@ -567,15 +557,13 @@ mod tests {
         assert!(Effect::AllocatesAndFaults.allocates() && Effect::AllocatesAndFaults.faults());
     }
 
-    /// **A standing invariant, not a gate** (REP-46): none of the nine overflow
-    /// alternatives may be declared faulting.
+    /// **A standing invariant:** none of the nine overflow alternatives may be
+    /// declared faulting.
     ///
-    /// It is green by construction the moment the rows exist, so it was never
-    /// red for this change and is not counted among its gates. What it catches
-    /// is a *later* edit marking one `AllocatesAndFaults` — which would make MIR
-    /// emit a `CheckFault` after a call that never faults, i.e. REP-53's failure
-    /// mode arriving from the other end, and would quietly undo the one property
-    /// that makes these methods alternatives to a faulting operator at all.
+    /// What it catches is an edit marking one `AllocatesAndFaults`, which would
+    /// make MIR emit a `CheckFault` after a call that never faults and quietly
+    /// undo the one property that makes these methods alternatives to a faulting
+    /// operator at all.
     #[test]
     fn no_overflow_alternative_declares_that_it_faults() {
         use RuntimeSymbol::*;
@@ -602,12 +590,11 @@ mod tests {
     /// **ADR-143.** All three `to_text` wrappers allocate and none of them
     /// faults.
     ///
-    /// Green by construction the moment the rows exist, and pinned for
-    /// `no_overflow_alternative_declares_that_it_faults`'s reason: the wrong
-    /// answer here is silent. `MethodEntry::can_fault` reads the manifest, so a
-    /// row copied from `FloatToInt` instead of `FloatToText` would make every
-    /// `n.to_text()` emit a `CheckFault` that can never fire, and nothing about
-    /// the program's behaviour would say so.
+    /// Pinned for `no_overflow_alternative_declares_that_it_faults`'s reason:
+    /// the wrong answer here is silent. `MethodEntry::can_fault` reads the
+    /// manifest, so a row copied from `FloatToInt` instead of `FloatToText`
+    /// would make every `n.to_text()` emit a `CheckFault` that can never fire,
+    /// and nothing about the program's behaviour would say so.
     #[test]
     fn the_to_text_family_allocates_and_cannot_fault() {
         for sym in [
@@ -748,9 +735,9 @@ mod tests {
     /// whether `Inst::Alloc { AllocKind::Text }` is followed by a `CheckFault`
     /// (ADR-088), whether a `Text` literal in a loop is hoisted into the
     /// preheader (ADR-108 §3), and whether `panic_fault_is_observable` lets the
-    /// wrapper's panic path abort. A later edit marking it faulting again would
-    /// silently restore 41 corpus checks, un-hoist every `Text` literal, and
-    /// make the abort a fault — this makes it a failing test instead.
+    /// wrapper's panic path abort. An edit marking it faulting would silently
+    /// add 41 corpus checks back, un-hoist every `Text` literal, and make the
+    /// abort a fault — this makes it a failing test instead.
     #[test]
     fn alloc_text_trusts_its_bytes_and_the_row_says_so() {
         assert_eq!(
@@ -760,8 +747,8 @@ mod tests {
              (ADR-111); declaring it faulting puts a check back after every text \
              literal and takes `Text` back out of the ADR-108 hoist"
         );
-        // And the wrapper the fault moved *to* still declares it, or the
-        // relocation would read as a deletion.
+        // And the wrapper that owns the fault declares it, so the requirement
+        // is enforced somewhere rather than nowhere.
         assert!(
             RuntimeSymbol::GetInput.faults(),
             "`praxis_get_input` holds raw host bytes and raises `InvalidText` \
@@ -770,9 +757,9 @@ mod tests {
     }
 
     /// Spot-check the rows the compiler is most sensitive to: the two that take
-    /// a narrow `u32` (the arity-only signature synthesis this manifest
-    /// replaces passed an `i64` here), and the arithmetic wrappers whose
-    /// fault-and-allocate pair drives both the safepoint and the fault check.
+    /// a narrow `u32`, where passing an `i64` is the mismatch this manifest
+    /// exists to prevent, and the arithmetic wrappers whose fault-and-allocate
+    /// pair drives both the safepoint and the fault check.
     #[test]
     fn narrow_and_faulting_rows_are_recorded_exactly() {
         assert_eq!(

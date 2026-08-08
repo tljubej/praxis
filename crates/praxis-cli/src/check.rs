@@ -8,12 +8,11 @@
 //!
 //! # The front end is not here (ADR-097)
 //!
-//! This file used to hold its own parse → analyze → concatenate → sort-by-span
-//! sequence. §14.2 requires the CLI and the LSP to share one front-end query
-//! API, and M11 built it: `praxis_lsp::query::Snapshot`. The sequence lives
-//! there now, stated once, so a divergence between what `praxis check` prints
-//! and what the editor underlines is unrepresentable rather than merely
-//! unlikely.
+//! §14.2 requires the CLI and the LSP to share one front-end query API:
+//! `praxis_lsp::query::Snapshot`. The parse → analyze → concatenate →
+//! sort-by-span sequence lives there, stated once, so a divergence between what
+//! `praxis check` prints and what the editor underlines is unrepresentable
+//! rather than merely unlikely.
 
 use praxis_lsp::query::Snapshot;
 use praxis_lsp::Revision;

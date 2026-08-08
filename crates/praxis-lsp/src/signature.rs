@@ -1,4 +1,4 @@
-//! Signature help (WS6, §15.2).
+//! Signature help (§15.2).
 //!
 //! Two callee kinds: an ordinary function or method call, whose signature comes
 //! from the scheme inference gave it or the catalog entry dispatch selected, and
@@ -226,7 +226,6 @@ pub fn constructor_signatures(ctor: Constructor) -> Vec<(String, Vec<String>)> {
     match ctor.arg_shape() {
         ArgShape::Positional(1) => vec![one(&["parser"], result)],
         ArgShape::Positional(n) => {
-            // `repeat_n` is 1.82; the workspace MSRV is 1.80 (rust-toolchain.toml).
             let args: Vec<&str> = std::iter::repeat("parser").take(n).collect();
             vec![one(&args, result)]
         }

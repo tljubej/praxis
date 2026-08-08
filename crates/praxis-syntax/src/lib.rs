@@ -1,10 +1,10 @@
 //! Token and syntax-node definitions for the Praxis language.
 //!
 //! Per §14.1 of the design, this crate owns the token kinds and the lossless
-//! syntax tree node kinds. From Milestone 1 onward (ADR-003) the tree is a
-//! [`rowan`]-backed lossless tree: this crate contributes the [`SyntaxKind`]
-//! vocabulary, the [`PraxisLanguage`] tag that binds it to rowan, and the
-//! [`SyntaxNode`]/[`SyntaxToken`]/[`SyntaxElement`] type aliases.
+//! syntax tree node kinds. The tree is [`rowan`]-backed (ADR-003): this crate
+//! contributes the [`SyntaxKind`] vocabulary, the [`PraxisLanguage`] tag that
+//! binds it to rowan, and the [`SyntaxNode`]/[`SyntaxToken`]/[`SyntaxElement`]
+//! type aliases.
 //!
 //! The modules:
 //! - [`kind`] — the single `SyntaxKind` enum (tokens, trivia, tree nodes).
@@ -12,7 +12,7 @@
 //! - [`interp`] — the one rule for where a `"…"` literal ends and where its
 //!   interpolation holes are (§8.1, ADR-147), shared by the lexer's pre-scan
 //!   and its resume path.
-//! - [`literal`] — the one text-literal decoder (§4.3, IP-08).
+//! - [`literal`] — the one text-literal decoder (§4.3).
 //! - [`numeric`] — the one digit-separator rule for numeric literals (§4.3).
 //! - [`template`] — the one rule for where a backtick template ends (§7.2,
 //!   D10), shared by the lexer and the input parser's template scanner.

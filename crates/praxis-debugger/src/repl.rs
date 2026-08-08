@@ -1,22 +1,27 @@
-//! The interactive crash REPL (§9.4, M10-WS5).
+//! The interactive crash REPL (§9.4).
 //!
 //! When a fault fires and the host is attached to a terminal (or `--debug=always`
 //! forces it), the CLI hands the crash snapshot to this REPL. The user navigates
-//! the frame chain and inspects locals; no command can mutate or resume the
-//! faulted state in v1 (§9.5, §19.10 — `p EXPR` and the mutation gate land in
-//! M10b).
+//! the frame chain and inspects locals; **no command mutates or resumes the
+//! faulted state** (§9.5, §19.10) — `restart`/`reload` rerun the program from the
+//! start rather than continuing the faulted run.
 //!
-//! Commands (§9.4), M10a subset:
+//! Commands (§9.4):
 //! - `bt`              show the numbered backtrace
 //! - `frame N`         select frame N
 //! - `up`              move the selection toward the caller
 //! - `down`            move the selection toward the callee
 //! - `locals`          show the selected frame's locals
+//! - `p EXPR`          evaluate a read-only expression
+//! - `type EXPR`       show the inferred expression type
+//! - `heap EXPR`       inspect a value with its type
+//! - `source [N]`      show a frame's source
+//! - `input`           show the input near the active parser cursor
+//! - `parser`          show the active input parser near the fault
+//! - `restart`         rerun the program with the same input
+//! - `reload`          recompile the source and rerun with the same input
 //! - `help`            list commands
 //! - `quit` (or EOF)   exit the REPL
-//!
-//! `p EXPR`, `type EXPR`, `source`, `input`, `parser`, `heap`, `restart`,
-//! `reload` are acknowledged but deferred to M10b.
 
 use std::io::{BufRead, Write};
 
@@ -76,11 +81,11 @@ impl Repl {
     /// first.
     ///
     /// The order is the point. A `CrashSnapshot` holds `GcRef`s into the
-    /// session's heap, and since S6 the heap finalizes its payloads on drop —
-    /// so a snapshot outliving the runtime is a use-after-free waiting to be
-    /// read (hazard H8). Destructuring here makes that explicit instead of
-    /// relying on field declaration order surviving the next edit. The caller
-    /// gets a session it can [`DebugSession::teardown`].
+    /// session's heap, and the heap finalizes its payloads on drop — so a
+    /// snapshot outliving the runtime is a use-after-free waiting to be read.
+    /// Destructuring here makes that explicit instead of relying on field
+    /// declaration order surviving the next edit. The caller gets a session it
+    /// can [`DebugSession::teardown`].
     #[must_use]
     pub fn into_session(self) -> Option<DebugSession> {
         let Repl {
@@ -90,13 +95,14 @@ impl Repl {
         session
     }
 
-    /// Borrow the live session, if any. M10b commands use this to reach the
-    /// `Jit`/`Runtime`/`TypeDb`; returns `None` for navigation-only REPLs.
+    /// Borrow the live session, if any. Commands that need live state use this
+    /// to reach the `Jit`/`Runtime`/`TypeDb`; returns `None` for
+    /// navigation-only REPLs.
     pub fn session(&self) -> Option<&DebugSession> {
         self.session.as_ref()
     }
 
-    /// Borrow the crash snapshot. M10b rendering commands (`source`,
+    /// Borrow the crash snapshot. The rendering commands (`source`,
     /// `render_frame_locals`) read frame spans/locals from it.
     pub fn snapshot(&self) -> &CrashSnapshot {
         &self.snapshot
@@ -120,7 +126,7 @@ impl Repl {
         }
     }
 
-    /// Run `p EXPR` / `type EXPR` against the selected frame (§9.5, M10b-WS4).
+    /// Run `p EXPR` / `type EXPR` against the selected frame (§9.5).
     /// Splits the snapshot/frame borrow (immutable) from the session borrow
     /// (mutable: the runtime hosts the call) so both coexist. Degrades to a
     /// "session not attached" error for navigation-only REPLs.
@@ -312,9 +318,9 @@ impl Repl {
                 let _ = writeln!(out, "{}", HELP_TEXT);
             }
             "quit" | "exit" | "q" => return Control::Quit,
-            // M10b-WS3 context commands. `source` reads the selected frame's
-            // source_span (threaded in WS1) against the session's source text.
-            // `input`/`parser` read the runtime's §7.11 ParseDetail.
+            // Context commands. `source` reads the selected frame's
+            // `source_span` against the session's source text; `input`/`parser`
+            // read the runtime's §7.11 `ParseDetail`.
             "source" => {
                 let frame_idx = match rest.parse::<usize>() {
                     Ok(n) if n < self.snapshot.len() => n,
@@ -355,11 +361,10 @@ impl Repl {
                     .unwrap_or("");
                 let _ = render_parser_context(out, detail, source_text);
             }
-            // M10b-WS4/WS5: the read-only expression evaluator (§9.5, §9.4).
-            // The three commands differ only in the mode they hand
-            // `evaluate_expr`; [`crate::evaluate::Mode`] documents what each one
-            // does with the synthesized function and owns the word → variant
-            // mapping.
+            // The read-only expression evaluator (§9.4, §9.5). The three
+            // commands differ only in the mode they hand `evaluate_expr`;
+            // [`crate::evaluate::Mode`] documents what each one does with the
+            // synthesized function and owns the word → variant mapping.
             "p" | "type" | "heap" => {
                 if rest.is_empty() {
                     let _ = writeln!(out, "usage: {cmd} EXPR");
@@ -370,10 +375,10 @@ impl Repl {
                 let result = self.evaluate_expr(rest, mode);
                 let _ = crate::evaluate::write_eval_result(out, &result);
             }
-            // M10b-WS6: `restart` reruns the same code+input; `reload`
-            // recompiles the source then reruns (§9.7). Both take the new
-            // snapshot (if it faulted) and reset the frame cursor; a clean run
-            // prints the result and stays in the REPL.
+            // `restart` reruns the same code+input; `reload` recompiles the
+            // source then reruns (§9.7). Both take the new snapshot (if it
+            // faulted) and reset the frame cursor; a clean run prints the
+            // result and stays in the REPL.
             "restart" => {
                 self.do_restart_or_reload(out, /* reload */ false);
             }
@@ -458,7 +463,7 @@ mod tests {
     fn navigation_only_repl_has_no_session() {
         // `Repl::new` (the unit-test / degraded path) carries no live session:
         // `session()` is None, and the snapshot/selected accessors still work.
-        // M10b commands that need the session will degrade gracefully off this.
+        // Commands that need the session degrade gracefully off this.
         let repl = Repl::new(two_frame_snapshot());
         assert!(
             repl.session().is_none(),

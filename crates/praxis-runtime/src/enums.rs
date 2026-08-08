@@ -1,16 +1,16 @@
-//! The `Enum` value descriptor (§4.6, M7).
+//! The `Enum` value descriptor (§4.6).
 //!
 //! An enum value carries a discriminant (`tag`) selecting its variant, the
 //! variant's payload values (one `GcRef` per payload type, in declaration
 //! order), and a pointer to the [`EnumSchema`] that says **which enum type it
 //! is**.
 //!
-//! The schema is what records and tuples already carry, for the same reason
-//! (RT-12/RT-11): a single `ENUM` descriptor serves every enum value, so
-//! without a per-type schema in the payload two unrelated enums of one shape
-//! were one type — `Colour::Red` equalled `Light::Red`, they hashed into the
-//! same bucket, and a value could only render as `<variant 0: …>` because
-//! nothing in the runtime knew the variant was called `Red`.
+//! The schema is what records and tuples already carry, for the same reason: a
+//! single `ENUM` descriptor serves every enum value, so without a per-type
+//! schema in the payload two unrelated enums of one shape would be one type —
+//! `Colour::Red` would equal `Light::Red`, they would hash into the same
+//! bucket, and a value could only render as `<variant 0: …>` because nothing
+//! in the runtime would know the variant was called `Red`.
 //!
 //! Each distinct enum *type* gets one schema, built by whichever producer
 //! allocates the value: the codegen's per-generation cache, the input parser's
@@ -132,9 +132,9 @@ impl EnumSchema {
 /// discriminant, and the variant's payload values (one `GcRef` per payload
 /// field, in declaration order).
 ///
-/// `schema` is **first**, mirroring `RecordPayload` and `TuplePayload`. The tag
-/// therefore no longer sits at offset 0, which is why the codegen reads it
-/// through `offset_of!` rather than a literal (hazard H6).
+/// `schema` is **first**, mirroring `RecordPayload` and `TuplePayload`, so the
+/// tag does not sit at offset 0: the codegen reads it through `offset_of!`
+/// rather than a literal.
 #[repr(C)]
 pub struct EnumPayload {
     /// The static enum type. `items.len()` must equal
@@ -201,9 +201,9 @@ unsafe fn enum_equals(a: *const u8, b: *const u8) -> bool {
     let pa = unsafe { &*(a as *const EnumPayload) };
     let pb = unsafe { &*(b as *const EnumPayload) };
     // Equality is same-type + same-variant + payload-wise equality (§5.5).
-    // "Same type" is the schema's identity and variant shape, not its *address*
-    // (RT-13): a `Colour::Red` and a `Light::Red` used to be equal because the
-    // tag was the whole of an enum value's identity.
+    // "Same type" is the schema's identity and variant shape, not its *address*:
+    // the tag alone is not an enum value's identity, or a `Colour::Red` and a
+    // `Light::Red` would be equal.
     if pa.schema.is_null() || pb.schema.is_null() {
         return false;
     }
@@ -222,9 +222,9 @@ unsafe fn enum_equals(a: *const u8, b: *const u8) -> bool {
         let desc = schema.descriptor_at(tag, i, *x);
         // For a slot the producer had no type for, `desc` is `x`'s own — so `y`
         // must carry the same one before its payload is read through it. Two
-        // values of different types are unequal; reading one as the other is
-        // the wrong-payload read P0-11 is about, and it is exactly what
-        // `Some(1) == Some("1")` used to do under one `Option` schema.
+        // values of different types are unequal; reading one as the other is a
+        // wrong-payload read, which is what `Some(1) == Some("1")` would be
+        // under a single `Option` schema.
         if !std::ptr::eq(desc, schema.descriptor_at(tag, i, *y)) {
             return false;
         }
@@ -244,9 +244,9 @@ unsafe fn enum_equals(a: *const u8, b: *const u8) -> bool {
 unsafe fn enum_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     // SAFETY: caller guarantees `payload` points at an initialized EnumPayload.
     let p = unsafe { &*(payload as *const EnumPayload) };
-    // Everything `same_type` compares is hashed, so `Eq` and `Hash` still agree
-    // now that equality is type identity rather than the tag alone: two enums
-    // that differ only in which type they are must be free to land in different
+    // Everything `same_type` compares is hashed, so `Eq` and `Hash` agree:
+    // equality is type identity rather than the tag alone, and two enums that
+    // differ only in which type they are must be free to land in different
     // buckets.
     if !p.schema.is_null() {
         // SAFETY: checked non-null; every producer supplies a `'static` schema.
@@ -268,9 +268,9 @@ unsafe fn enum_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     // Arity, to distinguish payload prefixes.
     hasher.write_bytes(&(p.items.len() as u64).to_le_bytes());
     for (i, item) in p.items.iter().enumerate() {
-        // The slot's type is part of the shape `eq` now compares, so it is part
-        // of the hash too. Reading it off the *value* for an unknown slot is
-        // what keeps hash and eq agreeing there: both ask the object.
+        // The slot's type is part of the shape `eq` compares, so it is part of
+        // the hash too. Reading it off the *value* for an unknown slot is what
+        // keeps hash and eq agreeing there: both ask the object.
         let desc = if p.schema.is_null() {
             item.descriptor()
         } else {
@@ -342,13 +342,13 @@ unsafe fn enum_compare(a: *const u8, b: *const u8) -> std::cmp::Ordering {
     Ordering::Equal
 }
 
-/// Descriptor for the `Enum` value type (M7, §4.6). Structural equality and
+/// Descriptor for the `Enum` value type (§4.6). Structural equality and
 /// hashing (§5.5): two enum values are equal iff they are the same enum *type*,
 /// carry the same variant tag and have equal payloads; hashing mixes the type
 /// identity, the variant, then each payload. An enum is equatable/hashable iff
 /// every payload type is; functions never are. This lets enums serve as
-/// map/set keys (M8 containers) — and the container ordering (ADR-138) walks the
-/// same three levels, in declaration order at the tag.
+/// map/set keys — and the container ordering (ADR-138) walks the same three
+/// levels, in declaration order at the tag.
 pub static ENUM: TypeDescriptor = TypeDescriptor::builtin::<EnumPayload>(
     BuiltinTypeId::Enum,
     "Enum",
@@ -363,7 +363,7 @@ pub static ENUM: TypeDescriptor = TypeDescriptor::builtin::<EnumPayload>(
 )
 .with_owned_bytes(enum_owned_bytes);
 
-/// The heap bytes an enum value owns beyond its payload, for GC pacing (RT-04).
+/// The heap bytes an enum value owns beyond its payload, for GC pacing.
 /// `capacity`, not `len`: the buffer's real footprint is what the collector is
 /// paced against.
 ///
@@ -383,7 +383,7 @@ pub const OPTION_SOME_TAG: i64 = 0;
 /// See [`OPTION_SOME_TAG`].
 pub const OPTION_NONE_TAG: i64 = 1;
 
-/// The runtime's own `'static` schema for the prelude `Option` (F12, D1).
+/// The runtime's own `'static` schema for the prelude `Option` (F12).
 ///
 /// `Map.get`, `Grid.find` and the graph walks answer `Option[V]` without ever
 /// learning `V` statically — they only have the value they found — so `Some`'s
@@ -521,9 +521,9 @@ mod alloc_tests {
         assert_eq!(null.descriptor().id(), crate::scalars::UNIT.id());
     }
 
-    /// RT-13. Two enum types of one shape are two types. Before the schema, an
-    /// enum value's whole identity was its tag, so `Colour::Red` and
-    /// `Light::Red` were equal and hashed alike.
+    /// Two enum types of one shape are two types: an enum value's identity is
+    /// its schema's, not its tag's, so `Colour::Red` and `Light::Red` are
+    /// neither equal nor alike in hash.
     #[test]
     fn two_enum_types_of_one_shape_are_not_one_type() {
         let mut rt = crate::Runtime::new();
@@ -586,7 +586,7 @@ mod alloc_tests {
 
     /// The null-payload-slot rule, applied to enums. Under one `Option` schema
     /// whose `Some` slot is unknown, `Some(1)` and `Some("1")` are unequal
-    /// rather than one being read through the other's descriptor (P0-11).
+    /// rather than one being read through the other's descriptor.
     #[test]
     fn a_some_of_two_different_payload_types_is_not_equal() {
         let mut rt = crate::Runtime::new();
@@ -647,8 +647,7 @@ mod alloc_tests {
         assert_eq!(hash_of(from_codegen), hash_of(from_runtime));
     }
 
-    /// An enum renders its variant name. `<variant 0: 3>` was all the runtime
-    /// could say before the schema carried the names.
+    /// An enum renders its variant name, which it reads from its schema.
     #[test]
     fn an_enum_renders_its_variant_name_and_payload() {
         let mut rt = crate::Runtime::new();

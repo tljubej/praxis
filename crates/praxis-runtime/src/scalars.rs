@@ -11,10 +11,10 @@
 //! (ADR-013).
 //!
 //! Each descriptor is followed by its [`Payload`] handle — `INT_PAYLOAD` beside
-//! `INT` — which is what the allocators take (REP-02). The descriptor derives
-//! its width from the payload type and then erases it, so an allocator handed a
-//! bare `&TypeDescriptor` could only compare widths at runtime; the handle
-//! carries the type, and the pairing is checked when the `static` is evaluated.
+//! `INT` — which is what the allocators take. The descriptor derives its width
+//! from the payload type and then erases it, so an allocator handed a bare
+//! `&TypeDescriptor` could only compare widths at runtime; the handle carries
+//! the type, and the pairing is checked when the `static` is evaluated.
 
 use std::cmp::Ordering;
 use std::fmt::{self, Write as _};
@@ -53,9 +53,8 @@ pub type FloatPayload = f64;
 // One implementation per operation, instantiated at each descriptor with the
 // payload type that descriptor was built from — `TypeDescriptor::builtin::<P>`
 // and `scalar_compare::<P>` on lines you can read together, so a callback that
-// reads the wrong width is visible where the descriptor is written rather than
-// four functions away. That is P0-12's shape: `Char`'s ordering read eight
-// bytes off a four-byte payload, and nothing at `CHAR` said otherwise.
+// reads the wrong width — eight bytes off `Char`'s four-byte payload, say — is
+// visible where the descriptor is written rather than four functions away.
 //
 // `BoolPayload` and `BytePayload` are both `u8`, so `Bool` and `Byte` share
 // these instantiations outright — which is exactly why a `Payload` handle names
@@ -67,11 +66,10 @@ pub type FloatPayload = f64;
 // they are handed, and `Float`'s equality, hash and order are each IEEE-754
 // decisions rather than the derived Rust ones (§4.12, ADR-045).
 //
-// Grepping for the old per-type names: `int_equals` and `char_equals` — named
-// in `small_int.rs`, `small_char.rs`, `dynamic_key.rs` and ADR-100/ADR-107 —
-// are `scalar_equals` instantiated at `IntPayload` / `CharPayload`, and the
-// claims those comments make about them (a reflexive `u32 ==`, and so on) are
-// unchanged.
+// `int_equals` and `char_equals` — the names `small_int.rs`, `small_char.rs`,
+// `dynamic_key.rs` and ADR-100/ADR-107 use — are `scalar_equals` instantiated
+// at `IntPayload` / `CharPayload`. The claims those places make about them (a
+// reflexive `u32 ==`, and so on) hold of these instantiations.
 
 /// A scalar payload holds no `GcRef`s, so there is nothing to report (ADR-013).
 unsafe fn scalar_trace(_: *mut u8, _: &mut dyn Tracer) {}
@@ -142,8 +140,8 @@ pub static UNIT: TypeDescriptor = TypeDescriptor::builtin::<UnitPayload>(
     Some(unit_compare),
 );
 
-/// `Unit`'s payload handle (REP-02). Its one value is an immortal, minted at
-/// startup — nothing gc-allocates a `Unit`.
+/// `Unit`'s payload handle. Its one value is an immortal, minted at startup —
+/// nothing gc-allocates a `Unit`.
 pub static UNIT_PAYLOAD: Payload<UnitPayload> = Payload::new(&UNIT);
 
 // ---- Bool ------------------------------------------------------------------
@@ -165,13 +163,13 @@ pub static BOOL: TypeDescriptor = TypeDescriptor::builtin::<BoolPayload>(
     Some(scalar_hash::<BoolPayload>),
     // A `Bool` can be a `Map` key, so a container has to be able to order one
     // (ADR-138). `true < false` is still Y006 — see `unit_compare`. The order is
-    // `false` before `true`, which is both the conventional one and the one the
-    // rendered forms already had — so no `Set[Bool]` prints differently for it.
+    // `false` before `true`, which is both the conventional one and the order of
+    // the rendered forms.
     Some(scalar_compare::<BoolPayload>),
 );
 
-/// `Bool`'s payload handle (REP-02). Both values are immortals too (RT-03), so
-/// this mints the pair at startup rather than one per comparison.
+/// `Bool`'s payload handle. Both values are immortals too (RT-03), so this
+/// mints the pair at startup rather than one per comparison.
 pub static BOOL_PAYLOAD: Payload<BoolPayload> = Payload::new(&BOOL);
 
 // ---- Int -------------------------------------------------------------------
@@ -206,9 +204,9 @@ pub static INT: TypeDescriptor = TypeDescriptor::builtin::<IntPayload>(
     Some(scalar_compare::<IntPayload>),
 );
 
-/// `Int`'s payload handle (REP-02). `IntPayload` is `i64` while a Rust integer
-/// literal defaults to `i32` — the mismatch that used to abort the process, and
-/// that this handle makes the compiler resolve.
+/// `Int`'s payload handle. `IntPayload` is `i64` while a Rust integer literal
+/// defaults to `i32`; the handle is what makes the compiler resolve that
+/// mismatch rather than a runtime width check.
 pub static INT_PAYLOAD: Payload<IntPayload> = Payload::new(&INT);
 
 /// The inline bitmap claim for an `Int` that [`crate::small_int`]'s table does
@@ -247,9 +245,9 @@ pub static BYTE: TypeDescriptor = TypeDescriptor::builtin::<BytePayload>(
     Some(scalar_compare::<BytePayload>),
 );
 
-/// `Byte`'s payload handle (REP-02). Its payload is the same Rust type as
-/// `Bool`'s, which is why a handle names its descriptor explicitly instead of
-/// the pairing being derived from the payload type.
+/// `Byte`'s payload handle. Its payload is the same Rust type as `Bool`'s,
+/// which is why a handle names its descriptor explicitly instead of the pairing
+/// being derived from the payload type.
 pub static BYTE_PAYLOAD: Payload<BytePayload> = Payload::new(&BYTE);
 
 // ---- Char ------------------------------------------------------------------
@@ -289,27 +287,27 @@ pub static CHAR: TypeDescriptor = TypeDescriptor::builtin::<CharPayload>(
     Some(scalar_equals::<CharPayload>),
     Some(scalar_hash::<CharPayload>),
     // Unicode scalar value order (ADR-045). The payload is the Unicode scalar
-    // value, so `u32` order *is* code-point order — and it is four bytes, which
-    // is why reading it as an `i64` was both wrong and out of bounds (P0-12).
+    // value, so `u32` order *is* code-point order — and it is four bytes, so
+    // reading it as an `i64` would be both wrong and out of bounds.
     // `CharPayload` here is what says so.
     Some(scalar_compare::<CharPayload>),
 );
 
-/// `Char`'s payload handle (REP-02). `CharPayload` is `u32`, not `char`: the two
-/// share a layout, so the runtime width check could never tell them apart — and
-/// one call site was passing a `char`. The type argument is what says which.
+/// `Char`'s payload handle. `CharPayload` is `u32`, not `char`: the two share a
+/// layout, so a runtime width check cannot tell them apart. The type argument
+/// is what says which.
 pub static CHAR_PAYLOAD: Payload<CharPayload> = Payload::new(&CHAR);
 
 // ---- Float ------------------------------------------------------------------
 
 /// Render a `Float` the way §4.12 asks: in the shortest form that reads back as
-/// **the same Praxis `Float`** (ADR-083, REP-44).
+/// **the same Praxis `Float`** (ADR-083).
 ///
 /// Rust's `{}` is shortest-round-trippable for Rust, where a bare `1` re-reads
 /// as an `f64`. Praxis is not Rust here: §4.12's typing rule is that `42` is
 /// strictly an `Int` literal and that `Float` and `Int` never mix, so a `Float`
 /// rendered `1` does not read back as a `Float` at all — and, printed inside a
-/// collection, a `Vec[Float]` of `[3.0, 5.0]` was indistinguishable from a
+/// collection, a `Vec[Float]` of `[3.0, 5.0]` would be indistinguishable from a
 /// `Vec[Int]`. So a finite value with no `.` and no exponent in its digits gets
 /// a `.0`, and everything else — including `inf`/`-inf`/`NaN`, which §4.12 names
 /// as those literals — is Rust's rendering unchanged.
@@ -361,7 +359,7 @@ unsafe fn float_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
 /// Not the source-level `<`: that is `Inst::FloatCmp`, stays IEEE-754, and
 /// answers `false` whenever either operand is NaN (§4.12). This callback exists
 /// because a `BinaryHeap` needs a *total* `Ord` or it corrupts its own sift
-/// invariants, and `f64::total_cmp` was rejected for splitting the two zeros.
+/// invariants, and `f64::total_cmp` is rejected for splitting the two zeros.
 ///
 /// # Safety
 /// Both pointers must point at `FloatPayload`s.
@@ -395,7 +393,7 @@ pub static FLOAT: TypeDescriptor = TypeDescriptor::builtin::<FloatPayload>(
     Some(float_compare),
 );
 
-/// `Float`'s payload handle (REP-02).
+/// `Float`'s payload handle.
 pub static FLOAT_PAYLOAD: Payload<FloatPayload> = Payload::new(&FLOAT);
 
 /// The inline bitmap claim for a `Float` (ADR-119). See [`INT_CLAIM_SITE`].
@@ -576,7 +574,7 @@ mod tests {
 
     /// ADR-045 decision 2. The container order is total, so it has to answer
     /// for NaN — and it has to agree with `equals` everywhere else, which is
-    /// why `f64::total_cmp` (which splits the two zeros) was not used.
+    /// why `f64::total_cmp` (which splits the two zeros) is not used.
     #[test]
     fn float_compare_is_numeric_with_nan_last() {
         use std::ptr;
@@ -610,9 +608,9 @@ mod tests {
         assert_eq!(unsafe { cmp(at(&nan), at(&nan)) }, Ordering::Equal);
     }
 
-    /// The `compare` callback reads the payload it was declared for — the whole
-    /// of P0-12's scalar half. A `Char` payload is four bytes; the old ordering
-    /// read eight.
+    /// The `compare` callback reads the payload it was declared for. A `Char`
+    /// payload is four bytes, so an ordering that read eight would be both
+    /// wrong and out of bounds.
     #[test]
     fn scalar_compare_reads_its_own_payload_width() {
         use std::ptr;
@@ -686,8 +684,8 @@ mod tests {
         assert!(!is_valid_char(0xD800)); // surrogate
     }
 
-    /// REP-02: every scalar's payload handle names the type its descriptor
-    /// describes, and the allocator writes exactly that.
+    /// Every scalar's payload handle names the type its descriptor describes,
+    /// and the allocator writes exactly that.
     ///
     /// The *pairing* is already a compile-time property — each `Payload::new`
     /// above runs during const evaluation of a `static`, so a handle whose type
@@ -748,9 +746,8 @@ mod tests {
         }
 
         // The round trip: what each allocator writes is readable as the declared
-        // payload type. `praxis_alloc_int` used to take an `i64` and hand it to a
-        // generic `gc_alloc` that checked the width at runtime; the width is now
-        // the handle's, and this is the value arriving intact through it.
+        // payload type. The width is the handle's, and this is the value
+        // arriving intact through it.
         let rt = crate::Runtime::new();
         assert_eq!(rt.alloc_int(-42).as_int(), -42);
         assert_eq!(rt.alloc_float(2.5).as_float(), 2.5);
@@ -765,9 +762,9 @@ mod tests {
         }
     }
 
-    /// **REP-44, ADR-083.** A `Float` renders as a Praxis `Float` literal.
+    /// **ADR-083.** A `Float` renders as a Praxis `Float` literal.
     ///
-    /// The descriptor test above could not catch this: its one value is `2.5`,
+    /// The descriptor test above cannot catch this: its one value is `2.5`,
     /// which already carries a `.`, so it passes whichever rule is in force.
     /// Every case here is a whole-numbered value, an exponent, or a non-finite
     /// one — the three places the two rules differ.
@@ -784,8 +781,9 @@ mod tests {
             };
             buf
         };
-        // The defect: identical to an `Int`'s rendering, so `[3.0, 5.0]` and
-        // `[3, 5]` printed the same and neither read back as the other's type.
+        // Without the `.0` these render identically to an `Int`, so `[3.0, 5.0]`
+        // and `[3, 5]` would print the same and neither would read back as the
+        // other's type.
         assert_eq!(rendered(1.0), "1.0");
         assert_eq!(rendered(0.0), "0.0");
         assert_eq!(rendered(-7.0), "-7.0");
@@ -799,23 +797,15 @@ mod tests {
         assert_eq!(rendered(f64::NAN), "NaN");
     }
 
-    /// **REP-50, and ADR-083's rule stated as a round trip.** The rendered form
-    /// of a `Float` is the text that reads back as *the same* `Float`, so the
-    /// check is a re-read and not a string comparison.
+    /// **ADR-083's rule stated as a round trip.** The rendered form of a
+    /// `Float` is the text that reads back as *the same* `Float`, so the check
+    /// is a re-read and not a string comparison. `to_bits` is what tells the two
+    /// zeros apart; `==` cannot, because IEEE-754 says they are equal.
     ///
-    /// `-0.0` is the case that made this worth writing: the formatter has
-    /// always been right about it, and the evaluator was not — a Float
-    /// negation was lowered as `0.0 - x`, so the literal `-0.0` produced
-    /// `+0.0` and the rendering of the *wrong value* round-tripped perfectly.
-    /// `to_bits` is what tells the two zeros apart; `==` cannot, because
-    /// IEEE-754 says they are equal.
-    ///
-    /// It is **not REP-50's gate** — that is `run_pass_float_negative_zero`,
-    /// which asks the *evaluator*. It **is** REP-44's: before the rendering fix
-    /// a whole-numbered `Float` printed like an `Int`, so `-0.0` rendered as
-    /// `-0` and the last assertion below was red. Both halves are worth having,
-    /// because a later edit to `FLOAT.format` would otherwise stop satisfying
-    /// the round trip without any evaluator test noticing.
+    /// This asks the *formatter*. `run_pass_float_negative_zero` in
+    /// `praxis-cli`'s `run.rs` asks the evaluator the same question. Both halves
+    /// are worth having, because an edit to `FLOAT.format` would otherwise stop
+    /// satisfying the round trip without any evaluator test noticing.
     #[test]
     fn a_rendered_float_reads_back_as_the_same_float() {
         let rendered = |v: FloatPayload| {

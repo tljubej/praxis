@@ -3,8 +3,8 @@
 //!
 //! Each assertion here names something an implementation could get plausibly
 //! wrong and still pass a weaker test: reporting `Y120` from lowering (where
-//! `praxis check` and the editor never see it), reporting one twice now that
-//! two passes build patterns, inventing a `Y120` for a scrutinee whose type a
+//! `praxis check` and the editor never see it), reporting one twice because two
+//! passes build patterns, inventing a `Y120` for a scrutinee whose type a
 //! *later* line pins, and offering a fix whose text does not compile.
 
 #![cfg(test)]
@@ -21,9 +21,9 @@ fn codes(analysis: &crate::Analysis, want: DiagCode) -> Vec<&praxis_source::Diag
         .collect()
 }
 
-/// **The milestone's reason for this pass.** A non-exhaustive match is reported
-/// by `analyze` — which is what `praxis check` and the language server run —
-/// and not only by lowering, which only `praxis run` reaches.
+/// A non-exhaustive match is reported by `analyze` — which is what
+/// `praxis check` and the language server run — and not only by lowering, which
+/// only `praxis run` reaches.
 #[test]
 fn a_non_exhaustive_match_is_reported_by_analysis() {
     let analysis =
@@ -37,8 +37,8 @@ fn a_non_exhaustive_match_is_reported_by_analysis() {
     );
 }
 
-/// …exactly once. Two passes build patterns now (this one and lowering), and
-/// only one of them may report.
+/// …exactly once. Two passes build patterns (this one and lowering), and only
+/// one of them may report.
 #[test]
 fn it_is_reported_once() {
     let src = "enum E { A, B }\nfn f(e: E) -> Int {\n    match e {\n        A => 1\n    }\n}\n";
@@ -59,9 +59,8 @@ fn it_is_reported_once() {
     );
 }
 
-/// An exhaustive match is silent, including through a payload — the case the
-/// pre-matrix scan got wrong and the one a "did anything report" test cannot
-/// tell from a false positive.
+/// An exhaustive match is silent, including through a payload — the case a
+/// "did anything report" test cannot tell from a false positive.
 #[test]
 fn an_exhaustive_match_is_silent() {
     let analysis = analyze(
@@ -183,25 +182,23 @@ fn the_fix_copies_the_files_indentation() {
 /// **The gate.** Every diagnostic a *well-formed* program can earn is analysis's,
 /// because analysis is what `praxis check` and the editor run.
 ///
-/// Each program here checked clean and then refused to run: the diagnostic was
-/// lowering's alone, and lowering is the one pass `Snapshot::diagnostics` does
-/// not reach. "A file could check clean and fail to run" is ADR-130's own
-/// statement of the problem, and these are the codes it did not move.
+/// A diagnostic only lowering decides is one `Snapshot::diagnostics` never
+/// reaches, so the file checks clean and then refuses to run — ADR-130's own
+/// statement of the problem. These are the codes ADR-133 covers.
 #[test]
 fn a_program_run_refuses_is_a_program_check_refuses() {
     for (src, want) in [
-        // `Y013` at an expression, which was `lower_lit`'s.
+        // `Y013` at an expression.
         (
             "var x = 99999999999999999999999\nout(x)\n",
             DiagCode::IntLiteralOutOfRange,
         ),
-        // …and at a literal *pattern*, which was the builder's under a sink the
-        // coverage pass threw away.
+        // …and at a literal *pattern*, which the pattern builder decides.
         (
             "fn f(n: Int) -> Int { match n { 99999999999999999999 => 1, _ => 0 } }\nout(f(1))\n",
             DiagCode::IntLiteralOutOfRange,
         ),
-        // `Y124`, the user-reported half: `A(i, j)` on a one-slot variant.
+        // `Y124`: `A(i, j)` on a one-slot variant.
         (
             "enum Bla { A(Int), B, C }\nvar bla = A(3)\nmatch bla { A(i, j) => {} B => {} C => {} }\n",
             DiagCode::PayloadArityMismatch,
@@ -233,8 +230,7 @@ fn a_program_run_refuses_is_a_program_check_refuses() {
 
 /// …and exactly once. Inference and the pattern builder walk the same patterns,
 /// and the two codes they *both* decide — a variant the enum has not (`Y122`)
-/// and a shape the scrutinee cannot take (`Y123`) — must not arrive twice now
-/// that the builder's sink is kept.
+/// and a shape the scrutinee cannot take (`Y123`) — must not arrive twice.
 #[test]
 fn a_diagnostic_two_passes_agree_on_is_reported_once() {
     for (src, want) in [
@@ -243,8 +239,8 @@ fn a_diagnostic_two_passes_agree_on_is_reported_once() {
             DiagCode::UnknownEnumVariant,
         ),
         // A `for` header is the other walk, and it must agree the same way. A
-        // *bare* `Nope` would be a binding (HIR-07), so this names one that can
-        // only be a variant pattern.
+        // *bare* `Nope` would be a binding, so this names one that can only be
+        // a variant pattern.
         (
             "enum E { A, B }\nvar e = A\nfor Nope(x) in [e] { out(0) }\n",
             DiagCode::UnknownEnumVariant,
@@ -317,10 +313,9 @@ fn every_pattern_position_is_checked_by_analysis() {
 
 // --- the character literal (ADR-141) ---
 
-/// **`exhaustive.rs` needed no code change and this is what says so.** `Char`
-/// falls through `signature()` to `Signature::Open` exactly as `Int` does, so a
-/// `match` over one is never exhaustive without a `_` — the rule the language
-/// already had for every scalar with more values than anyone can enumerate.
+/// `Char` falls through `signature()` to `Signature::Open` exactly as `Int`
+/// does, so a `match` over one is never exhaustive without a `_` — the rule for
+/// every scalar with more values than anyone can enumerate.
 #[test]
 fn a_match_on_a_char_needs_a_wildcard() {
     let analysis = analyze(
@@ -345,9 +340,8 @@ fn a_match_on_a_char_needs_a_wildcard() {
     );
 }
 
-/// `LitKey::render` has printed a `Char` witness as `'x'` since ADR-130 — years
-/// ahead of there being anything in the language spelled that way. The witness
-/// is now a program the reader can paste.
+/// `LitKey::render` prints a `Char` witness as `'x'`, so the suggested arm is a
+/// program the reader can paste.
 #[test]
 fn a_char_witness_renders_with_single_quotes() {
     let analysis = analyze(

@@ -26,9 +26,9 @@ use crate::{diagnostic_render, exit_code, source_file};
 ///
 /// `input_file` optionally overrides the process input (§7.1): when `None`,
 /// standard input is read **by the program's first `read`** and not before
-/// (§7.10, REP-51 — see [`lazy_stdin`]); when `Some(path)`, the file is read
-/// up front, because a regular file cannot block and reporting an unreadable
-/// `--input` before the program runs is worth more than the symmetry.
+/// (§7.10 — see [`lazy_stdin`]); when `Some(path)`, the file is read up front,
+/// because a regular file cannot block and reporting an unreadable `--input`
+/// before the program runs is worth more than the symmetry.
 pub fn run(
     file: &str,
     input_file: Option<&str>,
@@ -87,12 +87,11 @@ pub fn run(
     // Which function the host calls, and its declared return type — both read
     // before monomorphization consumes the module.
     //
-    // A file's top-level statements are its program (REP-19, ADR-067), so
-    // `<entry>` is the answer when the file has any. It always returns `Unit`,
-    // which is also the rule that keeps `out(…)` at top level from printing
-    // twice: a `Unit`-returning entry has no answer value to print, so the host
-    // prints a result only for the `fn main` fallback and only when it is
-    // non-`Unit`.
+    // A file's top-level statements are its program (ADR-067), so `<entry>` is
+    // the answer when the file has any. It always returns `Unit`, which is also
+    // the rule that keeps `out(…)` at top level from printing twice: a
+    // `Unit`-returning entry has no answer value to print, so the host prints a
+    // result only for the `fn main` fallback and only when it is non-`Unit`.
     let entry_name = praxis_hir::entry_point(|name| {
         module
             .items
@@ -108,7 +107,7 @@ pub fn run(
         })
         .unwrap_or_else(|| analysis.db.unit());
 
-    // Monomorphization (WS8, §13.6): instantiate every polymorphic callee per
+    // Monomorphization (§13.6): instantiate every polymorphic callee per
     // call site, between typed HIR and MIR. Produces a module of monomorphic
     // fns (one clone per generic callee + concrete type args); the MIR builder
     // then runs unchanged on it.
@@ -117,8 +116,8 @@ pub fn run(
     let mut funcs = lower_module(&module, &mut analysis.db);
     for f in &mut funcs {
         annotate(f);
-        // MIR-10. A failure here is a compiler bug, never a program error, so
-        // it is reported as one and no code is generated from it.
+        // A failure here is a compiler bug, never a program error, so it is
+        // reported as one and no code is generated from it.
         if let Err(errs) = verify(f) {
             eprintln!("internal error: {}", praxis_mir::verify::report(&errs));
             return Ok(exit_code::FAILED);
@@ -164,16 +163,16 @@ pub fn run(
     //
     // **Standard input is not.** §7.10: "The first `read` lazily reads standard
     // input once into an immutable GC-managed source buffer." Reading it here
-    // meant a program with no `read` in it consumed stdin anyway, and against
-    // an open pipe — a terminal, a CI harness holding the descriptor — `praxis
-    // run` blocked forever waiting for an EOF nobody was going to send
-    // (REP-51). The reader below is installed, not called; `praxis_get_input`
-    // calls it the one time, from the program's first `read`.
+    // would consume stdin for a program with no `read` in it, and against an
+    // open pipe — a terminal, a CI harness holding the descriptor — `praxis
+    // run` would block forever waiting for an EOF nobody is going to send. The
+    // reader below is installed, not called; `praxis_get_input` calls it the
+    // one time, from the program's first `read`.
     //
     // The `Text` is installed unconditionally, a zero-byte file included: empty
     // input is input, and the rule and its reasons are stated once, at
-    // `praxis_get_input` (REP-60, ADR-087). The CLI's own decision is only the
-    // one above — `--input` is eager, standard input is lazy.
+    // `praxis_get_input` (ADR-087). The CLI's own decision is only the one
+    // above — `--input` is eager, standard input is lazy.
     match input_file {
         Some(path) => match std::fs::read_to_string(path) {
             Ok(t) => {
@@ -224,7 +223,7 @@ pub fn run(
                     color.palette(),
                     &ctx,
                 )?;
-                // M10b: hand the live compile/run state to the REPL as a
+                // Hand the live compile/run state to the REPL as a
                 // `DebugSession`, so `p EXPR`/`source`/`restart`/`reload` can
                 // reach the Jit/Runtime/TypeDb/source/input. The snapshot was
                 // taken out of `runtime` above, so the two are decoupled.
@@ -239,10 +238,10 @@ pub fn run(
                     source_text: text.clone(),
                     source_path: path.to_path_buf(),
                     // What the program actually read — empty if it never
-                    // evaluated a `read` (REP-51). The session re-installs it
-                    // directly on each re-run, which is §9.7's guarantee that a
-                    // restart sees the same input; `clear_input_reader` below
-                    // is what stops a second read of an exhausted stdin.
+                    // evaluated a `read`. The session re-installs it directly on
+                    // each re-run, which is §9.7's guarantee that a restart sees
+                    // the same input; `clear_input_reader` below is what stops a
+                    // second read of an exhausted stdin.
                     input_text: lazy_stdin::text(),
                     eval_generation: std::rc::Rc::new(praxis_codegen_cranelift::Generation::new()),
                 };
@@ -322,8 +321,8 @@ pub fn run(
     }
     // The run is over and `result` has been rendered: drop the heap, then
     // reclaim the arenas its objects pointed into — the JIT generation (F13)
-    // and the parser plans (IP-12). `Runtime::teardown` mints the proof both
-    // demand, so this cannot be written the other way round (hazard H15).
+    // and the parser plans. `Runtime::teardown` mints the proof both demand, so
+    // this cannot be written the other way round (hazard H15).
     let proof = runtime.teardown();
     praxis_runtime::retire_parser_plans(&proof);
     jit.retire(proof);
@@ -331,7 +330,7 @@ pub fn run(
 }
 
 /// Standard input, read by the program's **first** `read` and not before
-/// (§7.10, REP-51).
+/// (§7.10).
 ///
 /// The runtime takes a plain `fn` — it is stored across the ABI boundary and
 /// called from generated code's stack, so it carries no captured state — which
@@ -367,14 +366,13 @@ mod lazy_stdin {
     /// `read` a program evaluates, and never otherwise.
     ///
     /// A terminal stdin reads as empty rather than blocking on a human who was
-    /// not asked for anything — the same rule the eager read used, kept here.
+    /// not asked for anything.
     ///
-    /// An I/O failure exits the process with the same message and the same code
-    /// ([`crate::exit_code::USAGE`]) the eager read used. It cannot be returned
-    /// instead: the runtime's reader is infallible by design, because what an
-    /// unreadable stdin *means* is the host's question. Laundering it into empty
-    /// input is the one thing that would be wrong — a truncated read would
-    /// silently produce a wrong answer.
+    /// An I/O failure exits the process with [`crate::exit_code::USAGE`]. It
+    /// cannot be returned instead: the runtime's reader is infallible by
+    /// design, because what an unreadable stdin *means* is the host's question.
+    /// Laundering it into empty input is the one thing that would be wrong — a
+    /// truncated read would silently produce a wrong answer.
     pub(super) fn read() -> Vec<u8> {
         use std::io::IsTerminal;
         if std::io::stdin().is_terminal() {

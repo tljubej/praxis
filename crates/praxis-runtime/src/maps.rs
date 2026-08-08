@@ -1,4 +1,4 @@
-//! `Map[K, V]`, `Set[T]`, and `Counter[T]` (M8-WS3, §6.1, §11.3).
+//! `Map[K, V]`, `Set[T]`, and `Counter[T]` (§6.1, §11.3).
 //!
 //! All three reuse Rust's hash collections behind opaque GC objects:
 //!
@@ -7,10 +7,9 @@
 //! - `Counter[T]`   → `HashMap<DynamicKey, GcRef>` with Int values (§6.2)
 //!
 //! `DynamicKey` (dynamic_key.rs) bridges Praxis values into Rust's `Hash`/`Eq`
-//! by delegating to the descriptor's `hash`/`equals` callbacks — this is the
-//! mechanism that finally closes the §19.7 "tuples and records as keys"
-//! criterion. A non-hashable key type (closure) is rejected at the capability
-//! layer (`supports_hash`) before reaching here.
+//! by delegating to the descriptor's `hash`/`equals` callbacks — the mechanism
+//! that lets tuples and records be keys. A non-hashable key type (closure) is
+//! rejected at the capability layer (`supports_hash`) before reaching here.
 //!
 //! Counter's defining behavior (§6.2): absent keys read as zero, never fault.
 //! `min=`/`max=` map updates (§6.2) live in the ABI wrappers.
@@ -25,7 +24,7 @@ use crate::DynamicHasher;
 use crate::GcRef;
 
 // ---------------------------------------------------------------------------
-// Deterministic rendering (RT-16)
+// Deterministic rendering
 // ---------------------------------------------------------------------------
 
 /// Render one value through `descriptor` into `out`.
@@ -44,16 +43,13 @@ pub(crate) unsafe fn render_into(
 
 /// Write already-ordered `entries` between `open` and `close`, comma-separated.
 ///
-/// It does **not** sort. It used to, on the rendered entry, because at the time
-/// that was the only total order in reach — which is why `{10: a, 9: b}` printed
-/// `10` first, and why a printed `Map` and a `for` over the same map could
-/// disagree: one sorted the whole `"key: value"` string and the other sorted the
-/// key alone, and `':'` is below `'1'` in ASCII.
-///
-/// Both are gone. The caller orders its keys through [`ordered_entries`] or
-/// [`ordered_members`] and renders in that order, so printing and iterating are
-/// one order by construction rather than by two sorts that happen to agree
-/// (ADR-138 decision 4). This function's only remaining job is the punctuation.
+/// It does **not** sort. The caller orders its keys through [`ordered_entries`]
+/// or [`ordered_members`] and renders in that order, so printing and iterating
+/// are one order by construction rather than by two sorts that happen to agree
+/// (ADR-138 decision 4). Sorting the rendered entry here would not even be that
+/// order: `':'` is below `'1'` in ASCII, so `"a1: 2"` would sort before
+/// `"a: 1"` while the key alone orders `a` first. This function's only job is
+/// the punctuation.
 pub(crate) fn write_ordered<I: Iterator<Item = String>>(
     out: &mut dyn fmt::Write,
     open: &str,
@@ -71,19 +67,19 @@ pub(crate) fn write_ordered<I: Iterator<Item = String>>(
 }
 
 /// The entries of a keyed collection in a **deterministic** order: sorted by the
-/// key's own order (REP-18, ADR-138).
+/// key's own order (ADR-138).
 ///
 /// The order matters because `keys()` and `values()` promise to be index-aligned,
 /// and because a `HashMap`'s own iteration order is randomized per process — the
-/// same program would answer differently on two runs, which is RT-16 again in a
-/// place where the value, not just the printing, depends on it.
+/// same program would answer differently on two runs, in a place where the
+/// value, not just the printing, depends on it.
 ///
 /// The sort key is [`crate::ordering::container_cmp`], which is the key's own
 /// `TypeDescriptor::compare` — the same callback `sorted()` and a heap's `Ord`
 /// go through. That is what makes `out(m.keys())` and `out(m.keys().sorted())`
-/// agree; sorting the *rendered* key instead, which is what this did until
-/// ADR-138, put `10` before `2` and made a program that walked a `Map[Int, V]`
-/// answer in an order no reader would predict.
+/// agree; sorting the *rendered* key instead would put `10` before `2` and make
+/// a program that walked a `Map[Int, V]` answer in an order no reader would
+/// predict.
 ///
 /// `sort_by`, not `sort_unstable_by`: `container_cmp` leaves a tie only for two
 /// keys that render identically, and a stable sort at least keeps the answer
@@ -101,7 +97,7 @@ pub(crate) unsafe fn ordered_entries(entries: &HashMap<DynamicKey, GcRef>) -> Ve
 
 /// The members of a `Set` in the same **deterministic** order
 /// [`ordered_entries`] gives a keyed collection: sorted by the member's own
-/// order (REP-15, ADR-138).
+/// order (ADR-138).
 ///
 /// `for x in s` iterates a snapshot of this (ADR-066), so the order is the
 /// program's answer and not only its printing — the same reason
@@ -174,17 +170,14 @@ const KEY_HASH_MIX: u64 = 0x9e3779b97f4a7c15;
 // ===========================================================================
 
 /// The `Map[K, V]` payload (§11.3). Both descriptors are **labels**: what the
-/// construction site knew about the type, or **null** when it knew nothing
-/// (REP-41). Neither is the authority for an element-wise operation — every key
-/// carries its own descriptor on its [`DynamicKey`] and every value carries one
-/// in its object header, and that is what `format`/`equals`/`hash` dispatch
-/// through. ADR-066 decision 5 is the rule: a null descriptor slot is legal and
-/// means "the value's own descriptor answers".
-///
-/// The label used to be non-nullable, so `praxis_map_new` had to spell an
-/// unknown key type `INT`, and every `Map`'s value label was `INT`
-/// unconditionally — which made a `Map[Text, Text]`'s value read as an `i64` by
-/// anything that trusted it.
+/// construction site knew about the type, or **null** when it knew nothing.
+/// Neither is the authority for an element-wise operation — every key carries
+/// its own descriptor on its [`DynamicKey`] and every value carries one in its
+/// object header, and that is what `format`/`equals`/`hash` dispatch through.
+/// ADR-066 decision 5 is the rule: a null descriptor slot is legal and means
+/// "the value's own descriptor answers". A non-nullable label would force
+/// `praxis_map_new` to spell an unknown type as `INT`, and anything that
+/// trusted it would read a `Map[Text, Text]`'s values as `i64`.
 #[repr(C)]
 pub struct MapPayload {
     /// The descriptor for every key, or null when the construction site had no
@@ -230,15 +223,13 @@ unsafe fn map_format(payload: *const u8, out: &mut FormatSink<'_>) {
     let p = unsafe { &*(payload as *const MapPayload) };
     // Order first, render second: a printed `Map` is the same sequence a `for`
     // over it walks, because both read `ordered_entries` (ADR-138 decision 4).
-    // Rendering first and sorting the strings is what made `{a1: 2, a: 1}` print
-    // in an order `m.keys()` disagreed with.
     // SAFETY: every key's payload matches the descriptor its `DynamicKey` carries.
     let rows = unsafe { ordered_entries(&p.entries) };
     write_braced(out, rows, |s, (k, v)| {
         // SAFETY: the key's payload matches its own header's descriptor, and
-        // so does the value's. Rendering through the *map's* value label is
-        // what printed a `Map[Text, Text]` as integers, because that label
-        // was `INT` unconditionally (REP-42).
+        // so does the value's. Rendering through the *map's* value label
+        // instead would print a `Map[Text, Text]` as integers whenever that
+        // label is a guess.
         unsafe {
             render_into(s, k.descriptor(), k);
             let _ = s.write_str(": ");
@@ -258,7 +249,7 @@ unsafe fn map_equals(a: *const u8, b: *const u8) -> bool {
     // pair compares through the *left* value's own descriptor, after checking
     // the right value carries the same one: values of two different types are
     // never equal, and dispatching one type's `equals` against the other's
-    // payload is precisely the wrong-type read a shared label licensed.
+    // payload is precisely the wrong-type read a shared label would license.
     for (k, va) in pa.entries.iter() {
         // `get` uses DynamicKey's PartialEq (structural, via the descriptor).
         let Some(vb) = pb.entries.get(k) else {
@@ -331,8 +322,8 @@ pub static MAP: TypeDescriptor = TypeDescriptor::builtin::<MapPayload>(
 .with_owned_bytes(map_owned_bytes);
 
 impl MapPayload {
-    /// The hash table this payload owns beyond its GC block, for GC pacing
-    /// (RT-04) — `capacity` slots of key *and* value, not `len`.
+    /// The hash table this payload owns beyond its GC block, for GC pacing —
+    /// `capacity` slots of key *and* value, not `len`.
     ///
     /// One statement of the size, with two readers (ADR-121):
     /// [`VecPayload::owned_bytes`](crate::collections::VecPayload::owned_bytes)
@@ -354,9 +345,9 @@ unsafe fn map_owned_bytes(payload: *const u8) -> usize {
 // ===========================================================================
 
 /// The `Set[T]` payload (§11.3). The element descriptor is a **label** — what
-/// the construction site knew, or null when it knew nothing (REP-41). Each
-/// member's `DynamicKey` carries its own descriptor, which is what `hash` and
-/// `format` dispatch through.
+/// the construction site knew, or null when it knew nothing. Each member's
+/// `DynamicKey` carries its own descriptor, which is what `hash` and `format`
+/// dispatch through.
 #[repr(C)]
 pub struct SetPayload {
     /// The descriptor for every element, or null when the construction site had
@@ -414,8 +405,8 @@ unsafe fn set_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     hasher.write_bytes(&(p.entries.len() as u64).to_le_bytes());
     let mut acc: u64 = 0;
     for k in p.entries.iter() {
-        // Through the member's own descriptor, not the set's label — `format`
-        // has always read `k.descriptor()` here and this is the same rule.
+        // Through the member's own descriptor, not the set's label — the same
+        // rule `format` reads `k.descriptor()` for.
         let Some(hash_el) = k.descriptor().hash else {
             return;
         };
@@ -445,8 +436,8 @@ pub static SET: TypeDescriptor = TypeDescriptor::builtin::<SetPayload>(
 .with_owned_bytes(set_owned_bytes);
 
 impl SetPayload {
-    /// The hash table this payload owns beyond its GC block, for GC pacing
-    /// (RT-04) — `capacity`, not `len`.
+    /// The hash table this payload owns beyond its GC block, for GC pacing —
+    /// `capacity`, not `len`.
     ///
     /// One statement of the size, with two readers (ADR-121):
     /// [`VecPayload::owned_bytes`](crate::collections::VecPayload::owned_bytes)
@@ -473,8 +464,8 @@ unsafe fn set_owned_bytes(payload: *const u8) -> usize {
 #[repr(C)]
 pub struct CounterPayload {
     /// The descriptor for every key, or null when the construction site had no
-    /// static key type (REP-41). A label, not the authority: each key's
-    /// `DynamicKey` carries its own. Read it through [`CounterPayload::key`].
+    /// static key type. A label, not the authority: each key's `DynamicKey`
+    /// carries its own. Read it through [`CounterPayload::key`].
     pub key_descriptor: *const TypeDescriptor,
     /// The entries: key → boxed Int value.
     pub entries: HashMap<DynamicKey, GcRef>,
@@ -546,7 +537,7 @@ unsafe fn counter_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     hasher.write_bytes(&(p.entries.len() as u64).to_le_bytes());
     let mut acc: u64 = 0;
     for (k, v) in p.entries.iter() {
-        // Through the key's own descriptor, not the counter's label (REP-41).
+        // Through the key's own descriptor, not the counter's label.
         let Some(hash_key) = k.descriptor().hash else {
             return;
         };
@@ -581,8 +572,8 @@ pub static COUNTER: TypeDescriptor = TypeDescriptor::builtin::<CounterPayload>(
 .with_owned_bytes(counter_owned_bytes);
 
 impl CounterPayload {
-    /// The hash table this payload owns beyond its GC block, for GC pacing
-    /// (RT-04) — `capacity` slots of key *and* boxed-`Int` value, not `len`.
+    /// The hash table this payload owns beyond its GC block, for GC pacing —
+    /// `capacity` slots of key *and* boxed-`Int` value, not `len`.
     ///
     /// One statement of the size, with two readers (ADR-121):
     /// [`VecPayload::owned_bytes`](crate::collections::VecPayload::owned_bytes)
@@ -639,10 +630,10 @@ mod tests {
         DynamicKey::new(rt.alloc_int(n))
     }
 
-    /// RT-16. Rust randomizes hash-table iteration order **per process**, so
-    /// the same program printing the same `Map` gave a different string on
-    /// every run. §19 promises deterministic formatting, and a program whose
-    /// expected output cannot be written down does not have one.
+    /// Rust randomizes hash-table iteration order **per process**, so a `Map`'s
+    /// printed form must not follow it: the same program would print a
+    /// different string on every run, and a program whose expected output
+    /// cannot be written down does not have one.
     ///
     /// Two maps built by inserting the same pairs in opposite orders is the
     /// cheap in-process proxy: it does not reproduce the cross-run seed, but it
@@ -663,9 +654,9 @@ mod tests {
         let backward = rendered(map_format, &build([6, 5, 4, 3, 2, 1]));
         assert_eq!(forward, backward, "insertion order must not show through");
         // Ordered by the key's own `compare` (ADR-138), which for `Int` is
-        // numeric. Every key here is one digit, so the lexicographic order this
-        // used to use would agree — `a_set_of_ints_orders_numerically_and_not_
-        // lexicographically` is the test that tells the two apart.
+        // numeric. Every key here is one digit, so a lexicographic order would
+        // agree — `a_set_of_ints_orders_numerically_and_not_lexicographically`
+        // is the test that tells the two apart.
         assert_eq!(forward, "{1: 10, 2: 20, 3: 30, 4: 40, 5: 50, 6: 60}");
     }
 
@@ -719,8 +710,8 @@ mod tests {
         assert_eq!(forward, "{1, 3, 4, 5, 9}");
     }
 
-    /// **REP-15.** A `Set`'s snapshot order is the order it prints in, and
-    /// neither follows the hash table's own.
+    /// A `Set`'s snapshot order is the order it prints in, and neither follows
+    /// the hash table's own.
     ///
     /// This matters more than the formatting rule it shares: `for x in s`
     /// iterates the snapshot, so the order is the *answer* a program computes
@@ -755,7 +746,7 @@ mod tests {
     }
 
     /// `keys()` and `values()` are index-aligned because they share one order,
-    /// and a `for` over the same map is the third caller of it (REP-15/REP-18).
+    /// and a `for` over the same map is the third caller of it.
     #[test]
     fn a_keyed_collections_entries_come_out_paired() {
         let rt = crate::Runtime::new();
@@ -793,14 +784,13 @@ mod tests {
         assert_eq!(forward, "{1: 1, 2: 2, 7: 7, 8: 8}");
     }
 
-    /// **The regression gate for ADR-138.** A `Set[Int]` orders by the number,
-    /// not by how the number prints.
+    /// **The gate for ADR-138.** A `Set[Int]` orders by the number, not by how
+    /// the number prints: a sort key of the rendered member answers
+    /// `10, 100, 2, 9`, because `"10" < "2"`.
     ///
-    /// The handover's own case: an Advent-of-Code solve walked a `Set[Int]` and
-    /// got `10, 100, 2, 9`, because the sort key was the rendered member and
-    /// `"10" < "2"`. Nothing reported it — a wrong order out of a `for` is an
-    /// *answer*, not a formatting wart — so this is the shape of defect a test
-    /// has to hold down rather than a reader.
+    /// A wrong order out of a `for` is an *answer*, not a formatting wart,
+    /// which is the shape of defect a test has to hold down rather than a
+    /// reader.
     #[test]
     fn a_set_of_ints_orders_numerically_and_not_lexicographically() {
         let rt = crate::Runtime::new();
@@ -827,11 +817,11 @@ mod tests {
 
     /// A keyed collection prints in the order it iterates (ADR-138 decision 4).
     ///
-    /// `"a"` and `"a1"` are the pair that used to tell the two apart: printing
-    /// sorted the whole rendered *entry*, so `"a1: 2"` came before `"a: 1"`
-    /// because `'1'` (0x31) is below `':'` (0x3A), while `keys()` and a `for`
-    /// sorted the rendered *key* and answered `a, a1`. One `Map`, two orders,
-    /// and a program that printed it and walked it disagreed with itself.
+    /// `"a"` and `"a1"` are the pair that tells the two apart: sorting the
+    /// whole rendered *entry* puts `"a1: 2"` before `"a: 1"`, because `'1'`
+    /// (0x31) is below `':'` (0x3A), while sorting the *key* answers `a, a1`.
+    /// One `Map`, two orders, and a program that printed it and walked it
+    /// would disagree with itself.
     #[test]
     fn a_keyed_collection_prints_in_the_order_it_iterates() {
         let rt = crate::Runtime::new();
@@ -856,10 +846,10 @@ mod tests {
         assert_eq!(rendered(map_format, &p), "{a: 1, a1: 2}");
     }
 
-    /// A tuple key orders element-wise — day 11's memo key shape,
-    /// `Map[(Text, Int), V]`, and the reason `TUPLE.compare` had to be
-    /// populated rather than left to the rendered-form fallback: `"(a, 10)"`
-    /// sorts before `"(a, 9)"` and `(a, 9)` does not.
+    /// A tuple key orders element-wise — a memo key of shape
+    /// `Map[(Text, Int), V]`, and the reason `TUPLE.compare` is populated
+    /// rather than left to the rendered-form fallback: `"(a, 10)"` sorts before
+    /// `"(a, 9)"` and `(a, 9)` does not.
     #[test]
     fn a_tuple_keyed_map_orders_element_wise() {
         let mut rt = crate::Runtime::new();
@@ -908,9 +898,8 @@ mod tests {
 
     /// A `Float` key orders numerically, with NaN last (ADR-045 decision 2).
     ///
-    /// The NaN rule was written when nothing consumed it at these three call
-    /// sites; this is the first test that ties it to the order a `Set` prints
-    /// and iterates in. Rendered-form order put `10.25` between `1.5` and `2.0`.
+    /// This ties that rule to the order a `Set` prints and iterates in: a
+    /// rendered-form order would put `10.25` between `1.5` and `2.0`.
     #[test]
     fn a_float_keyed_set_orders_numerically_and_puts_nan_last() {
         let rt = crate::Runtime::new();

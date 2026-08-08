@@ -1,4 +1,4 @@
-//! Closure capture analysis (M7-WS7, §4.10).
+//! Closure capture analysis (§4.10).
 //!
 //! A closure captures the free variables in its body — name references that
 //! resolve to bindings declared *outside* the closure (in an enclosing scope).
@@ -52,8 +52,7 @@ pub enum CaptureKind {
     ByValue,
     /// A capture of a **reassigned** binding: the env slot holds a `VarCell` GC
     /// cell shared between the binding site and the closure. Reads/writes in the
-    /// body go through the cell (WS7b), so a write on either side is seen by
-    /// both.
+    /// body go through the cell, so a write on either side is seen by both.
     ByCell,
 }
 
@@ -74,18 +73,16 @@ pub struct Capture {
 pub struct FreeVar {
     pub symbol: SymbolId,
     pub kind: SymbolKind,
-    /// The source range of the name reference that first discovered this capture.
-    /// Used to anchor diagnostics (e.g. `Y130` for an unsupported mutable capture).
+    /// The source range of the name reference that first discovered this
+    /// capture. Lowering looks the inferred type of the capture up by this
+    /// range.
     pub ref_range: TextRange,
 }
 
 /// The result of capture analysis: the ordered list of free-variable symbols.
 ///
-/// It used to carry a `CaptureError` list as well, whose only member was "this
-/// closure captures a `var`, which is unsupported" — a WS7a restriction WS7b
-/// lifted. Nothing read the list, `Y130` was never emitted, and the one test
-/// that mentioned it asserted the obsolete refusal (HIR-09). A mutable capture
-/// is now an ordinary `CaptureKind::ByCell`.
+/// A mutable capture is not an error; it is an ordinary capture that lowering
+/// gives a `CaptureKind::ByCell` env slot.
 #[derive(Debug, Default)]
 pub struct CaptureAnalysis {
     pub captures: Vec<FreeVar>,
@@ -135,12 +132,9 @@ where
 /// this closure's environment and drops every binding either closure declares.
 ///
 /// This function is not recursive and never calls itself; `analyze` is its only
-/// caller. It used to open with an early return when the walked expression *was*
-/// a nested closure, which meant `|a| |b| b + base` — a body that **is** a
-/// closure rather than one that merely contains one — recorded nothing, and the
-/// inner closure's environment was then filled from an empty one (handover 31
-/// item 1: a silent `Unit`, a runtime panic, or a SIGSEGV, depending on what was
-/// captured).
+/// caller. In particular it does not stop at an expression that *is* a nested
+/// closure: `|a| |b| b + base` must record `base`, or the inner closure's
+/// environment is filled from an empty one.
 fn walk<R, K>(
     expr: &Expr,
     closure_range: TextRange,
@@ -315,12 +309,8 @@ mod tests {
     /// inner's, and both are declared inside the outer closure node's range, so
     /// `record_free_var`'s `contains_range` test drops them. What survives is
     /// `o`, declared outside both — which the outer must hold in order to fill
-    /// the inner's environment.
-    ///
-    /// Renamed from `nested_closure_captures_are_separate`, which asserted the
-    /// right thing under a name that claimed the wrong rule: a nested closure's
-    /// captures are *not* separate when they resolve outside the enclosing
-    /// closure. That reading is what handover 31 item 1 was.
+    /// the inner's environment. A nested closure's captures are *not* separate
+    /// from the enclosing closure's when they resolve outside them both.
     #[test]
     fn an_inner_closures_own_bindings_are_not_the_outers_captures() {
         let names = capture_names(
@@ -336,16 +326,12 @@ mod tests {
         );
     }
 
-    /// **Inverted** from `mutable_capture_records_error`, which asserted the
-    /// WS7a refusal — "a closure may not capture a `var`" — that WS7b lifted
-    /// (HIR-09, plan §8.2). The property that replaced it: a captured binding is
-    /// an ordinary capture, whatever declared it.
+    /// A captured binding is an ordinary capture, whatever declared it.
     ///
-    /// Note that the *kind* no longer selects `ByCell`, and this test no longer
-    /// claims it does: since ADR-125 the kind is `Var` for every binding, and
-    /// what picks a cell is whether something reassigns it — a fact this module
-    /// deliberately does not read (it is `Symbol::reassigned`, applied in
-    /// lowering).
+    /// The *kind* does not select `ByCell`: since ADR-125 the kind is `Var` for
+    /// every binding, and what picks a cell is whether something reassigns it —
+    /// a fact this module deliberately does not read (it is
+    /// `Symbol::reassigned`, applied in lowering).
     #[test]
     fn a_mutable_capture_is_an_ordinary_capture() {
         // Note: `|| c` would parse as `PIPE2` (logical or), so the closure takes
@@ -367,13 +353,11 @@ mod tests {
         );
     }
 
-    // --- Transitive captures (handover 31 item 1) ----------------------------
+    // --- Transitive captures -------------------------------------------------
     //
     // A closure whose body *is* a closure must capture what the inner one names
     // from outside them both, because the inner closure's environment is filled
-    // from the outer's frame. These all answered `[]` while `walk` opened with an
-    // early return on `Expr::Closure`, and the shapes below are the ones a
-    // program actually writes.
+    // from the outer's frame.
 
     #[test]
     fn a_closure_whose_body_is_a_closure_captures_transitively() {
@@ -383,7 +367,7 @@ mod tests {
     }
 
     /// Two programs that differ by one pair of braces cannot have different
-    /// environments. This is the unit-level form of the handover's gate.
+    /// environments.
     #[test]
     fn a_braced_body_and_a_bare_body_capture_the_same_thing() {
         let bare =

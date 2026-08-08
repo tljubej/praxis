@@ -1,14 +1,13 @@
-//! Code actions (§15.2, §19.12's third acceptance criterion, ADR-132).
+//! Code actions (§15.2, §19.12 criterion 3, ADR-132).
 //!
 //! > *"Code actions can fix misspelled parser constructors and add missing
 //! > match arms."*
 //!
 //! **A code action is a diagnostic's machine-applicable suggestion.** Not a
 //! second analysis, not a table of "common mistakes" kept in the language
-//! server: `praxis_source::Suggestion` has carried an optional `replacement`
-//! since M0, the pass that detects a mistake is the one that knows how to fix
-//! it, and this module is the twenty lines that turn one into a
-//! `WorkspaceEdit`.
+//! server: `praxis_source::Suggestion` carries an optional `replacement`, the
+//! pass that detects a mistake is the one that knows how to fix it, and this
+//! module is the twenty lines that turn one into a `WorkspaceEdit`.
 //!
 //! That is why the fixes live where they do: the "did you mean `lines`" for
 //! `line` is written where the constructor table is consulted, the missing arms

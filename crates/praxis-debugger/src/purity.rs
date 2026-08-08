@@ -1,4 +1,4 @@
-//! The read-only gate for `p EXPR` / `type EXPR` (§9.5, §19.10, M10b-WS4).
+//! The read-only gate for `p EXPR` / `type EXPR` (§9.5, §19.10).
 //!
 //! §9.5: "`p EXPR` […] Mutating expressions are rejected in the initial
 //! debugger. This prevents changes to a state that cannot safely resume." And
@@ -13,18 +13,22 @@
 //! - `Lit`, `Path` — values and local reads (the snapshot's locals).
 //! - `Bin`, `Unary`, `Paren` — arithmetic/logic (may *fault* — overflow/div0
 //!   — but never mutates; a fault is reported, not a mutation).
-//! - `If`, `Block`, `Tuple`, `FieldGet`, `Match`, `RecordLit`, `EnumVariant`
-//!   — pure structure.
+//! - `If`, `Block`, `Tuple`, `FieldGet`, `TupleIndex`, `Match`, `RecordLit`,
+//!   `EnumVariant` — pure structure.
+//! - `Range`, `ListLit`, `Interp` — they allocate, but the only object each
+//!   touches is the one it just made.
 //! - `MethodCall` — only when the catalog tagged it `Pure` (`v.len()`,
 //!   `v.get(i)`, `text.len()`, …); impure methods (`v.push`, `v.set`) reject.
 //!
 //! Rejected: any user `Call` (cannot prove purity without a separate analysis),
 //! `Read`/`Parse` (consume input + can fault on the cursor), `Closure` literals
-//! (could capture and mutate), and the diverging nodes (`While`/`For`/`Loop`/
-//! `Break`/`Continue`/`Return` — they don't yield a value in this context).
+//! and `FnValue` (could capture and mutate, and have no readable form), and the
+//! diverging nodes (`While`/`For`/`Loop`/`Break`/`Continue`/`Return` — they
+//! don't yield a value in this context).
 //!
 //! Assignment is statement-only in Praxis (it cannot appear inside an
-//! expression), so it never reaches this walk — a free win.
+//! expression), so the expression walk never meets one; the *block* walk is
+//! where an assignment in a `p` expression's block is rejected.
 
 use praxis_stdlib::Purity;
 
@@ -168,11 +172,11 @@ fn walk_expr(e: &TypedExpr) -> Result<(), String> {
         TypedExpr::Closure { .. } => {
             Err("closure literals may capture and mutate — `p` rejects them".to_string())
         }
-        // A bare `fn` name (REP-01) captures nothing and mutates nothing — but
-        // `p double` would allocate a closure whose adapter the crash generation
-        // has no code for, and the value is not something the user can do
-        // anything with in a read-only prompt. Rejected with the closure
-        // literals, for the same reason and not for a different one.
+        // A bare `fn` name captures nothing and mutates nothing — but `p double`
+        // would allocate a closure whose adapter the crash generation has no
+        // code for, and the value is not something the user can do anything with
+        // in a read-only prompt. Rejected with the closure literals, for the
+        // same reason and not for a different one.
         TypedExpr::FnValue { .. } => {
             Err("a function value has no readable form — `p` rejects it".to_string())
         }
@@ -197,11 +201,10 @@ fn walk_expr(e: &TypedExpr) -> Result<(), String> {
 /// inside a `Block` or `If` arm; `Assign`, `IndexAssign` and `FieldAssign` are
 /// mutations and must reject.
 ///
-/// A `var` **declaration** is not one of them. It used to be refused on the
-/// grounds that `var` announced an intent to mutate, which was the only thing
-/// the keyword meant — and since ADR-125 it is the one binding form, so refusing
-/// it would refuse every `p` expression that names an intermediate value.
-/// Declaring a fresh local mutates nothing; the write that would is
+/// A `var` **declaration** is not one of them. `var` is the one binding form
+/// (ADR-125), not an announcement of intent to mutate, so refusing it would
+/// refuse every `p` expression that names an intermediate value. Declaring a
+/// fresh local mutates nothing; the write that would is
 /// [`Assign`](praxis_hir::TypedStmt::Assign), and that is rejected on its own
 /// account two arms down.
 fn walk_block(b: &TypedBlock) -> Result<(), String> {
@@ -213,8 +216,8 @@ fn walk_block(b: &TypedBlock) -> Result<(), String> {
                 return Err("assignment mutates — `p` rejects mutating expressions".to_string());
             }
             // `m[key] = v` mutates the collection, which is a stronger reason to
-            // reject than a local assignment's: the write outlives the expression
-            // (REP-16, ADR-034).
+            // reject than a local assignment's: the write outlives the
+            // expression (ADR-034).
             TypedStmt::IndexAssign { .. } => {
                 return Err(
                     "an indexed assignment mutates a collection — `p` rejects mutating \
@@ -416,9 +419,8 @@ mod tests {
     fn rejects_read_and_parse() {
         let mut db = mk_db();
         // Any real plan id will do — the gate rejects the *node*, not the plan.
-        // `0` is no longer spellable here (IP-12): `PlanId` is a `NonZeroU32`,
-        // which is what stopped the HIR's failure sentinel from naming the
-        // first plan any program registered.
+        // `PlanId` is a `NonZeroU32`, so `0` is not spellable here: the HIR's
+        // failure sentinel cannot name the first plan a program registers.
         let plan = praxis_hir::PlanId::from_raw(1).expect("1 is a plan id");
         let read = TypedExpr::Read {
             plan,
@@ -459,9 +461,8 @@ mod tests {
 
     #[test]
     fn type_data_scalar_int_round_trips() {
-        // Sanity: confirm the TypeDb renders Int as "Int" (the printer the
-        // evaluator uses to synthesize param annotations). Guards against a
-        // regression in praxis-types::pretty.
+        // The TypeDb renders Int as "Int" — the printer the evaluator uses to
+        // synthesize param annotations.
         let mut db = mk_db();
         let i = db.int();
         assert!(matches!(db.data(db.follow(i)), TypeData::Scalar(_)));

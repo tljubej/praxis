@@ -1,4 +1,4 @@
-//! What a live value records about its own type (P0-11, foundation F11).
+//! What a live value records about its own type.
 //!
 //! A `GcRef`'s header names a [`TypeDescriptor`], and for most types that is the
 //! whole story: an `Int` object is an `Int`. For the parameterized types it is
@@ -154,7 +154,7 @@ pub unsafe fn instance_repr(value: GcRef) -> InstanceRepr {
             }
             // A record/enum object carries its *field* schema, not which named
             // type it is: two records with the same field descriptors are
-            // indistinguishable here. Nominal identity is F12 (S10).
+            // indistinguishable here.
             BuiltinTypeId::Record => {
                 InstanceRepr::Unrecorded("a record value does not record its nominal identity")
             }

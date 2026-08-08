@@ -1,24 +1,23 @@
 //! Where a `"…"` literal ends and where its holes are — **one** answer, for
 //! both readers (§8.1, ADR-147).
 //!
-//! Since ADR-147 a `{` inside a text literal opens an *interpolation hole*
-//! holding a full expression, so `"Part 2: {part2}"` is no longer one token: the
+//! A `{` inside a text literal opens an *interpolation hole* holding a full
+//! expression (ADR-147 decision 1), so `"Part 2: {part2}"` is not one token: the
 //! lexer splits it into fragment tokens with the hole's ordinary tokens between
 //! them, which is what gives a name inside a hole a real range in the lossless
-//! tree and therefore makes it a closure capture (ADR-147 decision 1).
+//! tree and therefore makes it a closure capture.
 //!
 //! Two readers have to agree about the extent of such a run: [`text_end`], which
 //! the lexer asks **before** it emits anything, and [`fragment_end`], which the
 //! lexer asks again each time a hole closes and it has to resume scanning text.
 //! They are the same rule read from two starting points, so they live in one
-//! module and call one another — [`template`](crate::template)'s doc records
-//! what happened the last time two scanners each owned a copy of one rule.
+//! module and call one another rather than each owning a copy of it — see
+//! [`template`](crate::template)'s doc.
 //!
 //! # The rule
 //!
-//! A text literal ends at the line it opens on; that predates interpolation and
-//! is why [`crate::template`] gives backtick templates the same bound. Within a
-//! literal:
+//! A text literal ends at the line it opens on; [`crate::template`] gives
+//! backtick templates the same bound. Within a literal:
 //!
 //! - `\` hides the next scalar, so `"\""` is one literal and `"\{"` is a
 //!   literal brace ([`crate::literal::decode_escape`] owns which escapes mean
@@ -41,8 +40,8 @@
 //! enters interpolation mode — the brace-depth stack that decides whether a `}`
 //! closes a hole or a block — for a literal this module has already proved
 //! closes. So there is no path on which a newline or an EOF reaches that stack,
-//! and an unterminated literal is exactly what it was before ADR-147: one
-//! `TextLit` token plus `T004` (ADR-147 decision 5).
+//! and an unterminated literal is one `TextLit` token plus `T004` (ADR-147
+//! decision 5).
 //!
 //! That is also why nesting past [`MAX_INTERPOLATION_NESTING`] answers
 //! `Unterminated` rather than "stop treating quotes as structure". Refusing to
@@ -68,8 +67,8 @@ pub enum TextEnd {
         /// The index of the `{` opening the **first** hole, or `None` when the
         /// literal has none.
         ///
-        /// `None` is what keeps an ordinary literal on the path it has always
-        /// been on: one `TextLit` token, no mode stack, no new node.
+        /// `None` is what keeps an ordinary literal on the simple path: one
+        /// `TextLit` token, no mode stack, no new node.
         first_hole: Option<usize>,
     },
     /// The line ended, the text ended, a hole never closed, or the nesting bound
@@ -269,9 +268,8 @@ mod tests {
         }
     }
 
-    /// A literal with no brace in it is exactly what it was before ADR-147, and
-    /// says so: `first_hole` is `None`, which is the answer that keeps it a
-    /// single `TextLit`.
+    /// A literal with no brace in it has no holes and says so: `first_hole` is
+    /// `None`, which is the answer that keeps it a single `TextLit`.
     #[test]
     fn a_literal_with_no_brace_has_no_holes() {
         for src in [r#""""#, r#""hello""#, r#""a\"b""#, r#""tab\there""#] {
@@ -353,9 +351,8 @@ mod tests {
         }
     }
 
-    /// A text literal ends at the line it opens on — the rule that predates
-    /// interpolation. Every one of these is `T004` and one `TextLit`, which is
-    /// byte for byte what it was before ADR-147 (decision 5).
+    /// A text literal ends at the line it opens on. Every one of these is one
+    /// `TextLit` plus `T004` (ADR-147 decision 5).
     #[test]
     fn a_literal_that_does_not_close_on_its_line_is_unterminated() {
         // A hole that never closes.
@@ -389,8 +386,7 @@ mod tests {
 
     /// A dangling `\` inside a character literal in a hole is not a continuation
     /// either, and it stops at the line terminator's *first* byte, so a CRLF is
-    /// not split. That byte is the one place the character-literal scanner
-    /// disagreed with [`fragment`] before the two became one [`quoted_run`].
+    /// not split — the same byte [`fragment`] stops at.
     #[test]
     fn a_dangling_escape_in_a_char_literal_stops_at_the_line_terminator() {
         // The `'` opens at 7 and the `\` is at 8, so 9 is the `\n` in one case

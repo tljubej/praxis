@@ -1,37 +1,35 @@
 //! Explicit root frames (§12.3, ADR-012) and the composite runtime root set.
 //!
 //! §12.3 offers "compiler-managed shadow-stack frames **or** explicit root
-//! frames." M3 shipped explicit root frames (ADR-012): a [`RootSet`] is
+//! frames"; this runtime takes explicit root frames (ADR-012): a [`RootSet`] is
 //! anything that can enumerate the `GcRef`s it keeps alive, and a RAII
 //! [`RootScope`] holds a `Vec<GcRef>` and chains to an optional parent.
 //!
-//! That left the collector's root set open: whoever called `Heap::collect`
-//! chose what to root, and the automatic path chose only `ctx.shadow` — so
-//! `input_source`, a parse failure's partial value, a runtime-owned crash
-//! snapshot and everything native code held in a Rust local were invisible to
-//! automatic GC (P0-06). [`RuntimeRoots`] closes that: it is the only thing
+//! [`RuntimeRoots`] closes the collector's root set: it is the only thing
 //! `Heap::collect` accepts, it is constructible only from a `*mut
 //! RuntimeContext`, and it is exhaustive over its six arms — five **strong**,
 //! enumerated by its [`RootSet`] impl, and one **weak**, cleared by its
-//! [`WeakSet`] impl. "Collect against a partial root set" has no
-//! representation.
+//! [`WeakSet`] impl. `ctx.shadow`, `input_source`, a parse failure's partial
+//! value, a runtime-owned crash snapshot and everything native code holds in a
+//! Rust local are all arms of it, so "collect against a partial root set" has
+//! no representation.
 //!
 //! [`NativeScope`] is the fifth strong arm. Native code that builds a value
 //! across an allocation — the grid helpers assembling a `Vec` of points, the
 //! parser interpreter assembling a record — holds it in a `Rooted`, which is
-//! the only input the `&mut Payload` accessors take (P0-07). Holding a payload
-//! reference across a safepoint without rooting its owner no longer
-//! type-checks. The references themselves live in **one** contiguous
-//! [`NativeRootStore`] the runtime owns (ADR-114); a scope is the run of
-//! entries above the watermark it found, not an object.
+//! the only input the `&mut Payload` accessors take. Holding a payload
+//! reference across a safepoint without rooting its owner does not type-check.
+//! The references themselves live in **one** contiguous [`NativeRootStore`] the
+//! runtime owns (ADR-114); a scope is the run of entries above the watermark it
+//! found, not an object.
 //!
 //! The sixth arm is the crash debugger's frames, and it is weak (ADR-106): the
 //! collector never traces it — tracing it would re-merge the two sets ADR-044
-//! split and undo MIR-01 — but it does *scan* it, once per collection,
-//! immediately after the sweep, marking every debug slot whose object that
-//! sweep reclaimed. A debug value is therefore always a live object or a stated
-//! absence, never a dangling reference — and the absence says *which* absence it
-//! is ([`crate::debug::RECLAIMED_WORD`]): a slot the collector emptied is not a
+//! split — but it does *scan* it, once per collection, immediately after the
+//! sweep, marking every debug slot whose object that sweep reclaimed. A debug
+//! value is therefore always a live object or a stated absence, never a
+//! dangling reference — and the absence says *which* absence it is
+//! ([`crate::debug::RECLAIMED_WORD`]): a slot the collector emptied is not a
 //! slot nothing was ever written into.
 
 use std::cell::RefCell;
@@ -56,20 +54,19 @@ impl RootSet for () {
 
 /// A set the collector keeps **valid** without keeping **alive** (ADR-106).
 ///
-/// A [`RootSet`] answers "what must survive". This answers the other question,
-/// which the collector had no way to ask before: "what names storage, but has
-/// no say in whether that storage survives". Such a set is never traced, so it
-/// retains nothing; instead it is scanned once per collection, immediately
-/// after the sweep, and every entry naming reclaimed storage is turned into an
-/// absence rather than left as a dangling reference.
+/// A [`RootSet`] answers "what must survive". This answers the other question:
+/// "what names storage, but has no say in whether that storage survives". Such
+/// a set is never traced, so it retains nothing; instead it is scanned once per
+/// collection, immediately after the sweep, and every entry naming reclaimed
+/// storage is turned into an absence rather than left as a dangling reference.
 ///
 /// The one implementor that matters is [`RuntimeRoots`], whose weak arm is the
 /// crash debugger's per-call value slots. Those deliberately outlive the shadow
 /// slots that root them — ADR-044 decision 2 nulls a shadow slot the moment its
-/// local dies (MIR-01), while MIR-16 requires the debugger to keep rendering
-/// the value — so between the death and the fault the debugger names something
-/// the collector is free to reclaim, and after RT-01 made swept storage
-/// reusable, free to *reissue as an object of another type*.
+/// local dies, while the debugger must keep rendering the value — so between
+/// the death and the fault the debugger names something the collector is free
+/// to reclaim, and, since swept storage is reusable, free to *reissue as an
+/// object of another type*.
 ///
 /// **Weak, not strong, is the whole point.** Rooting those slots strongly is a
 /// two-line change and it is the set-merge ADR-044 exists to refuse: it makes
@@ -91,8 +88,8 @@ pub trait WeakSet {
     fn clear_reclaimed(&self) -> usize;
 }
 
-/// A no-weak-set impl, so the in-crate tests that collect against a bare
-/// [`RootScope`] keep their existing call shape. Mirrors `impl RootSet for ()`.
+/// A no-weak-set impl, so in-crate tests can collect against a bare
+/// [`RootScope`]. Mirrors `impl RootSet for ()`.
 impl WeakSet for () {
     fn clear_reclaimed(&self) -> usize {
         0
@@ -160,7 +157,7 @@ impl RootSet for RootScope<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// The native root store (P0-07, ADR-114)
+// The native root store (ADR-114)
 // ---------------------------------------------------------------------------
 
 /// How many roots the store reserves at [`Runtime::new`](crate::Runtime::new).
@@ -183,10 +180,9 @@ impl RootSet for RootScope<'_> {
 /// So the store reallocs, and the two populations it serves are 1 and *the
 /// input*, with nothing in between: **the reservation is not sized to demand,
 /// because there is no demand curve to size to.** 1024 roots is 8 KiB, three
-/// orders of magnitude above every bounded program measured and about what a
-/// *single* old-style scope's two allocations cost — of which the benchmark
-/// suite made tens of millions. It buys the bounded population "one `malloc`
-/// per `Runtime`, ever", which is the property this whole change is about.
+/// orders of magnitude above every bounded program measured. It buys the
+/// bounded population "one `malloc` per `Runtime`, ever", which is the property
+/// this store is for.
 ///
 /// **Nothing turns on the number**, and that is worth saying rather than
 /// implying: for the unbounded population the growth is `Vec`'s doubling, so the
@@ -209,13 +205,12 @@ pub const NATIVE_ROOT_RESERVATION: usize = 1024;
 /// is reachable through [`RuntimeContext::native_roots`], and it is the fifth
 /// strong arm of [`RuntimeRoots`].
 ///
-/// **A frame is not an object.** Through ABI v19 each [`NativeScope`] boxed a
-/// `NativeRootFrame` carrying a `parent` pointer and its own `Vec`, so every
-/// runtime wrapper that rooted anything paid two `malloc`s and two `free`s to do
-/// it — on the path of `praxis_vec_push`, `praxis_map_insert` and every other
-/// mutating collection primitive in the language. A scope is now the run of
-/// entries above the watermark it found on entry, exactly as ADR-101 made a
-/// shadow frame the run of slots above the `top` a prologue found.
+/// **A frame is not an object.** A [`NativeScope`] is the run of entries above
+/// the watermark it found on entry, exactly as ADR-101 made a shadow frame the
+/// run of slots above the `top` a prologue found, so opening one allocates
+/// nothing — which matters because it sits on the path of `praxis_vec_push`,
+/// `praxis_map_insert` and every other mutating collection primitive in the
+/// language.
 ///
 /// Roots are held behind a `RefCell` so [`NativeScope::root`] can take `&self`
 /// and several `Rooted` values can be live at once — the common shape, since a
@@ -295,12 +290,11 @@ impl Default for NativeRootStore {
 impl RootSet for NativeRootStore {
     /// One `extend_from_slice` over every live scope's roots at once.
     ///
-    /// This yields *exactly* the set the parent-pointer walk yielded, for
-    /// ADR-101's reason applied to this chain: scopes nest with the Rust stack,
-    /// each occupies exactly the run between its own watermark and the next
-    /// one's, and the runs partition `[0, len)`. What it does not do is walk a
-    /// linked list and `extend_from_slice` once per frame — the parser
-    /// interpreter's own recursion put dozens of those in front of every
+    /// One copy yields *every* live scope's roots, for ADR-101's reason applied
+    /// to this chain: scopes nest with the Rust stack, each occupies exactly the
+    /// run between its own watermark and the next one's, and the runs partition
+    /// `[0, len)`. There is no per-frame walk, which matters because the parser
+    /// interpreter's own recursion can stack dozens of scopes in front of a
     /// collection taken inside a parse.
     fn push_roots(&self, out: &mut Vec<GcRef>) {
         out.extend_from_slice(&self.roots.borrow());
@@ -310,12 +304,12 @@ impl RootSet for NativeRootStore {
 /// A `GcRef` proven rooted for `'s` — the only input to a `&mut Payload`
 /// accessor.
 ///
-/// The accessors used to take a bare `GcRef` and hand back a `&'static mut
-/// Payload`, which says the payload outlives the program: a helper could hold
-/// one across an allocation that reclaimed its owner and keep writing through
-/// it. A `Rooted<'s>` cannot outlive the [`NativeScope`] that produced it, and
-/// the accessors' results cannot outlive the `Rooted`, so the whole chain is
-/// bounded by a scope that is itself in the collector's root set.
+/// A `Rooted<'s>` cannot outlive the [`NativeScope`] that produced it, and the
+/// accessors' results cannot outlive the `Rooted`, so the whole chain is bounded
+/// by a scope that is itself in the collector's root set. An accessor taking a
+/// bare `GcRef` and handing back a `&'static mut Payload` would say the payload
+/// outlives the program, and let a helper keep writing through one across an
+/// allocation that reclaimed its owner.
 ///
 /// **It carries the reference by value, and that is what makes it survive the
 /// store's growth.** A `Rooted` that held a `*mut GcRef` into
@@ -347,21 +341,19 @@ impl Rooted<'_> {
 /// on construction and truncates back to it on `Drop`.
 ///
 /// Create one in any runtime wrapper that holds a `GcRef` across something that
-/// may allocate, and root every such reference through it. Sixty sites do
-/// (forty-two in `abi.rs`, seventeen in the parser interpreter, one in the
-/// debugger's `p EXPR`), and none of them had to change when ADR-114 replaced
-/// the boxed frame underneath: the type is a pointer, a `usize` and a
-/// `PhantomData`, it is still constructed by an `unsafe fn new(ctx)` returning
-/// by value, `root` still takes `&self` so several `Rooted` values can be live
-/// at once, and `Rooted<'s>` still borrows from the scope.
+/// may allocate, and root every such reference through it; `abi.rs`, the parser
+/// interpreter and the debugger's `p EXPR` all do. The type is a pointer, a
+/// `usize` and a `PhantomData`, constructed by an `unsafe fn new(ctx)` returning
+/// by value; `root` takes `&self` so several `Rooted` values can be live at
+/// once, and `Rooted<'s>` borrows from the scope.
 ///
 /// **The watermark is a `usize` index and it must stay one.** The store grows —
 /// see [`NATIVE_ROOT_RESERVATION`] for why it has to — so a `*mut GcRef`
-/// watermark saved by an outer scope dangles the moment an inner scope's
-/// `root()` reallocs, and `Drop` then publishes that dangling pointer as the
-/// store's new end. Every small test passes; the failure needs a scope that
-/// roots past the reservation while another is live, which is
-/// `a_scope_survives_the_growth_its_own_roots_force` and its sibling.
+/// watermark saved by an outer scope would dangle the moment an inner scope's
+/// `root()` reallocs, and `Drop` would then publish that dangling pointer as the
+/// store's new end. Only a scope that roots past the reservation while another
+/// is live exercises this: `a_scope_survives_the_growth_its_own_roots_force`
+/// and its sibling.
 pub struct NativeScope<'c> {
     /// The store this scope claims from, or null when the context was null or
     /// a [`placeholder`](RuntimeContext::placeholder). Shared, never `&mut`:
@@ -378,11 +370,10 @@ impl<'c> NativeScope<'c> {
     /// Open a scope on `ctx`'s native root store.
     ///
     /// A null or unwired context is accepted: the scope has no store to claim
-    /// from, so `root` records nothing, but it still hands back a `Rooted` — the
-    /// proof keeps its meaning on the defensive null-context paths, exactly as
-    /// it did when those roots went into a frame that was linked to nothing.
-    /// Either way the references are unreachable from a collection that cannot
-    /// happen, because a context with no store has no heap either.
+    /// from, so `root` records nothing, but it still hands back a `Rooted`, so
+    /// the proof keeps its meaning on the defensive null-context paths. The
+    /// references are unreachable from a collection that cannot happen, because
+    /// a context with no store has no heap either.
     ///
     /// # Safety
     /// `ctx` must be null, or point at a live `RuntimeContext` that outlives
@@ -410,9 +401,7 @@ impl<'c> NativeScope<'c> {
 
     /// Root `r` for the rest of this scope and return the proof.
     ///
-    /// One bounds-checked store and one increment past the null test — where
-    /// through ABI v19 the first call on a scope also grew a zero-capacity
-    /// `Vec` (and the scope's construction had already boxed a frame).
+    /// One bounds-checked store and one increment past the null test.
     #[inline]
     pub fn root(&self, r: GcRef) -> Rooted<'_> {
         // SAFETY: as `new`'s — `store` is either null or the live store of the
@@ -428,10 +417,6 @@ impl<'c> NativeScope<'c> {
 
     /// The number of references this scope and everything nested inside it
     /// currently root.
-    ///
-    /// The old shape answered "this frame only", which was the same number for
-    /// every caller that asked before opening an inner scope — and every caller
-    /// does, because a scope is a leaf for as long as it is being filled.
     #[must_use]
     pub fn root_count(&self) -> usize {
         // SAFETY: as `new`'s.
@@ -454,7 +439,7 @@ impl Drop for NativeScope<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// The composite runtime root set (P0-06)
+// The composite runtime root set
 // ---------------------------------------------------------------------------
 
 /// Everything the runtime owns that names a `GcRef` — five arms that keep one
@@ -470,14 +455,12 @@ impl Drop for NativeScope<'_> {
 /// | `input` | strong | `ctx.input_source` — the read-in buffer |
 /// | `parse_partial` | strong | `ParseDetail.fail.partial` — the best partial parse |
 /// | `snapshot` | strong | the runtime-owned `CrashSnapshot`'s copied locals |
-/// | `native` | strong | [`NativeRootStore`] — what Rust helpers hold, scanned `[0, len)` (P0-07, ADR-114) |
+/// | `native` | strong | [`NativeRootStore`] — what Rust helpers hold, scanned `[0, len)` (ADR-114) |
 /// | `debug` | **weak** | `ctx.debug_frames` + `ctx.debug_values` — the crash debugger's live frames and the value slots they name (ADR-104, ADR-106) |
 ///
-/// Before this, `abi::maybe_collect` walked `shadow` alone *and returned early
-/// when it was null* — so during host-driven allocation, and throughout the
-/// parser interpreter, nothing was collected at all. Deleting that early return
-/// is what makes the other four strong arms load-bearing rather than
-/// decorative.
+/// `abi::maybe_collect` builds one of these and passes it whole, so a
+/// host-driven allocation and one taken inside the parser interpreter collect
+/// against the same arms generated code does.
 ///
 /// ## Why the sixth arm is weak
 ///
@@ -485,8 +468,8 @@ impl Drop for NativeScope<'_> {
 /// root set precisely so that making the root set exact would not make the
 /// debugger render `<uninit>` for a local the user can still see in their
 /// source. `RootSlots::dead` nulls a shadow slot at its local's last use; the
-/// debug slot keeps the value, because MIR-16 says a value that has been
-/// produced stays renderable.
+/// debug slot keeps the value, because a value that has been produced stays
+/// renderable.
 ///
 /// Pushing `debug` in [`RootSet::push_roots`] would undo exactly that split. It
 /// is one line, it makes every dead local reachable again, and
@@ -640,14 +623,14 @@ mod tests {
     use std::ptr::NonNull;
 
     fn dummy_ref(n: usize) -> GcRef {
-        // A `GcRef` whose header is a stack `GcHeader` — never dereferenced by
-        // these root-set tests; only the pointer identity is observed.
+        // A `GcRef` whose header is a leaked `GcHeader` — never dereferenced by
+        // these root-set tests; only the pointer identity is observed, and each
+        // call leaks its own header, so two refs are two addresses. `n` only
+        // labels the call site.
         let header = Box::leak(Box::new(crate::GcHeader::detached()));
         let nn = NonNull::from(header);
         // SAFETY: `nn` points at a leaked, aligned, live header.
         let r = unsafe { GcRef::from_non_null(nn) };
-        // Tag the address so distinct refs are distinguishable; the low bits are
-        // unused under the allocation alignment.
         let _ = n;
         r
     }
@@ -767,9 +750,9 @@ mod tests {
 
     #[test]
     fn nested_scopes_partition_one_contiguous_run() {
-        // ADR-114's form of `nested_frames_are_one_contiguous_scan`: the parent
-        // pointer is gone, so the collector reads `[0, len)` once instead of
-        // walking a chain and allocating a `Vec` per link.
+        // ADR-114's form of `nested_frames_are_one_contiguous_scan`: nested
+        // scopes are runs of one array, so the collector reads `[0, len)` once
+        // rather than walking a chain.
         let mut f = Native::new();
         let a = heap_ref(&f.rt, 1);
         let b = heap_ref(&f.rt, 2);
@@ -799,10 +782,10 @@ mod tests {
 
     #[test]
     fn a_scope_survives_the_growth_its_own_roots_force() {
-        // The test the package exists for. The store reallocs — it must, because
-        // one scope's root count is the program's input (`praxis_bfs` roots
-        // ~2 per edge) — and a `*mut GcRef` watermark would have been left
-        // pointing into the freed array. A `usize` index cannot be.
+        // The store reallocs — it must, because one scope's root count is the
+        // program's input (`praxis_bfs` roots ~2 per edge) — and a `*mut GcRef`
+        // watermark would be left pointing into the freed array. A `usize` index
+        // cannot be.
         let mut f = Native::new();
         let refs: Vec<GcRef> = (0..(NATIVE_ROOT_RESERVATION as i64 + 64))
             .map(|n| heap_ref(&f.rt, n))
@@ -932,10 +915,8 @@ mod tests {
 
     #[test]
     fn a_scope_on_a_null_context_roots_nothing_and_drops_cleanly() {
-        // The defensive path `NativeScope::new`'s contract has always allowed.
-        // There is no store to claim from, so the proof is all the caller gets —
-        // which is the same thing it got when the roots went into a frame that
-        // was linked to nothing.
+        // The defensive path `NativeScope::new`'s contract allows. There is no
+        // store to claim from, so the proof is all the caller gets.
         let mut rt = crate::Runtime::new();
         let a = heap_ref(&rt, 1);
         // SAFETY: a null context is explicitly accepted.
@@ -954,9 +935,8 @@ mod tests {
     fn every_context_this_runtime_mints_sees_the_same_store() {
         // The store is the runtime's, not the context's, so a context taken
         // *while* a scope is open — which is what `Runtime::collect_now` and the
-        // debugger's `p EXPR` both do — sees it. The chain this replaced started
-        // null on every fresh context, so a collection driven from the host was
-        // blind to everything native code was holding.
+        // debugger's `p EXPR` both do — sees it. A collection driven from the
+        // host is therefore not blind to what native code is holding.
         let mut f = Native::new();
         let a = heap_ref(&f.rt, 42);
         let ctx = f.ctx_ptr();

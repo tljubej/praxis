@@ -7,10 +7,6 @@
 //! than through `Rc<RefCell<…>>`. The scalar/collection vocabulary is reused from
 //! [`praxis_stdlib`] (rule 20.3: one vocabulary); this crate adds the inference
 //! layer on top.
-//!
-//! **M2 scope:** `Int`, `Text`, `Bool`, `Unit`, `Never`, tuples, functions, and
-//! let-generalization. Collections, records, enums, closures, and the internal
-//! capability system arrive with their own milestones (M5/M7).
 
 pub mod constraint;
 pub mod ctor;
@@ -63,9 +59,9 @@ impl TypeDb {
         self.scalar(Scalar::Bool)
     }
 
-    /// The `Char` type (§4.3) — a single Unicode scalar value. M6 wires it
-    /// end-to-end: the input parser produces `Char` values (`char` atom,
-    /// `grid(char)`), and the runtime descriptor (`scalars::CHAR`) is complete.
+    /// The `Char` type (§4.3) — a single Unicode scalar value. The input parser
+    /// produces `Char` values (`char` atom, `grid(char)`), and the runtime
+    /// descriptor is `scalars::CHAR`.
     #[must_use]
     pub fn char(&mut self) -> Type {
         self.scalar(Scalar::Char)

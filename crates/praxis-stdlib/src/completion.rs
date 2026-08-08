@@ -1,12 +1,11 @@
-//! Completion-data generation from the method catalog (M8-WS7, §19.8).
+//! Completion-data generation from the method catalog (§19.8).
 //!
 //! The §19.8 acceptance criterion requires that "method completion data is
 //! generated from the same catalog used by the compiler." This module renders
 //! the [`MethodCatalog`](crate::MethodCatalog) into a serializable completion
-//! table that the M11 language server will consume for completion/signature-help
-//! (§5.7 line 520: "The language server uses the same table"). No LSP wiring
-//! here — just the generation + a round-trip test proving the generated data
-//! covers the compiler's catalog 1:1.
+//! table for completion and signature help (§5.7: "The language server uses the
+//! same table"). No LSP wiring here — just the generation, plus a round-trip
+//! test proving the generated data covers the compiler's catalog 1:1.
 
 use crate::{MethodCatalog, MethodEntry};
 

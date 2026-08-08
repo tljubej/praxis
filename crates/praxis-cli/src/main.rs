@@ -4,10 +4,10 @@
 //! `run`, `check` and `lsp` do real work; `watch` and `repl` are honest stubs.
 //!
 //! **The doc comments below are user-facing text.** clap renders each one into
-//! `praxis --help`, so a §-reference or a milestone marker in one is a note to
-//! the implementer printed to somebody trying to learn the flag. The notes are
-//! worth keeping and they go in a plain `//` comment beside the doc comment,
-//! where clap cannot reach them (REP-73).
+//! `praxis --help`, so a §-reference or any other note to the implementer put in
+//! one is printed to somebody trying to learn the flag. The notes are worth
+//! keeping and they go in a plain `//` comment beside the doc comment, where
+//! clap cannot reach them.
 
 mod check;
 mod color_mode;
@@ -45,16 +45,16 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    // §3.1, M4+.
+    // §3.1.
     /// Parse, type-check, JIT-compile, and run the program.
     Run {
         /// The `.px` source file to run.
         file: String,
-        // §7.1, M6.
+        // §7.1.
         /// Read the process input from this file instead of stdin.
         #[arg(long)]
         input: Option<String>,
-        // §9.6, M10.
+        // §9.6.
         /// When to drop into the crash debugger on a runtime fault:
         /// `auto` (default) enters the REPL iff stdin & stdout are a terminal;
         /// `always` forces the REPL; `never` always prints the noninteractive
@@ -67,18 +67,18 @@ enum Command {
         /// The `.px` source file to check.
         file: String,
     },
-    // §19 M-later. The design document's §3.1 invocation shows `--input`, and
-    // this variant declares only `file`: settle that when `watch` is built,
-    // rather than shipping a flag whose behaviour nothing has decided.
+    // §19. The design document's §3.1 invocation shows `--input`, and this
+    // variant declares only `file`: settle that when `watch` is built, rather
+    // than shipping a flag whose behaviour nothing has decided.
     /// Keep the program and input alive, recompile on source changes. (Not implemented yet.)
     Watch {
         /// The `.px` source file to watch.
         file: String,
     },
-    // No milestone. §19 does not schedule it.
+    // §19 does not schedule it.
     /// Start an ordinary interactive REPL session. (Not implemented yet.)
     Repl,
-    // §15, M11.
+    // §15.
     /// Start the language server over stdio. Speaks JSON-RPC LSP on
     /// stdin/stdout; not meant to be run by hand.
     Lsp {
@@ -89,9 +89,9 @@ enum Command {
         /// this server has, so the flag names what is already true.
         ///
         /// It is here because the alternative is exiting 2 on an argument the
-        /// convention says is harmless, before a byte of protocol is spoken —
-        /// which is what happened, and which every client reports as
-        /// "the server crashed" rather than as a bad flag.
+        /// convention says is harmless, before a byte of protocol is spoken,
+        /// which every client reports as "the server crashed" rather than as a
+        /// bad flag.
         #[arg(long)]
         stdio: bool,
     },
@@ -121,11 +121,9 @@ fn main() -> Result<()> {
 /// Emit an honest "not implemented" message and return [`exit_code::USAGE`].
 /// Never silently no-op a command.
 ///
-/// **No milestone number**, which is what it used to end with. Both call sites
-/// passed a hardcoded `0`, so the message pointed at a milestone that completed
-/// long ago — `watch` is §19 M-later and `repl` is scheduled nowhere. A number
-/// nobody maintains is worse than no number: it reads as a commitment and it is
-/// a typo that never went red (REP-73).
+/// **The message carries no milestone number.** A number nobody maintains is
+/// worse than no number: it reads as a commitment, and nothing makes it go red
+/// when it goes stale.
 fn not_implemented(name: &str, file: Option<&str>) -> Result<i32> {
     let where_ = match file {
         Some(f) => format!(" `{f}`"),

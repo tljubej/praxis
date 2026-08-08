@@ -1,23 +1,23 @@
-//! Immortal singleton objects (§4.3, M3 deliverable).
+//! Immortal singleton objects (§4.3).
 //!
-//! §4.3 notes that `Unit` and `Bool` "may be immortal singleton objects." M3
-//! materializes this: [`Immortals`] pre-allocates `Unit`, `true`, and `false`
-//! once at runtime startup. They are allocated on pages the sweep does not walk
-//! (ADR-103), so the collector never reclaims them — they live for the entire
-//! run.
+//! §4.3 notes that `Unit` and `Bool` "may be immortal singleton objects."
+//! [`Immortals`] pre-allocates `Unit`, `true`, and `false` once at runtime
+//! startup. They are allocated on pages the sweep does not walk (ADR-103), so
+//! the collector never reclaims them — they live for the entire run.
 //!
 //! Immortals are the natural return value for runtime wrappers that must return
 //! *a* `GcRef` after a fault (Appendix B: "return a valid sentinel object such
 //! as `Unit`").
 //!
-//! **`Int` joined them, and then `Char`.** The same §4.3 paragraph reserves the
-//! right to "intern small integers", and a small `Int` satisfies exactly the two
-//! conditions the `ImmortalWitness` below exists to enforce — its payload is
-//! `Copy`, and there is a bounded set of them so each can be minted once at
-//! startup. An ASCII `Char` satisfies both identically (ADR-107). The ranges and
-//! the argument that sharing such an object is unobservable are
-//! [`crate::small_int`]'s and [`crate::small_char`]'s; this module's job is only
-//! that the tables are minted here, once, like every other immortal.
+//! **Small `Int`s and ASCII `Char`s are immortal too.** The same §4.3 paragraph
+//! reserves the right to "intern small integers", and a small `Int` satisfies
+//! exactly the two conditions the `ImmortalWitness` below exists to enforce —
+//! its payload is `Copy`, and there is a bounded set of them so each can be
+//! minted once at startup. An ASCII `Char` satisfies both identically
+//! (ADR-107). The ranges and the argument that sharing such an object is
+//! unobservable are [`crate::small_int`]'s and [`crate::small_char`]'s; this
+//! module's job is only that the tables are minted here, once, like every other
+//! immortal.
 
 use crate::heap::Heap;
 use crate::scalars::{BoolPayload, BOOL_PAYLOAD, CHAR_PAYLOAD, INT_PAYLOAD, UNIT_PAYLOAD};
@@ -32,7 +32,7 @@ use crate::GcRef;
 /// immortal can be minted. Restricting it here is what keeps two properties
 /// true: an immortal is never swept and never dropped, so its payload must be
 /// `Copy` and it must be allocated exactly once — a wrapper that minted one per
-/// call consumed storage no collection could ever reclaim (RT-03).
+/// call would consume storage no collection could ever reclaim.
 pub(crate) struct ImmortalWitness(());
 
 /// The immortal singletons, pre-allocated at runtime start (§4.3).
@@ -53,12 +53,12 @@ pub struct Immortals {
     /// One `Char` per code point in [`crate::small_char`]'s range, indexed by
     /// [`small_char::index_of`].
     ///
-    /// A `Box<[GcRef]>` for `small_ints`' reason, reaching a different consumer:
-    /// the parser interpreter reads this table through a raw pointer parked in
-    /// `RuntimeContext.small_chars` (`parser.rs`'s `Rt` holds nothing but a
-    /// `*mut RuntimeContext`), and that pointer must survive a move of the
-    /// `Runtime` that owns the `Immortals`. An inline array would move with it;
-    /// a boxed slice's elements do not.
+    /// A `Box<[GcRef]>` for `small_ints`' reason: this table too is read through
+    /// a raw pointer parked in `RuntimeContext.small_chars` — by generated code
+    /// for a character literal and by the parser interpreter (`parser.rs`'s `Rt`
+    /// holds nothing but a `*mut RuntimeContext`) — and that pointer must survive
+    /// a move of the `Runtime` that owns the `Immortals`. An inline array would
+    /// move with it; a boxed slice's elements do not.
     small_chars: Box<[GcRef]>,
 }
 
@@ -67,12 +67,11 @@ impl Immortals {
     /// immortal, which the sweep does not walk; the collector never reclaims
     /// them.
     ///
-    /// There is no pre-colouring here any more. The three singletons used to be
-    /// painted black at birth so a mark phase that happened to visit them —
-    /// through a root that aliases one — did not transiently un-protect them by
-    /// resetting their colour at the next sweep. The page flag says the same
-    /// thing permanently instead of transiently: sweep never clears an immortal
-    /// page's `allocated` bit, whatever its mark bit says.
+    /// They carry no pre-set mark colour: the page flag protects them
+    /// permanently where a mark bit would protect them only until the next
+    /// sweep. Sweep never clears an immortal page's `allocated` bit, whatever
+    /// its mark bit says — which is what makes a mark phase that reaches an
+    /// immortal through an aliasing root harmless.
     pub fn new(heap: &Heap) -> Self {
         // `alloc_immortal` uses the same low-level layout as every other
         // allocation, so the descriptors and accessors work on immortals
@@ -84,16 +83,16 @@ impl Immortals {
         // `SMALL_INT_MIN + i` and `small_int::index_of` is the only arithmetic
         // anyone does over this table. Minting them here — rather than lazily on
         // first use — is what keeps the `ImmortalWitness` seal meaningful: a
-        // lazily-minted immortal is a wrapper that mints one per call away from
-        // RT-03, and it would also make `ctx.small_ints` hold a null the backend
-        // would have to test.
+        // lazily-minted immortal is one step from a wrapper that mints one per
+        // call and leaks, and it would also make `ctx.small_ints` hold a null the
+        // backend would have to test.
         let small_ints: Box<[GcRef]> = (SMALL_INT_MIN..=SMALL_INT_MAX)
             .map(|v| heap.alloc_immortal(INT_PAYLOAD, v, ImmortalWitness(())))
             .collect();
         debug_assert_eq!(small_ints.len(), SMALL_INT_COUNT);
         // The interned ASCII `Char`s, on the same terms and appended after the
         // `Int`s rather than interleaved with them: a `Char` block rounds to the
-        // same 32-byte rung, so these 128 land on the class-1 immortal pages the
+        // same 24-byte rung, so these 128 land on the class-1 immortal pages the
         // `Int` table already opened, and `small_ints_ptr`'s density argument is
         // untouched by construction. Slot `i` holds code point `i` — the map is
         // the identity, which `small_char::index_of` is the single statement of.
@@ -182,14 +181,13 @@ impl Immortals {
     /// The base address of the interned-`Char` table, for
     /// `RuntimeContext.small_chars`.
     ///
-    /// The reader is `parser.rs`'s `Rt::alloc_char`, not generated code: there
-    /// is no character literal in the language, so nothing lowers to a load of
-    /// this base (ADR-107 Decision 2). It is still a raw pointer for the same
-    /// reason `small_ints_ptr` is — the parser interpreter reaches the runtime
-    /// only through a `*mut RuntimeContext` — and it is still sound only because
-    /// the table is dense, in index order, and never reallocated after
-    /// [`Immortals::new`], which is not checkable from the reader and so is
-    /// stated here where the table is built.
+    /// Two readers: `parser.rs`'s `Rt::alloc_char`, which reaches the runtime
+    /// only through a `*mut RuntimeContext`, and the Cranelift lowering of
+    /// `Inst::ConstGc { GcConst::Char }` for a character literal (ADR-141),
+    /// which indexes from this base with a compile-time byte offset. Both are
+    /// sound only because the table is dense, in index order, and never
+    /// reallocated after [`Immortals::new`] — not checkable from either reader,
+    /// so stated here where the table is built.
     #[inline]
     #[must_use]
     pub fn small_chars_ptr(&self) -> *const GcRef {
@@ -328,9 +326,10 @@ mod tests {
         seen.dedup();
         assert_eq!(seen.len(), SMALL_CHAR_COUNT);
 
-        // The raw pointer the context hands the parser addresses the same
-        // objects `small_char` answers, in index order — the invariant
-        // `Rt::alloc_char`'s `add(i)` rests on.
+        // The raw pointer the context hands its readers addresses the same
+        // objects `small_char` answers, in index order — the invariant both
+        // `Rt::alloc_char`'s `add(i)` and the backend's compile-time element
+        // offset rest on.
         let base = im.small_chars_ptr();
         for code in 0..=SMALL_CHAR_MAX {
             // SAFETY: `code` is below `SMALL_CHAR_COUNT`, the table's length.
@@ -359,14 +358,13 @@ mod tests {
 
     #[test]
     fn minting_the_immortals_costs_the_collector_nothing() {
-        // RT-04: pacing measures the pressure a program puts on the collector,
-        // and an object no collection can reclaim exerts none. The `Int` table
-        // is ~40 KiB against a 64 KiB initial threshold, so charging it would
-        // put every program two thirds of the way to its first collection before
-        // `main` ran — and would silently move that point again the next time
-        // anyone tuned an interned range. The `Char` table is 4 KiB more of
-        // exactly the same argument (ADR-107), and it must not charge either:
-        // together they would be three quarters of the budget.
+        // Pacing measures the pressure a program puts on the collector, and an
+        // object no collection can reclaim exerts none. The `Int` table is
+        // ~30 KiB against a 64 KiB initial threshold, so charging it would put
+        // every program halfway to its first collection before `main` ran — and
+        // would silently move that point again the next time anyone tuned an
+        // interned range. The `Char` table is 3 KiB more of exactly the same
+        // argument (ADR-107), and it must not charge either.
         let heap = Heap::new();
         let _im = Immortals::new(&heap);
         assert_eq!(

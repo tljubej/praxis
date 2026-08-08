@@ -31,13 +31,12 @@
 //! `{16 + 4 = 20, align 8}`, which rounds to the 24-byte rung of ADR-103's
 //! ladder — the same rung an `Int` takes — so the table costs
 //! [`SMALL_CHAR_COUNT`] × 24 = **3 KiB** of permanently resident arena. The BMP
-//! is 63,488 scalar values, or ~1.45 MiB, on a change whose whole purpose is a
-//! program's memory ceiling as much as its speed (handover 21 §3.6). And 3 KiB
-//! buys the whole population: Praxis reads AoC-shaped input, every byte of which
-//! a UTF-8 `Text` stores in one byte is exactly a code point ≤ 127, so a grid of
-//! `#`/`.`, a line of digits and every letter of an English word are all inside
-//! the range. A `Char` above it — `é`, a box-drawing glyph — is what the
-//! allocator is for.
+//! is 63,488 scalar values, or ~1.45 MiB, against a change whose purpose is a
+//! program's memory ceiling as much as its speed. And 3 KiB buys the whole
+//! population: Praxis reads AoC-shaped input, every byte of which a UTF-8 `Text`
+//! stores in one byte is exactly a code point ≤ 127, so a grid of `#`/`.`, a
+//! line of digits and every letter of an English word are all inside the range.
+//! A `Char` above it — `é`, a box-drawing glyph — is what the allocator is for.
 //!
 //! Widening past `0xD7FF` would also stop being one decision: the surrogate
 //! range `0xD800..=0xDFFF` holds no scalar values, so a table over the BMP would
@@ -49,22 +48,17 @@
 //! **There is no `SMALL_CHAR_MIN`,** because 0 is the floor of the payload type
 //! and a constant zero only invites a `code - MIN` that cannot be checked.
 //!
-//! There **is** a [`SMALL_CHAR_STRIDE`], and this paragraph used to say there
-//! was not. ADR-107 Decision 2's reasoning was exact and its premise expired:
-//! `crate::small_int` had a stride because the Cranelift lowering of
-//! `Inst::ConstGc` indexes that table with a compile-time byte offset, and
-//! nothing indexed this one from generated code — the language had no character
-//! literal, so there was no `GcConst::Char`. ADR-141 is that literal, and
-//! `GcConst::Char` reads this table exactly the way `GcConst::SmallInt` reads
-//! the other. The stride is declared here, beside the array it measures, rather
-//! than written as an `8` in the backend, for [`index_of`]'s reason: a table and
-//! the arithmetic that walks it are one statement or they are two answers.
+//! There **is** a [`SMALL_CHAR_STRIDE`]: the character literal of ADR-141
+//! lowers to `Inst::ConstGc { GcConst::Char }`, which indexes this table with a
+//! compile-time byte offset exactly the way `GcConst::SmallInt` indexes
+//! `crate::small_int`'s. The stride is declared here, beside the array it
+//! measures, rather than written as an `8` in the backend, for [`index_of`]'s
+//! reason: a table and the arithmetic that walks it are one statement or they
+//! are two answers.
 //!
-//! It stays un-re-exported from the crate root, where `small_int`'s constants
-//! are re-exported: the backend reaches it as
-//! `praxis_runtime::small_char::SMALL_CHAR_STRIDE`, which names the table it
-//! belongs to at the use site. `small_int`'s re-export predates this module and
-//! is not worth reversing; a second one is not worth adding.
+//! It is not re-exported from the crate root, unlike `small_int`'s constants:
+//! the backend reaches it as `praxis_runtime::small_char::SMALL_CHAR_STRIDE`,
+//! which names the table it belongs to at the use site.
 
 /// The highest code point the runtime interns: the last ASCII scalar.
 ///
@@ -156,9 +150,7 @@ mod tests {
     /// rounds to the 24-byte rung of ADR-103's ladder — and this codebase pins
     /// derivations. If the header moves, the ladder is re-granulated, or the
     /// range is widened, the ADR's table stops being true and this is where that
-    /// is discovered. It has already earned its keep once: ADR-109 took the
-    /// header from 24 bytes to 16 the same day this was written, and this test
-    /// is what caught the stale figure.
+    /// is discovered.
     #[test]
     fn the_table_costs_three_kibibytes_of_permanently_resident_arena() {
         let (_, block) = crate::heap::BlockLayout::of(&crate::scalars::CHAR);

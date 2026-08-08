@@ -23,7 +23,7 @@
 //! reference resolving to the symbol it resolved to before, and no new
 //! diagnostic. That is the property "rejects unsafe collisions" is trying to
 //! describe, asked directly of the resolver instead of re-derived from a scope
-//! tree that cannot answer "which scope is this offset in" (M11 handover §5.2).
+//! tree that cannot answer "which scope is this offset in".
 //!
 //! It costs one extra analysis per rename — about 4 ms on a puzzle-sized file,
 //! for an operation a user performs by hand and waits for.

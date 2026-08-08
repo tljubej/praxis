@@ -22,22 +22,21 @@
 //! concrete language terms and must never mention "trait" or "capability".** The
 //! diagnostic wording lives in [`crate::diagnostics`].
 //!
-//! # One door, five questions (F10)
+//! # One door, five questions
 //!
 //! [`check`] is the entry point, and every capability question routes through
 //! it. The predicates below it are the rules; `check` is what makes them one
 //! decision with one failure shape (`Err(offending inner type)`), so a caller
 //! cannot ask half the question or answer it with the wrong predicate.
 //!
-//! Two of the five are new here and are the point of the stage:
+//! Two of the five are easy to reach for wrongly:
 //!
 //! - [`supports_hash_stable`] is what a `Map` key must answer. [`supports_hash`]
 //!   really is [`supports_eq`] — the descriptor's `hash` and `equals` callbacks
-//!   are one fact — and that is exactly why it is the wrong question for a key
-//!   (TY-32, D4).
+//!   are one fact — and that is exactly why it is the wrong question for a key.
 //! - [`supports_numeric`] is what arithmetic and the numeric sinks require, and
 //!   it is a *different* set from [`supports_ord`]: `Text` is orderable and is
-//!   not a number (TY-31).
+//!   not a number.
 //!
 //! [`supports_ord`] is also a different set from the runtime's
 //! `TypeDescriptor::compare`, and the split is deliberate: this module answers
@@ -61,11 +60,10 @@ use praxis_types::{data::TypeData, Capability, CollectionCtor, Type, TypeDb};
 /// "`Vec[fn(Int) -> Int]` cannot be a key" is a worse message than "a function
 /// value cannot be a key" — the program wrote the function, not the `Vec`.
 ///
-/// Every other capability question in the compiler routes through here. Before
-/// F10 there were four free predicates with no shared shape, two of which had
-/// zero non-test callers and one of which (`supports_hash`) was *literally*
-/// `supports_eq` — which is what admitted mutable collections as `Map` keys
-/// (TY-32, RT-08).
+/// Every other capability question in the compiler routes through here, so a
+/// caller cannot reach past it and ask the wrong predicate: `supports_hash` is
+/// *literally* `supports_eq`, and asking it about a `Map` key admits mutable
+/// collections.
 ///
 /// An unresolved variable answers **yes** to everything. That is right here and
 /// wrong nowhere: this function is asked about a specific type, and a variable
@@ -94,8 +92,8 @@ pub fn check(
         // Iterability is a yes/no about the receiver. *Which* item it yields is
         // unified by `Inferer::resolve_deferred_iterable`, which is the only
         // caller that has both an item to relate it to and somewhere to report a
-        // disagreement (REP-04): the failure here is `Err(offending type)`, and
-        // "iterates, but not at that element type" is a mismatch and not that.
+        // disagreement: the failure here is `Err(offending type)`, and "iterates,
+        // but not at that element type" is a mismatch and not that.
         Capability::Iterable { .. } => {
             if db.var_id_of(db.follow(t)).is_some() {
                 // Still a variable: optimistically yes, as everywhere else — and
@@ -120,7 +118,7 @@ pub fn check(
         }
         // Having a field is a yes/no about the receiver; *which* type that field
         // holds is unified by `Inferer::resolve_deferred_field`, for the reason
-        // `Iterable`'s item is (REP-04, REP-28).
+        // `Iterable`'s item is.
         Capability::HasField { name, .. } => {
             let resolved = db.follow(t);
             if db.var_id_of(resolved).is_some() {
@@ -220,7 +218,7 @@ pub fn supports_eq(db: &TypeDb, t: Type) -> bool {
         // A record is equatable iff every field type is, and iff every type
         // argument is: a generic def's field types mention its parameters,
         // which are unresolved variables and answer optimistically, so the
-        // arguments are where the real answer lives (F12).
+        // arguments are where the real answer lives.
         TypeData::Record { def, args } => {
             args.iter().all(|a| supports_eq(db, *a))
                 && db
@@ -252,15 +250,15 @@ pub fn supports_eq(db: &TypeDb, t: Type) -> bool {
 /// and "can be compared" are one question about the representation.
 ///
 /// It is **not** the question a `Map` key has to answer. That is
-/// [`supports_hash_stable`], and conflating the two is TY-32: a `Vec` hashes
-/// fine and stops being findable the moment it changes.
+/// [`supports_hash_stable`]: a `Vec` hashes fine and stops being findable the
+/// moment it changes.
 #[must_use]
 pub fn supports_hash(db: &TypeDb, t: Type) -> bool {
     supports_eq(db, t)
 }
 
-/// True iff a value of type `t` may be a `Map` key or a `Set` element (D4,
-/// TY-32/RT-08).
+/// True iff a value of type `t` may be a `Map` key or a `Set` element
+/// (ADR-057 D4).
 ///
 /// Hashable **and immutable**. The rule is mutability, not container-ness:
 ///
@@ -334,15 +332,15 @@ pub fn supports_hash_stable(db: &TypeDb, t: Type) -> bool {
 }
 
 /// True iff `t` admits arithmetic — `+`, `-`, `*`, `/`, unary minus, and the
-/// numeric sinks (§4.12, TY-31).
+/// numeric sinks (§4.12).
 ///
 /// `Int`, `UInt`, `Byte` and `Float`, and nothing else. `Bool` is not a number
 /// however it is represented, `Char` is a scalar value and not an arithmetic
 /// one, and `Text` has `+` only as concatenation, which is a different rule at
 /// a different site.
 ///
-/// `%` is narrower still — it is undefined for `Float` (TY-27) — so it is not
-/// this capability.
+/// `%` is narrower still — it is undefined for `Float` — so it is not this
+/// capability.
 #[must_use]
 pub fn supports_numeric(db: &TypeDb, t: Type) -> bool {
     use praxis_stdlib::type_pattern::ScalarType;
@@ -376,18 +374,16 @@ pub fn supports_numeric(db: &TypeDb, t: Type) -> bool {
 /// `(1, 2) < (1, 3)` is still `Y006`, which is the line below, and widening this
 /// function to "whatever has a `compare`" would quietly legalise it.
 ///
-/// This used to answer *yes* for a tuple of orderable elements, and for a
-/// collection or record of them, on the reasonable ground that a lexicographic
-/// product is conventional. But no such ordering was ever lowered: MIR had one
-/// integer compare, so `(1, 2) < (1, 3)` compiled into a comparison of two
-/// payload words that happen to be schema pointers (P0-12). ADR-045 chose
-/// rejection over a semantics nobody had picked; a composite ordering is a
-/// language decision plus a recursive `praxis_value_cmp`, and both belong to
-/// whichever milestone wants sorting by key.
+/// A composite is rejected rather than given the conventional lexicographic
+/// product order, because no such ordering is lowered: admitting one would
+/// compile `(1, 2) < (1, 3)` into a comparison of two payload words that happen
+/// to be schema pointers. ADR-045 chose rejection over a semantics nobody had
+/// picked; a composite ordering would be a language decision plus a recursive
+/// `praxis_value_cmp`.
 ///
-/// `Bool` and `Unit` stay non-orderable for the older reason: the spec (§5.4)
-/// leaves `SupportsOrd` compiler-defined, and ordering booleans is almost
-/// always a mistyped `&&`.
+/// `Bool` and `Unit` are non-orderable because the spec (§5.4) leaves
+/// `SupportsOrd` compiler-defined, and ordering booleans is almost always a
+/// mistyped `&&`.
 #[must_use]
 pub fn supports_ord(db: &TypeDb, t: Type) -> bool {
     use praxis_stdlib::type_pattern::ScalarType;
@@ -428,9 +424,10 @@ pub fn supports_ord(db: &TypeDb, t: Type) -> bool {
 /// members (§4.13). Functions, the other scalars, records, enums, and tuples are
 /// not iterable.
 ///
-/// # An unresolved receiver yields a *fresh* variable (REP-03)
+/// # An unresolved receiver yields a *fresh* variable
 ///
-/// It used to yield **itself**, and that is a legal program rejected:
+/// Yielding the receiver **itself** would make the loop variable and the
+/// iterator one variable, and reject this legal program:
 ///
 /// ```praxis
 /// fn total(r) { var t = 0
@@ -438,16 +435,14 @@ pub fn supports_ord(db: &TypeDb, t: Type) -> bool {
 ///   t }
 /// ```
 ///
-/// The loop variable and the iterator came back as one variable, so `t + i`
-/// pinned the *iterator* to `Int` and the `for` reported `Y005` — "values of
-/// type `Int` cannot be iterated" — about a parameter the program never typed.
-/// Identically for `Vec`, `BitSet` and `Range`, which is why TY-34's gates all
-/// annotate their iterated parameters.
+/// `t + i` would pin the *iterator* to `Int` and the `for` would report `Y005` —
+/// "values of type `Int` cannot be iterated" — about a parameter the program
+/// never typed.
 ///
 /// A fresh variable is also what gives the deferred `Iterable { item }`
-/// constraint two things to relate, which is what makes REP-04 checkable at all:
-/// `Inferer::resolve_deferred_iterable` unifies the item this function answers
-/// with the one the constraint carries once the receiver is known.
+/// constraint two things to relate: `Inferer::resolve_deferred_iterable`
+/// unifies the item this function answers with the one the constraint carries
+/// once the receiver is known.
 ///
 /// Takes `&mut TypeDb` because the `Map[K, V]` and `Counter[T]` cases mint fresh
 /// tuple types to return as the `Item` — and because of the arm above.
@@ -486,8 +481,8 @@ pub fn iter_item(db: &mut TypeDb, t: Type) -> Option<Type> {
             let int_ty = db.scalar(ScalarType::Int);
             db.pair(*k, int_ty)
         }
-        // `Seq[T]` is the compiler-internal pipeline source (M8 WS8); it
-        // threads its single element type through the pipeline.
+        // `Seq[T]` is the compiler-internal pipeline source; it threads its
+        // single element type through the pipeline.
         (CollectionCtor::Seq, [el]) => *el,
         // An under/over-applied or malformed collection ctor is not iterable.
         _ => return None,
@@ -578,8 +573,7 @@ mod tests {
     ///
     /// The item type is the whole assertion: a `Text` that yielded `Text` would
     /// typecheck every loop body a `Char` does not, and the `for` would then
-    /// lower `praxis_text_get`'s `Char` into a slot typed `Text` — the shape
-    /// REP-03's silent half was made of.
+    /// lower `praxis_text_get`'s `Char` into a slot typed `Text`.
     #[test]
     fn text_yields_char() {
         let mut db = TypeDb::new();
@@ -619,17 +613,9 @@ mod tests {
         assert!(iter_item(&mut db, v).is_some());
     }
 
-    /// **Rewritten** from `numeric_scalars_are_orderable` (plan §8.2, H18's last
-    /// entry). The assertions it made are still true — `Int`, `Text` and `Char`
-    /// are all orderable, and ADR-045 is what made that honest by giving the
-    /// runtime a `compare` for each. What changed is that its *name* is now a
-    /// claim about two different capabilities: this stage introduces
-    /// `CapKind::Numeric`, and "numeric" and "orderable" are exactly the two
-    /// things TY-31 and TY-32 separate. `Text` is orderable and is not a number.
-    ///
-    /// So it states the rule instead: the orderable set is the six scalars whose
-    /// descriptors carry a `compare` callback, and it is neither a subset nor a
-    /// superset of the numeric one.
+    /// The orderable set is the scalars whose descriptors carry a `compare`
+    /// callback, and it is neither a subset nor a superset of the numeric one:
+    /// `Text` is orderable and is not a number.
     #[test]
     fn orderable_and_numeric_are_different_sets_of_scalars() {
         let mut db = TypeDb::new();
@@ -656,12 +642,13 @@ mod tests {
         assert!(!supports_numeric(&db, b));
     }
 
-    // --- D4: a key is hashable AND immutable --------------------------------
+    // --- A key is hashable AND immutable (ADR-057 D4) -----------------------
 
-    /// TY-32 stated as the distinction it is. `supports_hash` was *literally*
-    /// `supports_eq`, so every collection that could be hashed was admitted as a
-    /// key — and hashing a `Vec` by its contents and then pushing to it moves
-    /// the entry's bucket without moving the entry. D4 confirms the rejection.
+    /// Hashable and key-able are different questions. `supports_hash` is
+    /// *literally* `supports_eq`, so answering a key question with it would
+    /// admit every collection that can be hashed — and hashing a `Vec` by its
+    /// contents and then pushing to it moves the entry's bucket without moving
+    /// the entry.
     #[test]
     fn a_mutable_collection_is_hashable_but_is_not_a_key() {
         let mut db = TypeDb::new();
@@ -734,11 +721,12 @@ mod tests {
         assert!(!supports_hash_stable(&db, func));
     }
 
-    // --- the one decision function (F10) ------------------------------------
+    // --- the one decision function ------------------------------------------
 
     /// `check` is the only route to a capability answer, and it routes each of
-    /// the five kinds to its own predicate. A kind wired to the wrong predicate
-    /// is what `supports_hash = supports_eq` was.
+    /// the five kinds to its own predicate. `supports_hash` and `supports_eq`
+    /// are one function, so a kind wired to the wrong predicate answers
+    /// plausibly and wrongly.
     #[test]
     fn check_answers_each_capability_with_its_own_rule() {
         let mut db = TypeDb::new();
@@ -927,13 +915,10 @@ mod tests {
         assert!(!supports_ord(&db, func));
     }
 
-    /// **Inverted** by ADR-045, and this is the assertion that used to say the
-    /// opposite: `tuple_is_orderable_iff_elements_are`, which was true of the
-    /// capability check and of nothing else in the compiler. A tuple of
-    /// orderable elements has no ordering *lowering*, so admitting it meant
-    /// `(1, 2) < (1, 3)` compiled into a comparison of two schema pointers
-    /// (P0-12). Composite ordering returns as a language decision plus a
-    /// recursive runtime compare, not as an optimistic `all`.
+    /// A tuple of orderable elements has no ordering *lowering* (ADR-045), so
+    /// admitting it would compile `(1, 2) < (1, 3)` into a comparison of two
+    /// schema pointers. Composite ordering would arrive as a language decision
+    /// plus a recursive runtime compare, not as an optimistic `all`.
     #[test]
     fn composites_are_not_orderable_even_when_their_elements_are() {
         let mut db = TypeDb::new();
@@ -951,13 +936,13 @@ mod tests {
         let rec = db.record(Some("P".into()), fields);
         assert!(!supports_ord(&db, rec));
 
-        // Equality is unchanged: it *does* recurse, and it has a lowering.
+        // Equality is the other rule: it *does* recurse, and it has a lowering.
         assert!(supports_eq(&db, tup));
         assert!(supports_eq(&db, rec));
     }
 
     /// The negative gate for ADR-138 decision 3. Every type a `Map` key can be
-    /// now carries a runtime `compare` — a tuple, a `Bool`, a `Range` — because
+    /// carries a runtime `compare` — a tuple, a `Bool`, a `Range` — because
     /// a container has to walk its keys in one deterministic sequence. That is
     /// **not** the same question as `<`, and the temptation to "fix the
     /// inconsistency" by widening this function is exactly what this test is

@@ -5,9 +5,7 @@
 //! `CARGO_BIN_EXE_praxis` is set by cargo only while compiling *this* package's
 //! integration tests, so `bin_path` has to expand the literal inside one of
 //! them; a helper crate would see no such variable. The other two follow it
-//! rather than being split across two homes. Five files had retyped `bin_path`
-//! and a sixth inlined the `env!` twice, and three of them wrote the same
-//! two-pop walk to the workspace root under three different names.
+//! rather than being split across two homes.
 
 // Every test binary compiles this whole module and calls part of it, so the
 // items a given file does not use are dead *there* and nowhere else — and

@@ -1,6 +1,6 @@
-//! Semantic tokens (WS8, §15.2, §19.11 criterion 4).
+//! Semantic tokens (§15.2, §19.11 criterion 4).
 //!
-//! Full-document only; deltas are M12.
+//! Full-document only: the protocol's delta requests are not served.
 //!
 //! The legend covers §15.2's nine classes. The **four parser classes** —
 //! constructors, template literal text, capture names, capture types — read
@@ -30,7 +30,7 @@ use crate::position::Encoding;
 use crate::query::Snapshot;
 
 /// The legend, in index order. **The one place the token-type list exists** —
-/// the server advertises it, the encoder indexes into it, and WS10's drift gate
+/// the server advertises it, the encoder indexes into it, and a drift gate
 /// checks the extension maps every custom entry to a TextMate scope.
 pub const TOKEN_TYPES: &[&str] = &[
     // §15.2's classes.
@@ -54,7 +54,7 @@ pub const TOKEN_TYPES: &[&str] = &[
 ];
 
 /// The four types §19.11 criterion 4 requires, and the ones the extension must
-/// map to TextMate scopes (WS10 gate 4).
+/// map to TextMate scopes.
 pub const CUSTOM_TOKEN_TYPES: &[&str] = &[
     "parserConstructor",
     "parserTemplateText",
@@ -297,8 +297,8 @@ fn classify_token(token: &SyntaxToken, analysis: &praxis_hir::Analysis) -> Optio
 
     let range = token.text_range();
 
-    // A method name is not a name reference (HIR-02): it resolves to a catalog
-    // entry, so it has its own map and has to be asked first.
+    // A method name is not a name reference: it resolves to a catalog entry, so
+    // it has its own map and has to be asked first.
     if analysis.method_refs.contains_key(&range) {
         return Some("method");
     }

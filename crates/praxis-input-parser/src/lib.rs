@@ -5,11 +5,12 @@
 //! parser-plan construction. The DSL has its own typed AST (§7.9) and is **not**
 //! lowered immediately into string-splitting calls.
 //!
-//! **Milestone 6** fills this crate: atomics (`int`/`char`/`word`/`text`/
-//! `rest`/`digit`) and constructors (`lines`/`sections`/`csv`/`ws`/`sep`/
-//! `grid`), backtick templates, type synthesis, and plan lowering. The runtime
-//! interpreter lives in `praxis-runtime::parser`. Heterogeneous `sections`,
-//! `block`, `choice`, `scan` follow in Milestone 9.
+//! The crate covers the atomics ([`AtomicKind::ALL`] — `int`, `uint`, `float`,
+//! `byte`, `char`, `digit`, `word`, `identifier`, `text`, `rest`), the
+//! constructors ([`Constructor::ALL`] — `lines`, `sections`, `csv`, `ws`,
+//! `sep`, `grid`, `matrix`, `chars`, `one_of`, `block`, `choice`, `optional`,
+//! `scan`, `repeated`), backtick templates, type synthesis, and plan lowering.
+//! The runtime interpreter lives in `praxis-runtime::parser`.
 
 pub mod ast;
 pub mod body;

@@ -1,21 +1,20 @@
 //! The compiler-managed shadow stack (§12.3, ADR-019, ADR-101).
 //!
 //! §12.3 offers "compiler-managed shadow-stack frames **or** explicit root
-//! frames." M3 shipped explicit root frames ([`RootScope`](crate::RootScope),
-//! ADR-012) for the host. M5 added the compiler-managed shadow stack that
-//! JIT-generated code spills into: at every GC safepoint (allocation / call
-//! that may allocate), the Cranelift backend stores the live `GcRef` locals
-//! into this function's slots *before* the safepoint and reloads them after.
+//! frames," and the runtime has both: explicit root frames
+//! ([`RootScope`](crate::RootScope), ADR-012) for the host, and this
+//! compiler-managed shadow stack that JIT-generated code spills into. At every
+//! GC safepoint (allocation / call that may allocate), the Cranelift backend
+//! stores the live `GcRef` locals into this function's slots *before* the
+//! safepoint and reloads them after.
 //!
 //! A **frame is not an object.** The runtime owns one contiguous region of
 //! slots for the whole program ([`SlotStack`]); a function's frame is the run
 //! of slots between the `top` it found on entry and the `top` it left behind.
 //! Generated code claims a run by bump-allocating inline — load `top`, zero
 //! `slot_count` slots, store `top + slot_count*8` back — and reclaims it by
-//! storing the saved base into `top` again. No allocation, no free, no call.
-//! ADR-101 records why this replaced a per-call `Box<ShadowFrame>` of
-//! `MAX_SHADOW_SLOTS` pointers, 1536 bytes of which were memset to null on
-//! every Praxis call whatever the function's real slot count.
+//! storing the saved base into `top` again. No allocation, no free, no call
+//! (ADR-101).
 //!
 //! Slots are raw `*mut GcHeader` (not [`GcRef`]) because a slot is *null until
 //! the backend writes a value into it*: a local may be live across a safepoint
@@ -25,8 +24,8 @@
 //!
 //! The collector reaches the whole stack through one [`RootSet`] impl on
 //! [`SlotStackHeader`], which scans `[base, top)` in a single linear pass. That
-//! is exactly the set the old parent-pointer chain yielded, because each frame
-//! occupies exactly its own slot run and the runs partition `[base, top)`.
+//! is exactly every live frame's roots, because each frame occupies exactly its
+//! own slot run and the runs partition `[base, top)`.
 //!
 //! The header is `#[repr(C)]` and publishes [`SlotStackHeader::TOP_OFFSET`] so
 //! the backend emits a compile-time-derived displacement rather than a literal
@@ -43,76 +42,59 @@ use crate::{
 /// rejects (at compile time) any function exceeding this, through
 /// [`SlotCount`]; real Praxis functions have small root sets.
 ///
-/// Under ADR-019's per-call `Box<ShadowFrame>` this constant was the *width of
-/// every allocation*, so raising it made every call in the language slower —
-/// the handover measured 192 → 24 taking a no-op-call benchmark from 1.43 s to
-/// 1.27 s on its own. Under the contiguous stack it costs no per-call time at
-/// all.
+/// **It is not what bounds the stack, and it is not a performance dial**
+/// (ADR-101). The budget guard bounds every claimed slot on its own — see
+/// [`SHADOW_STACK_SLOTS`] — and this constant contributes only that
+/// reservation's headroom term for Rust-side pushes. It appears in exactly two
+/// places that survive to run time: the size of the reservation, and
+/// [`SlotCount::new`], which is a compile-time check. **It appears in no
+/// generated code.** Raising it changes the cost of no program that compiles
+/// today; it changes only which programs compile.
 ///
-/// **It is not what bounds the stack, and it has not been a performance dial
-/// since ADR-101** (ADR-128 amends the account this comment used to give). The
-/// budget guard bounds every claimed slot on its own — see [`SHADOW_STACK_SLOTS`]
-/// — and this constant contributes only that reservation's headroom term for
-/// Rust-side pushes. It appears in exactly two places that survive to run time:
-/// the size of the reservation, and [`SlotCount::new`], which is a compile-time
-/// check. **It appears in no generated code.** Raising it changes the cost of no
-/// program that compiles today; it changes only which programs compile.
-///
-/// Since ADR-128 a frame's root width is the number of *colors* its co-live root
-/// sets need, not its count of `Gc` locals, and over all 71 functions of
+/// A frame's root width is the number of *colors* its co-live root sets need,
+/// not its count of `Gc` locals (ADR-128), and over all 71 functions of
 /// `tests/aoc-corpus` the largest co-live root set is 11 — which is
-/// [`REFERENCE_FRAME_SLOTS`]. So this cap keeps its value and its meaning and
-/// simply stops being reachable. What a programmer can still exhaust is
-/// [`MAX_DEBUG_VALUE_SLOTS`], which bounds the thing they can see: how many `Gc`
-/// locals one function may have.
+/// [`REFERENCE_FRAME_SLOTS`]. So this cap is in practice unreachable. What a
+/// programmer can still exhaust is [`MAX_DEBUG_VALUE_SLOTS`], which bounds the
+/// thing they can see: how many `Gc` locals one function may have.
 ///
 /// This is part of the contract between the backend and the runtime; bumping it
 /// is an ABI-affecting change caught by the ABI version check (§11.6) only in
 /// that the two are rebuilt together.
-///
-/// M8 raises this from 64 to 192 to accommodate AoC-style graph programs that
-/// allocate many collections (Deque/Set/Map/Vec) in a single frame.
 pub const MAX_SHADOW_SLOTS: usize = 192;
 
 /// The maximum `Gc` locals a single JIT'd function may have — the bound on the
 /// *dense* index space the crash debugger reads (ADR-128 decision 3).
 ///
-/// Until ADR-128 this was [`MAX_SHADOW_SLOTS`], because one index space served
-/// both: a local's shadow slot index doubled as its debug-local index. Colouring
-/// the root slots by live range ends that. The two spaces now answer different
-/// questions and are sized differently — root slots are as many as a function's
-/// co-live root sets need, debug value slots are one per `Gc` local, in MIR local
-/// order, so that the debugger can render a local the program has finished with.
+/// This is a **different index space** from the shadow slots, so it has its own
+/// bound: root slots are as many as a function's co-live root sets need, debug
+/// value slots are one per `Gc` local, in MIR local order, so that the debugger
+/// can render a local the program has finished with.
 ///
-/// So the dense space needs its own bound, and it is sized for the thing it now
-/// limits: how many `Gc` locals a function may have, which is a property of the
-/// source text a programmer can see and can act on. 192 was closer to biting than
-/// anyone noticed — `bfs`'s and `vm`'s entry points are already at 178 and 185,
-/// and a 40-line function of twenty `var v = [1, 2, 3]` / `out(v.len())` pairs
-/// did not compile at all, while its largest co-live root set was **2**.
+/// It is sized for the thing it limits: how many `Gc` locals a function may
+/// have, which is a property of the source text a programmer can see and can
+/// act on. A bound of 192 would bite — `bfs`'s and `vm`'s entry points are
+/// already at 178 and 185 locals, and a 40-line function of twenty
+/// `var v = [1, 2, 3]` / `out(v.len())` pairs reaches it while its largest
+/// co-live root set is **2**.
 ///
-/// The cost of the headroom is address space and nothing else, and it is **one**
-/// reservation's, not two: [`MAX_SHADOW_SLOTS`] keeps its value, so
-/// [`SHADOW_STACK_SLOTS`] is unchanged at 624,192 slots and only
-/// [`DEBUG_VALUE_STACK_SLOTS`](crate::debug::DEBUG_VALUE_STACK_SLOTS) grows —
-/// 624,192 → 628,096, which is `(4096 − 192) × 8` = **30.5 KiB**. (ADR-128's own
-/// text prices it at ~64 KB by charging both reservations; that is the one
-/// number in the record that is wrong.) [`SlotStack::new`] allocates zeroed,
-/// which for the shadow stack's raw pointers is an `mmap` of untouched zero
-/// pages, so resident memory tracks how wide programs actually are.
+/// The cost of the headroom is address space and nothing else, and it is
+/// **one** reservation's, not two: only
+/// [`DEBUG_VALUE_STACK_SLOTS`](crate::debug::DEBUG_VALUE_STACK_SLOTS) carries
+/// it, at `(4096 − 192) × 8` = **30.5 KiB** over [`SHADOW_STACK_SLOTS`].
+/// [`SlotStack::new`] allocates zeroed, which for the shadow stack's raw
+/// pointers is an `mmap` of untouched zero pages, so resident memory tracks how
+/// wide programs actually are.
 pub const MAX_DEBUG_VALUE_SLOTS: usize = 4096;
 
 /// A frame width the shadow stack can actually hold: a `u32` proven `<=`
 /// [`MAX_SHADOW_SLOTS`] at construction.
 ///
-/// This replaces the runtime `assert!` in the deleted `ShadowFrame::new`. An
-/// over-wide frame used to be a panic inside the prologue helper — a state the
-/// program could reach and the runtime then had to reject. It is now
-/// *unconstructible*: [`SlotCount::new`] is the only way to make one, the
-/// backend turns the `None` into a compile diagnostic naming the function, and
-/// every consumer of a `SlotCount` may assume the bound without re-checking it.
-/// That assumption is load-bearing — it is one of the two premises of
-/// [`SHADOW_STACK_SLOTS`].
+/// An over-wide frame is *unconstructible* rather than rejected at run time:
+/// [`SlotCount::new`] is the only way to make one, the backend turns the `None`
+/// into a compile diagnostic naming the function, and every consumer of a
+/// `SlotCount` may assume the bound without re-checking it. That assumption is
+/// load-bearing — it is one of the two premises of [`SHADOW_STACK_SLOTS`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlotCount(u32);
 
@@ -138,14 +120,13 @@ impl SlotCount {
 /// A count of debug value slots the debug value stack can actually hold: a `u32`
 /// proven `<=` [`MAX_DEBUG_VALUE_SLOTS`] at construction (ADR-128 decision 3).
 ///
-/// **A distinct type from [`SlotCount`], and that is the point.** Before ADR-128
-/// one count was both — the claim on the shadow stack and the claim on the debug
-/// value stack were the same number, so one type served. They are now different
+/// **A distinct type from [`SlotCount`], and that is the point.** The claim on
+/// the shadow stack and the claim on the debug value stack are different
 /// numbers with different bounds over different index spaces, and the failure
 /// mode of confusing them is silent: claiming the *colored* width on the debug
-/// stack would give the debugger a frame too short for its own metadata to index,
-/// and every local past the end would render another frame's value. Making them
-/// two types means that mix-up does not compile.
+/// stack would give the debugger a frame too short for its own metadata to
+/// index, and every local past the end would render another frame's value.
+/// Making them two types means that mix-up does not compile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DebugSlotCount(u32);
 
@@ -189,12 +170,12 @@ impl DebugSlotCount {
 /// nothing left to check. That is one branch removed from the hottest path in
 /// the language.
 ///
-/// The old bound was `MAX_RECURSION_DEPTH * MAX_SHADOW_SLOTS`, which multiplied
-/// "the deepest recursion" by "the widest frame" as if a program could have both
-/// at once. It cannot, and now the guard is what says so: a maximum-width frame
-/// spends `FRAME_BYTES_BASE + 2 × (MAX_SHADOW_SLOTS − REFERENCE_FRAME_SLOTS)`
-/// bytes, so a stack of them runs out of budget at 2161 frames, not 8000. The
-/// reservation falls from 12.29 MiB to 4.77 MiB of *virtual address space* per
+/// Sizing this as `MAX_RECURSION_DEPTH * MAX_SHADOW_SLOTS` would multiply "the
+/// deepest recursion" by "the widest frame" as if a program could have both at
+/// once. It cannot, and the guard is what says so: a maximum-width frame spends
+/// `FRAME_BYTES_BASE + 2 × (MAX_SHADOW_SLOTS − REFERENCE_FRAME_SLOTS)` bytes, so
+/// a stack of them runs out of budget at 2161 frames, not 8000. The reservation
+/// is therefore 4.77 MiB of *virtual address space* per
 /// [`Runtime`](crate::Runtime). [`SlotStack::new`] allocates it zeroed, which is
 /// an `mmap` of fresh zero pages: resident memory tracks how deep the program
 /// actually recurses, not how deep it is allowed to.
@@ -205,7 +186,7 @@ pub const SHADOW_STACK_SLOTS: usize = (STACK_BUDGET_BYTES / FRAME_BYTES_PER_SLOT
 /// The bound the reservation above covers, spelled once so the `const` block and
 /// the test can both read it rather than restating the arithmetic.
 ///
-/// `pub(crate)` since ADR-128: it bounds the *debug value* stack too, and for the
+/// `pub(crate)` because it bounds the *debug value* stack too, and for the
 /// same reason rather than by coincidence. [`crate::frame_cost`] charges the
 /// dense count of `Gc` locals (decision 4), which is exactly that stack's width,
 /// so the budget argument that bounds the claimed shadow slots bounds the claimed
@@ -221,8 +202,7 @@ pub(crate) const MAX_LIVE_SLOTS: usize = (STACK_BUDGET_BYTES / FRAME_BYTES_PER_S
 // address space is too much and writing a smaller number. That edit makes
 // shadow-stack overflow reachable from generated code — silently, because
 // generated code does not check the limit — and this fails the *build* instead.
-// Same discipline as ADR-040's P0-08c: a sizing error is a compile error, not a
-// test run.
+// Same discipline as ADR-040: a sizing error is a compile error, not a test run.
 const _: () = assert!(
     SHADOW_STACK_SLOTS > MAX_LIVE_SLOTS,
     "the shadow stack must cover every slot the budget can buy, plus one frame \
@@ -247,10 +227,9 @@ const _: () = assert!(
 /// that three instructions with no base-plus-scaled-index arithmetic.
 ///
 /// The fields stay private and the backend reaches `top` through
-/// [`Self::TOP_OFFSET`]. That is strictly better than making the field `pub`
-/// (which is what `ShadowFrame.slots` had to be, only so the backend could
-/// `offset_of!` it): the displacement is still derived from the `#[repr(C)]`
-/// layout at compile time, but no other crate can write the field.
+/// [`Self::TOP_OFFSET`]. That is strictly better than making the field `pub` so
+/// the backend can `offset_of!` it: the displacement is still derived from the
+/// `#[repr(C)]` layout at compile time, but no other crate can write the field.
 ///
 /// Generic in the slot type because the mechanism is not specific to GC roots;
 /// see [`SlotStack`].
@@ -361,10 +340,10 @@ impl<T: Copy> SlotStackHeader<T> {
 /// Generic in `T` because the mechanism is not specific to GC roots. The same
 /// shape serves any per-frame array of `Copy` slots whose zero value means
 /// "nothing here yet" — the crash debugger's per-frame locals
-/// (`SlotStack<Option<GcRef>>`, whose zero *is* `None` by the `NonNull` niche,
-/// F18) being the one this was built with in view. Two such stacks are
-/// index-parallel for free, because a local's shadow slot index already doubles
-/// as its debug-local index.
+/// (`SlotStack<Option<GcRef>>`, whose zero *is* `None` by the `NonNull` niche)
+/// being the instantiation this shape was built with in view. The root stack
+/// and the debug value stack index *different* spaces: root slots are colored
+/// by live range, debug value slots are dense, one per `Gc` local (ADR-128).
 pub struct SlotStack<T: Copy> {
     header: Box<SlotStackHeader<T>>,
     slots: Box<[T]>,
@@ -376,8 +355,8 @@ impl<T: Copy> SlotStack<T> {
     /// `zero` is a parameter rather than a `Default` bound so the caller names
     /// the all-zero value — and because that is what lets this lower to a
     /// single `alloc_zeroed`. `vec![zero; n]` hits std's `IsZero`
-    /// specialization for raw pointers, so the 12.29 MiB shadow reservation is
-    /// an `mmap` of untouched zero pages rather than a 12 MiB memset at every
+    /// specialization for raw pointers, so the 4.77 MiB shadow reservation is
+    /// an `mmap` of untouched zero pages rather than a memset at every
     /// `Runtime::new()`. An instantiation whose `zero` std does not recognise
     /// as all-zero-bytes still works; it pays that memset.
     #[must_use]
@@ -449,14 +428,12 @@ const _: () = assert!(ShadowStackHeader::TOP_OFFSET == 0);
 impl RootSet for ShadowStackHeader {
     /// One linear pass over every claimed slot.
     ///
-    /// This yields *exactly* the set ADR-019's chain walk yielded: each frame
-    /// occupies exactly its own `slot_count` slots and the frames partition
+    /// This yields *exactly* every live frame's roots: each frame occupies
+    /// exactly its own `slot_count` slots and the frames partition
     /// `[base, top)`, so the concatenation is the union of every live frame's
-    /// `slots[..slot_count]`. What it does not do is what the chain walk did on
-    /// the way — `ShadowFrame::push_roots` recursed the parent pointers and
-    /// called a `live_refs()` that **allocated a fresh `Vec<GcRef>` per frame**,
-    /// so a collection 8000 frames deep was 8000 mallocs and 8000 levels of
-    /// native recursion *inside* `Heap::mark`.
+    /// `slots[..slot_count]`. Walking a parent-pointer chain instead would cost
+    /// a level of native recursion and an allocation per frame *inside*
+    /// `Heap::mark`, 8000 of each at the deepest legal recursion.
     ///
     /// Slots *above* `top` may still hold pointers a popped frame wrote. That is
     /// harmless, and needs no invariant to make it so: they are never scanned,
@@ -481,8 +458,7 @@ impl RootSet for ShadowStackHeader {
 /// The RAII shape is what makes "write past your frame" unrepresentable from
 /// Rust: [`Self::set`] and [`Self::clear`] are bounds-checked against the width
 /// the frame was pushed with, and the only way to restore `top` is to drop the
-/// guard — so a frame cannot outlive its slots or be popped twice. The tests
-/// this replaces reached into `(*frame).slots[i]` by hand.
+/// guard — so a frame cannot outlive its slots or be popped twice.
 pub struct ShadowFrameGuard {
     header: *mut ShadowStackHeader,
     /// This frame's first slot, and the `top` the drop restores.
@@ -508,9 +484,9 @@ impl ShadowFrameGuard {
         unsafe { *self.base.add(index) = r.as_ptr() };
     }
 
-    /// Un-root slot `index` (MIR-01: a dead slot must not keep its object
-    /// reachable, and once swept storage became reusable a stale slot could
-    /// name a live object of an entirely different type).
+    /// Un-root slot `index`. A dead slot must not keep its object reachable,
+    /// and since swept storage is reusable a stale slot could name a live
+    /// object of an entirely different type.
     ///
     /// # Panics
     /// If `index` is outside the frame.
@@ -646,8 +622,8 @@ mod tests {
 
     #[test]
     fn nested_frames_are_one_contiguous_scan() {
-        // ADR-019's parent pointer is gone: the collector no longer walks a
-        // chain, it reads `[base, top)` once and gets the same set.
+        // The collector walks no chain: it reads `[base, top)` once and gets
+        // every live frame's roots.
         let mut f = Fixture::new();
         let a = dummy_ref();
         let b = dummy_ref();
@@ -733,9 +709,8 @@ mod tests {
 
     #[test]
     fn rejects_an_oversized_frame() {
-        // This used to be a `#[should_panic]` against `ShadowFrame::new`. The
-        // panic disappearing is the invariant getting stronger: an over-wide
-        // frame moved from "rejected at runtime" to "unconstructible".
+        // An over-wide frame is unconstructible, not rejected at run time:
+        // there is no panic to provoke, only a `None`.
         assert!(SlotCount::new(MAX_SHADOW_SLOTS as u32).is_some());
         assert!(SlotCount::new((MAX_SHADOW_SLOTS + 1) as u32).is_none());
     }
@@ -762,11 +737,11 @@ mod tests {
 
     #[test]
     fn a_wide_frame_spends_more_budget_than_a_narrow_one() {
-        // The whole content of ADR-105, as arithmetic: the guard's addend now
+        // The whole content of ADR-105, as arithmetic: the guard's addend
         // varies with the frame, so the deepest recursion a program reaches
-        // falls as its frames widen. A call count could not express this — and
-        // the factor it could not express is the factor by which the measured
-        // native frames actually differ.
+        // falls as its frames widen. A plain call count cannot express that,
+        // and the factor it misses is the factor by which the measured native
+        // frames actually differ.
         let reference = STACK_BUDGET_BYTES / crate::frame_cost(REFERENCE_FRAME_SLOTS);
         let widest = STACK_BUDGET_BYTES / crate::frame_cost(MAX_SHADOW_SLOTS as u32);
         assert_eq!(

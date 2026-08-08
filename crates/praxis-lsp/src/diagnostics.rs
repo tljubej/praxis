@@ -1,4 +1,4 @@
-//! `praxis_source::Diagnostic` → `lsp_types::Diagnostic` (WS3, §8.2, §15.2).
+//! `praxis_source::Diagnostic` → `lsp_types::Diagnostic` (§8.2, §15.2).
 //!
 //! The mapping is field for field, and the fields already exist: severity,
 //! a **registered** code, a primary `FileSpan`, `notes` that are secondary spans
@@ -10,8 +10,8 @@
 //! `(category, number)` pair exists. Rendering it here is a `to_string`, so a
 //! code the editor shows is a code the register allocated.
 //!
-//! The `replacement`s ride along untouched. They are M12's code actions, and
-//! carrying them now costs nothing and keeps the conversion total.
+//! The `replacement`s ride along untouched: they are what a code action would
+//! apply, and carrying them keeps the conversion total.
 
 use lsp_types::{
     Diagnostic as LspDiagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location,
@@ -27,10 +27,10 @@ pub const SOURCE: &str = "praxis";
 
 /// Convert one diagnostic.
 ///
-/// `uri` is this document's, and it is the only URI involved: M11 is one file,
-/// so a note's span is in the same file as the primary by construction. A
-/// multi-file note would need the note's own `FileId` resolved to a URI, which
-/// is M12's workspace indexing.
+/// `uri` is this document's, and it is the only URI involved: a snapshot holds
+/// one file, so a note's span is in the same file as the primary by
+/// construction. A multi-file note would need the note's own `FileId` resolved
+/// to a URI, which needs workspace indexing.
 #[must_use]
 pub fn to_lsp(
     diag: &Diagnostic,
@@ -81,7 +81,7 @@ pub fn all_to_lsp(
 ///
 /// §8.2's rendered form puts advice under the snippet; an LSP diagnostic has one
 /// message, so the advice goes in its tail. A suggestion that carries a
-/// `replacement` is a *fix*, not advice — it belongs in a code action (M12) and
+/// `replacement` is a *fix*, not advice — it belongs in a code action, and
 /// repeating its text in the message would say the same thing twice.
 fn message_with_advice(diag: &Diagnostic) -> String {
     let mut message = diag.message().to_string();

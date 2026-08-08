@@ -48,8 +48,7 @@ pub struct LexOutput {
 
 /// Lex `text` belonging to `file`, returning tokens and diagnostics.
 ///
-/// This is the stable front-end entry point the CLI and parser both call; its
-/// shape is deliberately unchanged from Milestone 0.
+/// This is the stable front-end entry point the CLI and parser both call.
 pub fn lex(file: FileId, text: &str) -> LexOutput {
     let mut lexer = Lexer::new(file, text);
     lexer.run();
@@ -71,7 +70,7 @@ struct Lexer<'a> {
     diagnostics: Vec<Diagnostic>,
     /// Whether the trivia seen since the last meaningful token contained a line
     /// break. Consumed (and cleared) by the next meaningful token, which is
-    /// where the parser reads it from (F8/D8, ADR-049).
+    /// where the parser reads it from (ADR-049).
     pending_newline: bool,
     /// The open interpolation holes, innermost last, each holding the brace
     /// depth **within** it (§8.1, ADR-147).
@@ -84,9 +83,8 @@ struct Lexer<'a> {
     ///
     /// A frame is pushed only by a fragment token, and a fragment token is only
     /// emitted for a literal [`praxis_syntax::interp::text_end`] has already
-    /// proved closes on its line. That is what keeps the stack from being a new
-    /// failure mode: there is no newline, no EOF and no malformed literal that
-    /// can leave a frame on it (ADR-147 decision 5).
+    /// proved closes on its line. So there is no newline, no EOF and no
+    /// malformed literal that can leave a frame on it (ADR-147 decision 5).
     holes: Vec<u32>,
 }
 
@@ -148,8 +146,7 @@ impl<'a> Lexer<'a> {
                 b'"' => CharClass::Quote,
                 // A `'` opens a character literal and nothing else — it is not
                 // a lifetime sigil, not a digit separator and not part of an
-                // identifier (ADR-141). Before it was claimed, every one of
-                // these was `T003` plus a parse cascade.
+                // identifier (ADR-141).
                 b'\'' => CharClass::SingleQuote,
                 b'`' => CharClass::Backtick,
                 // Any leading punctuation byte of an operator we recognize. The
@@ -232,13 +229,12 @@ impl<'a> Lexer<'a> {
         // rest stay identifiers. Builtins (`out`, `panic`, type names) are
         // intentionally not keywords.
         //
-        // A **lone** `_` is neither (FE-02). `is_ident_start` accepts it — and
-        // must, because `_x` and `snake_case` are identifiers — so a bare
-        // underscore used to arrive downstream as an ordinary `Ident`, which
-        // made every wildcard a *binding* named `_`: two `_` arms of one match
-        // were a duplicate declaration, and `Point { x: 1, _: 2 }` named a
-        // field. `_` followed by anything ident-continue is still an
-        // identifier; only the one-character run is the wildcard.
+        // A **lone** `_` is neither: it gets its own `UNDERSCORE` kind, so the
+        // wildcard is never a *binding* named `_` (two `_` arms of one match
+        // would be a duplicate declaration, and `Point { x: 1, _: 2 }` would
+        // name a field). `is_ident_start` accepts `_` — and must, because `_x`
+        // and `snake_case` are identifiers — so the split is on the whole run:
+        // `_` followed by anything ident-continue is still an identifier.
         let text = &self.src[start..self.pos];
         let kind = if text == "_" {
             SyntaxKind::UNDERSCORE
@@ -258,20 +254,16 @@ impl<'a> Lexer<'a> {
     ///
     /// **A trailing dot is not part of the literal.** `2.` lexes as `IntLit` `2`
     /// followed by `DOT`, so `var x = 2.` parses as a method call on `2` with no
-    /// method name and reports. This comment used to claim the opposite — that
-    /// `2.` was "a valid float iff the integer part is nonempty" — and the code
-    /// below has always required the digit. The float spellings are `2.0` and
-    /// `2e0`.
+    /// method name and reports. The float spellings are `2.0` and `2e0`.
     ///
     /// A leading-dot float (`.5`) is not reachable here because the dispatch
     /// routes on the first byte: `.` is `Punct`. Leading-dot floats are not
     /// supported (a deliberate simplification); users write `0.5`.
     ///
-    /// Every digit run admits `_` separators between its digits (REP-11), so
-    /// `1_000`, `3.141_592` and `1e1_0` are each one token. The rule is
+    /// Every digit run admits `_` separators between its digits, so `1_000`,
+    /// `3.141_592` and `1e1_0` are each one token. The rule is
     /// `praxis_syntax::numeric`'s, and the same module strips them back out when
-    /// lowering reads the value — the two halves used to disagree, with the
-    /// lexer rejecting what the decoder stripped.
+    /// lowering reads the value, so the two halves cannot disagree.
     fn eat_number(&mut self, start: usize) {
         // Integer part: one or more digits (the first is already known present).
         self.eat_digit_run();
@@ -283,10 +275,9 @@ impl<'a> Lexer<'a> {
         // float, so a separator is only ever *between* digits.
         //
         // …and a digit run that *itself* follows a `.` is a **tuple index**, so
-        // it takes no fraction at all (REP-08). `t.0.1` is `t`, `.0`, `.1` — two
-        // indices — and lexing the `0.1` as one float is what made a nested tuple
-        // unreadable even once the parser accepted `p.0`. The rule is adjacency:
-        // the immediately preceding token, with no trivia between, is a `DOT`.
+        // it takes no fraction at all: `t.0.1` is `t`, `.0`, `.1` — two indices,
+        // not an index and the float `0.1`. The rule is adjacency: the
+        // immediately preceding token, with no trivia between, is a `DOT`.
         // A `..` is `DOT2` and is a different token, so `0..1.5` is untouched,
         // and no float literal in any program has a bare `DOT` before it — in
         // `1.5` the `.` is consumed *inside* this function and never emitted.
@@ -319,12 +310,12 @@ impl<'a> Lexer<'a> {
     }
 
     /// Consume digits and the `_` separators between them, leaving `pos` on the
-    /// first byte that is neither (REP-11).
+    /// first byte that is neither.
     ///
     /// Each caller has already consumed at least one digit, which is what makes
     /// a separator's left-hand digit certain; `separator_run_len` checks it
     /// regardless. A trailing `_` is not consumed — `1_` is the literal `1`
-    /// followed by the `_` token (FE-02), not a literal with a dangling
+    /// followed by the `UNDERSCORE` token, not a literal with a dangling
     /// separator.
     fn eat_digit_run(&mut self) {
         loop {
@@ -340,8 +331,8 @@ impl<'a> Lexer<'a> {
     }
 
     /// True iff the token just emitted is a bare `DOT` ending exactly at `start`
-    /// — nothing between it and the literal now being lexed, not even whitespace
-    /// (REP-08).
+    /// — nothing between it and the literal now being lexed, not even
+    /// whitespace.
     ///
     /// The one caller is [`Self::eat_number`]: a digit run in that position is a
     /// **tuple index** and takes no fractional part, so `t.0.1` is two indices
@@ -377,8 +368,9 @@ impl<'a> Lexer<'a> {
         matches!(self.bytes().get(i), Some(d) if d.is_ascii_digit())
     }
 
-    /// A `"…"` literal, which since §8.1's interpolation landed (ADR-147) is one
-    /// of three token shapes rather than always one.
+    /// A `"…"` literal, which with interpolation (§8.1, ADR-147) is one of three
+    /// token shapes: a whole `TextLit`, or an `InterpOpen`/`InterpMiddle`/
+    /// `InterpClose` fragment run.
     ///
     /// The extent is decided **before** anything is emitted, by
     /// [`praxis_syntax::interp::text_end`], and that ordering is the whole of
@@ -386,8 +378,7 @@ impl<'a> Lexer<'a> {
     /// [`holes`](Self::holes) brace-depth stack that decides whether a later `}`
     /// closes a hole or a block — only for a literal already proved to close on
     /// its line with balanced holes. So no newline and no EOF can reach that
-    /// stack, and a literal that does *not* close is one `TextLit` plus `T004`,
-    /// byte for byte what it was before interpolation existed.
+    /// stack, and a literal that does *not* close is one `TextLit` plus `T004`.
     ///
     /// Escapes are still validated here (a stray `\q` is `T005`), and still only
     /// over the *literal text*: the escape rule does not apply inside a hole,
@@ -433,9 +424,8 @@ impl<'a> Lexer<'a> {
     /// [`InterpClose`]: SyntaxKind::InterpClose
     ///
     /// This reads the *same* rule the pre-scan in [`eat_text`] read, through the
-    /// same function — [`praxis_syntax::interp::fragment_end`] — entered in the
-    /// middle. Two scanners with a copy each of one rule is the mistake
-    /// [`praxis_syntax::template`] exists to have stopped repeating.
+    /// same module — [`praxis_syntax::interp::fragment_end`] — entered in the
+    /// middle. One rule with a scanner-local copy is one rule with two answers.
     ///
     /// [`eat_text`]: Self::eat_text
     ///
@@ -472,11 +462,10 @@ impl<'a> Lexer<'a> {
     /// Report `T005` for every unrecognized escape in the literal text spanning
     /// `from..to`.
     ///
-    /// Split out of [`eat_text`](Self::eat_text) when the scan of *where* a
-    /// literal ends moved to `praxis_syntax::interp`: validation is the half
-    /// that stayed, because it is about the characters and not about the extent,
-    /// and every fragment of an interpolated literal needs it on the same terms
-    /// as a whole one.
+    /// Separate from the scan of *where* a literal ends
+    /// (`praxis_syntax::interp`): validation is about the characters and not the
+    /// extent, and every fragment of an interpolated literal needs it on the
+    /// same terms as a whole literal.
     fn validate_escapes(&mut self, from: usize, to: usize) {
         let mut pos = from;
         while pos < to {
@@ -488,10 +477,9 @@ impl<'a> Lexer<'a> {
                 break;
             }
             // The escaped **scalar**, not the escaped byte. `"\¡"` is an invalid
-            // escape either way, but a span ending inside `¡` is a span the
-            // diagnostic renderer slices the source at — which is the panic
-            // `eat_char` records having been bitten by and `lex_never_panics`
-            // exists to catch.
+            // escape either way, but the diagnostic renderer slices the source
+            // at the span, so a span ending inside `¡` panics (`lex_never_panics`
+            // is the fuzz target that pins this).
             let (esc, esc_len) = self.scalar_at(pos + 1).expect("pos is a char boundary");
             let end = pos + 1 + esc_len;
             if !esc.is_ascii() || !is_valid_escape(esc as u8) {
@@ -514,8 +502,9 @@ impl<'a> Lexer<'a> {
     /// and the inner `}` must close the inner one. Only the innermost frame is
     /// ever consulted, which is what makes that fall out rather than be arranged.
     ///
-    /// Every other punctuation byte routes straight through, so a file with no
-    /// interpolation in it takes exactly the path it took before.
+    /// Every other punctuation byte routes straight through to [`eat_punct`].
+    ///
+    /// [`eat_punct`]: Self::eat_punct
     fn eat_punct_tracking_holes(&mut self, start: usize) {
         let byte = self.bytes()[start];
         if let Some(depth) = self.holes.last_mut() {
@@ -546,10 +535,10 @@ impl<'a> Lexer<'a> {
     /// - `\'` is an escape here and `\"` is there — the shared table
     ///   ([`praxis_syntax::literal::decode_escape`]) supplies the rest, so the
     ///   two spellings of `\n` cannot drift;
-    /// - a *closed* literal is decoded immediately and its length checked. That
-    ///   is the whole of gate 3: `'ab'` is `T007` where `"ab"[0]` was a
-    ///   well-typed program that quietly meant `a`, and `''` is `T007` where
-    ///   `""[0]` was an index fault at run time.
+    /// - a *closed* literal is decoded immediately and its length checked, so
+    ///   `'ab'` is `T007` where `"ab"[0]` is a well-typed program that quietly
+    ///   means `a`, and `''` is `T007` where `""[0]` is an index fault at run
+    ///   time.
     ///
     /// The token is pushed on every path, including the unterminated one, so the
     /// tokens still tile the source (ADR-003) and the parser still sees a
@@ -573,8 +562,7 @@ impl<'a> Lexer<'a> {
                     // an invalid escape either way, but stepping two bytes past
                     // it leaves the cursor inside `¡` — and every later read,
                     // including the slice `finish_char` decodes, then panics on
-                    // a char boundary. Found by `lex_never_panics`, which is
-                    // what that fuzz target is for.
+                    // a char boundary.
                     let (esc, esc_len) = self.scalar_at(esc_at).expect("pos is a char boundary");
                     let bad_at = self.pos;
                     self.pos = esc_at + esc_len;
@@ -715,31 +703,26 @@ impl<'a> Lexer<'a> {
     /// Consume a backtick template as **one** token, interior and all.
     ///
     /// The interior is opaque here; `praxis_input_parser::scan_template`
-    /// re-scans it. What is not opaque is where the token *ends*, and that is a
-    /// consequence of D10: a capture body is a full parser expression, so
-    /// `` `{g:choice(A: `{x:int}`)}` `` is one template containing another. The
-    /// predecessor closed at the first unescaped backtick, which cut that into
-    /// three unrelated token runs and produced errors about the fragments.
+    /// re-scans it. What is not opaque is where the token *ends*: a capture body
+    /// is a full parser expression, so `` `{g:choice(A: `{x:int}`)}` `` is one
+    /// template containing another, and a backtick closes only at brace depth 0.
     ///
     /// **The rule is not written here.** It lives in
     /// [`praxis_syntax::template`], because the scanner that re-reads this
     /// token's interior has to find the same nested templates and the same
-    /// closing backtick inside it. When this function had its own copy of the
-    /// rule the two disagreed at once: this one counted `{`/`}` inside string
-    /// literals, so `` `{c:one_of("{")}` `` — which the scanner accepted —
-    /// closed nowhere and swallowed the rest of the file.
+    /// closing backtick inside it. A scanner-local copy is how the two come to
+    /// disagree — over, for instance, whether a brace inside a string literal
+    /// counts, which decides `` `{c:one_of("{")}` ``.
     fn eat_template(&mut self, start: usize) {
         // **A template ends at the line it opens on** (ADR-094), so an
-        // unterminated one names its own line instead of the rest of the file.
-        // It used to set `self.pos = self.src.len()`: the `}` closing the
-        // enclosing block ended up *inside* the token, so one typo produced
-        // `T002` spanning to EOF, then a `P001` for the block that never closed,
-        // then a `Y001`. The report was true and three times too wide.
+        // unterminated one names its own line instead of swallowing the rest of
+        // the file into one token plus a cascade of block- and item-level
+        // faults.
         //
         // The two kinds are not cosmetic — see
         // `SyntaxKind::UnterminatedBacktickTemplate` for why the alternative
         // (one kind plus a "does it end in a backtick" test at each consumer)
-        // reintroduces a closed defect.
+        // is a defect.
         let kind = match praxis_syntax::template::template_end(self.src, start) {
             TemplateEnd::Closed(end) => {
                 self.pos = end;
@@ -777,7 +760,7 @@ impl<'a> Lexer<'a> {
     // --- helpers ---
 
     /// Emit a token covering `start..pos`, threading the newline fact through
-    /// it (F8/D8, ADR-049).
+    /// it (ADR-049).
     ///
     /// Trivia *accumulates* the fact — a line break anywhere in the run before a
     /// meaningful token counts, so `1 /* \n */ + 2` and `1\n+ 2` agree. A
@@ -854,15 +837,13 @@ fn single_punct(b: u8) -> Option<SyntaxKind> {
 ///
 /// Asked of [`praxis_syntax::literal::decode_escape`] rather than listed again,
 /// because a lexer that *accepts* an escape the decoder does not *decode* is two
-/// answers to one question — and this function had already drifted from that
-/// table by one row before ADR-147 added two more to it (`\{` and `\}`, so a
-/// literal brace has a spelling now that `{` opens a hole).
+/// answers to one question. That table includes `\{` and `\}`, the spelling of a
+/// literal brace now that `{` opens an interpolation hole (ADR-147).
 ///
-/// The one row that is still only here is `` \` ``, which the decoder leaves
-/// alone: the lexer accepts it so a backtick inside a text literal does not earn
+/// The one row that is only here is `` \` ``, which the decoder leaves alone:
+/// the lexer accepts it so a backtick inside a text literal does not earn
 /// `T005`, and preserving it verbatim is what `unquote_text` does with any
-/// escape it does not recognize. That carve-out predates this change and is
-/// deliberately not widened by it.
+/// escape it does not recognize. The carve-out is deliberately no wider.
 fn is_valid_escape(esc: u8) -> bool {
     esc.is_ascii() && (praxis_syntax::literal::decode_escape(esc as char).is_some() || esc == b'`')
 }
@@ -927,9 +908,7 @@ mod tests {
         assert_eq!(diags[0].kind(), DiagCode::UnexpectedCharacter);
         // The `@` becomes an ERROR token and lexing continues. It must not be
         // dropped: the tree is lossless (ADR-003), so every byte of the source
-        // has to be reachable through some token — this test previously
-        // asserted the opposite, contradicting both ADR-003 and the doc on
-        // `SyntaxKind::ERROR`.
+        // has to be reachable through some token.
         assert!(kinds.contains(&SyntaxKind::ERROR));
         assert!(kinds.contains(&SyntaxKind::KW_VAR));
         assert!(kinds.contains(&SyntaxKind::IntLit));
@@ -986,10 +965,8 @@ mod tests {
         assert_eq!(diags[0].kind(), DiagCode::UnterminatedTemplate);
     }
 
-    /// **D10's lexer half.** A capture body is a full parser expression, so a
-    /// template may contain a template. Closing at the first unescaped backtick
-    /// cut `` `{g:choice(A: `{x:int}`)}` `` into three unrelated token runs, and
-    /// the scanner never saw the template the source wrote.
+    /// A capture body is a full parser expression, so a template may contain a
+    /// template: `` `{g:choice(A: `{x:int}`)}` `` is **one** token.
     ///
     /// A backtick closes only at brace depth 0; inside a capture it opens a
     /// nested run.
@@ -1034,13 +1011,10 @@ mod tests {
         assert_eq!(diags[0].kind(), DiagCode::UnterminatedTemplate);
     }
 
-    /// A brace inside a **string literal** is text, not structure.
-    ///
-    /// This is the regression the shared rule exists to prevent: the lexer's
-    /// own copy of the brace counter had no string arm, so `one_of("{")` — a
-    /// legal §7.5 program the input parser's scanner accepts — left the counter
-    /// above zero at the closing backtick, which then read as an *opener* and
-    /// swallowed the rest of the file into one token plus a false `T002`.
+    /// A brace inside a **string literal** is text, not structure: a brace
+    /// counter with no string arm leaves `one_of("{")` — a legal §7.5 program —
+    /// unbalanced at the closing backtick, which then reads as an *opener*.
+    /// This is what the rule shared with the input parser's scanner prevents.
     #[test]
     fn a_brace_inside_a_string_does_not_extend_the_template() {
         for template in [
@@ -1070,15 +1044,10 @@ mod tests {
         }
     }
 
-    /// A lexer walks whatever the file contains, so nesting is bounded (D10) —
-    /// and the bound is *exactly* [`praxis_syntax::MAX_TEMPLATE_NESTING`].
-    ///
-    /// The predecessor of this test fed 5,000 unclosed openers and asserted
-    /// only that `UnterminatedTemplate` was reported somewhere, which the old
-    /// lexer — which had no nesting at all — also did. It discriminated
-    /// nothing. What only a bounded, nesting lexer produces is this: a properly
-    /// closed nest of `MAX_TEMPLATE_NESTING` templates is **one** token, and
-    /// one level deeper is not.
+    /// A lexer walks whatever the file contains, so nesting is bounded — and the
+    /// bound is *exactly* [`praxis_syntax::MAX_TEMPLATE_NESTING`]: a properly
+    /// closed nest of `MAX_TEMPLATE_NESTING` templates is **one** token, and one
+    /// level deeper is not.
     #[test]
     fn template_nesting_is_bounded_at_exactly_max_template_nesting() {
         use praxis_syntax::MAX_TEMPLATE_NESTING;
@@ -1147,7 +1116,7 @@ error[T003]: unexpected character in source
 ");
     }
 
-    // ---- New M1 coverage ----
+    // ---- Keywords, builtins and identifier runs ----
 
     #[test]
     fn keywords_split_from_identifiers() {
@@ -1197,9 +1166,8 @@ error[T003]: unexpected character in source
         );
     }
 
-    /// The old rule accepted every byte `>= 0x80` as an identifier
-    /// continuation, so a non-identifier scalar silently extended the name
-    /// instead of ending it.
+    /// Identifier continuation is a per-*scalar* question (§4.1): a scalar that
+    /// is not ident-continue ends the run rather than extending it.
     #[test]
     fn a_non_identifier_scalar_ends_an_identifier_run() {
         let (kinds, diags) = lex_text("ab\u{2192}cd");
@@ -1253,7 +1221,7 @@ error[T003]: unexpected character in source
         assert_eq!(meaningful, vec![SyntaxKind::Ident; 5]);
     }
 
-    // --- F8: the newline fact the parser needs (D8, ADR-049) ----------------
+    // --- the newline fact the parser needs (ADR-049) ------------------------
 
     /// `(kind, preceded_by_newline)` for the meaningful tokens, EOF included.
     fn newline_flags(text: &str) -> Vec<(SyntaxKind, bool)> {
@@ -1283,7 +1251,8 @@ error[T003]: unexpected character in source
     }
 
     /// Two statements on one line report no line break anywhere — which is
-    /// exactly what FE-04's separator check has to be able to see.
+    /// exactly what the parser's statement-separator check has to be able to
+    /// see.
     #[test]
     fn same_line_tokens_report_no_newline() {
         assert!(newline_flags("var a = 1 var b = 2")
@@ -1418,8 +1387,7 @@ error[T003]: unexpected character in source
             .collect()
     }
 
-    /// A literal with no brace in it takes exactly the path it took before
-    /// ADR-147: one token, one kind, no fragments.
+    /// A literal with no brace in it is one token, one kind, no fragments.
     #[test]
     fn a_literal_with_no_hole_is_still_one_text_lit() {
         assert_eq!(
@@ -1549,13 +1517,12 @@ error[T003]: unexpected character in source
 
     /// **The gate for ADR-147 decision 5.** An unterminated interpolated literal
     /// is the *fallback*: one `TextLit` and one `T004`, exactly what an
-    /// unterminated plain literal has always been. No fragment is emitted, so
-    /// nothing is left on the lexer's hole stack and the rest of the file lexes
-    /// as it did.
+    /// unterminated plain literal is. No fragment is emitted, so nothing is left
+    /// on the lexer's hole stack and the rest of the file lexes normally.
     ///
-    /// This is the half a later edit would quietly lose — an implementation that
-    /// emitted the opening fragment first and discovered the problem afterwards
-    /// passes every other test here and produces a cascade on this one.
+    /// An implementation that emitted the opening fragment first and discovered
+    /// the problem afterwards passes every other test here and produces a
+    /// cascade on this one.
     #[test]
     fn an_unterminated_interpolated_literal_is_one_text_lit_and_t004() {
         for src in ["\"a {b\ncd\n", "\"{a\n", "\"{a // b}\"\n"] {
@@ -1595,8 +1562,7 @@ error[T003]: unexpected character in source
 
     // --- the character literal (ADR-141) ---
 
-    /// The token exists and is one token. Before ADR-141 a `'` was `T003` and
-    /// `'a'` was three of them plus a parse cascade.
+    /// A `'…'` literal is one `CharLit` token spanning both quotes.
     #[test]
     fn a_char_literal_is_one_token() {
         let map = SourceMap::new();
@@ -1642,8 +1608,8 @@ error[T003]: unexpected character in source
         }
     }
 
-    /// **Gate 3.** `"##"[0]` is a well-typed program that quietly means `#`;
-    /// `'##'` is a lexical error carrying the rewrite the author meant.
+    /// `"##"[0]` is a well-typed program that quietly means `#`; `'##'` is a
+    /// lexical error carrying the rewrite the author meant.
     #[test]
     fn a_two_character_char_literal_is_a_lex_error() {
         let (kinds, diags) = lex_text("var c = 'ab'");
@@ -1659,7 +1625,7 @@ error[T003]: unexpected character in source
         assert!(kinds.contains(&SyntaxKind::CharLit));
     }
 
-    /// **Gate 3, the other half.** `""[0]` was an index fault at run time.
+    /// …and the empty one, where `""[0]` is an index fault at run time.
     #[test]
     fn an_empty_char_literal_is_a_lex_error() {
         let (kinds, diags) = lex_text("var c = ''");
@@ -1834,12 +1800,9 @@ error[T003]: unexpected character in source
         assert!(!kinds.contains(&SyntaxKind::FloatLit));
     }
 
-    /// REP-11: a `_` between digits belongs to the literal, in every digit run.
+    /// A `_` between digits belongs to the literal, in every digit run.
     ///
-    /// `1_000` was a `P002` at the `_` and `9_223_372_036_854_775_808` lexed as
-    /// `9` followed by an identifier — while lowering stripped separators on the
-    /// other side, so the pair never met. The token text keeps the separators;
-    /// removing them is the decoder's half.
+    /// The token text keeps the separators; removing them is the decoder's half.
     #[test]
     fn a_digit_separator_belongs_to_the_literal() {
         for (src, kind) in [
@@ -1847,7 +1810,7 @@ error[T003]: unexpected character in source
             ("1_0_0", SyntaxKind::IntLit),
             // A run is one separator: nothing here counts `_`s.
             ("1__0", SyntaxKind::IntLit),
-            // The finding's own case, which used to lex as `9` + an identifier.
+            // A long run of separators, past `Int`'s range.
             ("9_223_372_036_854_775_808", SyntaxKind::IntLit),
             // Every digit run, not just the integer part.
             ("3.141_592", SyntaxKind::FloatLit),
@@ -1865,9 +1828,9 @@ error[T003]: unexpected character in source
 
     /// …and a `_` with no digit after it is not part of the literal at all.
     ///
-    /// `1_` is the literal `1` followed by the `_` token FE-02 gave a kind of
-    /// its own — which the parser rejects where it stands. A separator has
-    /// digits on *both* sides, so the number never ends in punctuation.
+    /// `1_` is the literal `1` followed by the `UNDERSCORE` token — which the
+    /// parser rejects where it stands. A separator has digits on *both* sides,
+    /// so the number never ends in punctuation.
     #[test]
     fn a_trailing_separator_is_not_part_of_the_literal() {
         let (kind, text) = lex_one_number("1_");
@@ -1891,18 +1854,16 @@ error[T003]: unexpected character in source
         assert!(!kinds.contains(&SyntaxKind::FloatLit));
     }
 
-    /// **REP-08.** A digit run immediately after a `.` is a **tuple index**, so
-    /// it takes no fractional part: `t.0.1` is two indices, not an index and the
-    /// float `0.1`.
+    /// A digit run immediately after a `.` is a **tuple index**, so it takes no
+    /// fractional part: `t.0.1` is two indices, not an index and the float
+    /// `0.1`.
     ///
-    /// The parser accepting `p.0` is not enough on its own — a nested tuple was
-    /// unreadable while the lexer folded `0.1` into one `FloatLit`. The rule is
-    /// adjacency to a bare `DOT` **token**, which is why `1.5..2.5` is untouched:
-    /// the byte before its `2` is a `.` too, but that one was consumed into a
-    /// `DOT2`.
+    /// The rule is adjacency to a bare `DOT` **token**, which is why `1.5..2.5`
+    /// is untouched: the byte before its `2` is a `.` too, but that one was
+    /// consumed into a `DOT2`.
     #[test]
     fn a_digit_run_after_a_dot_is_an_index_and_takes_no_fraction() {
-        // The defect's own case.
+        // Two indices in a row.
         let (kinds, _) = lex_text("t.0.1");
         assert!(
             !kinds.contains(&SyntaxKind::FloatLit),
@@ -1928,8 +1889,8 @@ error[T003]: unexpected character in source
             assert!(diags.is_empty(), "{src}: {diags:?}");
             assert!(kinds.contains(&SyntaxKind::FloatLit), "{src}: {kinds:?}");
         }
-        // The one that made the rule a *token* rule: the byte before `2` is the
-        // second `.` of the `..`, but that `.` is inside a `DOT2`.
+        // The case that makes the rule a *token* rule: the byte before `2` is
+        // the second `.` of the `..`, but that `.` is inside a `DOT2`.
         let (kinds, _) = lex_text("1.5..2.5");
         assert_eq!(
             kinds.iter().filter(|k| **k == SyntaxKind::FloatLit).count(),
@@ -1947,8 +1908,8 @@ error[T003]: unexpected character in source
         assert!(kinds.contains(&SyntaxKind::FloatLit), "{kinds:?}");
     }
 
-    /// A separated bound is still a bound: `1_000..2_000` is a range (TY-34),
-    /// not a float and not one token.
+    /// A separated bound is still a bound: `1_000..2_000` is a range, not a
+    /// float and not one token.
     #[test]
     fn a_separated_literal_is_still_a_range_bound() {
         let (kinds, diags) = lex_text("1_000..2_000");

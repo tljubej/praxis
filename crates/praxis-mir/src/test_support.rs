@@ -1,11 +1,11 @@
 //! Shape assertions over lowered MIR: source text in, a count of instructions
-//! by variant out (handover 26 §2).
+//! by variant out.
 //!
-//! Several packages in the post-M11 performance plan state their gate as a
-//! count of emitted MIR — "`mandelbrot`'s inner loop goes from 10
-//! `Materialize{Float}` to 2" — and for those a count is better evidence than a
-//! stopwatch, because it does not drift with what else the machine is doing.
-//! This module is that count, written once.
+//! Several of the performance passes state their gate as a count of emitted MIR
+//! — "`mandelbrot`'s inner loop goes from 10 `Materialize{Float}` to 2" — and
+//! for those a count is better evidence than a stopwatch, because it does not
+//! drift with what else the machine is doing. This module is that count, written
+//! once.
 //!
 //! **Why it is a feature and not a `#[cfg(test)] mod tests` helper.** The
 //! consumers are in two crates: a MIR pass tests its own before and after here,
@@ -61,8 +61,7 @@ pub struct Lowered {
 /// debugger's reload and the backend's own integration tests all call
 /// `mono::monomorphize` between `lower` and `lower_module`; a helper that
 /// skipped it would count instructions in functions the JIT never compiles and
-/// miss the clones it does. That was the one divergence between this and the
-/// per-crate copies it replaces.
+/// miss the clones it does.
 ///
 /// It stops **before** [`crate::annotate`], because that is where the passes
 /// that read it run: a pass that deletes a safepoint has to run before the root
@@ -489,10 +488,10 @@ impl LoopRegion {
 /// **A fault edge is not an edge**, because `liveness::successors` — the
 /// crate's one statement of what leaves a block, and the function this asks —
 /// does not carry [`Inst::CheckFault`]'s `on_fault`. That is the right answer
-/// for a loop
-/// census: the fault path leaves the loop for the host and never returns, so it
-/// is not part of an iteration. It does mean a fault landing pad is in no loop
-/// region and, having no terminator edge into it at all, is unreachable here.
+/// for a loop census: the fault path leaves the loop for the host and never
+/// returns, so it is not part of an iteration. It does mean a fault landing pad
+/// is in no loop region and, having no terminator edge into it at all, is
+/// unreachable here.
 #[must_use]
 pub fn loops(func: &Function) -> Vec<LoopRegion> {
     let doms = dominators(func);
@@ -631,9 +630,7 @@ fn reachable_from(func: &Function, start: BlockId) -> Vec<bool> {
 /// The directory `benchmarks/run.py` runs its eight programs from.
 ///
 /// Derived from this crate's manifest directory, so it answers the same whether
-/// the caller is this crate's own tests or another crate's. The four copies it
-/// replaces reached the same directory two different ways, which is one more
-/// than a directory needs.
+/// the caller is this crate's own tests or another crate's.
 #[must_use]
 pub fn benchmark_dir() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -706,9 +703,9 @@ mod tests {
         assert_eq!(lowered.entry().name, "main");
     }
 
-    /// The divergence the per-crate copies had: monomorphization drops the
-    /// generic original and the JIT compiles the clones, so the census has to be
-    /// of the clones. Without it there is one `id` here, with the wrong body.
+    /// Monomorphization drops the generic original and the JIT compiles the
+    /// clones, so the census has to be of the clones. Without it there is one
+    /// `id` here, with the wrong body.
     #[test]
     fn a_generic_function_is_censused_as_its_monomorphic_clones() {
         let lowered = lower_src_to_mir(
@@ -732,13 +729,11 @@ mod tests {
     /// reporting "`Materialize`: 2" would be reporting two different costs as
     /// one.
     ///
-    /// The program moved when ADR-120 landed and the sentence did not. It used
-    /// to be `a + b < b`, whose `a + b` box is an interior node the forwarding
-    /// deletes and whose `Bool` box is a terminator operand it also deletes —
-    /// leaving nothing for a census to tell apart. `f(a + b)` boxes the sum
-    /// because a call argument is a `Gc` operand, and `var c = a < b` boxes the
-    /// comparison because its consumer is a binding rather than a branch. Both
-    /// are shapes the language really emits.
+    /// The program has to name shapes ADR-120's forwarding keeps: `f(a + b)`
+    /// boxes the sum because a call argument is a `Gc` operand, and
+    /// `var c = a < b` boxes the comparison because its consumer is a binding
+    /// rather than a branch. An interior node and a terminator operand are both
+    /// deleted, which would leave a census nothing to tell apart.
     #[test]
     fn a_census_tells_a_float_materialize_from_a_bool_one() {
         let lowered = lower_src_to_mir(
@@ -873,8 +868,7 @@ mod tests {
         // assignment to a plain binding writes the local directly and gets no
         // slot of its own, so nothing spans `s = s + i * 3` — which is what
         // `block_over` means by "name an expression the lowering gives a slot
-        // to". It used to be spanned anyway, by the body block's synthesized
-        // `Unit` tail, back when that tail carried the block's whole range.
+        // to".
         let plain_loop = plain.innermost_loop_over(plain.function("f"), "s + i * 3");
         let shifted_loop = shifted.innermost_loop_over(shifted.function("f"), "s + i * 3");
         assert_ne!(
@@ -887,19 +881,14 @@ mod tests {
         );
     }
 
-    /// **The worked example, and the number handover 26 §1 asserted without
-    /// measuring** (§9: "counted by hand-walking one inner loop"). It was
-    /// right: the builder emits **ten** `Float` boxes in `mandelbrot`'s
-    /// innermost loop, and W8-S0's gate — 10 to 2 — was priced against a real
-    /// count.
-    ///
-    /// **The ten are now two**, because ADR-120's forwarding runs inside
-    /// `lower_module` and this helper lowers through it. The number below moved
-    /// with the pass and the loop did not: `forward::tests::mandelbrots_inner_
-    /// loop_boxes_two_floats_where_it_boxed_ten` is where the delta is stated,
-    /// and the per-block split preserved here is what it is a delta *of* —
-    /// three of the ten were in the escape test and seven in the body, and the
-    /// two survivors are the loop-carried `x` and `y`, one in each.
+    /// **The worked example.** The builder emits **ten** `Float` boxes in
+    /// `mandelbrot`'s innermost loop; ADR-120's forwarding runs inside
+    /// `lower_module`, which this helper lowers through, so **two** survive here.
+    /// `forward::tests::mandelbrots_inner_loop_boxes_two_floats_where_it_boxed_
+    /// ten` is where the delta is stated, and the per-block split preserved here
+    /// is what it is a delta *of* — three of the ten are in the escape test and
+    /// seven in the body, and the two survivors are the loop-carried `x` and
+    /// `y`, one in each.
     ///
     /// Two is the per-iteration figure as well as the static one. The region's
     /// five blocks are the header `i < max_iter`, the `&&`'s second conjunct,
@@ -928,10 +917,10 @@ mod tests {
     }
 
     /// The other half of the same measurement, and the reason `mandelbrot` is
-    /// the suite's most allocation-bound benchmark: every box was read straight
+    /// the suite's most allocation-bound benchmark: every box is read straight
     /// back out. The builder writes 22 `Float` reloads into that loop; ADR-120
-    /// leaves 14, and the eight it removes are the eight boxes it removed
-    /// paired one for one.
+    /// leaves 14, and the eight it removes pair one for one with the eight
+    /// boxes it removed.
     #[test]
     fn mandelbrots_inner_loop_extracts_fourteen_float_payloads_where_the_builder_wrote_22() {
         let lowered = lower_src_to_mir(mandelbrot_src().as_str());

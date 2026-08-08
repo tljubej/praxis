@@ -1,6 +1,6 @@
-//! Integration tests for the `praxis run` command — the Milestone 4 acceptance
-//! criteria (§19): execute boxed integer arithmetic, branches, loops, and
-//! recursive function calls; faults return to the host without unwinding.
+//! Integration tests for the `praxis run` command (§19): execute boxed integer
+//! arithmetic, branches, loops, and recursive function calls; faults return to
+//! the host without unwinding.
 //!
 //! These drive the compiled `praxis` binary end to end (parse → analyze → typed
 //! HIR → MIR → Cranelift JIT → execute), asserting on stdout and the exit code.
@@ -20,20 +20,10 @@ fn fixture(name: &str) -> PathBuf {
 /// A scratch directory this **process** owns, for the tests that must write a
 /// file for the binary to read.
 ///
-/// Five tests wrote fixed names straight into `std::env::temp_dir()`
-/// (`praxis-rep60-empty.in`, `m10b_ws6_reload.px`, …). Within one run that is
-/// fine, and one helper even says so — "named after the calling test so two
-/// tests cannot race for it". Between runs it is not: **two concurrent
-/// `cargo test` processes share `/tmp` and clobber each other's fixtures**, so
-/// one rewrites a source file while the other's REPL is reading it. That is not
-/// hypothetical — it was measured while two agents ran the suite at once, and
-/// four different tests in this file failed across four runs while every one of
-/// them passed in isolation. A test that fails only when something else is
-/// running is worse than a failing test: it teaches you to re-run instead of to
-/// look.
-///
-/// `CARGO_TARGET_TMPDIR` alone does not fix it — it is the same path for both
-/// processes. The pid is what makes it exclusive.
+/// **Two concurrent `cargo test` processes share `/tmp`**, and they share
+/// `CARGO_TARGET_TMPDIR` too — it is the same path for both. A fixed file name
+/// therefore lets one process rewrite a source file while the other's REPL is
+/// reading it. The pid is what makes the directory exclusive.
 fn scratch_dir() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("run-tests-{}", std::process::id()));
@@ -108,7 +98,7 @@ fn run_pass_constant() {
     assert_passes("constant.px", "42");
 }
 
-// ---- Lazy standard input (§7.10, REP-51) ----
+// ---- Lazy standard input (§7.10) ----
 
 /// Run a fixture with stdin bound to a pipe this test **keeps open**, writing
 /// `stdin` into it but never sending EOF until the deadline. Returns the exit
@@ -116,11 +106,11 @@ fn run_pass_constant() {
 ///
 /// A never-closed pipe is the shape a terminal and a CI harness both have, and
 /// it is the only shape that can tell an eager read from a lazy one: against
-/// `/dev/null` — which `Command::output` uses by default, and which is why no
-/// existing test here noticed — an eager read returns immediately.
+/// `/dev/null` — which `Command::output` uses by default — an eager read
+/// returns immediately.
 ///
-/// The deadline is what keeps a regression a *failure*: without it, restoring
-/// the eager read would wedge this test process rather than fail it.
+/// The deadline is what keeps a regression a *failure*: without it, an eager
+/// read would wedge this test process rather than fail it.
 fn run_with_open_stdin(
     name: &str,
     stdin: &str,
@@ -167,19 +157,18 @@ fn run_with_open_stdin(
     }
 }
 
-/// **REP-51's gate.** A program with no `read` never touches standard input.
+/// **The laziness gate.** A program with no `read` never touches standard
+/// input.
 ///
 /// §7.10: "The first `read` lazily reads standard input once into an immutable
-/// GC-managed source buffer." The host read it to EOF *before* calling the
-/// entry function instead, so a `read`-free program consumed stdin anyway — and
-/// against a pipe nobody closes, which is what a terminal and a CI harness both
-/// are, `praxis run` blocked forever waiting for an EOF that was not coming.
-/// Every `praxis run` of a `read`-free program from a terminal hung.
+/// GC-managed source buffer." A host that read stdin to EOF *before* calling
+/// the entry function would consume it for a `read`-free program too, and
+/// against a pipe nobody closes — which is what a terminal and a CI harness
+/// both are — would block forever waiting for an EOF that is not coming.
 ///
 /// The open pipe is the whole test. Every other test in this file goes through
 /// `Command::output`, which binds stdin to `/dev/null`, where an eager read
-/// returns instantly — which is exactly why the defect survived a suite this
-/// size. Without the fix this call returns `None` at the deadline.
+/// returns instantly and nothing is observable.
 #[test]
 fn a_program_that_never_reads_does_not_wait_for_standard_input() {
     let deadline = std::time::Duration::from_secs(10);
@@ -192,10 +181,9 @@ fn a_program_that_never_reads_does_not_wait_for_standard_input() {
     assert_eq!(stdout.trim(), "42");
 }
 
-/// The other half, and it is a **mutation companion, not a gate**: it passes on
-/// `main`, where the read is eager. Laziness must not become "never" — the
-/// cheapest way to stop the hang is to stop reading standard input at all, and
-/// that would pass the gate above.
+/// The other half, and a **mutation companion, not a gate**. Laziness must not
+/// become "never" — the cheapest way to stop a hang on standard input is to
+/// stop reading it at all, and that would pass the gate above.
 ///
 /// So: the *same* open pipe, a program that does `read`, and the child must
 /// still be running at the deadline. A `read` reads to EOF (§7.10 — the buffer
@@ -268,21 +256,18 @@ fn a_parse_that_outgrows_the_native_root_reservation_still_answers() {
     assert_passes_with_stdin("reads_lines_of_int.px", &lines, "4096\n4096");
 }
 
-/// **REP-60.** A zero-byte `--input` file is *empty input*, not the absence of
+/// **ADR-087.** A zero-byte `--input` file is *empty input*, not the absence of
 /// input.
 ///
-/// The buffer was installed only `if !t.is_empty()`, so an empty file left
-/// `ctx.input_source` at the immortal Unit. `Input::new` answers `None` for a
-/// non-Text source and takes the "no detail was recorded" path, so every `read`
-/// faulted with `program faulted: input parse mismatch` and **nothing else** —
-/// no offset, no `expected`, no `actual`, and no mention of the file being
-/// empty. §7.11 asks a parse detail to name where parsing broke; the one shape
-/// that could not say anything at all was the one the message was least able to
-/// be guessed from.
+/// The buffer is installed unconditionally, so an empty file still leaves
+/// `ctx.input_source` a Text source and every `read` parses against a
+/// zero-length buffer. (Leave it at the immortal Unit and `Input::new` answers
+/// `None`, which takes the "no detail was recorded" path: a fault with no
+/// offset, no `expected` and no `actual`, where §7.11 asks a parse detail to
+/// name where parsing broke.)
 ///
 /// `lines(int)` over a zero-length buffer is `[]` by `split_lines`'s own rule,
-/// so the program answers rather than faults. That is also what makes the gate
-/// red before the fix without asserting on message text: it exits 1 today.
+/// so the program answers rather than faults.
 #[test]
 fn a_zero_byte_input_file_is_empty_input_and_not_a_contentless_fault() {
     let empty = scratch_dir().join("praxis-rep60-empty.in");
@@ -358,44 +343,29 @@ fn run_with_input_file(name: &str, contents: &str, tag: &str) -> (i32, String, S
     )
 }
 
-/// **REP-60's stdin half, and the twin of the `--input` gate above.** A reader
-/// that answers zero bytes has given *empty input*, not no input.
+/// **The stdin half, and the twin of the `--input` gate above.** A reader that
+/// answers zero bytes has given *empty input*, not no input.
 ///
-/// `praxis_get_input` installed the buffer only `if !bytes.is_empty()`, so
-/// standard input with nothing in it left `ctx.input_source` at the immortal
-/// Unit and `praxis_run_parser`'s §6.3 descriptor guard faulted before the
-/// parser ran — `program faulted: input parse mismatch` and nothing else. The
-/// `--input` half of REP-60 had already dropped the same guard, so the two
-/// spellings of "run this with no input" gave different answers: `--input` on an
-/// empty file printed `0\n0` and exited 0 while `< /dev/null` exited 1 with a
-/// contentless fault. ADR-087 is the record; the rule lives at
-/// `praxis_get_input`.
-///
-/// **Observed red** with step 1 of the repair reverted (the `if
-/// !bytes.is_empty()` wrapper restored in `praxis_get_input`): rc=1 with
-/// `error: program faulted: input parse mismatch` on stderr instead of `0\n0` on
-/// stdout.
+/// `praxis_get_input` installs the buffer whatever its length, so standard
+/// input with nothing in it still reaches the parser rather than tripping
+/// `praxis_run_parser`'s §6.3 descriptor guard before it runs. ADR-087 is the
+/// record; the rule lives at `praxis_get_input`.
 #[test]
 fn empty_standard_input_is_empty_input_and_not_a_contentless_fault() {
     assert_passes_with_stdin("reads_lines_of_int.px", "", "0\n0");
 }
 
-/// The field assertion, and the reason the row was worth opening: a program that
-/// *requires* content still faults on empty input, and now the fault carries
-/// §7.11's fields.
+/// The field assertion: a program that *requires* content still faults on empty
+/// input, and the fault carries §7.11's fields.
 ///
 /// §7.11: "A mismatch creates a runtime fault containing: input span / parser
 /// span / expected description / actual preview / parser path / partial root
-/// value." A fault raised *before* any buffer existed can carry none of them —
-/// it has no input span to name — which is why the contentless message was not
-/// merely terse but unfixable in place. With a zero-length buffer installed, the
-/// parse actually runs and fails where it should: at `0..0`, wanting an `int`.
+/// value." A fault raised *before* any buffer exists can carry none of them —
+/// it has no input span to name. With a zero-length buffer installed, the parse
+/// actually runs and fails where it should: at `0..0`, wanting an `int`.
 ///
-/// This is deliberately not "the program succeeds": a repair that only made
+/// This is deliberately not "the program succeeds": a rule that only made
 /// `reads_lines_of_int.px` pass would leave this one contentless.
-///
-/// **Observed red** with step 1 reverted: rc was 1 (correctly), but stderr held
-/// neither `at input offset 0..0` nor `expected int`.
 #[test]
 fn empty_standard_input_faults_with_an_offset_and_an_expectation() {
     let (code, stdout, stderr) = run_with_closed_stdin("reads_an_int.px", "");
@@ -413,7 +383,7 @@ fn empty_standard_input_faults_with_an_offset_and_an_expectation() {
     );
 }
 
-/// **A mutation companion, not a gate** — it is green today and stays green.
+/// **A mutation companion, not a gate.**
 ///
 /// It pins the one §7.11 field the test above legitimately cannot assert: a
 /// zero-length buffer has no bytes to preview, so `actual:` is correctly absent
@@ -437,14 +407,10 @@ fn a_failing_read_names_what_it_saw() {
 /// **The "one rule" gate.** The two spellings of "run this with no input" must
 /// answer identically — not merely both plausibly.
 ///
-/// Asserting the two behaviours separately would let them drift apart again the
-/// next time one path is touched; asserting they are *equal* is what makes the
-/// rule checkable. A user cannot be expected to know that `< /dev/null` and
+/// Asserting the two behaviours separately would let them drift apart the next
+/// time one path is touched; asserting they are *equal* is what makes the rule
+/// checkable. A user cannot be expected to know that `< /dev/null` and
 /// `--input /dev/null` are different questions.
-///
-/// **Observed red** with step 1 reverted: both exited 1, but the stderrs
-/// differed — the `--input` run carried `at input offset 0..0: expected int`
-/// and the stdin run carried no detail lines at all.
 #[test]
 fn empty_stdin_and_a_zero_byte_input_file_answer_the_same() {
     let piped = run_with_closed_stdin("reads_an_int.px", "");
@@ -479,13 +445,11 @@ fn run_pass_float_arith() {
 fn run_pass_float_methods() {
     // sqrt(16.0) + 5.to_float() = 4.0 + 5.0 = 9.0.
     //
-    // **This assertion used to read `"9"`** (REP-44, §8.2). It was not wrong
-    // about the arithmetic and it was not wrong about the type — it was wrong
-    // that a `Float` may render as an `Int`. `9` is not a `Float` literal in
-    // this language (§4.12: `42` is strictly an `Int`, and the two never mix),
-    // so the text it asserted did not read back as the value it came from, and
-    // the same characters are what a `Vec[Int]` of `[9]` would print. ADR-083
-    // decided the rendering; the expected text moves with it.
+    // The expected text is `9.0` and not `9` (§8.2): a `Float` never renders as
+    // an `Int`. `9` is not a `Float` literal in this language (§4.12: `42` is
+    // strictly an `Int`, and the two never mix), so that text would not read
+    // back as the value it came from, and the same characters are what a
+    // `Vec[Int]` of `[9]` would print. ADR-083 decided the rendering.
     assert_passes("float_methods.px", "9.0");
 }
 
@@ -495,21 +459,19 @@ fn run_pass_float_div_by_zero() {
     assert_passes("float_div_by_zero.px", "inf");
 }
 
-/// **REP-50's gate.** The `-0.0` literal, and the round trip ADR-083 states.
+/// The `-0.0` literal, and the round trip ADR-083 states.
 ///
-/// A Float negation was lowered as `0.0 - x`, and `0.0 - 0.0` is `+0.0`, so
-/// `-0.0` evaluated to `+0.0`: `out(-0.0)` printed `0.0`, and the text a Float
-/// rendered to did not read back as that Float — which is the one rule ADR-083
-/// exists to state. ADR-045 had already decided the two zeros are distinct
-/// values (§16.3 orders a container by the rendered form, and the two forms
-/// differ), so the sign was a value the language admits and the evaluator lost.
+/// A Float negation must not be lowered as `0.0 - x`: `0.0 - 0.0` is `+0.0`, so
+/// that spelling loses the sign and the text a Float renders to no longer reads
+/// back as that Float — the one rule ADR-083 exists to state. ADR-045 decides
+/// the two zeros are distinct values (§16.3 orders a container by the rendered
+/// form, and the two forms differ), so the sign is a value the language admits.
 ///
 /// The observation is `1.0 / x` and **not** `x == 0.0`: IEEE-754 says
 /// `-0.0 == 0.0`, so equality is blind to precisely the bit this is about, and
-/// a gate written with `==` would pass before the fix. Lines 1–2 (the computed
-/// negative zero) were already right and are the companion; lines 3–6 are the
-/// literal and the same negation through a binding, and both answered `0.0` /
-/// `inf` before the fix.
+/// a gate written with `==` would pass either way. Lines 1–2 are the computed
+/// negative zero; lines 3–6 are the literal and the same negation through a
+/// binding.
 #[test]
 fn run_pass_float_negative_zero() {
     assert_passes(
@@ -518,24 +480,21 @@ fn run_pass_float_negative_zero() {
     );
 }
 
-/// **REP-64's gate.** A compound assignment on a `Float` is Float arithmetic —
-/// at every operator, through every target shape the language has.
+/// A compound assignment on a `Float` is Float arithmetic — at every operator,
+/// through every target shape the language has.
 ///
 /// A `Float` rides the uniform `i64` scalar channel as its IEEE-754 **bit
 /// pattern** (ADR-037), so every arithmetic site has to bit-cast to `f64` and
 /// back. Both compound-assignment paths in MIR — `x += …` on a binding and
-/// `m[k] += …` through a subscript — forgot, and did integer arithmetic on the
-/// pattern instead: `var f = 1.0; f += 2.0; out(f)` printed
-/// `9218868437227405312`, which is `f64::to_bits(1.0) + f64::to_bits(2.0)`. The
-/// plain binary `+` had never forgotten, so `f = f + 2.0` was right in the same
-/// program.
+/// `m[k] += …` through a subscript — have to do it; integer arithmetic on the
+/// pattern makes `var f = 1.0; f += 2.0; out(f)` print `9218868437227405312`,
+/// which is `f64::to_bits(1.0) + f64::to_bits(2.0)`.
 ///
-/// Every operand is picked so the old path is a **silent wrong answer** with
-/// `rc=0` rather than a crash — an integer overflow would have been caught by
-/// any test that ran the program at all, and the fixture's comments carry the
-/// pre-fix value line by line. `-0.0` is observed through `1.0 / x` and not
-/// `x == 0.0`, because IEEE-754 says `-0.0 == 0.0` and equality is blind to
-/// exactly the bit those two lines are about (REP-50).
+/// Every operand is picked so a forgotten cast is a **silent wrong answer**
+/// with `rc=0` rather than a crash: an integer overflow would be caught by any
+/// test that ran the program at all. `-0.0` is observed through `1.0 / x` and
+/// not `x == 0.0`, because IEEE-754 says `-0.0 == 0.0` and equality is blind to
+/// exactly the bit those two lines are about.
 #[test]
 fn run_pass_float_compound_assign() {
     let expected = [
@@ -552,11 +511,9 @@ fn run_pass_float_compound_assign() {
     assert_passes("float_compound_assign.px", &expected);
 }
 
-/// **Every place the language can assign to**, through the compiled binary.
-///
-/// Two of them are new: a `Vec`/`Deque` element (ADR-064 gave those receivers a
-/// subscript read and no store, and said so) and a record field (`p.x = 5` was
-/// `Y021` — "the left side of an assignment must be a name or an index").
+/// **Every place the language can assign to**, through the compiled binary:
+/// bindings, record fields, and `Vec`/`Deque` elements — the last of those is a
+/// store row on ADR-064's subscript table, not a second surface.
 ///
 /// The expected lines are chosen so the two mistakes a store like this makes
 /// are *visible* rather than merely possible: a store that appended instead of
@@ -582,11 +539,11 @@ fn run_pass_place_assignment() {
         "2", // Nested places: a field of a field, and a field of an element.
         "{ inner: { v: 7 }, xs: [10, 30] }",
         "[{ v: 100 }, { v: 2 }]",
-        // A deferred receiver, through a generic `fn` (REP-28).
+        // A deferred receiver, through a generic `fn`.
         "8",
         "55", // The receiver of a compound store runs once, and lands once.
         "1",
-        "9", // …and the collections that already stored still do.
+        "9", // …and so does a store through a collection element.
         "3",
     ]
     .join("\n");
@@ -629,8 +586,6 @@ fn run_pass_recursive_fibonacci() {
 // `out` is `(T) -> Unit`: it writes its argument once and returns `Unit`. A
 // `Unit`-returning `main` has no answer value, so the host prints nothing for
 // it (no trailing result line) — the program's output is whatever `out` wrote.
-// These guard against a former double-print bug where `out` returned its
-// argument and the host re-printed `main`'s result.
 // ===========================================================================
 
 #[test]
@@ -683,12 +638,12 @@ fn run_fault_does_not_abort() {
 }
 
 // ===========================================================================
-// M10 WS4 — §9.6 noninteractive crash diagnostic.
+// §9.6 noninteractive crash diagnostic.
 //
-// A runtime fault now renders the fault line + a numbered backtrace + the
-// top frame's locals (via praxis-debugger), instead of a bare one-liner. These
-// tests assert the §9.6 output is present on stderr and the exit code is 1.
-// The `--debug=never` flag forces the noninteractive path regardless of TTY.
+// A runtime fault renders the fault line + a numbered backtrace + the top
+// frame's locals (via praxis-debugger). These tests assert the §9.6 output is
+// present on stderr and the exit code is 1. The `--debug=never` flag forces the
+// noninteractive path regardless of TTY.
 // ===========================================================================
 
 /// Run a fixture with explicit `--debug` mode, returning (exit, stdout, stderr).
@@ -716,14 +671,14 @@ fn m10ws4_noninteractive_renders_backtrace_and_locals() {
     assert!(stderr.contains("Backtrace:"), "backtrace header present");
     assert!(stderr.contains("#0"), "backtrace numbers frames");
     assert!(stderr.contains("main"), "frame name shown");
-    // The named local `xs` with its Vec value renders (now in the `locals:`
-    // section with a type column: `xs: <type> = [11, 22]`).
+    // The named local `xs` with its Vec value renders, in the `locals:` section
+    // with a type column: `xs: <type> = [11, 22]`.
     assert!(
         stderr.contains("xs:") && stderr.contains("[11, 22]"),
         "named local renders with value: {stderr}"
     );
-    // Temps are now in a separate `temps:` section, annotated with the
-    // expression they materialized (`@ "..."`).
+    // Temps live in a separate `temps:` section, annotated with the expression
+    // they materialized (`@ "..."`).
     assert!(stderr.contains("temps:"), "temps section present: {stderr}");
     assert!(
         stderr.contains("xs.get(99)"),
@@ -754,7 +709,7 @@ fn m10ws4_default_auto_non_tty_is_noninteractive() {
 }
 
 // ===========================================================================
-// M10 WS5 — interactive crash REPL (§9.4).
+// Interactive crash REPL (§9.4).
 //
 // `--debug=always` enters the REPL after a fault. Program input comes from
 // `--input` (freeing stdin for REPL commands). These tests pipe a command
@@ -843,31 +798,23 @@ fn m11_locals_split_users_and_temps_with_types() {
     );
 }
 
-/// **RED ON PURPOSE, and the reason it is here at all.**
+/// **A temp whose producing box ADR-120's forwarding elides still renders the
+/// value it materialized**, not `<uninit>`.
 ///
-/// Handover 26 said four times that W8-S0 lands
-/// `m11_locals_split_users_and_temps_with_types` red and called that its
-/// measurement signal. It does not: every assertion in that test is a
-/// *provenance string*, never a value. Handover 27 §1 read the chain — the
-/// fixture makes `a + b` an interior node whose producer ADR-120 deletes; the
-/// debug store is driven by `praxis_mir::defs`, so the slot is never written;
-/// `render.rs` keeps an uninit temp that has a span; and the span survives
-/// because `build_function_debug_meta` emits a `DebugLocalMeta` for every `Gc`
-/// local, defined or not. So the temp silently degrades from `= 30` to
-/// `= <uninit>` and nothing goes red.
+/// The chain this guards: `a + b` is an interior node whose producer ADR-120
+/// deletes; the debug store is driven by `praxis_mir::defs`, so the slot would
+/// never be written; and `render.rs` keeps an uninit temp that has a span, so
+/// the temp would degrade silently from `= 30` to `= <uninit>`. Nothing above
+/// catches that — every assertion in
+/// `m11_locals_split_users_and_temps_with_types` is a *provenance string*,
+/// never a value.
 ///
-/// This is the assertion that goes red, and it was added by ADR-120 part 1
-/// *before* the pass landed so that part 2 (W8-S0b, the scalar debug slot) has
-/// something to turn green **unedited**. Do not relax it, do not delete it, and
-/// do not "fix" it by editing what it expects: the whole of its value is that a
-/// §9 debugger guarantee cannot be narrowed without a test saying so.
-///
-/// `crates/praxis-codegen-cranelift/tests/jit.rs`'s
-/// `a_temp_that_never_reached_a_shadow_slot_is_still_renderable` is the same
-/// regression one layer down, at the crash-snapshot API rather than the
-/// rendered text, and it is red for the same reason. Handover 27 §9 asked
-/// whether such a test existed outside `run.rs`; it does, and finding it was
-/// worth more than the guess.
+/// Do not relax this assertion and do not "fix" it by editing what it expects:
+/// its whole value is that a §9 debugger guarantee cannot be narrowed without a
+/// test saying so. `crates/praxis-codegen-cranelift/tests/jit.rs`'s
+/// `a_temp_that_never_reached_a_shadow_slot_is_still_renderable` pins the same
+/// rule one layer down, at the crash-snapshot API rather than the rendered
+/// text.
 #[test]
 fn a_forwarded_binop_temp_still_renders_the_value_it_materialized() {
     let (code, out) = run_repl_with_cmds("debug_temps.px", "locals\nquit\n");
@@ -878,21 +825,20 @@ fn a_forwarded_binop_temp_still_renders_the_value_it_materialized() {
     );
 }
 
-/// **All three of them**, and the third is the one nobody predicted.
+/// **All three temps the forwarding reaches**, of the fixture's seven.
 ///
-/// ADR-120 decision 6 measured the part-1 regression as three temps of the
-/// fixture's seven going `<uninit>`, not the one handover 27 §1 traced:
-/// `@ "a + b"` 30, `@ "a + b + c"` 60, and `@ "9223372036854775807"` — an
-/// out-of-range `Int` literal whose `Alloc{Int}` producer is in the forwarded
-/// set. `@ "10"`, `@ "20"` and `@ "30"` never degraded, because a small-int
-/// box is also `MoveGc`'d into the binding it initializes and that second
-/// reader declines the forward.
+/// ADR-120 decision 6: `@ "a + b"` 30, `@ "a + b + c"` 60, and
+/// `@ "9223372036854775807"` — an out-of-range `Int` literal whose
+/// `Alloc{Int}` producer is in the forwarded set. `@ "10"`, `@ "20"` and
+/// `@ "30"` are not reachable by it, because a small-int box is also
+/// `MoveGc`'d into the binding it initializes and that second reader declines
+/// the forward.
 ///
-/// The test above asserts the first. This asserts all three, so a part-2
-/// implementation that repaired the `Materialize` case and missed the `Alloc`
-/// one would be a failure rather than a partial success — and so the survivors
-/// are pinned too: they are the control that says the fixture still contains
-/// temps this transform does not touch.
+/// The test above asserts the first. This asserts all three, so an
+/// implementation that handles the `Materialize` case and misses the `Alloc`
+/// one is a failure rather than a partial success — and the survivors are
+/// pinned too: they are the control that says the fixture still contains temps
+/// this transform does not touch.
 #[test]
 fn every_temp_the_forwarding_elided_renders_its_value_again() {
     let (code, out) = run_repl_with_cmds("debug_temps.px", "locals\nquit\n");
@@ -901,9 +847,9 @@ fn every_temp_the_forwarding_elided_renders_its_value_again() {
         "@ \"a + b\" = 30",
         "@ \"a + b + c\" = 60",
         "@ \"9223372036854775807\" = 9223372036854775807",
-        // The three that never degraded, asserted so a change that "fixed" the
-        // three above by writing every slot from somewhere else is still a
-        // failure if it disturbed these.
+        // The three the forwarding does not reach, asserted so an
+        // implementation that satisfies the three above by writing every slot
+        // from somewhere else is still a failure if it disturbed these.
         "@ \"10\" = 10",
         "@ \"20\" = 20",
         "@ \"30\" = 30",
@@ -912,8 +858,8 @@ fn every_temp_the_forwarding_elided_renders_its_value_again() {
     }
     // And the faulting expression's own temp stays `<uninit>`: `render.rs`
     // keeps an uninit temp that has a span precisely so the user can see which
-    // expression did not finish, and ADR-120 part 2 must not fill it in with
-    // the wrapped sum the overflow produced on the way to the raise.
+    // expression did not finish, and nothing may fill it in with the wrapped
+    // sum the overflow produced on the way to the raise.
     assert!(
         out.contains("@ \"a + b + c + 9223372036854775807\" = <uninit>"),
         "the expression that faulted produced no value: {out}"
@@ -940,25 +886,23 @@ fn m11_temp_provenance_shows_materializing_expression() {
 /// **ADR-139's gate.** Every binding form ADR-125 lists, in one frame, printing
 /// `name: Type = value`.
 ///
-/// The negative assertion is the load-bearing half and is not optional: the
-/// defect was six binding forms of which two printed their name, and a fix that
-/// named five of the six satisfies every positive assertion below. `? = ` is
+/// The negative assertion is the load-bearing half and is not optional: naming
+/// five of the six forms satisfies every positive assertion below. `? = ` is
 /// what an unnamed binding renders as, so its absence is the property.
 #[test]
 fn every_pattern_binding_prints_its_name_and_type() {
     let (code, out) = run_repl_with_cmds("debug_pattern_bindings.px", "locals\nquit\n");
     assert_eq!(code, 1, "the subscript faults and the REPL exits 1");
     for expected in [
-        // A `var`, and a function parameter: the two that always worked.
+        // A `var`, and a function parameter.
         "total: Int = ",
         "limit: Int = 100",
-        // A plain `for` variable — the handover's `? = 3`.
+        // A plain `for` variable.
         "item: Int = 3",
         // A destructuring `for`'s two components.
         "a: Int = 6",
         "b: Int = 7",
-        // A `match` arm payload bound by reference, which used to render in the
-        // `temps:` section as `<tmp#N> = 8`.
+        // A `match` arm payload bound by reference.
         "payload: Int = 8",
         // And one bound into its own slot, because it is reassigned — the other
         // lowering branch entirely.
@@ -976,7 +920,7 @@ fn every_pattern_binding_prints_its_name_and_type() {
 /// compiler temp, not a third binding beside `a` and `b`. The programmer named
 /// the components; nothing named the pair. It shows in `temps:` with the type
 /// it holds and the expression it was read out of, which explains itself where
-/// an anonymous `? = (6, 7)` in `locals:` did not.
+/// an anonymous `? = (6, 7)` in `locals:` would not.
 #[test]
 fn a_destructuring_fors_scrutinee_is_a_temp_not_a_binding() {
     let (_code, out) = run_repl_with_cmds("debug_pattern_bindings.px", "locals\nquit\n");
@@ -999,11 +943,10 @@ fn a_destructuring_fors_scrutinee_is_a_temp_not_a_binding() {
     );
 }
 
-/// The other half of the same defect, and the one with no coverage at all
-/// before: a local the frame cannot name is a local `p` cannot bind, so
-/// `p item` answered "`item` is not defined" about a name `locals` was
-/// printing. Naming the slot in MIR is the whole fix — `collect_bindings` was
-/// already written against the right contract.
+/// The other half of the same rule: a local the frame cannot name is a local
+/// `p` cannot bind, so an unnamed slot answers "`item` is not defined" about a
+/// name `locals` is printing. Naming the slot in MIR is what binds it;
+/// `collect_bindings` is written against that contract.
 #[test]
 fn p_binds_a_pattern_introduced_binding() {
     let (_code, out) = run_repl_with_cmds(
@@ -1047,16 +990,16 @@ fn m10ws5_repl_help_lists_commands() {
 }
 
 // ===========================================================================
-// M10b WS3 — `source` / `input` / `parser` context commands (§9.4).
+// `source` / `input` / `parser` context commands (§9.4).
 //
-// `source` renders the selected frame's source extent (threaded in WS1) from
-// the session's source text. `input`/`parser` render the §7.11 ParseDetail.
+// `source` renders the selected frame's source extent from the session's source
+// text. `input`/`parser` render the §7.11 ParseDetail.
 // ===========================================================================
 
 #[test]
 fn m10b_ws3_source_renders_faulting_function_text() {
     // `source` on the faulting `main` frame prints the function's source lines
-    // (the whole `fn main … { … }` extent, threaded in WS1) with a caret.
+    // (the whole `fn main … { … }` extent) with a caret.
     let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "source\nquit\n");
     assert!(
         out.contains("main:"),
@@ -1078,7 +1021,7 @@ fn m10b_ws3_source_help_lists_command() {
 }
 
 // ===========================================================================
-// M10b WS4 — `p EXPR` / `type EXPR` read-only JIT evaluator (§9.5).
+// `p EXPR` / `type EXPR` read-only JIT evaluator (§9.5).
 //
 // The fixture `debug_backtrace.px` has `xs = [11, 22]` in the faulting `main`
 // frame. `p EXPR` synthesizes `fn __p_expr(xs: Vec[Int]) { EXPR }`, type-checks
@@ -1103,7 +1046,7 @@ fn m10b_ws4_p_evaluates_pure_method_on_snapshot_local() {
 #[test]
 fn m10b_ws4_p_index_into_snapshot_vec() {
     // `p xs.get(0)` → 11. Indexes the snapshot Vec via a pure method. This is
-    // the case that needs the full static `Vec[Int]` type (WS1) to type-check.
+    // the case that needs the full static `Vec[Int]` type to type-check.
     let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "p xs.get(0)\nquit\n");
     assert!(out.contains("11"), "p xs.get(0) should print 11: {out}");
 }
@@ -1120,7 +1063,7 @@ fn m10b_ws4_p_rejects_mutation() {
 
 #[test]
 fn m10b_ws4_type_reports_collection_type() {
-    // `type xs` → Vec[Int]. Proves the full static type (WS1) renders.
+    // `type xs` → Vec[Int]. Proves the full static type renders.
     let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "type xs\nquit\n");
     assert!(
         out.contains("Vec[Int]"),
@@ -1136,9 +1079,9 @@ fn m10b_ws4_type_reports_inferred_method_type() {
 }
 
 // ===========================================================================
-// M10b WS5 — `heap EXPR` recursive inspection (§9.4).
+// `heap EXPR` recursive inspection (§9.4).
 //
-// `heap EXPR` evaluates the expression (reusing the WS4 evaluator + purity
+// `heap EXPR` evaluates the expression (reusing the `p` evaluator + purity
 // gate) and renders the result prefixed with its type, so the structure and
 // type are visible at a glance.
 // ===========================================================================
@@ -1166,23 +1109,22 @@ fn m10b_ws5_heap_literal() {
 }
 
 // ===========================================================================
-// DBG-06 — a frame's locals must not decide whether `p` works at all.
+// A frame's locals must not decide whether `p` works at all.
 //
-// The synthetic `fn __p_expr(<typed params>) { EXPR }` annotated *every* local
-// in the frame with `TypeDb::render`, which prints for a human rather than for
-// the parser. Three kinds of local therefore broke the whole module — and with
-// it every command, `p 1 + 2` included, which names no local at all:
+// The synthetic `fn __p_expr(<typed params>) { EXPR }` binds only the locals
+// the expression *names*, and those are spelled by `praxis_debugger::synth`,
+// which emits the declarations it needs and declines the types it cannot
+// write. Annotating every local in the frame instead — with `TypeDb::render`,
+// which prints for a human rather than for the parser — breaks the whole
+// module, and with it every command including `p 1 + 2`, which names no local
+// at all. Three kinds of local do it:
 //
 //   - a user `struct`/`enum`, rendered as a bare name the synthetic module
 //     never declares (``unknown type `Foo` ``);
 //   - a parser template's anonymous record, rendered `{ x: Int, y: Int }`, for
 //     which type position has no syntax ("parse error: expected a type");
-//   - a seventh local of any kind, against an ABI arity ceiling that counted
+//   - a seventh local of any kind, against an ABI arity ceiling that counts
 //     the frame instead of the expression.
-//
-// An expression now binds only the locals it names, and those are spelled by
-// `praxis_debugger::synth`, which emits the declarations it needs and declines
-// the types it cannot write.
 // ===========================================================================
 
 #[test]
@@ -1229,9 +1171,8 @@ fn dbg06_type_and_heap_report_user_declared_types() {
 
 #[test]
 fn dbg06_a_literal_expression_ignores_the_frames_locals() {
-    // The headline symptom: `p 1 + 2` failed in a program that merely *had* a
-    // struct local, because the frame was annotated before the expression was
-    // read.
+    // `p 1 + 2` names no local, so it must answer in a program that merely
+    // *has* a struct local, many locals, or a template record.
     for fixture in [
         "debug_user_types.px",
         "debug_many_locals.px",
@@ -1327,7 +1268,7 @@ fn dbg06_an_unspellable_local_says_why_it_is_missing() {
 }
 
 // ===========================================================================
-// M10b WS6 — `restart` / `reload` (§9.7).
+// `restart` / `reload` (§9.7).
 //
 // `restart` reruns the same compiled code+input (re-faulting deterministically).
 // `reload` re-reads the source from disk, recompiles, and reruns — discarding
@@ -1353,35 +1294,22 @@ fn m10b_ws6_restart_refaults_deterministically() {
     );
 }
 
-/// **REP-60's §9.7 half.** A `restart` against empty input must see the *same*
+/// **ADR-087's §9.7 half.** A `restart` against empty input must see the *same*
 /// empty input — which means the same zero-length buffer, not no buffer.
 ///
-/// `rerun_main` re-installed the session's input only `if
-/// !self.input_text.is_empty()`, the same guard the `--input` path had already
-/// shed. So the first fault carried `at input offset 0..0: expected int` and the
-/// restarted one carried nothing, and `input` in the REPL answered `(no input
-/// context — not a parse failure)` about a run that had failed to parse. §9.7
-/// promises a restart is the same run; for zero-byte input it was not, and that
-/// was true on the `--input` path that REP-60's first half was supposed to have
-/// finished.
+/// `DebugSession::rerun_main` re-installs the session's input whatever its
+/// length. §9.7 promises a restart is the same run, so the restarted parse must
+/// fail the same way and the REPL's `input` must have the same context to
+/// report.
 ///
 /// `--input /dev/null` is the zero-byte file (`run_repl_with_cmds` passes it).
 ///
 /// **What this asserts, and why not the banner.** `restart`'s banner prints the
 /// fault *kind* and the frame count and never the parse detail — for empty and
 /// non-empty input alike (`Repl::do_restart_or_reload`). So "the detail line
-/// appears twice" is not this row's property; it is not true of any input and
-/// asserting it would fail for a reason that has nothing to do with REP-60. The
-/// property that genuinely differed is what the REPL's `input` command can
-/// answer *about the restarted run*, so that is what is asserted, together with
-/// the empty/non-empty equivalence that is the whole point of ADR-087.
-///
-/// **Observed red** with step 4 of the repair reverted (the
-/// `if !self.input_text.is_empty()` guard restored in
-/// `DebugSession::rerun_main`): `input` after `restart` answered
-/// `(no input context — not a parse failure)` — about a run that had failed to
-/// parse — where the same drive over a non-empty failing file answered
-/// `input at offset 0..0:`.
+/// appears twice" is not this row's property; it is not true of any input. The
+/// property that distinguishes the two is what the REPL's `input` command can
+/// answer *about the restarted run*, so that is what is asserted.
 #[test]
 fn a_restart_with_empty_input_sees_the_same_empty_input() {
     let (_code, out) = run_repl_with_cmds("reads_an_int.px", "restart\ninput\nquit\n");
@@ -1538,19 +1466,12 @@ fn m10b_ws6_reload_on_malformed_source_keeps_session() {
 }
 
 // ===========================================================================
-// REP-19: a top-level statement executes (ADR-067)
+// A top-level statement executes (ADR-067)
 // ===========================================================================
 
-/// **REP-19's headline.** A file's top-level statements are its program, and
-/// §3.2 has said so since the design doc was written: "top-level statements are
-/// wrapped in a generated entry function."
-///
-/// Nothing wrapped them. `TypedModule.items` held only `fn` declarations,
-/// `lower_module` emitted only those, and the host called `main` — so
-/// `out(1)\nvar x = 2\nout(x)` passed `praxis check` and printed **nothing**,
-/// then exited 1 with "no `main` function to run". §3.3 and §4.2 are written
-/// entirely at top level, so the design doc's own programs are what that
-/// silenced.
+/// A file's top-level statements are its program (§3.2): "top-level statements
+/// are wrapped in a generated entry function". §3.3 and §4.2 are written
+/// entirely at top level, so those are the design doc's own programs.
 #[test]
 fn a_top_level_statement_runs_in_the_order_it_is_written() {
     // Every top-level statement kind: a call, a `var` read by a later one, a
@@ -1572,9 +1493,9 @@ fn a_top_level_statement_runs_in_the_order_it_is_written() {
 /// doc never mentions a `main`.
 #[test]
 fn a_declared_main_is_the_entry_point_only_when_nothing_else_is() {
-    // No top-level statements: `main` runs, exactly as before — both a
-    // `Unit`-returning one, whose output is its `out(…)` calls, and an
-    // `Int`-returning one, whose answer the host prints.
+    // No top-level statements: `main` runs — both a `Unit`-returning one, whose
+    // output is its `out(…)` calls, and an `Int`-returning one, whose answer the
+    // host prints.
     assert_passes("unit_main_out.px", "kurac");
     assert_passes("constant.px", "42");
 
@@ -1647,14 +1568,13 @@ fn the_entry_points_name_is_not_one_a_program_can_spell() {
     let _ = std::fs::remove_file(&src_path);
 }
 
-/// RT-13, at the surface. An enum value renders its **variant name**: the
-/// runtime carries an `EnumSchema` now, so `Number(7)` prints as `Number(7)`
-/// rather than as the `<variant 2: 7>` a value whose whole identity was its tag
-/// could only manage.
+/// An enum value renders its **variant name**: the runtime carries an
+/// `EnumSchema`, so `Number(7)` prints as `Number(7)` and not as the
+/// `<variant 2: 7>` a value whose whole identity is its tag could manage.
 ///
 /// `Some`/`None` are here beside a declared enum on purpose — the prelude
-/// `Option` is one enum def like any other (F12), and a `Some` the program
-/// wrote must render the same way as one the runtime built.
+/// `Option` is one enum def like any other, and a `Some` the program wrote must
+/// render the same way as one the runtime built.
 #[test]
 fn run_pass_enum_renders_its_variant_name() {
     assert_passes(
@@ -1663,21 +1583,19 @@ fn run_pass_enum_renders_its_variant_name() {
     );
 }
 
-/// **REP-72.** The destination of the instruction that *faulted* renders
-/// `<uninit>`, not the sentinel its wrapper returned.
+/// The destination of the instruction that *faulted* renders `<uninit>`, not
+/// the sentinel its wrapper returned.
 ///
 /// A faulting runtime wrapper sets `pending_fault` and returns the Unit
 /// sentinel — it has to return something, and `Inst::CheckFault` right behind
-/// it is what makes the value unreachable. But `def_var` stored that sentinel
-/// and the debug store behind it recorded it, so the subscript that faulted
-/// rendered `= Unit` while its own consumer one line below rendered
-/// `<uninit>`. Both were never produced; only one of them said so, and the
-/// difference is invisible unless you know that `Unit` here means "nothing
-/// happened" — which is the one thing the debugger exists to make obvious.
+/// it is what makes the value unreachable. Storing that sentinel into the debug
+/// slot would render the faulting subscript as `= Unit` while its own consumer
+/// one line below renders `<uninit>`: both were never produced, and only one of
+/// them would say so.
 ///
 /// ADR-135 covers the check with its instruction's step, so the store lands in
 /// the check's fall-through block. The neighbours are asserted too: this is a
-/// change to *where* a store is emitted, and a version of it that moved the
+/// rule about *where* a store is emitted, and a version of it that moved the
 /// store off every path would turn the whole frame `<uninit>` and still pass an
 /// assertion about one line.
 #[test]
@@ -1702,19 +1620,18 @@ fn the_destination_of_a_faulting_instruction_is_uninit() {
     }
 }
 
-// --- Transitive closure captures (handover 31 item 1) ---------------------
+// --- Transitive closure captures ------------------------------------------
 
-/// **The handover's stated gate.** `|a| |b| b + base` and `|a| { |b| b + base }`
-/// differ by one pair of braces, and must print the same `<closure:N>` and the
-/// same answer.
+/// `|a| |b| b + base` and `|a| { |b| b + base }` differ by one pair of braces,
+/// and must print the same `<closure:N>` and the same answer.
 ///
 /// The comparison is the point, and it is why this asserts the equality of two
 /// runs rather than only a literal. `out` on a closure prints how many bindings
-/// it captured, so `N` is the defect made observable from outside the compiler:
-/// the broken spelling printed `<closure:0>` — the outer closure captured
-/// nothing — and then read a `Unit` out of the environment it never filled. A
-/// fix that only stopped the panic without restoring the capture would still
-/// print two different `N` here.
+/// it captured, so `N` makes the capture observable from outside the compiler:
+/// an outer closure that captured nothing prints `<closure:0>` and then reads a
+/// `Unit` out of the environment it never filled. A change that only stopped
+/// the panic without restoring the capture would still print two different `N`
+/// here.
 #[test]
 fn a_curried_closure_prints_the_same_thing_with_and_without_braces() {
     let dir = scratch_dir();
@@ -1760,14 +1677,12 @@ fn a_curried_closure_prints_the_same_thing_with_and_without_braces() {
     assert_eq!(bare_out, "<closure:1>\n11\n");
 }
 
-/// **Gate 1, end to end** (ADR-141): dispatching on a grid cell.
+/// **End to end** (ADR-141): dispatching on a grid cell.
 ///
-/// This is the program the character literal exists for, and the one that would
-/// have caught the item's real defect had it been implemented from the handover
-/// alone. `lower_pattern_test`'s `Lit::Char` arm was an unconditional
-/// `Terminator::Jump { target: on_success }` — so with the syntax landed and
-/// that arm untouched, this prints `wall` three times, exits 0, and checks
-/// clean. Nothing below the JIT can see it.
+/// This is the program the character literal exists for. `lower_pattern_test`'s
+/// `Lit::Char` arm has to compare: an unconditional
+/// `Terminator::Jump { target: on_success }` there prints `wall` three times,
+/// exits 0, and checks clean, and nothing below the JIT can see it.
 #[test]
 fn a_char_match_dispatches_on_the_character() {
     let dir = scratch_dir();
@@ -1808,14 +1723,12 @@ fn a_char_match_dispatches_on_the_character() {
     );
 }
 
-/// **Gate 1, end to end** (§8.1, ADR-147): `out("Part 2: {part2}")` renders the
-/// value.
+/// **End to end** (§8.1, ADR-147): `out("Part 2: {part2}")` renders the value.
 ///
-/// This is the line the design document has shown as the spec since it was
-/// written, and it printed `Part 2: {part2}` — braces and all — for twelve
-/// milestones. The rest of the program walks the decisions: a full expression in
-/// a hole, a type with no `to_text()` row, a nested literal inside a hole, the
-/// `\{` escape, and a closure that names an outer binding only inside a hole.
+/// This is the line the design document shows as the spec. The rest of the
+/// program walks the decisions: a full expression in a hole, a type with no
+/// `to_text()` row, a nested literal inside a hole, the `\{` escape, and a
+/// closure that names an outer binding only inside a hole.
 ///
 /// The last of those is the one with no compile-time symptom. An implementation
 /// that lexed the literal whole and re-parsed holes later prints an empty line
@@ -1932,10 +1845,10 @@ fn a_hole_renders_an_int_and_plus_still_refuses_one() {
 ///
 /// Both numbers are asserted rather than one, because the pair is the finding:
 /// a program's answer here now depends on whether an optimizer promoted a slot.
-/// ADR-121 records that, records the two fixes that would make the question moot
-/// (gating the fast path on the descriptor's reflexivity, or refusing `Float` as
-/// a `CapKind::HashStable` type the way Rust refuses `f64: Hash`), and records
-/// that neither is in this package.
+/// ADR-121 records that, and records the two changes that would make the
+/// question moot: gating the fast path on the descriptor's reflexivity, or
+/// refusing `Float` as a `CapKind::HashStable` type the way Rust refuses
+/// `f64: Hash`.
 #[test]
 fn a_nan_key_deduplicates_or_not_depending_on_whether_its_slot_was_promoted() {
     let dir = scratch_dir();

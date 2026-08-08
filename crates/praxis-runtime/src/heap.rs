@@ -49,23 +49,22 @@ use crate::Tracer;
 ///
 /// # Generated code holds no token, and does not need one (ADR-113, ADR-119)
 ///
-/// Since ADR-113 the Cranelift backend reproduces [`Heap::collection_is_due`]
-/// inline and, when it answers `false`, reads an interned small `Int` out of
+/// The Cranelift backend reproduces [`Heap::collection_is_due`] inline
+/// (ADR-113) and, when it answers `false`, reads an interned small `Int` out of
 /// [`crate::small_int`]'s table without entering this module at all. That is not
 /// a forged token, and the reason is what this type means: **the token is
 /// permission to *collect*, not permission to allocate.** It takes that branch
 /// only where `maybe_collect` would have returned `false`, which is the branch
 /// on which `pace` mints a token having done nothing at all. Where the predicate
 /// answers `true` the inline path branches to `praxis_alloc_int`, which paces
-/// through `pace` exactly as before.
+/// through `pace`.
 ///
-/// **ADR-113 also said "the inline path allocates nothing — it hands back an
-/// immortal the runtime minted before `main` ran". Since ADR-119 that sentence
-/// is false**: on the branch the predicate leaves open, generated code claims a
-/// block out of a page's `allocated` bitmap, writes the header and the payload
-/// itself, and bumps both live counters and the pacing charge — everything
-/// `alloc_raw` → `claim_block` → `occupy` does, in that order, without entering
-/// this module. What replaced the sentence is not weaker, and it is three parts:
+/// The inline path also does more than hand back an immortal (ADR-119): on the
+/// branch the predicate leaves open, generated code claims a block out of a
+/// page's `allocated` bitmap, writes the header and the payload itself, and
+/// bumps both live counters and the pacing charge — everything `alloc_raw` →
+/// `claim_block` → `occupy` does, in that order, without entering this module.
+/// Three parts carry that:
 ///
 /// 1. **Entry.** Every store the sequence performs is dominated, in the emitted
 ///    Cranelift CFG, by the branch on [`Heap::collection_is_due`]. Asserted with
@@ -198,8 +197,7 @@ impl PacingOffsets {
 /// as far as a type can go. A type cannot force the backend to *emit* the
 /// compare — that claim is about an instruction stream, and it is carried by
 /// `an_inline_int_box_tests_the_pacing_counter_before_it_reads_the_table` in the
-/// backend, which reads the emitted IR. ADR-113 says so plainly rather than
-/// implying the type proved more than it did.
+/// backend, which reads the emitted IR.
 #[derive(Clone, Copy, Debug)]
 pub struct InlineInternSite {
     pacing: PacingOffsets,
@@ -288,13 +286,9 @@ impl InlineInternSite {
 
     /// `log2(stride)` — the shift that scales an index to a byte offset.
     ///
-    /// A shift rather than a multiply because the stride is a pointer width.
-    /// That was load-bearing when the sequence was emitted at
-    /// `opt_level = "none"`, where nothing would strength-reduce an `imul` for
-    /// us; the tree is at `"speed"` now and the mid-end would, so the shift is
-    /// free rather than necessary and is kept for being the thing that is
-    /// actually meant. `new` asserts the stride is a power of two, so this is
-    /// exact rather than approximate.
+    /// A shift rather than a multiply because the stride is a pointer width and
+    /// a shift is the thing actually meant. `new` asserts the stride is a power
+    /// of two, so this is exact rather than approximate.
     #[must_use]
     pub const fn stride_shift(self) -> u8 {
         self.stride_shift
@@ -303,11 +297,6 @@ impl InlineInternSite {
 
 /// Everything generated code may bake in to **claim and initialize a block**
 /// inline, and nothing else (ADR-119).
-///
-/// This is the value ADR-113 decision 3 declined to write and left the name
-/// `InlineAllocSite` free for. It was declined because P-1a allocated nothing at
-/// all, and "four fields nothing reads are four fields that go stale before
-/// their first reader arrives". This is that reader.
 ///
 /// # What it makes unrepresentable
 ///
@@ -531,7 +520,7 @@ impl InlineClaimSite {
 /// (Appendix B). Every mutable field is a [`Cell`]: the collector runs through a
 /// `&Heap` that the descriptor `trace` callbacks reborrow, so a `RefCell` would
 /// only buy a double-borrow panic that a scalar and a raw pointer cannot need —
-/// and it charged a borrow-flag round trip on the hottest path in the runtime.
+/// and would charge a borrow-flag round trip on the hottest path in the runtime.
 #[repr(C)]
 pub struct Heap {
     /// This heap's identity, stamped into every header it allocates. The mark
@@ -542,14 +531,13 @@ pub struct Heap {
     /// How many collectable objects this heap holds — what [`HeapStats`]
     /// reports.
     ///
-    /// A running counter rather than a registry's length. It counts exactly what
-    /// the registry used to: immortals are not in it, because
-    /// [`Heap::alloc_immortal`] does not bump it, and sweep decrements it by the
-    /// blocks it actually reclaimed.
+    /// A running counter, not the length of any registry: immortals are not in
+    /// it, because [`Heap::alloc_immortal`] does not bump it, and sweep
+    /// decrements it by the blocks it actually reclaimed.
     live_count: Cell<usize>,
     /// Bytes allocated since the last collection. Used by [`Heap::maybe_collect`]
-    /// to trigger automatic collection on allocation pressure (§12.4, M5). This
-    /// is the mechanism that makes "survives collection" observable from JIT'd
+    /// to trigger automatic collection on allocation pressure (§12.4). This is
+    /// the mechanism that makes "survives collection" observable from JIT'd
     /// code: the alloc wrappers call `maybe_collect` with the current roots.
     ///
     /// A `Cell`, not a `RefCell`: a `usize` is `Copy`, so there is nothing to
@@ -578,11 +566,11 @@ pub struct Heap {
     partial: [Cell<*mut PageHeader>; NUM_CLASSES],
     /// Small pages holding nothing, awaiting a class.
     ///
-    /// **This is where the free list went.** A per-layout free list left an
-    /// emptied bucket as dead capital for every other layout — a program that
-    /// filled a heap with `Int`s and then with `Text`s paid for both. A page
-    /// that empties is re-classed on demand, so storage is reusable across
-    /// layouts (RT-01, strengthened).
+    /// **This is what stands in for a free list.** A per-layout free list would
+    /// leave an emptied bucket as dead capital for every other layout — a
+    /// program that filled a heap with `Int`s and then with `Text`s would pay
+    /// for both. A page that empties is re-classed on demand instead, so
+    /// storage is reusable across layouts (RT-01).
     empty: Cell<*mut PageHeader>,
     /// Large pages holding nothing. Keyed on the whole layout rather than a
     /// class, because that is exactly what the ladder rejected them for; the
@@ -602,7 +590,7 @@ pub struct Heap {
     /// table behind a `Map` are charged to [`Heap::bytes_since_collect`] at
     /// allocation, but they are not recoverable at sweep without an
     /// `owned_bytes_of` call per *survivor* — which is precisely the O(live)
-    /// walk ADR-103 deleted. So this number under-counts, and it under-counts
+    /// walk ADR-103 rules out. So this number under-counts, and it under-counts
     /// in the safe direction: a smaller `live` makes the next threshold
     /// smaller, so the collector runs **more** often, never less. It cannot
     /// produce an unbounded heap; it can only cost time, and only on a program
@@ -637,14 +625,13 @@ enum Trigger {
 /// within the block is recomputed on every reuse, so two descriptors that split
 /// the same total differently still share a block.
 ///
-/// Deliberately not `Hash`. The free list used to be a `HashMap` keyed on this,
-/// and hashing a 16-byte key twice per object — once to find a bucket in
-/// [`Heap::alloc_raw`], once to file a swept block in [`Heap::sweep`] — was 34%
-/// of runtime on `collatz` and 33% on `primes`, ahead of the generated code
-/// (docs/handovers/21-where-the-time-goes.md §3.1). Withholding the derive makes
-/// re-introducing a hash lookup a compile error rather than a silent regression.
-/// There is no hash left to re-introduce — a block's page is a mask and its
-/// class is a subtraction — and the derive stays withheld so it stays that way.
+/// Deliberately not `Hash`. Keying a free list on this costs a hash of a
+/// 16-byte key twice per object — once to find a bucket in [`Heap::alloc_raw`],
+/// once to file a swept block in [`Heap::sweep`] — which measured 34% of runtime
+/// on `collatz` and 33% on `primes`, ahead of the generated code
+/// (docs/handovers/21-where-the-time-goes.md §3.1). A block's page is a mask and
+/// its class is a subtraction, so no hash is needed; withholding the derive
+/// makes introducing one a compile error rather than a silent regression.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct BlockLayout {
     pub(crate) size: usize,
@@ -661,7 +648,7 @@ impl BlockLayout {
     /// Panics if the payload alignment exceeds what a `GcHeader` can record, or
     /// if the total size overflows.
     ///
-    /// `const` since ADR-119, for [`SizeClass::of`]'s reason: the inline claim
+    /// `const` for [`SizeClass::of`]'s reason (ADR-119): the inline claim
     /// sequence's stride and payload displacement come off this calculation in a
     /// `const` initializer, so they are this function's answer at build time and
     /// not a second derivation in the backend.
@@ -690,17 +677,13 @@ pub const INITIAL_COLLECT_THRESHOLD: usize = 1 << 16; // 64 KiB
 /// The ceiling on the *speculative* half of the pacing rule: six doublings of
 /// [`INITIAL_COLLECT_THRESHOLD`] and then no more (ADR-112, amended by ADR-129).
 ///
-/// Chosen by measurement, not by derivation — and **re-measured once the cost it
-/// prices had changed**. ADR-112 swept 8/16/64/256 MiB against its own build and
-/// put the knee at 64 MiB, where 8 MiB cost 4%. The only ceiling-dependent cost
-/// is the *per-collection fixed cost* — ADR-112's own prediction, and the reason
-/// total sweep work is independent of this constant — and ADR-114 and ADR-128
-/// cut precisely that, the first by taking two `malloc`s out of the rooting call
-/// and the second by narrowing the frame `push_roots` scans at every collection.
-/// So the knee moved: on this tree 8 MiB costs 1.6% and 4 MiB costs 1.9%, and
-/// 4 MiB peaks 3.3× lower — the suite goes from 3.6× CPython's resident set to
-/// 1.1× (ADR-129's Measurements). A figure derived from physical RAM would be
-/// more principled, but this workspace has no platform code for `sysctl
+/// Chosen by measurement, not by derivation. The only ceiling-dependent cost is
+/// the *per-collection fixed cost*, which is why total sweep work is independent
+/// of this constant — and why the knee has to be re-measured whenever that fixed
+/// cost changes. On this tree 8 MiB costs 1.6% and 4 MiB costs 1.9%, and 4 MiB
+/// peaks 3.3× lower — the suite goes from 3.6× CPython's resident set to 1.1×
+/// (ADR-129's Measurements). A figure derived from physical RAM would be more
+/// principled, but this workspace has no platform code for `sysctl
 /// hw.memsize` / `sysconf(_SC_PHYS_PAGES)`, and a constant is honest and
 /// testable where a derivation would make every Praxis program's schedule depend
 /// on the machine that ran it.
@@ -906,15 +889,14 @@ fn parse_bytes(text: &str) -> Option<usize> {
 
 // SAFETY: the heap owns raw allocations that are only accessed through `GcRef`s
 // the caller keeps rooted. It is `Send` because the collector is
-// single-threaded (§12.1) and the heap is never shared across threads in M3.
-// It is not `Sync` (no `&Heap` aliasing across threads); the collector is
-// single-threaded.
+// single-threaded (§12.1) and the heap is never shared across threads. It is
+// not `Sync`: no `&Heap` may alias across threads.
 unsafe impl Send for Heap {}
 
 /// Lightweight allocation statistics for tests and debugging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeapStats {
-    /// Number of currently-registered live allocations.
+    /// Number of live collectable allocations.
     pub live_count: usize,
     /// Block bytes the last sweep found still live. Zero on a heap that has
     /// never collected, and block bytes only — see [`Heap::live_bytes`].
@@ -984,9 +966,8 @@ impl Heap {
 
     /// Bytes of address space this heap's pages occupy.
     ///
-    /// The page allocator's answer to what `bumpalo::Bump::allocated_bytes`
-    /// used to report, and the number RT-01 is about: a program that allocates
-    /// and collects a bounded working set in a loop must not grow it.
+    /// The number RT-01 is about: a program that allocates and collects a
+    /// bounded working set in a loop must not grow it.
     pub fn committed_bytes(&self) -> usize {
         self.walk_pages().map(|page| page.page_bytes()).sum()
     }
@@ -1232,30 +1213,19 @@ impl Heap {
     /// Charge `bytes` of *owned* growth — a collection's backing buffer
     /// reallocating — against the pacing counter.
     ///
-    /// # The gap this closes, and why it only became visible with ADR-121
+    /// # Why the spine is charged and not only the object
     ///
     /// [`Heap::alloc_raw`] charges `stride + owned_bytes_of(payload)` once, at
-    /// construction. Its comment then explains why growth afterwards was left
-    /// uncharged:
-    ///
-    /// > Growth *after* this point — a `push` that reallocates — is still
-    /// > uncharged; **its elements are themselves paced allocations**, so the
-    /// > residual under-count is the spine, not the contents.
-    ///
-    /// That was true and load-bearing, and ADR-121 falsified the premise. When
-    /// every scalar the program computed was a heap object, an allocation-light
-    /// program did not exist: the arithmetic feeding a `push` paced the
-    /// collector even when the `push` itself did not. Promotion deletes exactly
-    /// those allocations, so a program whose memory is mostly *buffers* — `bfs`,
-    /// whose adjacency lists are a `Vec` of `Vec`s — stopped advancing the
-    /// counter at all. Measured: `bfs` went from **41 collections to 6**, and
-    /// its peak resident set from 61 MiB to 224, with an identical live set and
-    /// a *smaller* GC page heap. The collector was not running because nothing
-    /// told it anything had happened.
-    ///
-    /// So the spine is charged now too, and the pacer's input is the memory the
-    /// program actually took rather than the share of it that happened to be
-    /// shaped like an object.
+    /// construction. Growth *after* that point — a `push` that reallocates — has
+    /// to be charged too, or a program whose memory is mostly *buffers* barely
+    /// advances the counter at all: with scalars promoted out of the heap
+    /// (ADR-121), the arithmetic feeding a `push` is not itself a paced
+    /// allocation pacing the collector on the spine's behalf. Measured on `bfs`,
+    /// whose adjacency lists are a `Vec` of `Vec`s: **41 collections with the
+    /// spine charged against 6 without**, and a peak resident set of 61 MiB
+    /// against 224, for an identical live set. So the pacer's input is the
+    /// memory the program actually took rather than the share of it that
+    /// happened to be shaped like an object.
     ///
     /// Cheap by construction: callers invoke this only on the reallocation path,
     /// which amortized doubling already makes rare, and it is a load, an add and
@@ -1268,39 +1238,35 @@ impl Heap {
     }
 
     /// Allocate an immortal object: same layout as [`Heap::alloc`], but on a
-    /// page the collector never walks, so it is never reclaimed (§4.3, M3
-    /// deliverable). Used for the `Unit`/`Bool` singletons and the interned
-    /// small-`Int` table.
+    /// page the collector never walks, so it is never reclaimed (§4.3). Used for
+    /// the `Unit`/`Bool` singletons and the interned small-`Int` table.
     ///
-    /// The exemption used to be an omission — `alloc_raw` registered the object
-    /// and this function linear-scanned the registry to un-register it. It is
-    /// now a page flag, which is a stronger statement of the same thing: sweep
-    /// and `finalize_all` do not read an immortal page's `allocated` bitmap at
-    /// all, so there is no window in which an immortal is momentarily
-    /// collectable and no scan whose cost grows with the heap.
+    /// The exemption is a page flag: sweep and `finalize_all` do not read an
+    /// immortal page's `allocated` bitmap at all, so there is no window in which
+    /// an immortal is momentarily collectable and no scan whose cost grows with
+    /// the heap.
     ///
     /// Restricted to [`Immortals::new`](crate::immortal::Immortals::new) by the
     /// [`ImmortalWitness`](crate::immortal::ImmortalWitness) it takes, which
     /// only that module can construct. The restriction is load-bearing twice
     /// over: an immortal is invisible to sweep *and* to [`Heap`]'s `Drop`, so
     /// every immortal payload must be `Copy` (nothing to finalize) and must be
-    /// minted exactly once at startup. Minting one per call — which the `Bool`
-    /// wrappers used to do — is storage nothing ever reclaims (RT-03).
+    /// minted exactly once at startup. Minting one per call would be storage
+    /// nothing ever reclaims (RT-03).
     ///
     /// **This allocation is pacing-neutral, and that is not an optimization.**
     /// [`Heap::alloc_raw`] charges every block against `bytes_since_collect`
     /// because pacing measures the pressure a program is putting on the
     /// collector (RT-04) — and an object no collection can ever reclaim exerts
     /// none: collecting harder does not give one byte of it back. Charging it
-    /// anyway made the immortal table a hidden GC-schedule change, because the
-    /// interned small-`Int` table ([`crate::small_int`]) is ~40 KiB against a
+    /// anyway would make the immortal table a hidden GC-schedule change, because
+    /// the interned small-`Int` table ([`crate::small_int`]) is ~40 KiB against a
     /// 64 KiB [`INITIAL_COLLECT_THRESHOLD`]: every program's *first* real
-    /// allocation would have arrived with two thirds of its budget already
-    /// spent, and widening the interned range would have moved the first
-    /// collection of every program in the language. So the counter is
-    /// snapshotted and restored around the call rather than the charge being
-    /// skipped inside `occupy`, which would need a flag on the one path every
-    /// real allocation takes.
+    /// allocation would arrive with two thirds of its budget already spent, and
+    /// widening the interned range would move the first collection of every
+    /// program in the language. So the counter is snapshotted and restored around
+    /// the call rather than the charge being skipped inside `occupy`, which would
+    /// need a flag on the one path every real allocation takes.
     pub(crate) fn alloc_immortal<T: Copy>(
         &self,
         payload: Payload<T>,
@@ -1376,7 +1342,7 @@ impl Heap {
     /// "allocate without pacing" unwritable on the paced path: the token
     /// [`Heap::alloc`] demands cannot be obtained except by performing the
     /// [`Heap::maybe_collect`] that mints it, against the whole
-    /// [`RuntimeRoots`] (P0-08b).
+    /// [`RuntimeRoots`].
     pub fn pace(&self, roots: &RuntimeRoots<'_>) -> Safepoint<'_> {
         self.maybe_collect(roots);
         Safepoint(PhantomData)
@@ -1393,7 +1359,7 @@ impl Heap {
     ///
     /// The descriptor arrives as a [`Payload<T>`], so "this value is not that
     /// descriptor's payload" is a type error at the call rather than an assert
-    /// here (REP-02).
+    /// here.
     pub fn alloc<T: Copy>(
         &self,
         _safepoint: Safepoint<'_>,
@@ -1409,10 +1375,9 @@ impl Heap {
     ///
     /// This path keeps its runtime layout assertions, deliberately: `init` is a
     /// closure writing through a `*mut u8`, so there is no payload type for a
-    /// [`Payload<T>`] to carry (REP-02 removed the checks from the `Copy` path,
-    /// where the type *is* available). Every caller here writes a specific
-    /// non-`Copy` payload — a `Box<str>`, a `VecPayload` — and passes that type's
-    /// own `size_of`/`align_of`, which is why the assertions have never fired.
+    /// [`Payload<T>`] to carry, as there is on the `Copy` path. Every caller
+    /// here writes a specific non-`Copy` payload — a `Box<str>`, a `VecPayload`
+    /// — and passes that type's own `size_of`/`align_of`.
     ///
     /// Reach for [`Heap::alloc_payload`] instead unless `init` genuinely needs
     /// the raw pointer: it derives both numbers *and* the write from the payload
@@ -1443,8 +1408,8 @@ impl Heap {
     /// so every caller names its payload type three times and nothing but the
     /// assertions in [`Heap::alloc_with_unpaced`] holds the three together. Here
     /// it is named once and the compiler derives the rest — what [`Payload<T>`]
-    /// does for the `Copy` path (REP-02), carried as far as a payload that owns
-    /// Rust resources can carry it.
+    /// does for the `Copy` path, carried as far as a payload that owns Rust
+    /// resources can carry it.
     ///
     /// # Safety
     /// `descriptor` must be `P`'s own descriptor. A mismatched *layout* is
@@ -1480,14 +1445,9 @@ impl Heap {
     /// Rust locals that no root set can see, so a collection *here* would
     /// reclaim the value being returned.
     ///
-    /// The parser interpreter used to be the second. It held seventeen
-    /// `Vec<GcRef>` intermediates that no root set could see, so pacing it
-    /// would have reclaimed the values it was assembling — which is why the
-    /// back door had to exist and why the roots and the move to this path had
-    /// to be one commit (IPR-14, ADR-040 Decision 3, hazard H1). It has
-    /// `NativeScope`s now and allocates through [`Heap::alloc`]. Do not add a
-    /// third caller: the argument that justified this one is "no root set can
-    /// see my locals", and the answer to that is a `NativeScope`, not this.
+    /// Do not add a second caller: the argument that justifies this one is "no
+    /// root set can see my locals", and the answer to that is a `NativeScope`
+    /// (ADR-040 Decision 3), not this.
     ///
     /// A `praxis_*` wrapper must never use this: generated code roots what it
     /// holds across a call the manifest declares `Allocates`, which is exactly
@@ -1646,11 +1606,10 @@ impl Heap {
         // The block is only part of what the object costs. A `Text` is 48 bytes
         // of block and a `Box<str>` of whatever length the program read; a
         // freshly built `Vec` is 48 bytes and a buffer of `capacity` refs. The
-        // descriptor measures the rest, so a text-heavy program no longer
-        // under-reports its pressure by essentially its whole footprint
-        // (RT-04). Growth *after* this point — a `push` that reallocates — is
-        // still uncharged; its elements are themselves paced allocations, so
-        // the residual under-count is the spine, not the contents.
+        // descriptor measures the rest, so a text-heavy program does not
+        // under-report its pressure by essentially its whole footprint (RT-04).
+        // Growth *after* this point — a `push` that reallocates — is charged by
+        // `Heap::charge_owned_growth`, called from the reallocation path itself.
         // SAFETY: `init` has run, so the payload is a valid value of `descriptor`.
         let owned = unsafe { descriptor.owned_bytes_of(payload_ptr) };
         self.bytes_since_collect
@@ -1680,8 +1639,8 @@ impl Heap {
     /// Test-only: production collection roots from a
     /// [`RuntimeRoots`](crate::roots::RuntimeRoots), which is constructible
     /// only from a live `RuntimeContext` and is exhaustive over the runtime's
-    /// owners. Accepting a `&dyn RootSet` on the production path is what let
-    /// the automatic collector root from the shadow chain alone (P0-06).
+    /// owners. Accepting a `&dyn RootSet` there would let the automatic
+    /// collector run against a partial root set — the shadow chain alone.
     ///
     /// The weak set is `()`: a bare `RootScope` has no debug frames behind it,
     /// so there is nothing to clear. [`Heap::collect_with_weak`] is for the
@@ -1729,11 +1688,11 @@ impl Heap {
         self.bytes_since_collect.set(0);
         // Re-pace — but only when *pacing* was what ran this collection.
         //
-        // Growing the threshold on an explicit collection too meant a host that
-        // collected on a schedule (the debugger between REPL commands, a test
-        // between phases) pushed the automatic threshold up without any
-        // allocation pressure having caused it, and after a few such calls the
-        // program was effectively running without a collector (RT-04).
+        // Growing the threshold on an explicit collection too would let a host
+        // that collects on a schedule (the debugger between REPL commands, a
+        // test between phases) push the automatic threshold up without any
+        // allocation pressure having caused it, until after a few such calls
+        // the program is effectively running without a collector (RT-04).
         //
         // `self.sweep()` ran two lines up, so `live_bytes` is the live set
         // *this* collection measured rather than the previous one's — which is
@@ -1750,8 +1709,8 @@ impl Heap {
     /// Run a collection if allocation pressure has reached the threshold,
     /// rooting from `roots`. Reached from every allocation through
     /// [`Heap::pace`] (§12.4), so collection happens automatically inside JIT'd
-    /// code — this is what makes "nested vectors survive collection" (§19 M5
-    /// acceptance) testable without the host forcing it.
+    /// code — this is what makes "nested vectors survive collection" (§19)
+    /// testable without the host forcing it.
     ///
     /// Returns `true` if a collection ran.
     pub fn maybe_collect(&self, roots: &RuntimeRoots<'_>) -> bool {
@@ -1768,7 +1727,7 @@ impl Heap {
     ///
     /// [`Heap::maybe_collect`] and [`Heap::maybe_collect_with`] are its two
     /// callers here. Its third reader is not in this crate and cannot call it:
-    /// since ADR-113 the Cranelift backend **reproduces this expression inline**
+    /// the Cranelift backend **reproduces this expression inline** (ADR-113)
     /// in every `Inst::Materialize { Int }` it emits — two loads at
     /// [`Heap::BYTES_SINCE_COLLECT_OFFSET`] and
     /// [`Heap::COLLECT_THRESHOLD_OFFSET`], an unsigned compare, and a branch to
@@ -1786,11 +1745,11 @@ impl Heap {
     /// doing anything. That is the entire argument, and it holds only while this
     /// expression is what the backend emits.
     ///
-    /// **Since ADR-119 the branch this guards does allocate**, so the argument
-    /// carries more weight than it did: generated code claims a block and writes
-    /// its header on the far side of it. What makes that sound is that between
-    /// this branch and the last store there is no call, so *not due here* is
-    /// *not due throughout*. See [`Safepoint`], which states all three parts.
+    /// **The branch this guards also allocates** (ADR-119): generated code
+    /// claims a block and writes its header on the far side of it. What makes
+    /// that sound is that between this branch and the last store there is no
+    /// call, so *not due here* is *not due throughout*. See [`Safepoint`], which
+    /// states all three parts.
     ///
     /// So: **a term added here must be added to `emit_pacing_test` in
     /// `crates/praxis-codegen-cranelift/src/lower.rs`, or generated code
@@ -1822,21 +1781,16 @@ impl Heap {
         // **The grey set is reused across collections, and that is a memory
         // decision rather than a speed one.**
         //
-        // This used to be a fresh `Vec::new()` per collection, grown by doubling
-        // to the size of the transitive closure and dropped at the end of the
-        // phase. On `pipeline`'s 1M-element working set that is an 8 MiB buffer
-        // reached through the whole doubling ladder — 1, 2, 4, 8 — and freed
-        // again, sixty-odd times in one run. macOS's allocator does not return
-        // large freed regions to the OS promptly; it caches them, and `vmmap`
-        // showed **64 cached `MALLOC_LARGE (empty)` regions holding 489 MiB**
-        // against 4 regions and 16 MiB before ADR-121. Live malloc bytes were
-        // ~84 MiB in both, so none of that half-gigabyte was in use — it was
-        // resident, and `peak_rss` counts resident.
-        //
-        // ADR-121 did not create the churn; it made the same churn happen in
-        // less wall-clock time, which is what pushed the cache from 4 regions to
-        // 64. That distinction matters for who owns the fix: the collector
-        // should not allocate a buffer proportional to the live set on every
+        // A fresh `Vec::new()` per collection would be grown by doubling to the
+        // size of the transitive closure and dropped at the end of the phase. On
+        // `pipeline`'s 1M-element working set that is an 8 MiB buffer reached
+        // through the whole doubling ladder — 1, 2, 4, 8 — and freed again,
+        // sixty-odd times in one run. macOS's allocator does not return large
+        // freed regions to the OS promptly; it caches them, and `vmmap` measured
+        // **64 cached `MALLOC_LARGE (empty)` regions holding 489 MiB** against
+        // ~84 MiB of live malloc bytes — none of that half-gigabyte in use, all
+        // of it resident, and `peak_rss` counts resident. So the collector does
+        // not allocate a buffer proportional to the live set on every
         // collection, whatever the compiler above it is doing.
         //
         // `clear()` keeps the capacity, so after the first collection the mark
@@ -1856,8 +1810,7 @@ impl Heap {
         // The tracer enqueues child references onto the worklist. The grey set
         // *is* this worklist — a transient grey colour would say nothing extra
         // in a single-threaded collector with no concurrency, which is why the
-        // header never had a use for a third colour and no longer has a byte
-        // for one.
+        // header has no third colour and no byte for one.
         struct Enqueuer<'a>(&'a mut Vec<GcRef>);
         impl Tracer for Enqueuer<'_> {
             fn trace(&mut self, reference: GcRef) {
@@ -1913,17 +1866,15 @@ impl Heap {
     /// reuse, and clear the mark bitmap for the next cycle.
     ///
     /// A page in which nothing died costs one `alive & !marked == 0` test and at
-    /// most two stores per 64 blocks. That — not the allocation path — is where
-    /// most of this finding's win is: the registry walk touched every live
-    /// object on every collection, twice over, once to test its colour and once
-    /// to reset it.
+    /// most two stores per 64 blocks, so sweep never touches a survivor —
+    /// neither to test its colour nor to reset it.
     ///
     /// It also measures the live set in bytes, for the pacer (ADR-112). That
     /// costs **one multiply per page** — `live_count × block_size`, both of
     /// which the page already knows and neither of which is on a survivor — so
     /// ADR-103's "sweep does not touch survivors" property is preserved
     /// exactly. Reconstructing the same number from the objects would be the
-    /// O(live) walk this design exists to have deleted.
+    /// O(live) walk this design exists to avoid.
     fn sweep(&self) {
         let mut reclaimed = 0usize;
         let mut live_bytes = 0usize;
@@ -2012,7 +1963,7 @@ impl Heap {
         // This is also RT-01's precondition: between releasing the block and
         // handing it out again, it must not claim to be a typed object, or a
         // stale reference would be traced through whatever the allocator put
-        // there next (hazard H7).
+        // there next.
         header.poison();
     }
 
@@ -2025,11 +1976,10 @@ impl Heap {
     /// at, and those are not in a page — releasing the pages reclaims the
     /// `[header|payload]` blocks and leaks everything they own (RT-02).
     ///
-    /// This is the answer to "without a live registry, how do you enumerate
-    /// every live object": the `allocated` bitmaps already know, exactly.
+    /// Enumeration needs no registry: the `allocated` bitmaps already name every
+    /// live object, exactly.
     ///
-    /// Immortal pages are left alone, exactly as the unregistered immortals
-    /// were: an immortal payload is `Copy` by
+    /// Immortal pages are left alone: an immortal payload is `Copy` by
     /// [`ImmortalWitness`](crate::immortal::ImmortalWitness)'s argument, so
     /// there is nothing to finalize.
     ///
@@ -2063,13 +2013,12 @@ impl Heap {
         self.relink_pages();
     }
 
-    /// Reset the heap to empty, dropping everything. Used by tests and, later,
-    /// runtime teardown. Immortal singletons must be re-allocated afterwards —
-    /// which since the small-`Int` table ([`crate::small_int`]) means the whole
-    /// `Immortals` value, not just the three singletons: a `RuntimeContext`
-    /// minted before the reset holds `unit_ref`, `true_ref`, `false_ref` **and**
-    /// a `small_ints` pointer, and every one of them names storage the heap is
-    /// now free to hand out again.
+    /// Reset the heap to empty, dropping everything. Used by tests. Immortal
+    /// singletons must be re-allocated afterwards — the whole `Immortals` value,
+    /// not just the three singletons, because of the small-`Int` table
+    /// ([`crate::small_int`]): a `RuntimeContext` minted before the reset holds
+    /// `unit_ref`, `true_ref`, `false_ref` **and** a `small_ints` pointer, and
+    /// every one of them names storage the heap is now free to hand out again.
     pub fn reset(&mut self) {
         // Finalize every live allocation before repudiating the pages.
         self.finalize_all();
@@ -2092,7 +2041,7 @@ impl Heap {
         self.relink_pages();
         // Pacing is part of the heap's state, so a reset heap paces like a fresh
         // one. Leaving the counter and the geometrically-grown threshold in
-        // place meant a reset heap could run for megabytes before its first
+        // place would let a reset heap run for megabytes before its first
         // collection, or collect on its very first allocation (RT-04).
         self.bytes_since_collect.set(0);
         self.collect_threshold.set(INITIAL_COLLECT_THRESHOLD);
@@ -2132,13 +2081,12 @@ impl Drop for Heap {
     /// else: the `Box<str>` behind a `Text`, the `Vec<GcRef>` behind a `Vec[T]`,
     /// the `HashMap` behind a `Map[K,V]` are ordinary Rust allocations no page
     /// ever owned. Without the finalize, every object still reachable at
-    /// teardown leaked its backing store.
+    /// teardown would leak its backing store.
     ///
-    /// **A `GcRef` does not outlive the heap.** Finalizing here makes that a
-    /// visible use-after-free for a host that reads one afterwards, where it
-    /// used to be a quiet read of stale-but-intact bytes (hazard H8). The two
-    /// consumers that take a value out of the runtime were audited with this
-    /// change:
+    /// **A `GcRef` does not outlive the heap.** Finalizing here makes reading
+    /// one afterwards a visible use-after-free rather than a quiet read of
+    /// stale-but-intact bytes. The two consumers that take a value out of the
+    /// runtime keep to that:
     ///
     /// * `praxis-cli/src/run.rs` takes the crash snapshot, renders it, then
     ///   moves the `Runtime` into the `DebugSession` the `Repl` owns. `Repl`
@@ -2263,9 +2211,9 @@ mod tests {
 
     #[test]
     fn collect_preserves_nested_references() {
-        // The headline M3 acceptance test: a Vec of Int is rooted, garbage is
-        // allocated, and after collection the whole nested graph survives and
-        // is readable through the element descriptors.
+        // A Vec of Int is rooted, garbage is allocated, and after collection the
+        // whole nested graph survives and is readable through the element
+        // descriptors.
         let heap = Heap::new();
         let mut scope = RootScope::new();
 
@@ -2430,9 +2378,9 @@ mod tests {
         assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
-    /// `reset` and `Drop` share one finalizer loop, and it empties the registry
-    /// — so a heap that is reset and then dropped finalizes each payload once,
-    /// not twice.
+    /// `reset` and `Drop` share one finalizer loop, and it clears the same
+    /// `allocated` bits it finalized from — so a heap that is reset and then
+    /// dropped finalizes each payload once, not twice.
     #[test]
     fn resetting_then_dropping_finalizes_each_payload_once() {
         let drops = Arc::new(AtomicUsize::new(0));
@@ -2759,9 +2707,9 @@ mod tests {
     /// `Heap::occupy` charges `stride + owned_bytes_of(payload)`. Generated code
     /// can reproduce the first term and cannot make the indirect call the second
     /// needs, so a `Text` or a `Vec` claimed inline would under-charge the pacer
-    /// by its entire buffer — RT-04, re-introduced. This walks every built-in
-    /// descriptor and asserts the refusal is exactly the `owned_bytes` set,
-    /// rather than a list someone kept in step by hand.
+    /// by its entire buffer, breaking RT-04. This walks every built-in descriptor
+    /// and asserts the refusal is exactly the `owned_bytes` set, rather than a
+    /// list someone kept in step by hand.
     #[test]
     fn only_a_descriptor_with_no_owned_bytes_charge_has_a_claim_site() {
         for descriptor in crate::descriptor::BUILTINS {
@@ -2805,8 +2753,8 @@ mod tests {
     /// A host that collects on a schedule — the debugger between REPL commands,
     /// a test between phases — is not evidence that the program needs a bigger
     /// budget between automatic collections. Doubling on every explicit collect
-    /// meant a few such calls left the program effectively running without a
-    /// collector (RT-04).
+    /// would let a few such calls leave the program effectively running without
+    /// a collector (RT-04).
     #[test]
     fn an_explicit_collection_does_not_grow_the_pacing_threshold() {
         let heap = Heap::new();
@@ -2911,9 +2859,8 @@ mod tests {
         );
     }
 
-    /// The property this item exists for: the threshold's speculative half
-    /// ratchets to a bound and stops, where the doubling rule's grows without
-    /// limit for as long as the program runs.
+    /// The threshold's speculative half ratchets to a bound and stops, where the
+    /// doubling rule's grows without limit for as long as the program runs.
     #[test]
     fn a_bounded_pacer_stops_doubling_at_the_ceiling() {
         const CEILING: usize = 1 << 18; // 256 KiB — two rungs above INITIAL.
@@ -2969,11 +2916,10 @@ mod tests {
         );
     }
 
-    /// The exact difference from the naive `live × k` rule the pre-perf-fixes
-    /// experiment measured, and the reason no separate growth floor is needed:
-    /// the ratchet-to-ceiling *is* the floor. A program that briefly holds a
-    /// large live set and then drops it does not go back to collecting every
-    /// 64 KiB.
+    /// The difference from a naive `live × k` rule, and the reason no separate
+    /// growth floor is needed: the ratchet-to-ceiling *is* the floor. A program
+    /// that briefly holds a large live set and then drops it does not go back to
+    /// collecting every 64 KiB.
     #[test]
     fn a_shrinking_live_set_does_not_lower_the_threshold_below_the_ceiling() {
         const CEILING: usize = 1 << 20; // 1 MiB
@@ -3002,11 +2948,10 @@ mod tests {
         );
     }
 
-    /// RT-01 restated for the pacer, and the property the whole item is for: a
-    /// program that holds a bounded working set has a bounded heap, whatever
-    /// its total allocation. The doubling arm below is not decoration — it is
-    /// the measurement of what the bound is worth, and it fails the same
-    /// assertion by construction.
+    /// RT-01 restated for the pacer: a program that holds a bounded working set
+    /// has a bounded heap, whatever its total allocation. The doubling arm below
+    /// is not decoration — it is the measurement of what the bound is worth, and
+    /// it fails the same assertion by construction.
     #[test]
     fn a_bounded_heap_stops_growing() {
         const CEILING: usize = 1 << 18; // 256 KiB
@@ -3083,14 +3028,10 @@ mod tests {
         assert_eq!(heap.collect_threshold.get(), INITIAL_COLLECT_THRESHOLD);
     }
 
-    /// The flip ADR-112's Measurements bought, at the ceiling ADR-129 re-measured
-    /// it to. The exact ceiling and factor are pinned here rather than left
-    /// implicit, so a future re-tuning is a visible edit to a test that names the
-    /// numbers, not a silent change to every Praxis program's memory profile.
-    ///
-    /// It has already earned that once: ADR-129 lowered the ceiling 64 MiB → 4
-    /// MiB, and this assertion is what made the change announce itself. The
-    /// factor is unchanged and ADR-129 prices the direction ADR-112 did not.
+    /// The default is the bounded rule, at the measured ceiling and factor
+    /// (ADR-112, ADR-129). Both are pinned here rather than left implicit, so a
+    /// re-tuning is a visible edit to a test that names the numbers, not a
+    /// silent change to every Praxis program's memory profile.
     #[test]
     fn the_default_pacer_is_bounded_at_the_measured_ceiling() {
         assert_eq!(Pacer::from_spec(None), Pacer::DEFAULT);
@@ -3157,8 +3098,8 @@ mod tests {
 
     /// Pacing counts what an object *costs*, not the size of its fixed block.
     /// A `Text` is 48 bytes of block plus a `Box<str>` of whatever the program
-    /// read; charging only the block made a text-heavy program invisible to the
-    /// collector — it under-reported its footprint by essentially all of it
+    /// read; charging only the block would make a text-heavy program invisible
+    /// to the collector, under-reporting its footprint by essentially all of it
     /// (RT-04).
     #[test]
     fn pacing_charges_the_bytes_a_payload_owns() {
@@ -3184,25 +3125,25 @@ mod tests {
         );
 
         // And the consequence that matters: one large Text is enough pressure
-        // to reach the threshold, where before it took thousands of them.
+        // to reach the threshold on its own.
         assert!(
             big.maybe_collect_with(&RootScope::new()),
             "a 64 KiB Text must reach the 64 KiB threshold on its own"
         );
     }
 
-    /// **The pacer is charged the narrower stride, which is the whole of
-    /// ADR-109's memory win.**
+    /// **The pacer is charged the stride, which is what turns a narrower block
+    /// into a smaller resident set (ADR-109).**
     ///
-    /// Deleting `GcHeader::size` saves eight bytes per object in the heap, but
-    /// that saving only turns into a smaller resident set because
-    /// [`Heap::occupy`] charges the *stride* against `bytes_since_collect`. A
-    /// 24-byte `Int` is 25% fewer bytes charged than the 32-byte one it
-    /// replaces, so an `Int`-dominated program reaches `collect_threshold` after
-    /// a third more allocations and takes one fewer doubling to hold the same
-    /// live set. If pacing ever moved to counting *objects*, or to charging the
-    /// payload rather than the block, the header shrink would go on being true
-    /// and stop paying — and nothing else in the suite would notice.
+    /// A header that records no size saves eight bytes per object in the heap,
+    /// but that saving only turns into a smaller resident set because
+    /// [`Heap::occupy`] charges the *stride* against `bytes_since_collect`: a
+    /// 24-byte `Int` is 25% fewer bytes charged than a 32-byte one, so an
+    /// `Int`-dominated program reaches `collect_threshold` after a third more
+    /// allocations and takes one fewer doubling to hold the same live set. If
+    /// pacing ever moved to counting *objects*, or to charging the payload
+    /// rather than the block, the narrow header would go on being true and stop
+    /// paying — and nothing else in the suite would notice.
     ///
     /// So this asserts the product, not the factors: N `Int`s cost N × 24, and
     /// the 24 is written out rather than re-derived from `SizeClass`, for the
@@ -3290,10 +3231,10 @@ mod tests {
         );
     }
 
-    /// The reason the free list became a pool of pages rather than a pool of
-    /// blocks: a bucket keyed by layout is dead capital for every other layout,
-    /// so a program that fills a heap with one shape and then another paid for
-    /// both. An emptied page is re-classed, so it does not.
+    /// The reason the pool holds pages rather than blocks: a bucket keyed by
+    /// layout is dead capital for every other layout, so a program that fills a
+    /// heap with one shape and then another would pay for both. An emptied page
+    /// is re-classed, so it does not.
     #[test]
     fn an_emptied_page_is_reused_for_another_size_class() {
         use crate::text::{TextPayload, TEXT};
@@ -3324,8 +3265,7 @@ mod tests {
     }
 
     /// An immortal is on a page sweep does not walk, so it is never finalized,
-    /// never counted, and never handed back out — the three things the old
-    /// "allocate then un-register" trick bought, now bought by a flag.
+    /// never counted, and never handed back out.
     #[test]
     fn an_immortal_is_invisible_to_sweep_and_to_finalize_all() {
         let drops = Arc::new(AtomicUsize::new(0));
@@ -3506,8 +3446,8 @@ mod tests {
     /// naming a survivor alone.
     ///
     /// Nulling everything would satisfy "no dangling reference" and destroy the
-    /// debugger; retaining everything would satisfy the debugger and undo
-    /// MIR-01. This is the statement that it does neither.
+    /// debugger; retaining everything would satisfy the debugger and make the
+    /// debug slots strong roots. This is the statement that it does neither.
     #[test]
     fn the_weak_scan_nulls_only_what_this_collection_reclaimed() {
         let heap = Heap::new();
@@ -3634,8 +3574,7 @@ mod tests {
 
     /// The large path is not decoration: an over-aligned block must be
     /// reclaimed and reissued like any other, and must still land at its
-    /// alignment. Nothing tested that before §3.1 — the free list only ever saw
-    /// 8-aligned blocks in the suite.
+    /// alignment.
     #[test]
     fn an_overaligned_block_round_trips_through_its_own_page() {
         let heap = Heap::new();
@@ -3663,23 +3602,16 @@ mod tests {
 
     /// One half of the pair `a_swept_block_is_never_handed_to_a_request_of_another_alignment`
     /// needs: a payload that agrees with [`Aligned16`]'s in width and differs
-    /// from it in alignment. **The two widths are deliberately identical, and
-    /// they did not used to be.**
+    /// from it in alignment. **The two widths are deliberately identical.**
     ///
     /// The test asserts equal block sizes as its own precondition, and whether
-    /// that holds is a fact about the *header*, not about these structs. While
-    /// `GcHeader` was 24 bytes, `payload_offset_for(16)` padded an over-aligned
-    /// payload forward to 32, so the pair reached 48 bytes only by cancellation
-    /// — 24 + 24 against 32 + 16, two different payload widths landing on one
-    /// block size. ADR-109 took the header to 16, which is itself a multiple of
-    /// 16, so the padding disappeared and the cancellation with it: the fixtures
-    /// fell to 40 and 32 and the test died on its precondition rather than on
-    /// the property it exists to check.
-    ///
-    /// Giving both the same 32-byte payload makes the parity structural instead
-    /// of coincidental — it now holds for any header whose size is a multiple of
-    /// 16, rather than for one particular header size — and leaves the block at
-    /// the 48 bytes this test has always talked about.
+    /// that holds is a fact about the *header*, not about these structs: a
+    /// header whose size is not a multiple of 16 makes `payload_offset_for(16)`
+    /// pad an over-aligned payload forward, so two different payload widths
+    /// would reach one block size only by cancellation. Giving both the same
+    /// 32-byte payload makes the parity structural rather than coincidental — it
+    /// holds for any header whose size is a multiple of 16 — and leaves the
+    /// block at the 48 bytes this test talks about.
     #[repr(C)]
     struct Aligned8([u64; 4]);
 
@@ -3717,7 +3649,7 @@ mod tests {
     /// The first assertion is a precondition, not the property. If it is what
     /// fails, the fixtures have stopped sharing a block size and nothing about
     /// alignment reuse has regressed — read [`Aligned8`]'s doc, which explains
-    /// what the shared size depends on and what moved it last time.
+    /// what the shared size depends on.
     #[test]
     fn a_swept_block_is_never_handed_to_a_request_of_another_alignment() {
         let (_, eight) = BlockLayout::of(&ALIGNED_8);

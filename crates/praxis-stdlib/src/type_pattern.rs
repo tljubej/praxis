@@ -1,29 +1,27 @@
 //! Schema-level type patterns used to describe receivers, parameters, and
 //! results in the method catalog (§16.2).
 //!
-//! This is **not** the inference type system — that lives in `praxis-types`
-//! (Milestone 2). `TypePattern` is a small, self-describing shape language that
-//! is enough to populate the catalog at Milestone 0 and to be unified with the
-//! real type representation later. Keeping it separate avoids a dependency from
-//! `praxis-stdlib` onto `praxis-types` before the type system exists.
+//! This is **not** the inference type system — that lives in `praxis-types`.
+//! `TypePattern` is a small, self-describing shape language, enough to populate
+//! the catalog and to be unified with the real type representation. Keeping it
+//! separate is what keeps `praxis-stdlib` from depending on `praxis-types`.
 
 use std::fmt;
 
-/// What a catalog type variable is required to be (TY-31).
+/// What a catalog type variable is required to be.
 ///
-/// Having no way to state this at all is how `sum` came to accept `Vec[Bool]`
-/// *and* `Vec[Float]` — the first a nonsense addition of booleans, the second a
+/// Without a way to state this, `sum` would accept `Vec[Bool]` *and*
+/// `Vec[Float]` — the first a nonsense addition of booleans, the second a
 /// silent reinterpretation of float bits as an integer.
 ///
 /// # Why the scalar shape is not a capability, and why the other one is
 ///
-/// The plan expected these bounds to be [`CapKind`](crate::CapKind)s, and the
-/// finding is worded that way ("numeric/orderable element types"). Writing them
-/// found the opposite: `sum`, `product`, `min` and `max` each lower to an
-/// `ExtractScalar` at `ScalarKind::Int` followed by an `IntBinOp` or an `IntCmp`,
-/// so `Numeric` — which is `Int`, `UInt`, `Byte` *and* `Float` — would bless
-/// `Vec[Float].sum()` and return the float's bits added as an integer. A
-/// capability is the wrong *width* for an Int-only lowering.
+/// `sum`, `product`, `min` and `max` each lower to an `ExtractScalar` at
+/// `ScalarKind::Int` followed by an `IntBinOp` or an `IntCmp`, so
+/// [`CapKind`](crate::CapKind)`::Numeric` — which is `Int`, `UInt`, `Byte`
+/// *and* `Float` — would bless `Vec[Float].sum()` and return the float's bits
+/// added as an integer. A capability is the wrong *width* for an Int-only
+/// lowering.
 ///
 /// The capabilities the catalog would otherwise want are already enforced from
 /// the receiver's **type** rather than per row, which is stronger: a `Map` key
@@ -31,14 +29,13 @@ use std::fmt;
 /// built, not only when a particular method is called
 /// (`Inferer::require_collection_invariants`, ADR-057 Decision 3).
 ///
-/// So the scalar arm is not a capability. The **second** arm is, and it was
-/// added when the first row appeared that needed one: `sorted` orders its
-/// elements through the element descriptor's `compare` callback, and a `Vec[T]`
-/// whose `T` is a function value has none. That is `CapKind::Ord`, it is a fact
-/// about the row rather than about the receiver's *type* — a `Vec` is a
-/// perfectly good `Vec` of unorderable things right up until someone sorts it —
-/// so `require_collection_invariants` is the wrong door for it and the row has
-/// to say it itself.
+/// So the scalar arm is not a capability. The **second** arm is: `sorted`
+/// orders its elements through the element descriptor's `compare` callback, and
+/// a `Vec[T]` whose `T` is a function value has none. That is `CapKind::Ord`,
+/// and it is a fact about the row rather than about the receiver's *type* — a
+/// `Vec` is a perfectly good `Vec` of unorderable things right up until someone
+/// sorts it — so `require_collection_invariants` is the wrong door for it and
+/// the row has to say it itself.
 ///
 /// The match on this enum in `praxis_hir`'s `apply_bounds` is exhaustive, so a
 /// third arm is a compile error to add halfway rather than a silent omission.
@@ -61,13 +58,12 @@ pub enum Bound {
 ///
 /// # There is no placeholder arm
 ///
-/// There used to be an `Opaque` one, for rows added before their shape was
-/// worked out, and its doc promised the type checker would reject it if it was
-/// still present at use time. Nothing rejected it: `pattern_to_type`
-/// instantiated it as a fresh inference variable, which unifies with
-/// *anything* — the opposite of the promise. No row ever wrote one; every row
-/// writes a concrete pattern. If a placeholder is wanted again it has to arrive
-/// together with the rejection, not ahead of it.
+/// Every row writes a concrete pattern. A placeholder for rows whose shape is
+/// not worked out yet would have to arrive *together with* the rejection that
+/// makes it safe: the only thing `pattern_to_type` could instantiate one as is a
+/// fresh inference variable, which unifies with anything, so "the type checker
+/// rejects it if it is still present at use time" is a promise nothing keeps by
+/// default.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TypePattern {
     /// A specific scalar type, e.g. `Int`.
@@ -84,9 +80,9 @@ pub enum TypePattern {
     /// entry refer to the same type; that equality is what the type checker
     /// enforces at a call site.
     ///
-    /// `bound` is what the variable must satisfy (TY-31). It is a fact about the
-    /// *variable*, not about the position it is written in, so an entry declares
-    /// it once — at whichever occurrence reads best — and
+    /// `bound` is what the variable must satisfy. It is a fact about the
+    /// *variable*, not about the position it is written in, so an entry
+    /// declares it once — at whichever occurrence reads best — and
     /// [`MethodEntry::bounds`](crate::MethodEntry::bounds) finds it wherever it
     /// is. Declaring two different bounds for one name in one entry is a catalog
     /// authoring mistake and [`MethodCatalog::build`](crate::MethodCatalog::build)
@@ -114,9 +110,9 @@ pub enum TypePattern {
     /// the single canonical def every `Option[T]` in a program shares.
     ///
     /// §4.7: "Option[T] represents normal domain-level absence. It is not an
-    /// error channel." `Map.get` and `Grid.find` are what needed it — their
-    /// rows said `V` and `(Int, Int)` while their wrappers answered the Unit
-    /// sentinel on a miss (RT-14, RT-15).
+    /// error channel." `Map.get` and `Grid.find` are the rows that need it: a
+    /// miss is an absent value, not a `V` or an `(Int, Int)` standing in for
+    /// one.
     Option(Box<TypePattern>),
     /// A receiver the pipeline walks: any of the ten iterables named by
     /// [`is_pipeline_receiver`], binding what it yields to `item` (ADR-127).
@@ -152,9 +148,9 @@ pub enum TypePattern {
 /// receiver in this list*, so a future `Grid[T].map/1` is allowed and a
 /// `Set[T].map/1` is a build failure.
 ///
-/// **`Seq[T]` is excluded because it has no values.** `praxis-repr` already says
-/// a `Seq` has no runtime representation; since ADR-127 nothing produces one and
-/// nothing consumes one.
+/// **`Seq[T]` is excluded because it has no values.** `praxis-repr` says a `Seq`
+/// has no runtime representation, and nothing produces or consumes one
+/// (ADR-127).
 ///
 /// `Text` is the tenth receiver and is not here, because it is not a collection:
 /// it is the one *scalar* with members (§4.13). [`is_pipeline_receiver`] is the
@@ -195,12 +191,11 @@ pub fn is_pipeline_receiver(concrete: &TypePattern) -> bool {
 /// [`TypePattern::Iterable`] receiver matches any of the ten
 /// [`PIPELINE_RECEIVERS`]. All other variants require exact equality.
 ///
-/// **This lives here because it was written twice.**
+/// **This lives here because two callers ask the same question.**
 /// `praxis_hir::catalog::lookup` decides dispatch and
-/// `praxis_lsp::completion::dot_items` decides what `set.` offers, and the LSP's
-/// own comment said it was "the same rule … restated". If the two disagree the
-/// editor offers a method the compiler refuses; one function is what makes that
-/// unrepresentable rather than merely unlikely.
+/// `praxis_lsp::completion::dot_items` decides what `set.` offers. If the two
+/// disagree the editor offers a method the compiler refuses; one function is
+/// what makes that unrepresentable rather than merely unlikely.
 #[must_use]
 pub fn pattern_matches(catalog_pat: &TypePattern, concrete_pat: &TypePattern) -> bool {
     match (catalog_pat, concrete_pat) {
@@ -241,7 +236,7 @@ impl TypePattern {
         TypePattern::Var { name, bound: None }
     }
 
-    /// A type variable that must satisfy `bound` (TY-31).
+    /// A type variable that must satisfy `bound`.
     #[must_use]
     pub const fn bounded(name: &'static str, bound: Bound) -> TypePattern {
         TypePattern::Var {
@@ -306,9 +301,9 @@ impl TypePattern {
     }
 }
 
-/// Built-in scalar types (§4.3). The full set is reserved here even though the
-/// first implementation may omit `UInt` and `Float` until the integer pipeline
-/// is stable (§4.3) — their names must not be reused for anything else.
+/// Built-in scalar types (§4.3). The full set is named here even though `UInt`
+/// has no runtime object of its own (§7.4: its type is `Int`) — these names
+/// must not be reused for anything else.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ScalarType {
     Bool,
@@ -323,13 +318,11 @@ pub enum ScalarType {
 /// Built-in collection constructors (§6.1). `Range` and `BitSet` take no type
 /// arguments; the others take one (`Vec`, `Set`, ...) or two (`Map`).
 ///
-/// **`Seq` has no rows and no values.** It was the compiler-internal pipeline
-/// source (M8 WS8, §6.3), threading an element type through what was meant to
-/// become a lazy chain; the pipeline is eager (ADR-028 decision 2), so no row
-/// ever answered one and the twenty-three `Seq`-receiver rows were dead.
-/// ADR-127's generic receiver deleted them. Nothing produces a `Seq`, nothing
-/// consumes one, and retiring the constructor itself is a mechanical follow-up
-/// rather than a decision.
+/// **`Seq` has no rows and no values.** It is the compiler-internal pipeline
+/// source (§6.3), threading an element type through what a lazy chain would
+/// need; the pipeline is eager (ADR-028 decision 2), so no row answers one.
+/// Nothing produces a `Seq`, nothing consumes one, and retiring the constructor
+/// itself is a mechanical follow-up rather than a decision.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum CollectionCtor {
     Vec,
@@ -342,7 +335,7 @@ pub enum CollectionCtor {
     BitSet,
     Grid,
     Range,
-    /// Compiler-internal lazy sequence (M8 WS8, §6.3). Never appears in source.
+    /// Compiler-internal lazy sequence (§6.3). Never appears in source.
     Seq,
 }
 

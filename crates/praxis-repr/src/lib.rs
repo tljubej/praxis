@@ -1,18 +1,12 @@
 //! The total, bidirectional bridge between a static [`Type`] and its runtime
-//! [`TypeDescriptor`] (foundation F11; closes P0-11).
+//! [`TypeDescriptor`] (foundation F11).
 //!
 //! # Why one module
 //!
-//! The two directions used to be written independently and were not inverses.
-//! Codegen sent `Float`, `Unit`, `Record` and `Enum` to the `INT` descriptor
-//! through a `_ => INT` fallback, so a `Float` field in a record schema
-//! dispatched `Int`'s equality callback against an `f64` payload. Meanwhile the
-//! debugger reconstructed every `Vec[T]` as `Vec[Int]` and every `Map` as
-//! `Map[Int, Int]`. Each was locally plausible; together they made ADR-035's
-//! round-trip claim false.
-//!
-//! Colocating them makes the round-trip a test
-//! ([`tests::every_builtin_value_round_trips`]) instead of a hope, and the
+//! The two directions have to be inverses — ADR-035's round-trip claim is
+//! exactly that — and two independently written halves are each locally
+//! plausible while failing to compose. Colocating them makes the round-trip a
+//! test ([`tests::every_builtin_value_round_trips`]) instead of a hope, and the
 //! matches on both sides are exhaustive — a new [`BuiltinTypeId`], a new
 //! `ScalarType`, or a new `CollectionCtor` is a compile error here.
 //!
@@ -23,8 +17,7 @@
 //! unresolved type variable — yields [`NoRuntimeRepr`] rather than a descriptor
 //! that names a different type. Each of those is an upstream compiler bug at a
 //! descriptor-producing site, and the JIT refusing to emit is how it becomes
-//! visible instead of becoming a wrong payload read at runtime (design decision
-//! D9).
+//! visible instead of becoming a wrong payload read at runtime (ADR-042).
 
 use praxis_runtime::descriptor::{BuiltinTypeId, TypeDescriptor};
 use praxis_runtime::repr::{instance_repr, InstanceArg, InstanceRepr};
@@ -40,14 +33,13 @@ pub enum NoReprCause {
     /// No object of this type can exist, so no descriptor can describe one:
     /// `Never`, `UInt`, `Range`, `Seq`, and every non-built-in descriptor on the
     /// inverse side. Reaching one at a descriptor-producing site is a bug in the
-    /// caller, and the JIT refuses to emit (design decision D9).
+    /// caller, and the JIT refuses to emit (ADR-042).
     NoSuchObject,
     /// Inference did not finish here: the type is still a variable. The MIR
     /// *should* have spelled this `MirType::Opaque` and cannot, because per-use
-    /// inferred types are not threaded into HIR yet (HIR-01/MONO-01, S15). A
-    /// caller for which "unknown" is representable — a collection's element
-    /// descriptor — may treat this as `Opaque`; one for which it is not must
-    /// still refuse. See hazard H10.
+    /// inferred types are not threaded into HIR. A caller for which "unknown"
+    /// is representable — a collection's element descriptor — may treat this as
+    /// `Opaque`; one for which it is not must still refuse. See hazard H10.
     Unresolved,
 }
 
@@ -176,9 +168,10 @@ fn builtin_for_type(db: &TypeDb, ty: Type) -> Result<BuiltinTypeId, NoRuntimeRep
             )),
         },
         // An unresolved variable at a descriptor-producing site means inference
-        // did not finish. Emitting *some* descriptor here is what P0-11 was —
-        // but the caller decides, because "unknown element type" is a thing a
-        // collection payload can actually hold and a record schema cannot.
+        // did not finish. Emitting *some* descriptor here would name a type the
+        // value does not have; the caller decides instead, because "unknown
+        // element type" is a thing a collection payload can actually hold and a
+        // record schema cannot.
         TypeData::Var(_) => Err(NoRuntimeRepr::unresolved(resolved)),
     }
 }
@@ -263,8 +256,8 @@ unsafe fn type_for_arg(arg: InstanceArg, db: &mut TypeDb) -> Result<Type, NoRunt
 /// The type a descriptor names on its own, with no value to consult.
 ///
 /// Exact for scalars and `Unit`; `Err` for every parameterized descriptor,
-/// because one `VEC` describes every `Vec[T]` and guessing `Int` is exactly
-/// DBG-02.
+/// because one `VEC` describes every `Vec[T]` and guessing `Int` would be a
+/// wrong answer rather than a missing one.
 pub fn type_for_descriptor(
     descriptor: &'static TypeDescriptor,
     db: &mut TypeDb,
@@ -329,10 +322,9 @@ fn compose(
         BuiltinTypeId::Counter => CollectionCtor::Counter,
         BuiltinTypeId::MinHeap => CollectionCtor::MinHeap,
         BuiltinTypeId::MaxHeap => CollectionCtor::MaxHeap,
-        // A tuple's arguments are its elements, not a collection's.
         // A tuple's arguments are its elements, not a collection's. Fewer than
-        // two is the backend's degenerate empty-schema tuple (MIR-05), which is
-        // not a tuple type — say so rather than interning one (F5).
+        // two is the backend's degenerate empty-schema tuple, which is not a
+        // tuple type — say so rather than interning one (F5).
         BuiltinTypeId::Tuple => {
             let elems = TupleElems::new(args).map_err(|_| {
                 NoRuntimeRepr::value("a tuple payload with fewer than two elements names no type")

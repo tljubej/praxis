@@ -1,5 +1,5 @@
 //! Exhaustiveness and reachability for `match` expressions (§4.6), as a
-//! **usefulness matrix** (HIR-06).
+//! **usefulness matrix**.
 //!
 //! A `match` must cover every value of its scrutinee type; a match that does
 //! not is `Y120`, and an arm an earlier arm already covers is `Y121`.
@@ -7,16 +7,15 @@
 //! # Why a matrix
 //!
 //! Both questions are one question — *is this pattern useful against the ones
-//! above it?* — and the two ad-hoc walks this replaces could each only ask a
-//! flattened version of it:
+//! above it?* — and answering it takes the whole pattern, not a flattened view
+//! of its head:
 //!
-//! - `uncovered_constructors` compared the set of **top-level** variant indices
-//!   an arm named against the enum's variants, so `match w { Wrap(On) => 1 }`
-//!   over `enum Wrapped { Wrap(Flag) }` was "exhaustive": `Wrap` is covered, and
-//!   nothing looked at whether the payload's `Off` was.
-//! - the `pattern_catches_all` scan reported an arm unreachable only when an
-//!   *earlier* arm was a bare `_` or a bind, so a repeated constructor —
-//!   `match e { A => 1, A => 2, B => 3 }` — was silently dead code.
+//! - a check that compared only **top-level** variant indices would call
+//!   `match w { Wrap(On) => 1 }` over `enum Wrapped { Wrap(Flag) }` exhaustive:
+//!   `Wrap` is covered, and nothing looks at whether the payload's `Off` is.
+//! - a scan that reported an arm unreachable only when an *earlier* arm was a
+//!   bare `_` or a bind would let a repeated constructor —
+//!   `match e { A => 1, A => 2, B => 3 }` — through as silent dead code.
 //!
 //! # The algorithm
 //!
@@ -36,22 +35,11 @@
 //!
 //! Exhaustiveness is then "is `_` still useful against every arm?", and arm `i`
 //! is unreachable when its own pattern is not useful against arms `0..i`. Both
-//! recurse into payloads, which is the whole of HIR-06.
+//! recurse into payloads.
 //!
 //! Termination: the wildcard-complete case only fires when every constructor
 //! appears *literally* in the first column, so it can recurse no deeper than
 //! real constructor patterns nest in the source.
-//!
-//! # `Char` cost this pass nothing
-//!
-//! The character literal (ADR-141) arrived without a line of change here, which
-//! is the one thing worth recording about it: [`LitKey::Char`] already keyed a
-//! `Char` pattern, [`signature`] already falls it through to [`Signature::Open`]
-//! like every other scalar nobody can enumerate — so a `match` over a `Char` is
-//! never exhaustive without a `_` — and [`LitKey::render`] already printed a
-//! witness as `'x'`, which is now the spelling the reader can paste back into
-//! the program. `coverage_tests`' three `Char` tests exist to hold that, since
-//! there is no code here for a regression to break.
 
 use praxis_ast::AstNode;
 use praxis_source::{Diagnostic, FileId, FileSpan, Span};
@@ -72,11 +60,8 @@ static WILDCARD: TypedPattern = TypedPattern::Wildcard;
 const MAX_WITNESSES: usize = 3;
 
 /// A zero-length span at position 0 — the last-resort fallback when a caller
-/// supplies no span at all.
-///
-/// It used to be where *every* `Y120` pointed: a non-exhaustive match was
-/// reported at byte 0 of the file, which for a program with two matches names
-/// neither of them (HIR-07). `check` takes the match's own span now.
+/// supplies no span at all. Every real report carries the match's own span,
+/// because byte 0 of a file with two matches names neither of them.
 fn zero_span(file: FileId) -> FileSpan {
     FileSpan::new(
         file,
@@ -89,10 +74,10 @@ fn zero_span(file: FileId) -> FileSpan {
 
 /// Check **every** `match` in the file, at the end of analysis (ADR-130).
 ///
-/// This is where `Y120`/`Y121` are decided. It used to be lowering, which meant
-/// coverage was asked only where MIR was being built: `praxis check` was silent
-/// on a non-exhaustive match and `praxis run` reported one, and §15.2's
-/// "exhaustiveness errors" never reached an editor at all.
+/// This is where `Y120`/`Y121` are decided — in analysis rather than in
+/// lowering, so that §15.2's "exhaustiveness errors" reach `praxis check` and
+/// the editor and not only `praxis run`, which is the only caller that builds
+/// MIR.
 ///
 /// It runs *after* inference rather than inside it because a scrutinee's type is
 /// not final until the whole file has been inferred — `match e { … }` on an
@@ -105,13 +90,12 @@ fn zero_span(file: FileId) -> FileSpan {
 /// inference has already said at the same caret, which
 /// [`crate::pattern::merge_pattern_diagnostics`] is what decides.
 ///
-/// They used to be discarded, on the theory that inference had already walked
-/// these patterns and reported the shape mistakes. Two of the four codes are
-/// nobody else's: inference never decodes an integer literal and never counts a
-/// payload, so a `Y013` or a `Y124` inside a match arm was reachable only from
-/// lowering — and lowering is the pass `praxis check` and the editor do not run.
-/// `match bla { A(i, j) => … }` therefore checked clean in the editor and
-/// refused to run, which is exactly the divergence ADR-130 exists to close.
+/// Keeping them matters because two of the four codes are nobody else's:
+/// inference never decodes an integer literal and never counts a payload, so a
+/// `Y013` or a `Y124` inside a match arm is reachable only from a pattern build
+/// — and lowering, the other builder, is a pass `praxis check` and the editor do
+/// not run. Without this, `match bla { A(i, j) => … }` would check clean in the
+/// editor and refuse to run, which is the divergence ADR-130 exists to close.
 pub(crate) fn check_matches(
     file: FileId,
     root: &praxis_ast::SourceFile,
@@ -154,7 +138,7 @@ pub(crate) fn check_matches(
             arm_spans.push(file_span(file, arm.syntax().text_range()));
             // The **body** is not built: coverage is a question about patterns,
             // and lowering an arm's body here would be a second lowering of
-            // every expression in the file. `TypedExpr::Unit` stands in for it.
+            // every expression in the file. A `Lit::Unit` stands in for it.
             arms.push(TypedMatchArm {
                 pattern,
                 body: crate::lower::TypedExpr::Lit {
@@ -303,8 +287,8 @@ pub(crate) fn check(
     // --- Unreachable arms -------------------------------------------------
     // Arm `i` is reachable iff its pattern matches some value the arms above it
     // do not. An arm after a catch-all is the easy case; a repeated constructor
-    // and a payload an earlier arm already covered are the ones the old scan
-    // could not see.
+    // and a payload an earlier arm already covered are the ones only the matrix
+    // can see.
     let mut matrix: Vec<Row<'_>> = Vec::with_capacity(arms.len());
     for (i, arm) in arms.iter().enumerate() {
         let q = [&arm.pattern];
@@ -400,12 +384,12 @@ enum Ctor {
     Variant { def: EnumDefId, idx: u32 },
     /// A literal value.
     Lit(LitKey),
-    /// A tuple (REP-10). One constructor for the whole type, so a column of
-    /// tuples is `Closed` on it: `match p { (x, y) => … }` needs no `_`, and
-    /// what is left uncovered is a question about the *elements*.
+    /// A tuple. One constructor for the whole type, so a column of tuples is
+    /// `Closed` on it: `match p { (x, y) => … }` needs no `_`, and what is left
+    /// uncovered is a question about the *elements*.
     Tuple,
-    /// A record of definition `def` (REP-10) — one constructor, for the same
-    /// reason a tuple has one. The def is part of the identity for the reason a
+    /// A record of definition `def` — one constructor, for the same reason a
+    /// tuple has one. The def is part of the identity for the reason a
     /// variant's is.
     Record { def: RecordDefId },
 }
@@ -481,9 +465,8 @@ fn signature(db: &TypeDb, ty: Type) -> Signature {
             Ctor::Lit(LitKey::Bool(false)),
             Ctor::Lit(LitKey::Bool(true)),
         ]),
-        // One constructor each (REP-10), which is what makes
-        // `match p { P { x, y } => … }` exhaustive where it used to need a `_`.
-        // Both were `Open` only because no pattern could name them.
+        // One constructor each, which is what makes `match p { P { x, y } => … }`
+        // exhaustive without a `_`.
         TypeData::Tuple(_) => Signature::Closed(vec![Ctor::Tuple]),
         TypeData::Record { def, .. } => Signature::Closed(vec![Ctor::Record { def: *def }]),
         _ => Signature::Open,
@@ -604,10 +587,10 @@ enum Witness {
         fields: Vec<Witness>,
     },
     Lit(LitKey),
-    /// `(_, _)` — a tuple whose elements are the uncovered shapes (REP-10).
+    /// `(_, _)` — a tuple whose elements are the uncovered shapes.
     Tuple(Vec<Witness>),
     /// `P { x: _, y: _ }` — a record, rendered with its own field names, which
-    /// is why the def travels with it (REP-10).
+    /// is why the def travels with it.
     Record {
         def: RecordDefId,
         fields: Vec<Witness>,
@@ -920,9 +903,8 @@ mod tests {
         );
     }
 
-    /// **HIR-06's first half at the unit level.** The old walk compared
-    /// top-level variant indices only, so a covered constructor's *payload*
-    /// was never asked about.
+    /// A covered constructor's *payload* is asked about too: a check that
+    /// compared top-level variant indices only would stop one level short.
     #[test]
     fn a_covered_constructor_with_an_uncovered_payload_is_not_exhaustive() {
         let mut db = TypeDb::new();
@@ -931,8 +913,8 @@ mod tests {
         let wrapped = wrapped_enum(&mut db, flag);
         let wrapped_def = enum_def_of(&db, wrapped);
 
-        // `match w { Wrap(On) => … }` — `Wrap` is the only variant, so the old
-        // top-level check called this exhaustive.
+        // `match w { Wrap(On) => … }` — `Wrap` is the only variant, so a
+        // top-level check would call this exhaustive.
         let arms = vec![arm(
             variant(
                 wrapped_def,
@@ -976,8 +958,8 @@ mod tests {
         assert_eq!(y121, 0, "neither arm subsumes the other");
     }
 
-    /// **HIR-06's second half at the unit level.** Unreachability used to mean
-    /// "after a catch-all" and nothing else.
+    /// Unreachability is more than "after a catch-all": a second arm naming a
+    /// constructor the first already named adds no coverage.
     #[test]
     fn a_repeated_constructor_adds_no_coverage() {
         let mut db = TypeDb::new();
@@ -1018,9 +1000,9 @@ mod tests {
     }
 
     /// A payload sub-pattern that binds covers the whole payload, so an arm
-    /// naming one of its constructors afterwards is dead. This is the case a
-    /// top-level scan reports backwards: `Wrap(x)` and `Wrap(On)` are two
-    /// distinct arms naming one variant.
+    /// naming one of its constructors afterwards is dead. A top-level scan
+    /// would report this backwards: `Wrap(x)` and `Wrap(On)` are two distinct
+    /// arms naming one variant.
     #[test]
     fn a_binding_payload_covers_every_constructor_under_it() {
         let mut db = TypeDb::new();
@@ -1084,8 +1066,8 @@ mod tests {
         db.enum_(Some("Flag".into()), variants)
     }
 
-    /// `enum Wrapped { Wrap(Flag) }` — one variant, so a top-level check calls
-    /// every match on it exhaustive.
+    /// `enum Wrapped { Wrap(Flag) }` — one variant, so a top-level check would
+    /// call every match on it exhaustive.
     fn wrapped_enum(db: &mut TypeDb, flag: Type) -> Type {
         let variants = praxis_types::VariantSet::from_pairs(vec![("Wrap".into(), vec![flag])])
             .expect("distinct variant names");
@@ -1117,9 +1099,9 @@ mod tests {
 
     /// Build a trivial arm with the given pattern (body is an Int-0 lit).
     ///
-    /// `body_ty` used to be a forged `Type(0)`, which named whatever sat in
-    /// slot zero of whichever arena the test built. F5 seals the handle, so the
-    /// caller passes a real one.
+    /// `body_ty` is a real handle the caller supplies: F5 seals `Type`, and a
+    /// forged `Type(0)` would name whatever sat in slot zero of whichever arena
+    /// the test built.
     fn arm(pattern: TypedPattern, body_ty: Type) -> TypedMatchArm {
         TypedMatchArm {
             pattern,

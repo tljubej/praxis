@@ -1,6 +1,6 @@
 //! MIR liveness: compute, per GC safepoint, the minimal set of live `Gc` locals
 //! the shadow-stack frame must root (§12.3, ADR-016), *and*, separately, the
-//! set the crash debugger must be able to render (MIR-16, ADR-021/-035).
+//! set the crash debugger must be able to render (ADR-021/-035).
 //!
 //! A local is *live* at a program point if its current value may be read before
 //! it is next overwritten. Only [`LocalKind::Gc`] locals matter for rooting —
@@ -14,28 +14,27 @@
 //!    transfer. The root set at an instruction is
 //!    `((live_out \ defs) ∪ uses) ∩ gc_locals`: the destination is written
 //!    *after* the collection so it is not rooted, and the operands are handed to
-//!    the allocating call so they must be. This is exact, which is the point:
-//!    the old pass walked *forward* and only ever inserted definitions, so a
-//!    root set could never shrink within a block and a value stayed rooted long
-//!    past its last use (MIR-02).
+//!    the allocating call so they must be. This is exact, which is the point: a
+//!    forward walk that only ever inserted definitions could never shrink a root
+//!    set within a block, and a value would stay rooted long past its last use.
 //! 3. **Dead slots** ([`RootSlots::dead`]) — a forward *may* dataflow over
 //!    "which shadow slots might still hold a value". A slot written at one
-//!    safepoint and not live at the next was never cleared, so it kept its
-//!    object reachable forever (MIR-01). Nulling `dirty \ roots` at each
-//!    safepoint is the minimal repair: the frame starts all-null, only a
+//!    safepoint and not live at the next would otherwise never be cleared and
+//!    would keep its object reachable forever. Nulling `dirty \ roots` at each
+//!    safepoint is the minimal answer: the frame starts all-null, only a
 //!    safepoint writes it, and after a safepoint the dirty set *is* the root
 //!    set.
-//! 4. **Debug slots** ([`DebugSlots`]) — deliberately the old, over-approximate
+//! 4. **Debug slots** ([`DebugSlots`]) — deliberately an over-approximate
 //!    forward walk: `live_in(block) ∪ {defs seen so far}`. The debugger must
 //!    show `a` after `var a = 10` whether or not anything reads it again, so
-//!    this set is what making the *root* set exact must not shrink (H3).
+//!    making the *root* set exact must not shrink this one.
 //!
-//! The fourth is a **contract, not an emission plan** (ADR-104). The backend no
-//! longer writes `DebugSlots::visible()` at each annotated point; it writes each
-//! `Gc` local once, at its definition, which leaves the same value in the same
-//! slot at every point a snapshot can be taken and costs `Σ 1 per def` stores
-//! instead of `Σ_points |visible|`. [`defs`] is public for exactly that, so the
-//! two are driven by one answer to "what does this instruction define".
+//! The fourth is a **contract, not an emission plan** (ADR-104). The backend
+//! does not write `DebugSlots::visible()` at each annotated point; it writes
+//! each `Gc` local once, at its definition, which leaves the same value in the
+//! same slot at every point a snapshot can be taken and costs `Σ 1 per def`
+//! stores instead of `Σ_points |visible|`. [`defs`] is public for exactly that,
+//! so the two are driven by one answer to "what does this instruction define".
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -85,9 +84,9 @@ fn compute_fixpoint(func: &mut Function) -> usize {
             let debug_now: Vec<LocalId> = visible.iter().copied().collect();
             if let Some((roots, debug)) = gc_safepoint_slots(inst) {
                 let live: BTreeSet<LocalId> = roots_at[i].clone();
-                // MIR-01: a slot that may still hold a value but is not a root
-                // here is stale, and stale roots retain objects (and, worse,
-                // can outlive the local's type). Null exactly those.
+                // A slot that may still hold a value but is not a root here is
+                // stale, and stale roots retain objects (and, worse, can
+                // outlive the local's type). Null exactly those.
                 let dead: Vec<LocalId> = dirty.difference(&live).copied().collect();
                 roots.set(live.iter().copied().collect(), dead);
                 debug.set(debug_now);
@@ -243,20 +242,20 @@ fn transfer_term(live: &mut BTreeSet<LocalId>, term: &Terminator) {
 /// Locals defined by an instruction.
 ///
 /// **Public because the backend writes the debugger's view at definitions.**
-/// Since ADR-104 the Cranelift lowering emits one debug store per `Gc`
-/// definition instead of re-writing the whole [`DebugSlots`] set at every
+/// Under ADR-104 the Cranelift lowering emits one debug store per `Gc`
+/// definition rather than re-writing the whole [`DebugSlots`] set at every
 /// safepoint, and it drives those stores from *this* function rather than from
 /// a sixth exhaustive match over [`Inst`]. ADR-044's Consequences fix the count
 /// at five (`ir.rs`, this `defs`, `uses`, `verify.rs`'s `operands`, and
-/// `lower_inst`); a private copy in the backend would have made it six, and the
-/// two would have to agree for the debugger to show what MIR-16 promises.
+/// `lower_inst`); a private copy in the backend would make it six, and the two
+/// would have to agree for the debugger to render what it is promised.
 ///
-/// **The match itself now lives in [`crate::verify::defines`]** (ADR-122),
-/// which answers the sharper question — *the* local, not a list — because the
+/// **The match itself lives in [`crate::verify::defines`]** (ADR-122), which
+/// answers the sharper question — *the* local, not a list — because the
 /// provable-descriptor analysis needs a definition site and a `Vec` of one
 /// element is not one. This wraps it rather than restating it, so the count
-/// stays at five: the backend's iteration order over a definition set is
-/// unchanged, because there was never more than one member.
+/// stays at five; a definition set never has more than one member, so the
+/// backend's iteration order over one is not a question.
 pub fn defs(inst: &Inst) -> Vec<LocalId> {
     crate::verify::defines(inst).into_iter().collect()
 }
@@ -461,8 +460,7 @@ pub(crate) fn term_uses(term: &Terminator) -> Vec<LocalId> {
 /// conservatism is right for `Call` and wrong for a `Pure` primitive the
 /// builder named directly. ADR-118 decision 6 is where a row earns its way out
 /// of `Call` and therefore out of this list; the price of being here is
-/// [`spill_roots`](crate::annot) at every site, which handover 25 §3 measures
-/// at ~17 instructions.
+/// [`spill_roots`](crate::annot) at every site, ~17 instructions.
 ///
 /// [`Inst::ConstGc`] is absent for a stronger reason: it has no slot sets to
 /// annotate at all. It reads a reference the runtime minted at startup out of
@@ -470,7 +468,7 @@ pub(crate) fn term_uses(term: &Terminator) -> Vec<LocalId> {
 /// is not a place control can divert either, so the debugger needs nothing
 /// spilled here. A temp holding an interned literal is still spilled at the next
 /// `CheckFault`, whose `DebugSlots` is over-approximate on purpose and includes
-/// every `Gc` local defined so far in the block (MIR-16, [`crate::annot`]) — and
+/// every `Gc` local defined so far in the block ([`crate::annot`]) — and
 /// the verifier guarantees a `CheckFault` immediately precedes every fault
 /// diversion, so no crash snapshot loses the value.
 fn gc_safepoint_slots(inst: &mut Inst) -> Option<(&mut RootSlots, &mut DebugSlots)> {
@@ -489,8 +487,8 @@ fn gc_safepoint_slots(inst: &mut Inst) -> Option<(&mut RootSlots, &mut DebugSlot
 ///
 /// **It asks [`crate::annot::slot_sets`] rather than restating the list.**
 /// Carrying a [`RootSlots`] is what being a GC safepoint *means*, so this is
-/// definitionally `roots_of(inst).is_some()`. The hand-written `matches!` it
-/// used to be was a third copy of the variant list, which is how the debugger
+/// definitionally `roots_of(inst).is_some()`. A hand-written `matches!` here
+/// would be a third copy of the variant list, which is how the debugger
 /// silently stops seeing a local (ADR-044, ADR-128). [`gc_safepoint_slots`] is
 /// the one copy that must stay: it hands out `&mut` borrows of the sets, which
 /// an accessor returning shared references cannot supply.
@@ -782,13 +780,12 @@ mod tests {
             .expect("allocation slot sets")
     }
 
-    /// MIR-01. Making the root set exact is only half the fix: the *frame* is
-    /// what the collector reads, and a slot written at one safepoint keeps its
-    /// value until something overwrites it. `seed` is spilled at `first`'s
-    /// allocation and dead at `second`'s, so `second` must null it — otherwise
-    /// the object stays reachable for the rest of the call, and (since RT-01
-    /// made swept storage reusable) the slot can end up naming a live object of
-    /// a different type.
+    /// Making the root set exact is only half of it: the *frame* is what the
+    /// collector reads, and a slot written at one safepoint keeps its value
+    /// until something overwrites it. `seed` is spilled at `first`'s allocation
+    /// and dead at `second`'s, so `second` must null it — otherwise the object
+    /// stays reachable for the rest of the call, and, since swept storage is
+    /// reusable, the slot can end up naming a live object of a different type.
     #[test]
     fn a_slot_spilled_at_one_safepoint_is_nulled_once_its_local_dies() {
         let ShrinkingRoots {
@@ -837,10 +834,10 @@ mod tests {
         }
     }
 
-    /// MIR-16, and the reason the split had to land first (H3). The debugger's
-    /// view of a point must not shrink when the *root* set does: `seed` is not
-    /// rooted at `second`'s allocation and is nulled out of the shadow frame
-    /// there, yet `locals` must still render it. Two frames, two sets.
+    /// The debugger's view of a point must not shrink when the *root* set does:
+    /// `seed` is not rooted at `second`'s allocation and is nulled out of the
+    /// shadow frame there, yet `locals` must still render it. Two frames, two
+    /// sets.
     #[test]
     fn the_debug_set_still_shows_what_the_root_set_dropped() {
         let ShrinkingRoots {

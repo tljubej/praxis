@@ -1,4 +1,4 @@
-//! The typed syntax-node wrappers M2 consumes (ADR-009).
+//! The typed syntax-node wrappers over the parse tree (ADR-009).
 //!
 //! Each is a thin newtype over [`SyntaxNode`] with strongly-typed accessors. They
 //! are intentionally minimal: only nodes walked by name resolution or type
@@ -108,7 +108,7 @@ impl FnItem {
 }
 
 ast_node! {
-    /// A `struct Name { field: Type, … }` declaration (M7, §4.5).
+    /// A `struct Name { field: Type, … }` declaration (§4.5).
     StructItem, STRUCT_ITEM
 }
 impl StructItem {
@@ -123,7 +123,7 @@ impl StructItem {
 }
 
 ast_node! {
-    /// An `enum Name { Variant, Variant(Type), … }` declaration (M7, §4.6).
+    /// An `enum Name { Variant, Variant(Type), … }` declaration (§4.6).
     EnumItem, ENUM_ITEM
 }
 impl EnumItem {
@@ -138,7 +138,7 @@ impl EnumItem {
 }
 
 ast_node! {
-    /// One variant of an enum declaration: `Name` or `Name(Type, …)` (M7, §4.6).
+    /// One variant of an enum declaration: `Name` or `Name(Type, …)` (§4.6).
     /// Named `EnumVariantNode` to avoid clashing with the type-system
     /// `EnumVariantDef`.
     EnumVariantNode, ENUM_VARIANT
@@ -164,7 +164,7 @@ impl EnumVariantNode {
 ast_node! {
     /// The `{ field: Type, … }` body of a struct, or the `{ field: expr, … }` body
     /// of a record literal. Reused for both declaration types and record-literal
-    /// expressions (M7).
+    /// expressions.
     FieldList, FIELD_LIST
 }
 impl FieldList {
@@ -176,7 +176,7 @@ impl FieldList {
 
 ast_node! {
     /// A single `name: Type` field (in a struct) or `name: expr` / `name` (pun, in
-    /// a record literal). M7, §4.5.
+    /// a record literal). §4.5.
     Field, FIELD
 }
 impl Field {
@@ -219,10 +219,10 @@ impl Param {
     /// The parameter name, when the parameter *is* one.
     ///
     /// A `fn` parameter is a binder token and answers directly. A **closure**
-    /// parameter is a pattern (REP-29), so a bare-name one answers through that
-    /// pattern — which is what keeps every existing closure lowering, resolution
-    /// and inference path untouched: `|x|` still has a name here, and a
-    /// destructuring one has none and is reached through [`Param::pattern`].
+    /// parameter is a pattern, so a bare-name one answers through that pattern.
+    /// That is what lets closure lowering, resolution and inference go on asking
+    /// a parameter for its name: `|x|` has a name here, and a destructuring one
+    /// has none and is reached through [`Param::pattern`].
     pub fn name(&self) -> Option<SyntaxToken> {
         if let Some(tok) = name_token(&self.syntax) {
             return Some(tok);
@@ -233,21 +233,18 @@ impl Param {
             _ => None,
         }
     }
-    /// The parameter's pattern, for the position that has one (a closure, REP-29).
-    /// A `fn` parameter is a binder token and answers `None`.
+    /// The parameter's pattern, for the position that has one (a closure). A
+    /// `fn` parameter is a binder token and answers `None`.
     pub fn pattern(&self) -> Option<Pattern> {
         child(&self.syntax)
     }
-    /// The `_` this parameter **is**, when it is one (REP-32).
+    /// The `_` this parameter **is**, when it is one.
     ///
     /// A wildcard parameter binds no name — that is ADR-049 D7, and it is why
     /// [`Param::name`] answers `None` for it. It does not follow that there is no
-    /// parameter. `|_, y| y` takes two arguments and returns the second, and a
-    /// pipeline that reads the slot list rather than the type ran off the end of a
-    /// list one short: `|_, b| b` returned the *first* argument, and `fn g(_, b)`
-    /// lowered to a body whose arity disagreed with its own signature and died in
-    /// the Cranelift verifier. So the wildcard is reachable, and the pass that
-    /// needs a slot for it can find one.
+    /// parameter: `|_, y| y` takes two arguments and returns the second. So the
+    /// wildcard is reachable here, and a pass that needs one slot per parameter
+    /// finds one for it rather than reading a slot list one short.
     ///
     /// Both spellings answer here, because the parser writes them differently: a
     /// `fn` parameter's `_` is a bare `UNDERSCORE` token (`expect_binder`), a
@@ -291,11 +288,9 @@ impl ExprStmt {
 /// The parser emits one of three node kinds for an annotation — [`K::TYPE_REF`]
 /// for a name (with or without bracketed arguments), [`K::TUPLE_TYPE`] for
 /// `(T, U)`, [`K::FN_TYPE`] for `(P) -> R` — and this wrapper accepts all
-/// three. It used to accept only `TYPE_REF`, so `fn f(x: (Int, Text))` had *no*
-/// annotation as far as `Param::ty` was concerned, and the same held for `var`,
-/// `var`, return types, struct fields and enum payloads: six positions where a
-/// written type was silently discarded and inference invented a fresh variable
-/// instead (TY-08).
+/// three, so that a written type is seen as one in every annotation position
+/// (`var`, parameters, return types, struct fields, enum payloads) rather than
+/// discarded for inference to reinvent.
 ///
 /// Overriding `cast` is why this one is spelled out rather than declared by
 /// `ast_node!` like every other wrapper.
@@ -349,36 +344,36 @@ pub enum Expr {
     Block(BlockExpr),
     If(IfExpr),
     While(WhileExpr),
-    /// `for name in iter { body }` (M8, §4.11).
+    /// `for name in iter { body }` (§4.11).
     For(ForExpr),
-    /// `loop { body }` (M8, §4.11).
+    /// `loop { body }` (§4.11).
     Loop(LoopExpr),
-    /// `break [expr]` (M8, §4.11).
+    /// `break [expr]` (§4.11).
     Break(BreakExpr),
-    /// `continue` (M8, §4.11).
+    /// `continue` (§4.11).
     Continue(ContinueExpr),
-    /// `return [expr]` (M8, §4.11).
+    /// `return [expr]` (§4.11).
     Return(ReturnExpr),
     Call(CallExpr),
     MethodCall(MethodCallExpr),
     Tuple(TupleExpr),
     /// `[ e1, e2, … ]` — a `Vec` literal (§6.1).
     List(ListExpr),
-    /// `read parser_expression` (§7.1, M6).
+    /// `read parser_expression` (§7.1).
     Read(ReadExpr),
-    /// `parse(text, parser_expression)` (§7.1, M6).
+    /// `parse(text, parser_expression)` (§7.1).
     Parse(ParseExpr),
-    /// `Name { field: expr, … }` record literal (M7, §4.5).
+    /// `Name { field: expr, … }` record literal (§4.5).
     RecordLit(RecordLitExpr),
-    /// `receiver.field` field access (M7, §4.5).
+    /// `receiver.field` field access (§4.5).
     FieldGet(FieldExpr),
-    /// `receiver.0` tuple element access (REP-08, §4.4).
+    /// `receiver.0` tuple element access (§4.4).
     TupleIndex(TupleIndexExpr),
-    /// `receiver[index]` subscript (REP-16, §4.7/§6.2/§6.4).
+    /// `receiver[index]` subscript (§4.7/§6.2/§6.4).
     Index(IndexExpr),
-    /// `match scrutinee { pattern => expr, … }` (M7, §4.6).
+    /// `match scrutinee { pattern => expr, … }` (§4.6).
     Match(MatchExpr),
-    /// `|params| expr` closure (M7, §4.10).
+    /// `|params| expr` closure (§4.10).
     Closure(ClosureExpr),
     /// An unparseable expression the parser wrapped in a `PARSE_ERROR` node.
     Error(SyntaxNode),
@@ -465,7 +460,7 @@ impl Expr {
 }
 
 ast_node! {
-    /// `Name { field: expr, … }` — a record-literal expression (M7, §4.5). The
+    /// `Name { field: expr, … }` — a record-literal expression (§4.5). The
     /// first child is the `PATH_EXPR` naming the struct type; the `FIELD_LIST` holds
     /// the field initializers (explicit `name: expr` or punned `name`).
     RecordLitExpr, RECORD_LIT_EXPR
@@ -482,7 +477,7 @@ impl RecordLitExpr {
 }
 
 ast_node! {
-    /// `receiver.0` — tuple element access (REP-08, §4.4). The first child is the
+    /// `receiver.0` — tuple element access (§4.4). The first child is the
     /// receiver expression; the index is the trailing `IntLit` token.
     ///
     /// Its own node rather than a `FieldExpr` holding an `IntLit`: an element is
@@ -512,7 +507,7 @@ impl TupleIndexExpr {
 }
 
 ast_node! {
-    /// `receiver[index]` — a subscript (REP-16). The first child is the receiver
+    /// `receiver[index]` — a subscript. The first child is the receiver
     /// expression; the `ARG_LIST` holds the indices.
     ///
     /// The index list is a list rather than one expression because §6.4's
@@ -540,7 +535,7 @@ impl IndexExpr {
 
 ast_node! {
     /// `place = expr` / `place += expr` — a reassignment whose target is an
-    /// expression rather than a name (REP-16): `m[key] = v`, `counts[key] += 1`.
+    /// expression rather than a name: `m[key] = v`, `counts[key] += 1`.
     ///
     /// Two expression children, in source order: the target and the value. A bare
     /// `name = expr` is an [`AssignStmt`] instead, whose target is a *token* — which
@@ -555,7 +550,7 @@ impl PlaceAssignStmt {
     /// What this statement does to the place it names.
     ///
     /// A [`PlaceAssignOp`] and not the operator *token*, because `min=`/`max=`
-    /// has no token of its own (REP-21) — it is an `Ident` and an `=` under an
+    /// has no token of its own — it is an `Ident` and an `=` under an
     /// `UPDATE_OP` node. A token accessor would answer `None` for those two and
     /// every caller would read them as a plain store, which is the difference
     /// between "keep the smaller value" and "overwrite it".
@@ -600,7 +595,7 @@ impl PlaceAssignStmt {
     }
 }
 
-/// What a `place op= value` statement does (REP-16, REP-21).
+/// What a `place op= value` statement does.
 ///
 /// Every spelling of the operator, in one enum, so the two that are not a token
 /// cannot be forgotten: `min=` and `max=` are an identifier and an `=` (§6.2),
@@ -640,7 +635,7 @@ impl PlaceAssignOp {
 }
 
 ast_node! {
-    /// `receiver.field` — field access (M7, §4.5). The first child is the receiver
+    /// `receiver.field` — field access (§4.5). The first child is the receiver
     /// expression; the field name is the trailing `Ident` token.
     FieldExpr, FIELD_EXPR
 }
@@ -665,7 +660,7 @@ impl FieldExpr {
 }
 
 ast_node! {
-    /// `match scrutinee { pattern => expr, … }` (M7, §4.6/§4.11).
+    /// `match scrutinee { pattern => expr, … }` (§4.6/§4.11).
     MatchExpr, MATCH_EXPR
 }
 impl MatchExpr {
@@ -681,7 +676,7 @@ impl MatchExpr {
 }
 
 ast_node! {
-    /// One `pattern => expr` arm of a match expression (M7, §4.6).
+    /// One `pattern => expr` arm of a match expression (§4.6).
     MatchArm, MATCH_ARM
 }
 impl MatchArm {
@@ -700,7 +695,7 @@ impl MatchArm {
 }
 
 ast_node! {
-    /// `|params| expr` — a closure expression (M7, §4.10). The params are `PARAM`
+    /// `|params| expr` — a closure expression (§4.10). The params are `PARAM`
     /// children (no `PARAM_LIST` wrapper, since closures use `|…|` not `(…)`). The
     /// body is the trailing expression child. Closures capture outer variables
     /// automatically; the capture analysis lives in HIR.
@@ -722,7 +717,7 @@ impl ClosureExpr {
 }
 
 ast_node! {
-    /// A pattern (M7, §4.6): `_`, literal, variable bind, or enum variant
+    /// A pattern (§4.6): `_`, literal, variable bind, or enum variant
     /// (optionally with sub-patterns).
     Pattern, PATTERN
 }
@@ -735,12 +730,11 @@ impl Pattern {
     /// literal, and `P { x }` names `P` and not `x`.
     ///
     /// A pattern is a *record* pattern because of its brace, not because it has
-    /// fields (ADR-091 Decision 3). Deciding it from the fields instead was two
-    /// silent catch-alls at once: `P {}` had no `PATTERN_FIELD` child, so it fell
-    /// through to a **binding** named `P` that matched every value — `match q {
-    /// P {} => 1 }` where `q` is a `Q` ran the arm (REP-66) — and a headless
-    /// `{ a, b }` has no direct `Ident` either, so it would have reached the
-    /// final `Wildcard` below and become an irrefutable arm (HIR-07's class).
+    /// fields (ADR-091 Decision 3). Deciding it from the fields instead would be
+    /// two silent catch-alls at once: `P {}` has no `PATTERN_FIELD` child and
+    /// would fall through to a **binding** named `P` matching every value, and a
+    /// headless `{ a, b }` has no direct `Ident` either and would reach the final
+    /// `Wildcard` below — both irrefutable arms.
     pub fn kind(&self) -> PatternKind {
         let syntax = &self.syntax;
         // Check for wildcard.
@@ -751,9 +745,7 @@ impl Pattern {
             return PatternKind::Wildcard;
         }
         // Check for a literal. The set is `SyntaxKind::is_pattern_literal`, the
-        // one the parser accepts here — this copy used to include `FloatLit`,
-        // which §4.6 has no pattern for and neither `parse_pattern` nor this
-        // method's own doc ever admitted.
+        // one the parser accepts here.
         if syntax
             .children_with_tokens()
             .any(|e| matches!(e, rowan::NodeOrToken::Token(t) if t.kind().is_pattern_literal()))
@@ -762,9 +754,9 @@ impl Pattern {
         }
         // Check for an Ident — record, variant or variable bind.
         let name_tok = name_token(syntax);
-        // `Name { … }` or a headless `{ … }` — a record pattern (REP-10,
-        // ADR-091). Decided *before* the name, and from the brace: the head is
-        // optional, and a head with empty braces is still a record pattern. The
+        // `Name { … }` or a headless `{ … }` — a record pattern (ADR-091).
+        // Decided *before* the name, and from the brace: the head is optional,
+        // and a head with empty braces is still a record pattern. The
         // `PATTERN_FIELD` half stays as a second witness, so a tree whose brace
         // the parser lost still reads as the record it was written as.
         let has_brace = syntax
@@ -781,9 +773,9 @@ impl Pattern {
             }
             return PatternKind::Name(tok.text().to_string());
         }
-        // No name and no literal: `(a, b)` — a tuple pattern (REP-10). The
-        // parenthesis is what distinguishes it from a node the parser gave up
-        // on, which has neither.
+        // No name and no literal: `(a, b)` — a tuple pattern. The parenthesis is
+        // what distinguishes it from a node the parser gave up on, which has
+        // neither.
         if syntax
             .children_with_tokens()
             .any(|e| matches!(e, rowan::NodeOrToken::Token(t) if t.kind() == K::L_PAREN))
@@ -814,15 +806,15 @@ impl Pattern {
     /// The set is
     /// [`SyntaxKind::is_pattern_literal`](praxis_syntax::SyntaxKind::is_pattern_literal),
     /// so it cannot disagree with [`Pattern::kind`]'s: a token that made a
-    /// pattern `Literal` there and nothing here would have left the lowerer with
-    /// `None` and a wildcard, which is the irrefutable-arm class REP-66 is about.
+    /// pattern `Literal` there and nothing here would leave the lowerer with
+    /// `None` and an irrefutable wildcard.
     pub fn literal_token(&self) -> Option<SyntaxToken> {
         token_matching(&self.syntax, K::is_pattern_literal)
     }
 }
 
 ast_node! {
-    /// One `name` or `name: pattern` field of a record pattern (REP-10, §4.5).
+    /// One `name` or `name: pattern` field of a record pattern (§4.5).
     PatternField, PATTERN_FIELD
 }
 impl PatternField {
@@ -837,7 +829,7 @@ impl PatternField {
     }
 }
 
-/// What kind of pattern a [`Pattern`] is (M7, §4.6; REP-10).
+/// What kind of pattern a [`Pattern`] is (§4.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PatternKind {
     /// `_` — matches anything.
@@ -853,7 +845,7 @@ pub enum PatternKind {
     /// A record: `P { x, y: p }` or a headless `{ x, y: p }` — matches by field
     /// name (§4.5, ADR-091). The string is the record's name when the pattern
     /// names one; a headless pattern pins its record from the *scrutinee*, the
-    /// way a tuple pattern always has (ADR-069 Decision 4), which is what lets an
+    /// way a tuple pattern does (ADR-069 Decision 4), which is what lets an
     /// anonymous `choice(...)` payload — a record with no name to write — be
     /// taken apart at all.
     Record(Option<String>),
@@ -869,9 +861,8 @@ impl Literal {
     /// The single literal token.
     ///
     /// The set is [`SyntaxKind::is_literal_token`](praxis_syntax::SyntaxKind::is_literal_token),
-    /// which is the parser's own — this list used to be spelled out here without
-    /// `UnterminatedBacktickTemplate`, so for a `LITERAL` the parser really does
-    /// build this answered `None` and the HIR read it as a node with no token.
+    /// which is the parser's own, so every `LITERAL` the parser builds answers
+    /// here rather than reading as a node with no token.
     pub fn token(&self) -> Option<SyntaxToken> {
         use rowan::NodeOrToken;
         self.syntax
@@ -1145,16 +1136,15 @@ impl WhileExpr {
 }
 
 ast_node! {
-    /// `for name in iter { body }` (M8, §4.11).
+    /// `for name in iter { body }` (§4.11).
     ForExpr, FOR_EXPR
 }
 impl ForExpr {
     /// The binding pattern (`for x in …` → `x`, `for (k, v) in …` → `(k, v)`).
     ///
-    /// A pattern and not a name token since REP-25: a `for` binds one value per
-    /// step, and taking that value apart is what a pattern is for. The
-    /// overwhelmingly common shape is still a single name, which is a
-    /// [`PatternKind::Name`].
+    /// A pattern and not a name token: a `for` binds one value per step, and
+    /// taking that value apart is what a pattern is for. The overwhelmingly
+    /// common shape is a single name, which is a [`PatternKind::Name`].
     pub fn binding(&self) -> Option<Pattern> {
         child(&self.syntax)
     }
@@ -1168,7 +1158,7 @@ impl ForExpr {
 }
 
 ast_node! {
-    /// `loop { body }` (M8, §4.11).
+    /// `loop { body }` (§4.11).
     LoopExpr, LOOP_EXPR
 }
 impl LoopExpr {
@@ -1178,7 +1168,7 @@ impl LoopExpr {
 }
 
 ast_node! {
-    /// `break [expr]` (M8, §4.11).
+    /// `break [expr]` (§4.11).
     BreakExpr, BREAK_EXPR
 }
 impl BreakExpr {
@@ -1189,12 +1179,12 @@ impl BreakExpr {
 }
 
 ast_node! {
-    /// `continue` (M8, §4.11).
+    /// `continue` (§4.11).
     ContinueExpr, CONTINUE_EXPR
 }
 
 ast_node! {
-    /// `return [expr]` (M8, §4.11).
+    /// `return [expr]` (§4.11).
     ReturnExpr, RETURN_EXPR
 }
 impl ReturnExpr {
@@ -1218,7 +1208,7 @@ impl CallExpr {
     }
     /// The callee as an arbitrary expression, for a postfix call (`expr(args)`).
     /// `None` for a named call (use [`callee`](Self::callee) instead). This is
-    /// the callee-not-a-path case (M8, §4.10): calling a closure retrieved from
+    /// the callee-not-a-path case (§4.10): calling a closure retrieved from
     /// a collection, the result of another call, etc.
     pub fn callee_expr(&self) -> Option<Expr> {
         // Only present when there is no `PathExpr` callee (a named call). The
@@ -1234,14 +1224,14 @@ impl CallExpr {
         child(&self.syntax)
     }
     /// The written `[Type, …]` type arguments, for a constructor call that has
-    /// them (REP-09): `Counter[(Int, Int)]()`. `None` for every other call.
+    /// them: `Counter[(Int, Int)]()`. `None` for every other call.
     pub fn type_args(&self) -> Option<TypeArgList> {
         child(&self.syntax)
     }
 }
 
 ast_node! {
-    /// The `[Type, …]` type-argument list of a constructor call (REP-09, §3.3).
+    /// The `[Type, …]` type-argument list of a constructor call (§3.3).
     ///
     /// A sibling of the `ArgList` rather than part of the callee path, because it
     /// belongs to the *call*: `Counter` alone is still just a name, and the arguments
@@ -1256,7 +1246,7 @@ impl TypeArgList {
 }
 
 ast_node! {
-    /// A `read parser_expression` prefix expression (§7.1, M6). Its single child is
+    /// A `read parser_expression` prefix expression (§7.1). Its single child is
     /// the parser expression applied to the whole process-input buffer.
     ReadExpr, READ_EXPR
 }
@@ -1268,7 +1258,7 @@ impl ReadExpr {
 }
 
 ast_node! {
-    /// A `parse(text, parser_expression)` call (§7.1, M6). The first child is the
+    /// A `parse(text, parser_expression)` call (§7.1). The first child is the
     /// ordinary expression yielding the `Text`; the second is the parser expression.
     ParseExpr, PARSE_EXPR
 }
@@ -1353,7 +1343,7 @@ pub enum ParserExprKind {
 }
 
 ast_node! {
-    /// A named argument inside a parser constructor call (M9, §7.5):
+    /// A named argument inside a parser constructor call (§7.5):
     /// `name: parser_expr`. The name is the leading `Ident` token; the value is the
     /// nested [`ParserExpr`]. Used by heterogeneous `sections`
     /// (`rules: lines(...)`), `chars`/`grid` keyword args (`skip: whitespace`,
@@ -1388,7 +1378,7 @@ impl ParserNamedArg {
 }
 
 ast_node! {
-    /// A `receiver.method(args)` method-call expression (M5, §16.2). The receiver
+    /// A `receiver.method(args)` method-call expression (§16.2). The receiver
     /// is the first child expression; the method name is the `Ident` token after
     /// the `DOT`; the argument list follows.
     MethodCallExpr, METHOD_CALL_EXPR

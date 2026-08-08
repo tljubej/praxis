@@ -1,8 +1,8 @@
 //! The Praxis prelude (§16.1): symbols automatically available in every
 //! program, with no `use` required.
 //!
-//! Kept as data so the type checker, the LSP completion table, and the
-//! documentation generator all read the same single list.
+//! Kept as data so name resolution and the language server's completion, hover
+//! and signature tables all read the same single list.
 
 use crate::abi::RuntimeSymbol;
 
@@ -62,9 +62,8 @@ pub const PRELUDE: &[PreludeEntry] = &[
         "Non-negative least common multiple of two `Int`s, or `0` if either operand is. Faults if the result leaves `Int`.",
     ),
     // Nullary **functions**, not constants: `pi()` is the value and `pi` is
-    // `() -> Float`. The doc string is what hover shows, so calling them
-    // constants here put the wrong thing in front of the one reader who had
-    // asked (§4.12).
+    // `() -> Float` (§4.12). The doc string is what hover shows, so it must say
+    // so rather than call them constants.
     PreludeEntry::new("pi", "π as a Float. A nullary function: write `pi()`."),
     PreludeEntry::new(
         "e",
@@ -110,16 +109,14 @@ pub const PRELUDE: &[PreludeEntry] = &[
         "BitSet",
         "Compact set of non-negative integers. Takes no type argument.",
     ),
-    // Optionality (M9). Option[T] is a polymorphic enum: Some(T) carries a
-    // value, None marks absence (§4.7 — "normal domain-level absence… not an
-    // error channel"). Returned by the `optional(P)` parser, by `Map.get` and
-    // `Grid.find` (D1), and by the graph walks that may not reach their goal.
+    // Optionality. Option[T] is a polymorphic enum: Some(T) carries a value,
+    // None marks absence (§4.7 — "normal domain-level absence… not an error
+    // channel"). Returned by the `optional(P)` parser, by `Map.get` and
+    // `Grid.find`, and by the graph walks that may not reach their goal.
     //
-    // Also by `find`/`position` on a sequence, as of ADR-082: `find` answers
-    // the *element* as an `Option[T]` and `position` its index as an
-    // `Option[Int]`. This comment used to say the opposite — that they answered
-    // an `Int` with a `-1` miss sentinel — which was true before ADR-082 and
-    // has not been since; the catalog rows and a run both say `Some(4)`.
+    // Also by `find`/`position` on a sequence (ADR-082): `find` answers the
+    // *element* as an `Option[T]` and `position` its index as an `Option[Int]`.
+    // Neither uses a `-1` miss sentinel.
     PreludeEntry::new(
         "Option",
         "Optional value: `Some(T)` or `None`. Domain-level absence, not an error channel — what `Map.get`, `Grid.find`, `find`/`position` and the goal-directed graph walks answer with.",
@@ -165,10 +162,7 @@ pub const PRELUDE: &[PreludeEntry] = &[
 ///
 /// This is the table `praxis-hir`'s name resolution seeds the root scope from,
 /// so a type name the checker accepts and a type name the editor can describe
-/// are the same list. Before this it was a bare `&[&str]` in the resolver and
-/// the seven names had no documentation at all — hovering `Int` answered
-/// nothing, and the completion list offered them with neither a signature nor a
-/// sentence.
+/// are the same list.
 ///
 /// `UInt` and `Byte` are deliberately absent: §4.2 reserves them and neither is
 /// implemented, so either one in an annotation is an `N002` rather than a name
@@ -216,11 +210,10 @@ pub const BUILTIN_TYPES: &[TypeEntry] = &[
 /// var distance = bfs_distance(start, |s| neighbors(s), |s| s == goal)
 /// ```
 ///
-/// Before this, all six names resolved (they are in [`PRELUDE`]) and then had
-/// no scheme, no lowering and no implementation: inference handed out a fresh
-/// variable that unified with anything and the call lowered as a direct call to
-/// a function nobody defined. That is TY-33, and these were the last six names
-/// in that state.
+/// A name in [`PRELUDE`] with no row here resolves and then has no scheme, no
+/// lowering and no implementation: inference hands out a fresh variable that
+/// unifies with anything and the call lowers as a direct call to a function
+/// nobody defined.
 pub const GRAPH_HELPERS: &[GraphHelper] = &[
     GraphHelper::new(
         "bfs",
@@ -358,10 +351,9 @@ pub fn graph_helper(name: &str) -> Option<GraphHelper> {
 ///
 /// Every one of them is monomorphic on `Int` (ADR-058), so a row needs only the
 /// name and the wrapper it lowers to — the **arity** the type checker gives the
-/// name is [`RuntimeSymbol::arity`], read off the F4 manifest rather than
+/// name is [`RuntimeSymbol::arity`], read off the ABI manifest rather than
 /// restated here. That is what makes "a prelude name whose signature disagrees
-/// with the wrapper it calls" unrepresentable; before this the names had no
-/// wrapper at all and lowered as calls to functions nobody defined (TY-33).
+/// with the wrapper it calls" unrepresentable.
 ///
 /// `Float`'s counterparts are *methods* (`0.5.abs()`, `x.min(y)` — §4.12), not
 /// entries here: a genuinely polymorphic `abs` would have to carry a numeric
@@ -369,7 +361,7 @@ pub fn graph_helper(name: &str) -> Option<GraphHelper> {
 /// nothing needs that yet.
 ///
 /// `pi` and `e` are not here either. They are nullary `Float` functions rather
-/// than `Int` ones, and they already had schemes and dispatch.
+/// than `Int` ones, with their own schemes and dispatch.
 pub const NUMERIC_HELPERS: &[NumericHelper] = &[
     NumericHelper::new("abs", RuntimeSymbol::IntAbs),
     NumericHelper::new("sign", RuntimeSymbol::IntSign),
@@ -480,8 +472,7 @@ pub struct PreludeEntry {
     /// ordinary value. `Some` and `None` are `Option`'s two variants, declared
     /// by the prelude rather than by an `enum` item — and a consumer that has
     /// to tell a constructor from a binding cannot do it from the type
-    /// (`var A = None` has `Option`'s type too), so the declaration says
-    /// (HIR-03).
+    /// (`var A = None` has `Option`'s type too), so the declaration says.
     pub is_variant_ctor: bool,
 }
 
@@ -727,16 +718,16 @@ mod tests {
     /// Every numeric helper is a prelude name, and every name the design's
     /// numeric line lists is a numeric helper. The two lists are written
     /// separately — one by category for the LSP, one by lowering — and a name in
-    /// only one of them is either a phantom (TY-33's shape: resolves, then has
-    /// nowhere to go) or an unreachable wrapper.
+    /// only one of them is either a phantom (it resolves, then has nowhere to
+    /// go) or an unreachable wrapper.
     #[test]
     fn every_numeric_helper_is_a_prelude_name() {
         let prelude: HashSet<_> = PRELUDE.iter().map(|e| e.name).collect();
         for h in NUMERIC_HELPERS {
             assert!(prelude.contains(h.name), "{} is not in PRELUDE", h.name);
         }
-        // §16.1's numeric line, verbatim. `pi`/`e` are on it in `PRELUDE` but
-        // are Float constants with their own dispatch, not Int functions.
+        // §16.1's numeric line, verbatim. `pi`/`e` are in `PRELUDE` too but are
+        // nullary `Float` functions with their own dispatch, not `Int` ones.
         for required in ["abs", "sign", "min", "max", "clamp", "gcd", "lcm"] {
             assert!(
                 numeric_helper(required).is_some(),
@@ -863,8 +854,8 @@ mod tests {
 
     /// Every graph helper is a prelude name, and every name §6.5 lists is a
     /// graph helper. Same property as the numeric line's, for the same reason: a
-    /// name in only one list is either a phantom (resolves, then has nowhere to
-    /// go — TY-33's shape) or an unreachable wrapper.
+    /// name in only one list is either a phantom (it resolves, then has nowhere
+    /// to go) or an unreachable wrapper.
     #[test]
     fn every_graph_helper_is_a_prelude_name() {
         let prelude: HashSet<_> = PRELUDE.iter().map(|e| e.name).collect();
@@ -873,7 +864,7 @@ mod tests {
         }
         // §6.5's six algorithms, verbatim. (Its list also names connected
         // components and topological sort; neither is a `PRELUDE` name, so
-        // neither is one of TY-33's phantoms.)
+        // neither is a phantom.)
         for required in [
             "bfs",
             "bfs_distance",

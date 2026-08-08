@@ -2,28 +2,24 @@
 //!
 //! §7.10 is precise about when the read happens: "The first `read` lazily reads
 //! standard input once into an immutable GC-managed source buffer; later `read`
-//! expressions reuse it." The runtime had no way to express that — the host
-//! read standard input to EOF *before* calling the entry function and installed
-//! the buffer as [`RuntimeContext::input_source`], so a program with no `read`
-//! at all still consumed stdin, and against an open pipe (a terminal, a CI
-//! harness that leaves the descriptor open) `praxis run` blocked forever
-//! (REP-51). Every `praxis run` of a `read`-free program hung.
+//! expressions reuse it."
 //!
-//! This module is the missing expression. The host installs a *reader* — it is
-//! not called — and [`praxis_get_input`](crate::abi::praxis_get_input), which
-//! is what a `read` lowers to first, calls it the one time. A program that
-//! never evaluates a `read` never touches the host's input at all.
+//! This module is what expresses the laziness. The host installs a *reader* —
+//! it is not called — and [`praxis_get_input`](crate::abi::praxis_get_input),
+//! which is what a `read` lowers to first, calls it the one time. A program
+//! that never evaluates a `read` never touches the host's input at all, so a
+//! `read`-free program does not block against an open pipe (REP-51).
 //!
 //! **The reader is infallible by construction**, and deliberately so: what an
 //! unreadable stdin *means* is the host's question, not the runtime's. The CLI
 //! reports its own I/O failure the way it reports every other one. The runtime
 //! is left with bytes, and the only judgement it makes about them is §4.3's:
-//! text that is not UTF-8 is a fault. Since ADR-111 that judgement is made by
+//! text that is not UTF-8 is a fault. That judgement is made by
 //! [`praxis_get_input`](crate::abi::praxis_get_input) itself rather than by
-//! `praxis_alloc_text` — this is the one path in the runtime carrying bytes the
-//! compiler did not produce, so it is the one place the check belongs, and
-//! keeping it here is what leaves a `Text` *literal*'s allocation genuinely
-//! non-faulting. The reader's contract is unchanged: bytes, infallibly.
+//! `praxis_alloc_text` (ADR-111): this is the one path in the runtime carrying
+//! bytes the compiler did not produce, so it is the one place the check
+//! belongs, and keeping it here is what leaves a `Text` *literal*'s allocation
+//! genuinely non-faulting. The reader's contract is bytes, infallibly.
 //!
 //! `praxis run` never reaches that fault, and it is worth knowing which caller
 //! can. `lazy_stdin::read` (`praxis-cli/src/run.rs`) goes through
@@ -34,8 +30,8 @@
 //! The slot is thread-local because the runtime is single-threaded (§12.1) and
 //! because a `static mut` would be worse; there is one program per process, so
 //! there is one reader per process. A host that installs none — every JIT test,
-//! every embedder — is indistinguishable from today: `praxis_get_input` finds
-//! nothing to call and answers whatever `input_source` already holds.
+//! every embedder — costs nothing: `praxis_get_input` finds nothing to call and
+//! answers whatever `input_source` already holds.
 
 use std::cell::Cell;
 

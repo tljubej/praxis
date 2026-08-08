@@ -6,9 +6,6 @@
 //! `GcRef`. The context is the single channel through which generated code
 //! reaches the GC heap, the pending fault, the debug frame chain, the input
 //! source, and so on.
-//!
-//! M3 fills in the real [`Heap`] and [`crate::Immortals`]; the fault and
-//! debug-frame pointers remain null (M4/M10).
 
 use crate::crash_snapshot::{CrashSnapshot, SnapshotSlot};
 use crate::debug::{
@@ -41,11 +38,8 @@ use crate::{
 /// narrower than the reference is charged the same, so no call can ever cost
 /// less than this — which is what makes
 /// [`DEBUG_FRAME_STACK_SLOTS`](crate::debug::DEBUG_FRAME_STACK_SLOTS) sound at
-/// `MAX_RECURSION_DEPTH + 1`. Charging a genuinely proportional cost from zero
-/// was the first implementation, and it let the budget buy 9571 minimum-width
-/// frames against a stack sized for 8001; the debug frame stack overflowed its
-/// reservation in `adr100_a_stack_overflow_restores_the_shadow_stack`, which is
-/// how this was found.
+/// `MAX_RECURSION_DEPTH + 1`. A cost that was proportional from zero would let
+/// the budget buy more minimum-width frames than that reservation covers.
 ///
 /// The backend checks the model rather than trusting it: after Cranelift has
 /// compiled a function it knows the real frame size, and a `debug_assert`
@@ -60,12 +54,11 @@ pub const FRAME_BYTES_PER_SLOT: u32 = 2;
 /// The deepest recursion a *reference-width* function reaches, and the figure
 /// [`STACK_BUDGET_BYTES`] is derived from.
 ///
-/// This used to be the whole guard: the prologue counted calls and faulted at
-/// 8000 of them. What runs out is bytes, not calls, and a frame's byte cost
-/// varies by a factor of three with its width — so a count calibrated for a
-/// narrow frame let a wide one abort the host, which is precisely the failure
-/// the guard exists to prevent (ADR-105). It survives as the *anchor*: a
-/// reference frame still recurses exactly this deep.
+/// What runs out is bytes, not calls, and a frame's byte cost varies by a
+/// factor of three with its width — so the guard spends a byte budget rather
+/// than counting calls, because a count calibrated for a narrow frame lets a
+/// wide one abort the host (ADR-105). This constant is the *anchor* of that
+/// budget: a reference frame recurses exactly this deep.
 pub const MAX_RECURSION_DEPTH: u32 = 8000;
 
 /// The frame width [`MAX_RECURSION_DEPTH`] is calibrated against: the `Gc`
@@ -76,17 +69,15 @@ pub const MAX_RECURSION_DEPTH: u32 = 8000;
 /// ```
 ///
 /// — the program that constant was chosen for, and the one
-/// `adv_deep_recursion_over_limit_faults_cleanly` still uses.
+/// `adv_deep_recursion_over_limit_faults_cleanly` uses.
 ///
-/// **Anchoring the budget here rather than at zero is what keeps ADR-105 from
-/// being a regression.** A zero-slot function is a hypothetical: every real
-/// Praxis function boxes something, and the simplest recursive one there is
-/// takes eleven `Gc` locals. Deriving the budget from `frame_cost(0)` would
-/// have let *that* function recurse only 6686 deep where it used to reach 8000
-/// — a 16% cut to every ordinary program, paid to fix a defect that only ever
-/// affected wide frames. Deriving it from the reference frame leaves the
-/// ordinary case exactly where it was and takes the depth only from the frames
-/// that were over-reaching.
+/// **Anchoring the budget here rather than at zero is deliberate.** A zero-slot
+/// function is a hypothetical: every real Praxis function boxes something, and
+/// the simplest recursive one there is takes eleven `Gc` locals. Deriving the
+/// budget from `frame_cost(0)` would let *that* function recurse only 6686 deep
+/// rather than 8000 — a 16% cut to every ordinary program, to bound a cost only
+/// wide frames incur. Anchoring at the reference frame takes depth only from
+/// the frames that over-reach.
 ///
 /// `a_reference_frame_still_recurses_as_deep_as_the_call_count_allowed` is the
 /// end-to-end gate; if a codegen change makes `count` wider, that test fails and
@@ -103,9 +94,9 @@ pub const REFERENCE_FRAME_SLOTS: u32 = 11;
 /// the second, so asking the OS gives a number that is wrong exactly where the
 /// suite lives. Choosing one figure that fits under *both*, with room to spare,
 /// removes the question instead of answering it: it is what
-/// `MAX_RECURSION_DEPTH` reference frames already cost under the old guard —
-/// about 1.02 MiB charged, 768 KiB actually consumed — and no frame shape can
-/// exceed it now, because the guard charges by shape.
+/// `MAX_RECURSION_DEPTH` reference frames cost — about 1.02 MiB charged,
+/// 768 KiB actually consumed — and no frame shape can exceed it, because the
+/// guard charges by shape.
 ///
 /// A host that knows better may lower it through
 /// [`Runtime::set_stack_budget`](crate::Runtime::set_stack_budget). It may not
@@ -119,30 +110,27 @@ pub const STACK_BUDGET_BYTES: u32 = MAX_RECURSION_DEPTH * FRAME_BYTES_BASE;
 /// every `Gc` local past the reference width (ADR-105).
 ///
 /// The backend knows `slots` before it emits the prologue, so this folds to one
-/// immediate and the guard is the same four instructions it was when the addend
-/// was a literal 1.
+/// immediate and the guard is four instructions.
 ///
 /// The `saturating_sub` is the floor, and it does two jobs. It keeps an ordinary
-/// function at the depth the old call count gave it — see
-/// [`REFERENCE_FRAME_SLOTS`] — and it makes [`FRAME_BYTES_BASE`] the *minimum*
-/// any call can spend, which is the premise
-/// [`DEBUG_FRAME_STACK_SLOTS`](crate::debug::DEBUG_FRAME_STACK_SLOTS) is sized
-/// on.
+/// function at [`MAX_RECURSION_DEPTH`] — see [`REFERENCE_FRAME_SLOTS`] — and it
+/// makes [`FRAME_BYTES_BASE`] the *minimum* any call can spend, which is the
+/// premise [`DEBUG_FRAME_STACK_SLOTS`](crate::debug::DEBUG_FRAME_STACK_SLOTS)
+/// is sized on.
 ///
 /// **`slots` is the count of `Gc` locals, not the count of shadow slots**
 /// (ADR-128 decision 4) — a [`DebugSlotCount`](crate::DebugSlotCount) at the one
 /// real call site, so at most [`MAX_DEBUG_VALUE_SLOTS`](crate::MAX_DEBUG_VALUE_SLOTS).
-/// It was a [`SlotCount`](crate::SlotCount) bounded by
-/// [`MAX_SHADOW_SLOTS`](crate::MAX_SHADOW_SLOTS) until colouring made the two
-/// different numbers, and the charge deliberately stayed on the larger one:
-/// `FRAME_BYTES_PER_SLOT` is not rent on a shadow slot, it is a calibrated proxy
-/// for the *native* frame, and under-reporting that is the SIGABRT ADR-105
-/// exists to remove.
+/// Colouring makes that a different number from
+/// [`MAX_SHADOW_SLOTS`](crate::MAX_SHADOW_SLOTS), and the charge deliberately
+/// rides the larger one: `FRAME_BYTES_PER_SLOT` is not rent on a shadow slot,
+/// it is a calibrated proxy for the *native* frame, and under-reporting that is
+/// the SIGABRT ADR-105 exists to remove.
 ///
-/// So the bound this must not overflow is now 21× what it was — `frame_cost(4096)`
-/// is `134 + 2 × 4085` = 8304, comfortably inside `u32` and inside
-/// [`STACK_BUDGET_BYTES`] — and the saturating arithmetic is belt-and-braces for
-/// a caller that has not proved even that.
+/// So the bound this must not overflow is `frame_cost(4096)` = `134 + 2 × 4085`
+/// = 8304, comfortably inside `u32` and inside [`STACK_BUDGET_BYTES`] — and the
+/// saturating arithmetic is belt-and-braces for a caller that has not proved
+/// even that.
 #[must_use]
 pub const fn frame_cost(slots: u32) -> u32 {
     let over = slots.saturating_sub(REFERENCE_FRAME_SLOTS);
@@ -209,12 +197,12 @@ pub enum FaultKind {
     /// Division or remainder by zero (§4.12).
     DivByZero = 2,
     /// A collection index was out of bounds (§9.2). Raised by `Vec.get` /
-    /// indexing and similar accessors in M5.
+    /// indexing and similar accessors.
     IndexOutOfBounds = 3,
     /// An input parse mismatch (§7.11). Raised by the input-parser interpreter
-    /// when the input does not match a parser expression. The fault carries no
-    /// structured spans yet (M6 surfaces it as a plain fault; the crash debugger
-    /// in M10 will render the input/parser spans from the runtime's plan).
+    /// when the input does not match a parser expression. The interpreter also
+    /// records the deepest mismatch in the runtime's [`crate::ParseDetail`]
+    /// slot, which the host reads to render the input/parser spans.
     ParseFailed = 4,
     /// An operation required a non-empty collection but found an empty one
     /// (§9.2). Raised by `Deque.pop_front`/`pop_back`, heap `pop`/`peek`, and
@@ -233,42 +221,33 @@ pub enum FaultKind {
     FloatToInt = 7,
     /// A code point was not a Unicode scalar value: negative, above
     /// `0x10FFFF`, or in the surrogate range `D800..=DFFF` (§4.3). Raised by
-    /// `praxis_alloc_char`, which previously had no kind of its own to report
-    /// and raised `None` (RT-17/RT-18).
+    /// `praxis_alloc_char`.
     InvalidChar = 8,
     /// Host input that had to be `Text` was not valid UTF-8 (§4.3). Raised by
     /// `praxis_get_input`, which is its only producer (ADR-111).
     ///
-    /// It used to be raised by `praxis_alloc_text`, on the argument that a lossy
-    /// recovery should be a fault rather than a silent success. That made every
-    /// `Text` *literal* a faulting instruction — its bytes came from a Rust
-    /// `String` and cannot fail — so ADR-111 moved the validation to the one
-    /// caller that holds bytes it did not author. A literal's `Alloc` is
-    /// non-faulting now, and a violated precondition in `praxis_alloc_text`
-    /// aborts rather than faulting, the way `praxis_int_load`'s does.
+    /// The validation sits at the one caller holding bytes it did not author. A
+    /// `Text` *literal*'s bytes come from a Rust `String` and cannot fail, so
+    /// its `Alloc` is non-faulting, and a violated precondition in
+    /// `praxis_alloc_text` aborts rather than faulting, the way
+    /// `praxis_int_load`'s does.
     ///
-    /// The variant and its discriminant stay where they are regardless:
-    /// generated code reads `FaultKind` directly since ADR-102, so renumbering
-    /// one is an ABI change and not a tidy-up. It is also unreachable from
-    /// `praxis run`, whose `lazy_stdin::read` validates stdin and exits 2 — it
-    /// exists for an embedder that does not.
+    /// Generated code reads `FaultKind` directly since ADR-102, so renumbering
+    /// a variant is an ABI change and not a tidy-up. This one is unreachable
+    /// from `praxis run`, whose `lazy_stdin::read` validates stdin and exits 2
+    /// — it exists for an embedder that does not.
     InvalidText = 9,
     /// A size or extent the runtime cannot honour: a negative `Grid` width or
     /// height, a `width * height` that overflows or exceeds
     /// [`GridExtent::MAX_CELLS`](crate::collections::GridExtent::MAX_CELLS), or
     /// a `BitSet` member outside [`BitIndex`](crate::bitset::BitIndex)'s range
-    /// (§9.2). All three reached Rust as a `usize` cast and became an OOM abort
-    /// or a capacity-overflow panic *across* `extern "C"`; they are now faults
-    /// (RT-07).
-    ///
-    /// `clamp`'s inverted range borrowed this kind through S17 and no longer
-    /// does: it is [`EmptyRange`](Self::EmptyRange).
+    /// (§9.2). Each is checked *before* the `usize` cast, where a negative
+    /// extent would otherwise land near `usize::MAX` and become an OOM abort or
+    /// a capacity-overflow panic across `extern "C"`.
     InvalidSize = 10,
     /// A value did not have the type its destination declared: pushing a
     /// `Float` into a `Vec[Int]`, or constructing a `Grid[T]` whose cell type
-    /// has no default value to fill with (§9.2). The collection used to *retag*
-    /// itself to the intruder's type, so every element already stored was then
-    /// read through the wrong layout (P0-11).
+    /// has no default value to fill with (§9.2).
     TypeMismatch = 11,
     /// The program called `panic(value)` (§9.1). The value it passed is
     /// rendered through its descriptor into the runtime's [`FaultMessage`]
@@ -282,12 +261,10 @@ pub enum FaultKind {
     /// with `low > high` (ADR-058), which names an empty inclusive range and so
     /// has no value to clamp to.
     ///
-    /// ADR-058 recorded this kind as *owed*, because a new `FaultKind` costs an
-    /// ABI bump and S17's was spent; S18 spends one and pays it. ADR-059 wanted
-    /// `praxis_range_len`'s uncountable range in here too — S18 declined and
-    /// gave it [`IntOverflow`](Self::IntOverflow) instead, because
-    /// `Int::MIN..Int::MAX` is the *fullest* range there is and calling it empty
-    /// would be a fault message that lies. See ADR-075.
+    /// `praxis_range_len`'s uncountable range is deliberately *not* this kind:
+    /// it raises [`IntOverflow`](Self::IntOverflow), because `Int::MIN..Int::MAX`
+    /// is the *fullest* range there is and calling it empty would be a fault
+    /// message that lies (ADR-059, ADR-075).
     EmptyRange = 14,
     /// An argument this algorithm has no answer for: a negative edge weight in
     /// `dijkstra`/`a_star`, whose settle-once-and-never-reconsider shape makes a
@@ -297,9 +274,8 @@ pub enum FaultKind {
     /// The operand is well-formed and the graph is well-formed; what is absent
     /// is a *correct answer this algorithm could produce*, which is why neither
     /// [`InvalidSize`](Self::InvalidSize) nor
-    /// [`TypeMismatch`](Self::TypeMismatch) fits. ADR-060 asked for this kind by
-    /// its own heading — "an answer the walk cannot compute is a fault, not a
-    /// wrong number" — and S18 pays it with the same bump.
+    /// [`TypeMismatch`](Self::TypeMismatch) fits: an answer the walk cannot
+    /// compute is a fault, not a wrong number (ADR-060).
     NoAnswer = 15,
 }
 
@@ -349,10 +325,7 @@ impl FaultMessage {
 /// A [`FaultKind`] that is actually a fault.
 ///
 /// [`Fault::set`] takes one of these, so "raise the absence of a fault" has no
-/// spelling. It used to take a bare `FaultKind`, and two callers passed `None`
-/// for want of a kind that described them: the result was `{pending: true, kind:
-/// None}`, on which generated code branched to its fault path while the host
-/// reported "no fault" and exited zero (RT-17).
+/// spelling.
 ///
 /// The associated constants are the whole raisable set. There is no
 /// `RaisedFault(FaultKind::None)` to construct — [`RaisedFault::new`] is the
@@ -436,13 +409,9 @@ impl std::fmt::Display for FaultKind {
 /// The fault record a [`RuntimeContext`] points at. `pending_fault` is non-null
 /// and points at the owning runtime's slot.
 ///
-/// **The kind is the whole state.** There used to be a `pending: bool` beside
-/// it, documented as a mirror of `kind != None` and justified as "a cheap
-/// single-byte check in generated code" — but generated code never read it (it
-/// calls `praxis_check_fault`), and the two could disagree: `set(FaultKind::None)`
-/// produced `{pending: true, kind: None}`, on which generated code branched to
-/// its fault path while the host reported "no fault" (RT-17). One field cannot
-/// contradict itself.
+/// **The kind is the whole state.** There is no `pending: bool` mirroring
+/// `kind != None` beside it: one field cannot contradict itself, and generated
+/// code branches on the kind word directly (ADR-102).
 #[repr(C)]
 pub struct Fault {
     /// The pending fault, or [`FaultKind::None`] for no fault. Private: the
@@ -453,13 +422,13 @@ pub struct Fault {
 impl Fault {
     /// Where the kind sits within the record, and how wide it is.
     ///
-    /// **Generated code reads the kind directly as of ADR-102.** An
-    /// `Inst::CheckFault` used to be a call to `praxis_check_fault`; it is now a
-    /// load of `ctx.pending_fault`, a load of the kind at this offset, and a
-    /// `brif` — which works only because [`FaultKind::None`] is 0 and every
-    /// raisable kind is not, so the loaded word *is* [`Fault::is_pending`].
+    /// **Generated code reads the kind directly (ADR-102).** An
+    /// `Inst::CheckFault` is a load of `ctx.pending_fault`, a load of the kind
+    /// at this offset, and a `brif` — which works only because
+    /// [`FaultKind::None`] is 0 and every raisable kind is not, so the loaded
+    /// word *is* [`Fault::is_pending`].
     ///
-    /// So a repr change to `Fault` or to [`FaultKind`] is now a generated-code
+    /// So a repr change to `Fault` or to [`FaultKind`] is a generated-code
     /// change and owes a
     /// [`RUNTIME_ABI_VERSION`](crate::abi::RUNTIME_ABI_VERSION) bump. The
     /// backend asserts `KIND_SIZE` at compile time against the width it loads,
@@ -469,7 +438,7 @@ impl Fault {
     /// Both are minted here rather than reached for with `offset_of!` from the
     /// backend because `kind` is private — the field is private so that
     /// [`Fault::set`] is the only way to raise, which is what makes
-    /// "raise no fault" unspellable (RT-17).
+    /// "raise no fault" unspellable.
     pub const KIND_OFFSET: usize = core::mem::offset_of!(Fault, kind);
 
     /// The width of the kind, in bytes. See [`Fault::KIND_OFFSET`].
@@ -485,8 +454,7 @@ impl Fault {
     /// Raise `fault`.
     ///
     /// Takes a [`RaisedFault`] rather than a `FaultKind` so that "raise no
-    /// fault" — the state generated code and the host disagreed about — has no
-    /// spelling.
+    /// fault" has no spelling.
     pub fn set(&mut self, fault: RaisedFault) {
         self.kind = fault.kind();
     }
@@ -510,13 +478,13 @@ impl Default for Fault {
     }
 }
 
-/// One local variable in a debug frame snapshot (§9.3, M5).
+/// One local variable in a debug frame snapshot (§9.3).
 ///
 /// Carries the source name, the compiler-assigned `symbol_id` (which
 /// disambiguates shadowed bindings — two `var a` in the same scope get distinct
 /// ids, §4.2), the local's type descriptor, and the current `GcRef` value. The
-/// crash debugger (M10) reads these to display locals; M5 only *registers* them
-/// (the prologue/epilogue push/pop frames and the spill updates the values).
+/// prologue and epilogue push and pop the frames, the spill updates the values,
+/// and the crash debugger reads them to display locals.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct DebugLocal {
@@ -529,8 +497,13 @@ pub struct DebugLocal {
     pub symbol_id: u32,
     /// The local's static type descriptor (§9.3 "local type descriptors"), so
     /// the debugger can render a local without re-deriving its type. Embedded
-    /// by the backend at push time from the MIR local's `Type`. Null only on
-    /// frames constructed before M10-WS2 (the M5 unit tests).
+    /// by the backend at push time from the MIR local's `Type`. Null when the
+    /// local has no static type (`MirType::Opaque` — a pipeline accumulator, a
+    /// fused-loop item), alongside
+    /// [`NO_STATIC_TYPE`](crate::debug::NO_STATIC_TYPE) in `type_id`; and null
+    /// on its own when the type has no runtime descriptor (`Never`, an
+    /// unresolved inference variable), where `type_id` is still a real handle.
+    /// Either way the debugger omits the type column.
     pub descriptor: *const crate::TypeDescriptor,
     /// The current value of the local, or `None` for a slot no value has been
     /// written into yet.
@@ -546,25 +519,21 @@ pub struct DebugLocal {
     /// [`DebugValue::reference`](crate::debug::DebugValue::reference), which is
     /// the one door a scalar cannot pass.
     ///
-    /// The word itself is still `Option<GcRef>`-shaped in the slot, and the
-    /// zeroed slot a fresh frame starts with is still the `None` niche (F18).
-    /// The predecessor of *that* was a `GcRef` holding `NonNull::dangling()`,
-    /// compared by pointer identity to decide whether a slot held anything —
-    /// an invalid `GcRef` constructed in Rust (UB) and a sentinel a real
-    /// allocation could in principle collide with.
+    /// The word itself is `Option<GcRef>`-shaped in the slot, and the zeroed
+    /// slot a fresh frame starts with is the `None` niche (F18).
     pub value: Option<crate::debug::DebugValue>,
-    /// The full static `Type` id (`praxis_types::Type(u32)` handle, M10-WS1b),
-    /// so the crash debugger can reconstruct the local's *exact* type —
-    /// including collection element types (`Vec[Int]`, `Map[Text, Int]`) and
-    /// record field shapes — which the runtime `descriptor` alone loses. The
-    /// debugger pairs this id with the live `TypeDb` to type-check `p EXPR`
-    /// against the selected frame (§9.5). `0` until the backend threads it
-    /// (M10b); sound as a fallback since the debugger treats `0` as "unknown".
+    /// The full static `Type` id (a `praxis_types::Type(u32)` handle), so the
+    /// crash debugger can reconstruct the local's *exact* type — including
+    /// collection element types (`Vec[Int]`, `Map[Text, Int]`) and record field
+    /// shapes — which the runtime `descriptor` alone loses. The debugger pairs
+    /// this id with the live `TypeDb` to type-check `p EXPR` against the
+    /// selected frame (§9.5). [`NO_STATIC_TYPE`](crate::debug::NO_STATIC_TYPE)
+    /// when the local has none; every other `u32` is a valid arena index, so
+    /// there is no in-band zero sentinel.
     pub type_id: u32,
     /// The debugger classification: `LOCAL_KIND_USER` (a binding the programmer
     /// wrote) or `LOCAL_KIND_TEMP` (a compiler intermediate). See
-    /// [`crate::debug::LOCAL_KIND_USER`]. Replaces the old `"<tmp>"` string
-    /// placeholder.
+    /// [`crate::debug::LOCAL_KIND_USER`].
     pub kind: u8,
     /// The local's source span start (byte offset), paired with `span_end`.
     pub span_start: u32,
@@ -586,13 +555,12 @@ pub struct RuntimeContext {
     /// it to the runtime's own `Fault`; the sole null-wiring constructor,
     /// [`RuntimeContext::placeholder`], is `unsafe` and test-only.
     ///
-    /// That invariant is load-bearing as of ADR-102: an `Inst::CheckFault` is
-    /// now a load of this pointer and a load of the [`Fault::KIND_OFFSET`] word
-    /// behind it, with no null test, where it used to be a call to
-    /// `praxis_check_fault` (which does test, and answers "no fault"). A host
-    /// that hand-built a context with a null here and called generated code
-    /// would now fault the process rather than silently never observing a
-    /// Praxis fault. `a_wired_context_has_a_fault_slot` is the gate.
+    /// That invariant is load-bearing (ADR-102): an `Inst::CheckFault` is a
+    /// load of this pointer and a load of the [`Fault::KIND_OFFSET`] word
+    /// behind it, with no null test. A host that hand-built a context with a
+    /// null here and called generated code would fault the process rather than
+    /// silently never observing a Praxis fault. `a_wired_context_has_a_fault_slot`
+    /// is the gate.
     pub pending_fault: *mut Fault,
     /// The header of the runtime's one crash-debugger frame stack (§9.3,
     /// ADR-021, ADR-104). Generated code claims one [`DebugFrameEntry`] in the
@@ -600,27 +568,22 @@ pub struct RuntimeContext {
     /// [`crate::crash_snapshot::praxis_snapshot_debug_chain`] reads `[base, top)`
     /// innermost-first to build the frames the crash REPL renders.
     ///
-    /// This field was `debug_top: *mut DebugFrame` — the top of a chain of
-    /// per-call heap frames — through ABI v17. Same position, same width, a
-    /// different thing entirely pointed at, which is why v18 exists. (The
-    /// alternative, deleting it and appending a replacement, would have shifted
-    /// every field below it; §11.6's discipline in this struct is *append at the
-    /// end, never reorder*, and ADR-101 did the same to `roots`.)
+    /// §11.6's discipline in this struct is *append at the end, never reorder*:
+    /// a field generated code reads that comes to point at something else keeps
+    /// its position and bumps
+    /// [`RUNTIME_ABI_VERSION`](crate::abi::RUNTIME_ABI_VERSION), because
+    /// deleting it and appending a replacement would shift every field below.
     pub debug_frames: *mut DebugFrameStackHeader,
     /// The header of the runtime's one compiler-managed shadow stack (§12.3,
     /// ADR-019, ADR-101). Generated code claims a run of slots in the prologue
     /// by bumping the header's `top`, spills live `GcRef`s into that run at
     /// safepoints, and restores `top` in the epilogue. The collector scans
     /// `[base, top)` via [`RootSet`].
-    ///
-    /// This field was `roots: *mut ShadowFrame` — the top of a chain of
-    /// per-call heap frames — through ABI v14. Same position, same width, a
-    /// different thing entirely pointed at, which is why v15 exists.
     pub shadow: *mut ShadowStackHeader,
     pub input_source: GcRef,
     /// The cached immortal `Unit` — the "defined dummy" returned on fault paths
-    /// (§10.4). M6 split this from `input_source` (which now holds the read-in
-    /// buffer when present), so fault sentinels are stable regardless of input.
+    /// (§10.4). Separate from `input_source` (which holds the read-in buffer
+    /// when present), so fault sentinels are stable regardless of input.
     pub unit_ref: GcRef,
     pub current_generation: u64,
     /// How much of the native-stack budget the live Praxis frames have *not*
@@ -639,46 +602,37 @@ pub struct RuntimeContext {
     /// single place a stack size enters the system, and the backend never learns
     /// it. It also makes zero mean *exhausted*, which is the right thing for
     /// [`RuntimeContext::placeholder`] to say.
-    ///
-    /// Through ABI v18 this was `recursion_depth`, a plain call count. Same
-    /// position, same width, a different quantity — which is why v19 exists.
     pub stack_left: u32,
     /// Host-managed pointer to the runtime's [`crate::ParseDetail`] slot
-    /// (§7.11, M10-WS1). The parser interpreter writes the richest parse
-    /// mismatch into it on `ParseFailed`; the host (CLI / crash debugger) reads
-    /// it after the fault. Generated code never touches this field — it is
-    /// appended at the end of `RuntimeContext` so the offsets of all
-    /// generated-code-read fields above are unchanged (§11.6 ABI stability).
+    /// (§7.11). The parser interpreter writes the richest parse mismatch into
+    /// it on `ParseFailed`; the host (CLI / crash debugger) reads it after the
+    /// fault. Generated code never touches this field — it is appended at the
+    /// end of `RuntimeContext` so the offsets of all generated-code-read fields
+    /// above are unchanged (§11.6 ABI stability).
     pub parse_detail: *mut crate::ParseDetail,
-    /// Host-managed pointer to the runtime's [`crate::SnapshotSlot`] (§9.3,
-    /// M10-WS3). The first fault epilogue deep-copies the debug-frame chain
-    /// into it before unwinding; the host reads the snapshot after the fault.
-    /// Like `parse_detail`, generated code only passes it to
+    /// Host-managed pointer to the runtime's [`crate::SnapshotSlot`] (§9.3).
+    /// The first fault epilogue deep-copies the debug-frame chain into it
+    /// before unwinding; the host reads the snapshot after the fault. Like
+    /// `parse_detail`, generated code only passes it to
     /// `praxis_snapshot_debug_chain` — it is appended at the end of
     /// `RuntimeContext` for ABI stability.
     pub crash_snapshot: *mut crate::SnapshotSlot,
-    /// The runtime's one native root store (P0-07, ADR-114): what the runtime's
-    /// own Rust code holds live across an allocation, in one contiguous array.
+    /// The runtime's one native root store (ADR-114): what the runtime's own
+    /// Rust code holds live across an allocation, in one contiguous array.
     ///
     /// Claimed and released by [`crate::roots::NativeScope`], never by generated
     /// code — which is why it, like `parse_detail` and `crash_snapshot`, is
     /// appended at the end of the struct. It is the fifth arm of
     /// [`crate::roots::RuntimeRoots`], which scans `[0, len)`.
     ///
-    /// Through ABI v19 this was the head of a chain of per-scope
-    /// `Box<NativeRootFrame>`s, each with its own `Vec` — same position, same
-    /// width, a different thing entirely pointed at. It does **not** bump the
-    /// version the way `roots` → `shadow` (v15) and `debug_top` →
-    /// `debug_frames` (v18) did, and the difference is which side reads it:
-    /// those two are bump-allocated by every generated prologue, and this one
-    /// has no reader outside `praxis-runtime` at all. See ADR-114.
+    /// It has no reader outside `praxis-runtime` at all, so changing what it
+    /// points at is not the ABI-version event it would be for `shadow` or
+    /// `debug_frames`, which every generated prologue bump-allocates from. See
+    /// ADR-114.
     pub native_roots: *mut crate::roots::NativeRootStore,
-    /// The cached immortal `true`, alongside [`Self::unit_ref`] (§4.3).
-    ///
-    /// `praxis_alloc_bool` used to mint a *fresh* immortal on every call, so a
-    /// program that evaluated a comparison in a loop consumed unregistered
-    /// arena storage that no collection could ever reclaim (RT-03). There are
-    /// exactly two `Bool` values; the runtime allocates them once.
+    /// The cached immortal `true`, alongside [`Self::unit_ref`] (§4.3). There
+    /// are exactly two `Bool` values; the runtime allocates them once, so no
+    /// comparison in a loop consumes arena storage.
     pub true_ref: GcRef,
     /// The cached immortal `false`. See [`Self::true_ref`].
     pub false_ref: GcRef,
@@ -698,13 +652,12 @@ pub struct RuntimeContext {
     /// takes two loads — the base from here, then the element at a byte offset
     /// it computed at compile time from the literal's value. That is what
     /// `Inst::ConstGc` emits, and it is why an in-range `Int` literal in a loop
-    /// body is no longer a call, an allocation and a shadow-frame spill per
-    /// iteration (docs/handovers/21-where-the-time-goes.md §3.5).
+    /// body is not a call, an allocation and a shadow-frame spill per iteration
+    /// (docs/handovers/21-where-the-time-goes.md §3.5).
     ///
     /// Generated code *does* read this one, so it would be a compatibility
     /// break if it moved — but it is appended like `fault_message` and its
-    /// neighbours, so every offset above is unchanged and only code compiled
-    /// against v15 emits the load at all.
+    /// neighbours, so every offset above is unchanged.
     pub small_ints: *const GcRef,
     /// The header of the runtime's one crash-debugger value stack (§9.3,
     /// ADR-104). Generated code claims one slot per `Gc` local in the prologue,
@@ -722,10 +675,9 @@ pub struct RuntimeContext {
     /// It *is* scanned, once per collection, immediately after the sweep: every
     /// slot naming storage that sweep just reclaimed becomes `None`. That is
     /// what makes a debug value always a live object or an absence, and never a
-    /// reference to a block the allocator has since reissued as something else.
-    /// Through ADR-104 there was no such scan, and the defect it closes is
-    /// sharper than a dangling read — a reissued block renders as a well-formed
-    /// value of another type under the dead local's own name.
+    /// reference to a block the allocator has since reissued as something else
+    /// — which would render as a well-formed value of another type under the
+    /// dead local's own name, sharper than a dangling read.
     ///
     /// Appended after `small_ints`, so every offset above is unchanged.
     pub debug_values: *mut DebugValueStackHeader,
@@ -749,12 +701,11 @@ pub struct RuntimeContext {
     /// **By value, and that is the decision.** A pointer to
     /// [`crate::descriptor::BUILTINS`] would make the proof two *dependent*
     /// loads; the array makes it one load at a displacement the backend folds
-    /// from [`RuntimeContext::descriptor_offset`]. What it replaces was no load
-    /// at all — the backend baked `&scalars::INT` in as an `iconst`, which on
-    /// aarch64 is `movz`+`movk`+`movk` because a `static` in this binary lives
-    /// above 2³² — so a proof is two machine instructions shorter and the
-    /// compiler no longer names a descriptor *address* anywhere
-    /// (docs/handovers/25-two-mallocs-per-runtime-call.md §3 F-4).
+    /// from [`RuntimeContext::descriptor_offset`]. Baking the address in as an
+    /// `iconst` instead would be no load at all, but on aarch64 it costs
+    /// `movz`+`movk`+`movk` (a `static` in this binary lives above 2³²) and it
+    /// would make the compiler name a descriptor *address*, which it otherwise
+    /// never does (docs/handovers/25-two-mallocs-per-runtime-call.md §3 F-4).
     ///
     /// Filled by [`crate::descriptor::builtin_descriptor_addresses`], which
     /// derives it from `BUILTINS` — so "slot `i` holds the descriptor whose id
@@ -766,10 +717,9 @@ pub struct RuntimeContext {
     pub descriptors: [*const TypeDescriptor; BuiltinTypeId::COUNT],
 }
 
-/// The table is appended, so every field generated code read before it is
-/// where it was. Pinned rather than described: `small_chars` is the last field
-/// of ABI v19, and the proof site's displacement is only a compile-time
-/// immediate because the array starts where v19's struct ended.
+/// The table is appended, so every field generated code reads sits where it
+/// did. Pinned rather than described: the proof site's displacement is only a
+/// compile-time immediate because the array starts right after `small_chars`.
 const _: () = assert!(
     RuntimeContext::descriptor_offset(BuiltinTypeId::Unit)
         == core::mem::offset_of!(RuntimeContext, small_chars)
@@ -791,12 +741,12 @@ impl RuntimeContext {
     /// base of a `RuntimeContext`.
     ///
     /// **The one authority for the address ADR-102's proof compares against**,
-    /// and the reason the backend no longer holds a descriptor address at all:
-    /// it folds this displacement, loads whatever the runtime put there, and
-    /// compares. *Which* descriptor that is is the runtime's answer rather than
-    /// a pointer the compiler carried across the ABI — so the two cannot
-    /// disagree about the address `Int`'s descriptor has, only about which slot
-    /// it is in, and that is the enum discriminant.
+    /// and the reason the backend holds no descriptor address at all: it folds
+    /// this displacement, loads whatever the runtime put there, and compares.
+    /// *Which* descriptor that is is the runtime's answer rather than a pointer
+    /// the compiler carried across the ABI — so the two cannot disagree about
+    /// the address `Int`'s descriptor has, only about which slot it is in, and
+    /// that is the enum discriminant.
     ///
     /// Minted here rather than reached for with `offset_of!` from the backend
     /// for [`Fault::KIND_OFFSET`]'s reason one step further on: the element
@@ -810,14 +760,13 @@ impl RuntimeContext {
 
     /// Construct a context with all pointers null and the input source set to
     /// the canonical placeholder. Real runtime setup (rooting the heap,
-    /// installing a fault sink) is done via [`Runtime::context`] in M3+.
+    /// installing a fault sink) is done via [`Runtime::context`].
     ///
-    /// **Generated code must never be run against a placeholder.** Since
-    /// ADR-101 the prologue is inline: it dereferences `shadow` unconditionally
-    /// and without a null check, because the check cost every call in the
-    /// language and `Runtime::context` is the only producer of a context
-    /// generated code is ever handed. The extern push/pop helpers this replaced
-    /// returned null / returned early for a null context; nothing does now.
+    /// **Generated code must never be run against a placeholder.** The prologue
+    /// is inline (ADR-101): it dereferences `shadow` unconditionally and without
+    /// a null check, because the check cost every call in the language and
+    /// `Runtime::context` is the only producer of a context generated code is
+    /// ever handed.
     ///
     /// # Safety
     /// `input_source` must be a valid `GcRef` (or the caller must ensure no
@@ -903,25 +852,23 @@ pub unsafe fn current_fault_kind(ctx: *mut RuntimeContext) -> FaultKind {
 
 /// The owner of the heap and the immortal singletons.
 ///
-/// This is the M3 entry point for runtime code: construct a `Runtime`, allocate
-/// values through it, root them in a [`crate::RootScope`], and collect when
-/// needed. In M4, lowering will produce a `RuntimeContext` from a `Runtime` to
-/// hand to generated code.
+/// The entry point for runtime code: construct a `Runtime`, allocate values
+/// through it, root them in a [`crate::RootScope`], and collect when needed.
+/// [`Runtime::context`] produces the `RuntimeContext` handed to generated code.
 pub struct Runtime {
     heap: Heap,
     immortals: Immortals,
     /// The fault slot generated code signals through (§10.4). Owned here so its
     /// address is stable for the lifetime of the runtime.
     fault: Fault,
-    /// The rich parse-failure detail slot (§7.11, M10-WS1). Owned here so its
-    /// address is stable; `Runtime::context` installs it on every context. The
-    /// parser interpreter writes the deepest mismatch into it; the host reads it
-    /// after a `FaultKind::ParseFailed`.
+    /// The rich parse-failure detail slot (§7.11). Owned here so its address is
+    /// stable; `Runtime::context` installs it on every context. The parser
+    /// interpreter writes the deepest mismatch into it; the host reads it after
+    /// a `FaultKind::ParseFailed`.
     parse_detail: ParseDetail,
-    /// The crash-snapshot slot (§9.3, M10-WS3). Owned here so its address is
-    /// stable; the first fault epilogue deep-copies the debug-frame chain into
-    /// it before unwinding. The host reads it (and roots it for GC) after a
-    /// fault.
+    /// The crash-snapshot slot (§9.3). Owned here so its address is stable; the
+    /// first fault epilogue deep-copies the debug-frame chain into it before
+    /// unwinding. The host reads it (and roots it for GC) after a fault.
     crash_snapshot: SnapshotSlot,
     /// The message slot a `panic`/`assert` fault carries (§9.1). Owned here so
     /// its address is stable; `Runtime::context` installs it on every context.
@@ -946,8 +893,7 @@ pub struct Runtime {
     /// for the same reason and under the same never-resize rule as
     /// `shadow_stack`. `debug_frames` holds one entry per live call — which
     /// function, and where its values are — and `debug_values` one slot per `Gc`
-    /// local per live call. They replace the per-call `Box<DebugFrame>` and its
-    /// separately boxed locals array that ADR-021's prologue allocated.
+    /// local per live call.
     debug_frames: DebugFrameStack,
     debug_values: DebugValueStack,
     /// The native-stack budget every context this runtime mints starts with
@@ -976,9 +922,7 @@ impl Runtime {
             // 3.42 MiB of address space, allocated zeroed — one `mmap` of
             // untouched pages, faulted in only as deep as the program actually
             // recurses. See `SHADOW_STACK_SLOTS` for why it can be sized once
-            // and never checked, and why ADR-105's byte budget made the figure
-            // exact where it used to be the product of two worst cases that
-            // cannot occur together.
+            // and never checked.
             shadow_stack: ShadowStack::new(SHADOW_STACK_SLOTS, std::ptr::null_mut()),
             // 8 KiB of reservation, one `malloc`, and a growable one — the
             // asymmetry ADR-114 records: how deep the native scopes nest is
@@ -1026,7 +970,7 @@ impl Runtime {
     ///
     /// This is the host's collection entry point. It takes no root set: a host
     /// that could name its own would be choosing which of the runtime's owners
-    /// to honour, and choosing wrong is P0-06.
+    /// to honour, and choosing wrong frees a live object.
     pub fn collect_now(&mut self) {
         let mut ctx = self.context();
         // SAFETY: `ctx` is a fresh view of this live runtime, and the arms it
@@ -1042,7 +986,7 @@ impl Runtime {
     /// [`Heap::collect`](crate::Heap::collect), which accepts only a
     /// [`RuntimeRoots`](crate::roots::RuntimeRoots) read out of a live context
     /// — a host that could pass its own `&dyn RootSet` could collect against a
-    /// set that omits the runtime's own owners, which is P0-06 by another name.
+    /// set that omits the runtime's own owners, and so free a live object.
     #[cfg(test)]
     pub fn collect_with(&self, roots: &dyn RootSet) {
         self.heap.collect_with(roots);
@@ -1060,17 +1004,13 @@ impl Runtime {
     /// Every context this mints shares the three stacks **and the native root
     /// store**, so a context taken while generated code or a runtime wrapper is
     /// running (as [`Runtime::collect_now`] does) sees the frames and scopes
-    /// already on them. The `roots` field `shadow` replaced started null and was
-    /// filled by the first prologue, so a freshly minted context could not see
-    /// the shadow chain at all; `debug_top` had the same defect, and so did
-    /// `native_roots` until ADR-114 moved the store here.
+    /// already on them.
     ///
     /// **Two contexts must never execute over these stacks concurrently.** That
-    /// is not a new property — `shadow` and `stack_left` have always had it
-    /// — and it holds because a Praxis program is single-threaded and every host
-    /// that mints a second context ([`crate::Runtime::collect_now`], the
-    /// debugger's `p EXPR` and `restart`) does so only when the previous run has
-    /// fully unwound. A second context therefore starts with the *full* stack
+    /// holds because a Praxis program is single-threaded and every host that
+    /// mints a second context ([`crate::Runtime::collect_now`], the debugger's
+    /// `p EXPR` and `restart`) does so only when the previous run has fully
+    /// unwound. A second context therefore starts with the *full* stack
     /// budget rather than the running one's remainder, which is correct for the
     /// two callers that mint one while frames are live: both do so from the host,
     /// on the host's own stack, not from underneath the frames.
@@ -1091,10 +1031,7 @@ impl Runtime {
             crash_snapshot: &mut self.crash_snapshot as *mut SnapshotSlot,
             // The one store, shared by every context this runtime mints — so a
             // context taken while native code is running (as `collect_now` does)
-            // sees the scopes already open on it. The `native_roots` this
-            // replaced started null on every fresh context, so it could not:
-            // that is the same defect ADR-101 fixed for `shadow`, arriving one
-            // arm later.
+            // sees the scopes already open on it.
             native_roots: &mut self.native_roots as *mut crate::roots::NativeRootStore,
             true_ref: self.immortals.true_(),
             false_ref: self.immortals.false_(),
@@ -1139,10 +1076,10 @@ impl Runtime {
         self.fault_message.get()
     }
 
-    /// Borrow the rich parse-failure detail slot (§7.11, M10-WS1). The host
-    /// reads this after a `FaultKind::ParseFailed` to render the input/parser
-    /// span, the expected description, and the actual preview. Returns `None`
-    /// when no detail was recorded (e.g. a non-parser `ParseFailed` path).
+    /// Borrow the rich parse-failure detail slot (§7.11). The host reads this
+    /// after a `FaultKind::ParseFailed` to render the input/parser span, the
+    /// expected description, and the actual preview. Returns `None` when no
+    /// detail was recorded (e.g. a non-parser `ParseFailed` path).
     #[must_use]
     pub fn parse_detail(&self) -> &ParseDetail {
         &self.parse_detail
@@ -1154,9 +1091,9 @@ impl Runtime {
         &mut self.parse_detail
     }
 
-    /// Borrow the crash-snapshot slot (§9.3, M10-WS3). `None` when no fault
-    /// snapshotted this run (the program completed cleanly, or faulted before
-    /// any debug frame was pushed). The host reads this after a fault for the
+    /// Borrow the crash-snapshot slot (§9.3). `None` when no fault snapshotted
+    /// this run (the program completed cleanly, or faulted before any debug
+    /// frame was pushed). The host reads this after a fault for the
     /// noninteractive render / crash REPL.
     #[must_use]
     pub fn crash_snapshot(&self) -> Option<&CrashSnapshot> {
@@ -1264,8 +1201,7 @@ impl Runtime {
     /// survives to dereference a schema pointer.
     ///
     /// A host that never calls this loses nothing but memory: an un-retired
-    /// generation leaks its arena, which is exactly what the pre-S8
-    /// `Box::leak` did.
+    /// generation leaks its arena.
     #[must_use]
     pub fn teardown(self) -> crate::teardown::HeapDrained {
         drop(self);
@@ -1279,8 +1215,7 @@ impl Default for Runtime {
     }
 }
 
-// ---- typed allocation helpers (M3 deliverable: "allocation and payload
-// access helpers") -----------------------------------------------
+// ---- typed allocation helpers --------------------------------------------
 
 impl Runtime {
     /// Allocate an `Int` (§4.3), or answer the interned immortal when `value` is
@@ -1361,9 +1296,9 @@ impl Runtime {
     /// traces `owner`, keeping the backing alive.
     ///
     /// Returns `None` if the range is not a `Text`: past the owner's end, an
-    /// overflowing length, or ends that split a multi-byte scalar. This used to
-    /// be a `debug_assert` on the range only, so a release build sliced out of
-    /// range or produced a `Text` that read as empty (RT-06).
+    /// overflowing length, or ends that split a multi-byte scalar. The check is
+    /// unconditional, not a `debug_assert` — a release build must not slice out
+    /// of range.
     ///
     /// # Safety
     /// `owner` must be a live `Text` `GcRef`.
@@ -1396,7 +1331,7 @@ impl Runtime {
     }
 
     /// Allocate a `Grid[T]` from a flat row-major list of cells, the element
-    /// descriptor, and the column count (§7.5, M6). `items.len()` must be a
+    /// descriptor, and the column count (§7.5). `items.len()` must be a
     /// multiple of `width`.
     pub fn alloc_grid(
         &self,
@@ -1424,7 +1359,7 @@ impl Runtime {
     }
 
     /// Allocate a provisional structural `Record` from field values and a static
-    /// schema (§7.8, M6). `items.len()` must equal `schema.arity()`.
+    /// schema (§7.8). `items.len()` must equal `schema.arity()`.
     pub fn alloc_record(
         &self,
         schema: &'static crate::records::RecordSchema,
@@ -1587,14 +1522,12 @@ impl GcRef {
 #[cfg(test)]
 mod tests {
 
-    /// RT-05: nothing can reset the heap a runtime's immortals live in.
-    ///
-    /// `Runtime::heap_mut()` handed out `&mut Heap`, and `Heap::reset` tears
-    /// down the arena and mints a fresh `HeapId` — so one safe call left
-    /// `Runtime.immortals` and every context's cached `unit_ref` / `true_ref` /
-    /// `false_ref` naming storage the arena was free to hand out again. The
-    /// accessor is deleted; `Runtime` exposes only `&Heap`. This pins the
-    /// invariant that made it dangerous.
+    /// Nothing can reset the heap a runtime's immortals live in: `Runtime`
+    /// exposes only `&Heap`, never `&mut Heap`, so no safe call can tear down
+    /// the arena and mint a fresh `HeapId` underneath `Runtime.immortals`. This
+    /// pins the invariant that would make such an accessor dangerous — every
+    /// context's cached `unit_ref` / `true_ref` / `false_ref` is live storage
+    /// in this runtime's own heap.
     #[test]
     fn a_runtimes_immortals_belong_to_its_own_live_heap() {
         let mut rt = Runtime::new();
@@ -1615,8 +1548,8 @@ mod tests {
     use std::ptr::NonNull;
 
     /// ADR-102: generated code loads the fault kind rather than calling
-    /// `praxis_check_fault`, so three things `is_pending()` used to encapsulate
-    /// are now baked into emitted instructions and must be pinned here.
+    /// `praxis_check_fault`, so what `is_pending()` encapsulates is baked into
+    /// emitted instructions and must be pinned here.
     ///
     /// The `brif` the backend emits treats the loaded word as the predicate, so
     /// "a fault is pending" and "the word is non-zero" have to be the same
@@ -1661,9 +1594,8 @@ mod tests {
     /// than as prose in ADR-017's Consequences: a context generated code can be
     /// handed has a fault slot to read.
     ///
-    /// The old call did test for null and answered "no fault"; the two loads
-    /// that replaced it do not, so a null here is now a segfault instead of a
-    /// program that never observes a fault.
+    /// The two loads generated code emits do not test for null, so a null here
+    /// is a segfault rather than a program that never observes a fault.
     #[test]
     fn a_wired_context_has_a_fault_slot() {
         let mut rt = Runtime::new();
@@ -1683,9 +1615,9 @@ mod tests {
     /// `[ctx + RuntimeContext::descriptor_offset(id)]` and comparing it against
     /// the header's descriptor word (ADR-102). If a slot held a neighbour's
     /// descriptor, that proof would accept an object of the wrong type and the
-    /// payload read behind it would be REP-37 at whatever width the backend
-    /// folded — so the correspondence between the slot index and the descriptor
-    /// is the one thing this table has to get right.
+    /// payload read behind it would be a wrong-type read at whatever width the
+    /// backend folded — so the correspondence between the slot index and the
+    /// descriptor is the one thing this table has to get right.
     ///
     /// It is checked here at the offset generated code reads, in bytes, rather
     /// than by indexing the Rust array: indexing would re-derive the stride
@@ -1774,12 +1706,11 @@ mod tests {
         assert!(ctx.has_pending_fault());
     }
 
-    /// The audit wrote this as `fault.set(FaultKind::None)` followed by
-    /// `assert!(!fault.is_pending())`. That line no longer compiles: `set`
-    /// takes a [`RaisedFault`], and there is no `RaisedFault` for `None`. The
-    /// property is now structural, so what is left to test is the one place a
-    /// `FaultKind` arriving as data becomes a raisable one — and that it
-    /// rejects the absence of a fault (RT-17).
+    /// `set` takes a [`RaisedFault`] and there is no `RaisedFault` for `None`,
+    /// so `fault.set(FaultKind::None)` does not compile: the property is
+    /// structural. What is left to test is the one place a `FaultKind` arriving
+    /// as data becomes a raisable one — and that it rejects the absence of a
+    /// fault.
     #[test]
     fn setting_none_cannot_create_a_pending_fault() {
         assert!(

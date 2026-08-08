@@ -9,17 +9,15 @@
 //! [`SymbolId`].
 //!
 //! This module does NOT infer types — it only resolves names and produces the
-//! symbol table + reference map that inference (Slice 5) consumes. Type
-//! annotations are validated for *known-ness* (`N002`) but not yet checked
-//! against use.
+//! symbol table + reference map that inference consumes. Type annotations are
+//! validated for *known-ness* (`N002`) but not checked against use.
 //!
-//! **Two-pass (M7):** resolution runs in two phases so that top-level type names
+//! **Two-pass:** resolution runs in two phases so that top-level type names
 //! (`struct`/`enum`/`fn`) are visible *before* any type annotation is checked.
 //! Pass 1 (`register_top_level`) seeds all top-level names; pass 2
-//! (`resolve_top_stmt`) resolves bodies and annotations. For M7-WS1 this is
-//! preparatory infrastructure — `struct`/`enum` items are not parsed until WS3,
-//! but the closed `KNOWN_TYPE_NAMES` table is replaced with scope-based lookup
-//! so WS3 can register user types the same way.
+//! (`resolve_top_stmt`) resolves bodies and annotations. Type names are found
+//! by scope lookup, so a user `struct`/`enum` registers the same way a builtin
+//! does.
 
 use std::collections::{HashMap, HashSet};
 
@@ -92,15 +90,15 @@ impl NameResolution {
 
 /// Resolve names in `file`'s parsed tree. Seeds the prelude (the built-in
 /// functions and the type-name set) into the root scope first, then runs the
-/// two-pass resolution (M7): pass 1 registers all top-level names so forward
+/// two-pass resolution: pass 1 registers all top-level names so forward
 /// references work; pass 2 resolves bodies and annotations.
 #[must_use]
 pub fn resolve(file: FileId, root: &SourceFile) -> NameResolution {
     let mut r = Resolver::new(file);
     let root_scope = r.out.scopes.root();
     r.seed_prelude(root_scope);
-    // Pass 1: register all top-level declaration names (fn/var, and in WS3+
-    // struct/enum) so they are visible before any annotation is checked.
+    // Pass 1: register all top-level declaration names (`fn`, `struct`, `enum`)
+    // so they are visible before any annotation is checked.
     for stmt in root.stmts() {
         r.register_top_level(root_scope, &stmt);
     }
@@ -114,7 +112,7 @@ pub fn resolve(file: FileId, root: &SourceFile) -> NameResolution {
     r.out
 }
 
-/// The `fn` whose body resolution is currently inside (REP-22).
+/// The `fn` whose body resolution is currently inside.
 #[derive(Clone, Debug)]
 struct FnBoundary {
     /// The body scope. A read of a binding declared outside it is `N007`.
@@ -146,8 +144,7 @@ struct PendingCapture {
 struct Resolver {
     file: FileId,
     out: NameResolution,
-    /// The innermost enclosing **`fn` body**, when resolution is inside one
-    /// (REP-22).
+    /// The innermost enclosing **`fn` body**, when resolution is inside one.
     ///
     /// A `fn` body's scope is a child of the scope around it, so a lookup walks
     /// straight out of the function and finds whatever the file declared — which
@@ -241,14 +238,14 @@ impl Resolver {
 
     /// Whether `item` is a direct child of the source file, which is the only
     /// place a `fn` may be declared. Asking the tree rather than "did pass 1
-    /// declare it?" keeps this answer independent of TY-24's duplicate case,
+    /// declare it?" keeps this answer independent of the duplicate-`fn` case,
     /// which also leaves a `fn` undeclared.
     fn is_top_level(&self, item: &FnItem) -> bool {
         self.is_node_top_level(item.syntax())
     }
 
     /// Whether `node` is a direct child of the source file — the only place a
-    /// declaration may appear (§4.5, §4.6, TY-23/REP-06).
+    /// declaration may appear (§4.5, §4.6).
     ///
     /// The same question for a `struct`/`enum` as [`is_top_level`](Self::is_top_level)
     /// asks for a `fn`, and asked once so the three answers cannot diverge.
@@ -281,19 +278,17 @@ impl Resolver {
         self.out.diagnostics.push(diag);
     }
 
-    /// `N009` — a keyword the language retired, written where a statement starts
-    /// (REP-71).
+    /// `N009` — a keyword the language retired, written where a statement
+    /// starts.
     ///
     /// `let` is the whole table so far. It bound values until ADR-125 replaced
     /// it with `var`, and every document written before then opens with one, so
     /// it is the first thing a reader of an old example hits.
     ///
-    /// It used to be an `N001` with a spelling suggestion, and the suggestion
-    /// was `Set`: the budget is `max(1, len/3)`, `let` is three characters, so
-    /// the budget is 1 and `Set` is one edit away. The budget rule is right in
-    /// general and it is rustc's; what is wrong is asking it a question whose
-    /// answer is already known. A retired keyword is not a typo, and the fix for
-    /// it is exact.
+    /// A retired keyword is **not** offered `N001`'s near-miss spelling list: it
+    /// is not a typo, and the fix for it is exact. (The near-miss budget is
+    /// `max(1, len/3)`, so for a three-character word like `let` it would
+    /// happily suggest `Set`.)
     ///
     /// **Only at the head of a statement**, which is the condition that keeps
     /// `let` a legal identifier: `var let = 5` declares it, `out(let)` reads it,
@@ -335,15 +330,14 @@ impl Resolver {
     // --- prelude (§16.1) ----------------------------------------------------
 
     /// Seed the root scope with the prelude's function names and the built-in
-    /// type names (the latter as builtin symbols so type annotations can resolve
-    /// to them). M7: type names are now seeded here so `check_type_annotation`
-    /// can validate them through scope lookup rather than a closed constant.
+    /// type names (the latter as builtin symbols, so `check_type_annotation`
+    /// validates a type annotation through an ordinary scope lookup).
     fn seed_prelude(&mut self, root: ScopeId) {
         for entry in praxis_stdlib::PRELUDE {
             // `Some`/`None` are `Option`'s variants, declared here rather than
             // by an `enum` item. They get the same kind a user-declared variant
             // does, so lowering's "is this a constructor" question has one
-            // answer for both (HIR-03).
+            // answer for both.
             let kind = if entry.is_variant_ctor {
                 SymbolKind::EnumVariant
             } else {
@@ -355,9 +349,7 @@ impl Resolver {
         self.seed_type_names(root);
     }
 
-    /// Seed the built-in scalar type names as `Builtin` symbols. Retained as a
-    /// separate method so WS3/WS4 can add user `struct`/`enum` registrations
-    /// alongside without touching `seed_prelude`.
+    /// Seed the built-in scalar type names as `BuiltinType` symbols.
     ///
     /// The names come from `praxis_stdlib::BUILTIN_TYPES` rather than from a
     /// constant here, for the reason `seed_prelude` reads `PRELUDE`: the editor
@@ -377,23 +369,24 @@ impl Resolver {
         }
     }
 
-    // --- pass 1: top-level name registration (M7) --------------------------
+    // --- pass 1: top-level name registration --------------------------------
 
     /// Register a top-level declaration's *name* without resolving its body.
-    /// This is pass 1 of the two-pass resolution: it makes `fn` (and, in WS3+,
-    /// `struct`/`enum`) names visible before any type annotation is checked or
-    /// any body is resolved, so forward references and mutual recursion work.
+    /// This is pass 1 of the two-pass resolution: it makes `fn`, `struct` and
+    /// `enum` names visible before any type annotation is checked or any body is
+    /// resolved, so forward references and mutual recursion work.
     ///
-    /// Only `fn` names are registered here: a `var` follows lexical order
-    /// (their shadowing semantics require the initializer to resolve in the
-    /// *preceding* environment, §5.3, so pre-registering would break that).
+    /// A `var` is deliberately **not** registered here: it follows lexical
+    /// order, because its shadowing semantics require the initializer to
+    /// resolve in the *preceding* environment (§5.3), which pre-registering
+    /// would break.
     fn register_top_level(&mut self, scope: ScopeId, node: &praxis_syntax::SyntaxNode) {
         if let Some(fn_) = FnItem::cast(node.clone()) {
             if let Some(name_tok) = fn_.name() {
                 // A second `fn` of the same name is a redeclaration, not a
                 // shadow: both would reach the backend and be emitted under one
-                // JIT symbol (TY-24). Report it and keep the first, so the rest
-                // of the file still resolves against something.
+                // JIT symbol. Report it and keep the first, so the rest of the
+                // file still resolves against something.
                 if self.out.scopes.is_bound_here(scope, name_tok.text()) {
                     let span = range_to_span(name_tok.text_range());
                     let at = self.file_span(span);
@@ -410,8 +403,8 @@ impl Resolver {
                 }
             }
         }
-        // M7-WS3: register struct type names so they're visible as type
-        // annotations before any body resolves.
+        // Struct type names, so they are visible as type annotations before any
+        // body resolves.
         if let Some(struct_) = StructItem::cast(node.clone()) {
             if let Some(name_tok) = struct_.name() {
                 self.bind(
@@ -422,7 +415,7 @@ impl Resolver {
                 );
             }
         }
-        // M7-WS4: register enum type names + variant constructor names.
+        // Enum type names, plus each variant's constructor name.
         if let Some(enum_) = EnumItem::cast(node.clone()) {
             if let Some(name_tok) = enum_.name() {
                 self.bind(
@@ -461,9 +454,9 @@ impl Resolver {
         } else if let Some(assign) = AssignStmt::cast(node.clone()) {
             self.resolve_assign(scope, &assign);
         } else if let Some(assign) = PlaceAssignStmt::cast(node.clone()) {
-            // `m[key] = v` (REP-16). Both sides are expressions here — the
-            // target names no binding of its own, so there is nothing to bind and
-            // nothing to declare, only names to resolve.
+            // `m[key] = v`. Both sides are expressions here — the target names
+            // no binding of its own, so there is nothing to bind and nothing to
+            // declare, only names to resolve.
             for e in [assign.target(), assign.value()].into_iter().flatten() {
                 self.resolve_expr(scope, &e);
             }
@@ -474,19 +467,18 @@ impl Resolver {
         }
     }
 
-    /// Report a `struct`/`enum` declared inside a function body (REP-06).
+    /// Report a `struct`/`enum` declared inside a function body.
     ///
     /// `register_top_level` walks the source file's own statements, so a nested
-    /// declaration was never registered: it had no symbol, no type, and **no
-    /// diagnostic**. Using it was an `N001` about a name declared two lines
-    /// above, and not using it was silence.
+    /// declaration is never registered: it has no symbol and no type. Without
+    /// this report, using it would be an `N001` about a name declared two lines
+    /// above, and not using it would be silence.
     ///
-    /// `N005` is the code a nested `fn` already uses (TY-23) and this is the same
-    /// mistake, so it is the same code — ADR-051 is amended rather than extended.
-    /// The report is at the declaration; a *use* still reports its own `N001`,
-    /// exactly as it does for a nested `fn`, because the name is genuinely not
-    /// bound and suppressing that would need a symbol the pass deliberately does
-    /// not mint.
+    /// `N005` is the code a nested `fn` uses and this is the same mistake, so
+    /// it is the same code (ADR-051). The report is at the declaration; a *use*
+    /// still reports its own `N001`, exactly as it does for a nested `fn`,
+    /// because the name is genuinely not bound and suppressing that would need
+    /// a symbol the pass deliberately does not mint.
     fn reject_nested_type_decl(
         &mut self,
         node: &praxis_syntax::SyntaxNode,
@@ -504,8 +496,8 @@ impl Resolver {
         }
     }
 
-    /// Resolve a `struct Name { field: Type, … }` declaration (M7, §4.5). The
-    /// name was already registered in pass 1; here we validate the field types.
+    /// Resolve a `struct Name { field: Type, … }` declaration (§4.5). The name
+    /// was already registered in pass 1; here we validate the field types.
     fn resolve_struct(&mut self, scope: ScopeId, item: &StructItem) {
         self.reject_nested_type_decl(item.syntax(), item.name());
         if let Some(fields) = item.field_list() {
@@ -517,8 +509,8 @@ impl Resolver {
         }
     }
 
-    /// Resolve an `enum Name { Variant, Variant(Type), … }` declaration (M7,
-    /// §4.6). The name + variant constructors were registered in pass 1; here we
+    /// Resolve an `enum Name { Variant, Variant(Type), … }` declaration (§4.6).
+    /// The name + variant constructors were registered in pass 1; here we
     /// validate the variant payload types.
     fn resolve_enum(&mut self, scope: ScopeId, item: &EnumItem) {
         self.reject_nested_type_decl(item.syntax(), item.name());
@@ -554,11 +546,10 @@ impl Resolver {
     }
 
     fn resolve_fn(&mut self, scope: ScopeId, item: &FnItem) {
-        // Only a top-level `fn` was registered in pass 1. One inside a block was
-        // parsed but never declared, and inference then reached an `expect` on
-        // the missing declaration and panicked (TY-23). Report it here — where
-        // the nesting is visible — and carry on resolving the body, so the rest
-        // of the file still reports.
+        // Only a top-level `fn` was registered in pass 1. One inside a block is
+        // parsed but never declared, and inference cannot proceed without a
+        // declaration. Report it here — where the nesting is visible — and carry
+        // on resolving the body, so the rest of the file still reports.
         if !self.is_top_level(item) {
             if let Some(name_tok) = item.name() {
                 let span = range_to_span(name_tok.text_range());
@@ -594,11 +585,11 @@ impl Resolver {
             self.bind_params(body_scope, &pl);
         }
         if let Some(body) = item.body() {
-            // Everything in the body is inside this function's boundary
-            // (REP-22). Saved and restored rather than set and cleared: a
-            // nested `fn` is already `N005` above, but it is still *resolved*,
-            // and leaving the boundary cleared afterwards would silence every
-            // reference in the rest of the outer body.
+            // Everything in the body is inside this function's boundary. Saved
+            // and restored rather than set and cleared: a nested `fn` is already
+            // `N005` above, but it is still *resolved*, and leaving the boundary
+            // cleared afterwards would silence every reference in the rest of
+            // the outer body.
             let outer = self.fn_boundary.replace(FnBoundary {
                 scope: body_scope,
                 name: item
@@ -620,12 +611,12 @@ impl Resolver {
     /// Bind whatever a parameter introduces.
     ///
     /// A name — a `fn` parameter, or a closure parameter whose pattern is a bare
-    /// name — is one `Param` symbol, exactly as before. A closure parameter that
-    /// **destructures** (REP-29) introduces the pattern's own names *and* a slot
-    /// symbol for the argument itself, because the lowered closure still takes one
-    /// value per parameter and something has to hold it before the pattern takes it
-    /// apart. The slot is declared at the pattern node's range and never bound into
-    /// a scope: no source name reaches it, and lowering finds it by range.
+    /// name — is one `Param` symbol. A closure parameter that **destructures**
+    /// introduces the pattern's own names *and* a slot symbol for the argument
+    /// itself, because the lowered closure still takes one value per parameter and
+    /// something has to hold it before the pattern takes it apart. The slot is
+    /// declared at the pattern node's range and never bound into a scope: no source
+    /// name reaches it, and lowering finds it by range.
     fn bind_param(&mut self, scope: ScopeId, p: &Param) {
         if let Some(name_tok) = p.name() {
             self.bind(
@@ -636,12 +627,12 @@ impl Resolver {
             );
             return;
         }
-        // A **wildcard** parameter (REP-32). `_` binds nothing — ADR-049 D7, and
-        // no scope entry is made here — but it is still a parameter, and it gets
-        // the same anonymous slot symbol a destructuring one gets. Without it
-        // `lower_param` found no declaration and dropped the parameter, and every
-        // parameter after it took the wrong argument: `|_, b| b` answered the
-        // first. Both spellings arrive here, `fn g(_, b)` and `|_, b|`.
+        // A **wildcard** parameter. `_` binds nothing — ADR-049 D7, and no scope
+        // entry is made here — but it is still a parameter, and it gets the same
+        // anonymous slot symbol a destructuring one gets: with no declaration
+        // `lower_param` drops the parameter, and every parameter after it takes
+        // the wrong argument. Both spellings arrive here, `fn g(_, b)` and
+        // `|_, b|`.
         if let Some(tok) = p.wildcard() {
             let range = tok.text_range();
             let span = range_to_span(range);
@@ -758,20 +749,19 @@ impl Resolver {
                 }
             }
             Expr::Error(_) => {}
-            // M6 WS5: resolve read/parse sub-expressions (parser_expr has no
-            // ordinary names to resolve; parse's text arg does).
+            // `parser_expr` has no ordinary names to resolve; `parse`'s text
+            // argument does.
             Expr::Read(_) => {}
             Expr::Parse(p) => {
                 if let Some(text_expr) = p.text_expr() {
                     self.resolve_expr(scope, &text_expr);
                 }
             }
-            // M7-WS3: record literal — resolve the struct name (a type reference)
-            // and each field initializer.
+            // A record literal: resolve the struct name (a type reference) and
+            // each field initializer.
             Expr::RecordLit(r) => self.resolve_record_lit(scope, r),
-            // M7-WS3: field access — resolve the receiver. The field name is not
-            // a scope binding; it's resolved against the struct type during
-            // inference.
+            // Field access: resolve the receiver. The field name is not a scope
+            // binding; it is resolved against the struct type during inference.
             Expr::FieldGet(f) => self.resolve_field_get(scope, f),
             // A tuple index names nothing, so only the receiver is resolved.
             Expr::TupleIndex(t) => {
@@ -779,9 +769,9 @@ impl Resolver {
                     self.resolve_expr(scope, &receiver);
                 }
             }
-            // A subscript (REP-16): the receiver and every index are ordinary
+            // A subscript: the receiver and every index are ordinary
             // expressions. What the brackets *select* is resolved against the
-            // catalog during inference, as a method name is.
+            // catalog during inference, the way a method name is.
             Expr::Index(i) => {
                 if let Some(receiver) = i.receiver() {
                     self.resolve_expr(scope, &receiver);
@@ -790,19 +780,19 @@ impl Resolver {
                     self.resolve_expr(scope, &index);
                 }
             }
-            // M7-WS5: match — resolve the scrutinee and each arm's body. Pattern
+            // A match: resolve the scrutinee and each arm's body. Pattern
             // variable bindings enter a child scope.
             Expr::Match(m) => self.resolve_match(scope, m),
-            // M7-WS7: closure — params bind in a child scope; the body resolves
-            // there (capturing outer-scope names naturally through the scope chain).
+            // A closure: params bind in a child scope; the body resolves there
+            // (capturing outer-scope names through the scope chain).
             Expr::Closure(c) => self.resolve_closure(scope, c),
         }
     }
 
-    /// Resolve a `|params| expr` closure (M7, §4.10). Params bind in a child
-    /// scope; the body resolves in that scope. Outer names are captured
-    /// automatically through the scope chain (a free var in the body resolves to
-    /// an enclosing binding).
+    /// Resolve a `|params| expr` closure (§4.10). Params bind in a child scope;
+    /// the body resolves in that scope. Outer names are captured automatically
+    /// through the scope chain (a free var in the body resolves to an enclosing
+    /// binding).
     fn resolve_closure(&mut self, scope: ScopeId, c: &praxis_ast::ClosureExpr) {
         let body_scope = self.out.scopes.push_child(scope);
         for p in c.params() {
@@ -819,7 +809,7 @@ impl Resolver {
         }
     }
 
-    /// Resolve a `match scrutinee { pattern => body, … }` expression (M7, §4.6).
+    /// Resolve a `match scrutinee { pattern => body, … }` expression (§4.6).
     fn resolve_match(&mut self, scope: ScopeId, m: &praxis_ast::MatchExpr) {
         // Resolve the scrutinee.
         if let Some(scrutinee) = m.scrutinee() {
@@ -837,7 +827,7 @@ impl Resolver {
         }
     }
 
-    /// Bind any variable names introduced by a pattern in `scope` (M7, §4.6).
+    /// Bind any variable names introduced by a pattern in `scope` (§4.6).
     /// A `Name(x)` pattern introduces a binding `x`; a `Variant(Sub)`, a tuple
     /// and a record recurse into their sub-patterns.
     fn resolve_pattern_bindings(&mut self, scope: ScopeId, pat: &praxis_ast::Pattern) {
@@ -848,7 +838,7 @@ impl Resolver {
                     self.bind(scope, SymbolKind::Var, name, tok.text_range());
                 }
             }
-            // `(a, b)` — every element is a pattern of its own (REP-10).
+            // `(a, b)` — every element is a pattern of its own.
             praxis_ast::PatternKind::Tuple => {
                 for sub in pat.sub_patterns() {
                     self.resolve_pattern_bindings(scope, &sub);
@@ -992,7 +982,7 @@ impl Resolver {
         }
     }
 
-    /// `for binding in iter { body }` (M8, §4.11). The iterator resolves in the
+    /// `for binding in iter { body }` (§4.11). The iterator resolves in the
     /// current scope; the binding is declared in a child scope that wraps the
     /// body (so the loop variable is visible only inside the body).
     fn resolve_for(&mut self, scope: ScopeId, f: &ForExpr) {
@@ -1000,9 +990,9 @@ impl Resolver {
             self.resolve_expr(scope, &iter);
         }
         let body_scope = self.out.scopes.push_child(scope);
-        // The binding is a pattern (REP-25), so it declares whatever names it
-        // holds — one for `for x in …`, two for `for (k, v) in …` — through the
-        // same walk a match arm's pattern goes through.
+        // The binding is a pattern, so it declares whatever names it holds —
+        // one for `for x in …`, two for `for (k, v) in …` — through the same
+        // walk a match arm's pattern goes through.
         if let Some(pat) = f.binding() {
             self.resolve_pattern_bindings(body_scope, &pat);
         }
@@ -1035,7 +1025,7 @@ impl Resolver {
 
     fn resolve_call(&mut self, scope: ScopeId, c: &CallExpr) {
         // The callee is a name reference (named call `f(args)`), or — for a
-        // postfix call on an arbitrary expression (`expr(args)`, M8 §4.10) — an
+        // postfix call on an arbitrary expression (`expr(args)`, §4.10) — an
         // expression callee (e.g. `fs.get(0)` in `fs.get(0)(100)`, or a paren'd
         // closure `(|x| x)(14)`). Resolve whichever is present; the expression
         // callee must be resolved so its nested bindings (closure params,
@@ -1047,8 +1037,8 @@ impl Resolver {
         } else if let Some(callee_expr) = c.callee_expr() {
             self.resolve_expr(scope, &callee_expr);
         }
-        // Written type arguments are type annotations (REP-09), so they are checked
-        // like any other: `Counter[Nope]()` is `N002` and `Counter[x]()` is `N003`,
+        // Written type arguments are type annotations, so they are checked like
+        // any other: `Counter[Nope]()` is `N002` and `Counter[x]()` is `N003`,
         // at the annotation, before inference has an opinion about the call.
         if let Some(type_args) = c.type_args() {
             for ty in type_args.args() {
@@ -1068,8 +1058,6 @@ impl Resolver {
 
     // --- name references ---------------------------------------------------
 
-    /// Resolve a bare `Ident` token used as a reference. Looks it up, records the
-    /// resolved ref, or emits `N001`.
     /// Resolve one name *reference* and record it. Returns the declaration the
     /// name reached, or `None` when nothing is in scope under that spelling
     /// (which is reported as `N001` here, so callers need not).
@@ -1094,8 +1082,7 @@ impl Resolver {
         }
     }
 
-    /// Report a `fn` body naming a binding declared outside it (REP-22,
-    /// ADR-068).
+    /// Report a `fn` body naming a binding declared outside it (ADR-068).
     ///
     /// Only *bindings* cross badly: a `var` or another function's
     /// parameter is a local of the function that declared it, and a `fn` body has
@@ -1230,7 +1217,7 @@ impl Resolver {
                 }
                 // A name that resolves to a *value* is not a type. Reporting it
                 // as unknown would be a lie — it is known, and it is the wrong
-                // sort of thing (TY-11).
+                // sort of thing.
                 (Some(_), _) => {
                     let at = self.file_span(span);
                     self.out.diagnostics.push(name_is_not_a_type(at, name));

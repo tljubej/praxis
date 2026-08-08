@@ -1,4 +1,4 @@
-//! The `Closure` value descriptor (§4.10, M7-WS7).
+//! The `Closure` value descriptor (§4.10).
 //!
 //! A closure value carries a function pointer (the JIT'd entry point of the
 //! closure's synthetic function) plus a captured environment (the values it
@@ -9,7 +9,7 @@
 //! Per §5.5, function and closure values are **never equatable or hashable** —
 //! they have no structural identity. The `equals`/`hash` callbacks are `None`.
 //!
-//! ## Calling convention (Approach B)
+//! ## Calling convention
 //!
 //! The closure's synthetic function takes the closure value itself as a hidden
 //! first explicit parameter (after the implicit `ctx`): its MIR signature is
@@ -33,8 +33,9 @@ use crate::GcRef;
 /// order established by the HIR capture analysis).
 #[repr(C)]
 pub struct ClosurePayload {
-    /// The JIT'd entry-point function pointer. The calling convention matches
-    /// every other Praxis function: `fn(ctx: i64, params..., env...) -> i64`.
+    /// The JIT'd entry-point function pointer, called as
+    /// `fn(ctx: i64, closure_self: i64, params...) -> i64`. The captures are not
+    /// trailing parameters; the prologue reads them out of this payload.
     pub fn_ptr: *const u8,
     /// The captured values, in the order the capture analysis recorded them.
     /// Each is a `GcRef` into the GC heap.
@@ -63,7 +64,7 @@ unsafe fn closure_format(payload: *const u8, out: &mut FormatSink<'_>) {
     let _ = write!(out, "<closure:{}>", p.env.len());
 }
 
-/// Descriptor for the `Closure` value type (M7, §4.10). Closures are never
+/// Descriptor for the `Closure` value type (§4.10). Closures are never
 /// equatable or hashable (§5.5: function values have no structural identity).
 pub static CLOSURE: TypeDescriptor = TypeDescriptor::builtin::<ClosurePayload>(
     BuiltinTypeId::Closure,
@@ -79,7 +80,7 @@ pub static CLOSURE: TypeDescriptor = TypeDescriptor::builtin::<ClosurePayload>(
 )
 .with_owned_bytes(closure_owned_bytes);
 
-/// The heap bytes a closure owns beyond its payload, for GC pacing (RT-04).
+/// The heap bytes a closure owns beyond its payload, for GC pacing.
 /// `capacity`, not `len`: the buffer's real footprint is what the collector is
 /// paced against.
 ///

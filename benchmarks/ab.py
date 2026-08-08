@@ -441,9 +441,9 @@ def main() -> None:
         )
     # Every *environment* gate is asked before `--check-only` may answer, because
     # what it answers is "is this machine ready to measure?" and these are part
-    # of that question. They used to sit below the early return, so a shell with
-    # `PRAXIS_DUMP_CLIF` exported got "ready to measure" from `--check-only` and
-    # then a nonzero exit from the sweep it had just green-lit.
+    # of that question. Below the early return, a shell with `PRAXIS_DUMP_CLIF`
+    # exported would get "ready to measure" and then a nonzero exit from the
+    # sweep `--check-only` had just green-lit.
     #
     # `PRAXIS_GC_PACER` changes the collector's schedule and nothing else
     # (ADR-112), so a stale export moves both arms without moving one character of
@@ -499,9 +499,9 @@ def main() -> None:
     names += [n for n in controls if n not in names]
     # The suite-checksum gate exists because *both* arms can be identically
     # wrong, and a benchmark `results.json` has never recorded is exactly the
-    # case where it cannot say so. A missing entry used to yield `expected =
-    # None`, which the comparison then read as a pass — the gate failing open on
-    # the one input it was built for. Refuse instead, before the clock starts.
+    # case where it cannot say so. A missing entry is refused here, before the
+    # clock starts, rather than left to yield `expected = None` — which the
+    # comparison reads as a pass, failing the gate open on its one real input.
     # `--smoke` is the documented exception and is handled below: pilot sizes
     # compute a different, equally correct answer.
     if not args.smoke and (
@@ -643,9 +643,9 @@ def main() -> None:
             drift = {arm: sweep_drift(s) for arm, s in samples.items()}
             is_control = name in controls
             # §6 says a control voids the sweep when it moves "outside noise" —
-            # not outside 2%. Whichever of the two is larger is the honest bar,
-            # and now that the noise term is the paired dispersion rather than
-            # the sweep's range, "larger" is 2% on any quiet machine and a 5%
+            # not outside 2%. Whichever of the two is larger is the honest bar;
+            # with the noise term being the paired dispersion rather than the
+            # sweep's range, "larger" is 2% on any quiet machine and a 5%
             # control move voids as it should.
             bar = max(NOISE_FLOOR, dispersion)
             if is_control and abs(delta) > bar:

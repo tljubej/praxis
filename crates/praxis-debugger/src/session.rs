@@ -1,13 +1,13 @@
 //! The debug session state the crash REPL reaches into for `p EXPR`, `source`,
-//! `input`, `parser`, `restart`, and `reload` (§9.4–§9.7, M10b).
+//! `input`, `parser`, `restart`, and `reload` (§9.4–§9.7).
 //!
-//! M10a's `Repl` owned only the snapshot. M10b's commands need far more: the
-//! live `Runtime` (to host `p EXPR`'s synthetic call and to read
-//! `ParseDetail`), the `Jit` (to compile the synthetic function and to look up
-//! `main` for `restart`), the `TypeDb` (to type-check `p EXPR` against the
-//! selected frame's locals and to render `type EXPR`), the program source
-//! (for `source`), and the original input (for `restart`/`reload`'s "same
-//! input" guarantee, §9.7).
+//! These commands need far more than the snapshot the REPL navigates: the live
+//! `Runtime` (to host `p EXPR`'s synthetic call and to read `ParseDetail`), the
+//! `Jit` (to compile the synthetic function and to look up `main` for
+//! `restart`), the `TypeDb` (to type-check `p EXPR` against the selected
+//! frame's locals and to render `type EXPR`), the program source (for
+//! `source`), and the original input (for `restart`/`reload`'s "same input"
+//! guarantee, §9.7).
 //!
 //! Rather than thread half a dozen `&mut` borrows through every `handle`
 //! call, the [`DebugSession`] owns all of it. The [`crate::repl::Repl`] holds
@@ -60,15 +60,14 @@ pub struct DebugSession {
     /// The original input bytes (for `restart`/`reload`'s "same input"
     /// guarantee, §9.7). Re-installed as `input_source` on each re-run.
     pub input_text: String,
-    /// The JIT generation every `p EXPR` / `heap EXPR` compiles into (F13,
-    /// DBG-05).
+    /// The JIT generation every `p EXPR` / `heap EXPR` compiles into (F13).
     ///
-    /// `p` compiles a throwaway module per command. Before S8 each one leaked
-    /// its schemas, names and debug metadata for the life of the process, so a
-    /// long session grew without bound. Sharing one generation makes that
-    /// metadata *interned*: the same expression evaluated a hundred times
-    /// allocates once. It is deliberately separate from `jit`'s generation and
-    /// survives `reload`, because the values a `p` left in the heap keep
+    /// `p` compiles a throwaway module per command, and a generation per
+    /// command would leak its schemas, names and debug metadata for the life of
+    /// the process, so a long session would grow without bound. Sharing one
+    /// generation makes that metadata *interned*: the same expression evaluated
+    /// a hundred times allocates once. It is separate from `jit`'s generation
+    /// and survives `reload`, because the values a `p` left in the heap keep
     /// pointing at schemas this arena owns.
     pub eval_generation: Rc<Generation>,
 }
@@ -92,19 +91,16 @@ impl DebugSession {
         let mut ctx: RuntimeContext = self.runtime.context();
         // Installed unconditionally, including when it is empty: a zero-length
         // buffer is empty input, not the absence of input, and the rule is
-        // stated at `praxis_get_input` (ADR-087). The guard that used to stand
-        // here is why a `restart` after a zero-byte-input fault re-ran with no
-        // buffer at all — the second banner was contentless and `input` answered
-        // "(no input context — not a parse failure)" about a run that had failed
-        // to parse, which is not the "same input" §9.7 promises.
+        // stated at `praxis_get_input` (ADR-087). Skipping the install for an
+        // empty buffer would re-run with no buffer at all, which is not the
+        // "same input" §9.7 promises.
         //
-        // What stays true and is worth saying: `input_text` is the source of
-        // truth from here, because `praxis-cli`'s `clear_input_reader` disarms
-        // the reader before the REPL starts. For a program that faulted *before*
-        // its first `read`, that text is empty because nothing was read — so a
-        // `reload` that moves the `read` earlier sees empty input rather than the
-        // original stdin. That is a property of an exhausted stdin, not of this
-        // line.
+        // `input_text` is the source of truth from here, because `praxis-cli`'s
+        // `clear_input_reader` disarms the reader before the REPL starts. For a
+        // program that faulted *before* its first `read`, that text is empty
+        // because nothing was read — so a `reload` that moves the `read` earlier
+        // sees empty input rather than the original stdin. That is a property of
+        // an exhausted stdin, not of this line.
         ctx.input_source = self.runtime.alloc_text(&self.input_text);
         // SAFETY: caller guarantees main_entry is a finalized entry in self.jit.
         unsafe { (self.main_entry)(&mut ctx as *mut RuntimeContext) }
@@ -120,7 +116,7 @@ impl DebugSession {
     }
 
     /// Tear the session down in the one order that is sound: heap first, then
-    /// the generation arenas its objects pointed into (F13, hazard H15).
+    /// the generation arenas its objects pointed into (F13).
     ///
     /// Every `RecordPayload` and `TuplePayload` in the heap holds a raw
     /// `*const …Schema` into one of these two arenas — `jit`'s for values `main`
@@ -129,8 +125,7 @@ impl DebugSession {
     /// [`HeapDrained`](praxis_runtime::HeapDrained) that `retire` demands, so
     /// the ordering is checked by the compiler rather than by this comment.
     ///
-    /// A session that is merely dropped leaks both arenas, which is what every
-    /// pre-S8 run did.
+    /// A session that is merely dropped leaks both arenas.
     pub fn teardown(self) {
         let DebugSession {
             jit,
@@ -142,8 +137,7 @@ impl DebugSession {
         jit.retire(proof.clone());
         Generation::retire(eval_generation, proof.clone());
         // The parser plans are the third arena: a `read`/`parse` in the program
-        // registered one per compile, and every `reload` registered more
-        // (IP-12).
+        // registers one per compile, and every `reload` registers more.
         praxis_runtime::retire_parser_plans(&proof);
     }
 
@@ -188,9 +182,9 @@ impl DebugSession {
         let ids = new_jit
             .compile(&funcs, &mut analysis.db)
             .map_err(|e| format!("JIT compile failed: {e}"))?;
-        // The same entry-point rule the CLI's `run` uses (REP-19, ADR-067): a
-        // file's top-level statements are its program, and `fn main` is the
-        // fallback for a file with none.
+        // The same entry-point rule the CLI's `run` uses (ADR-067): a file's
+        // top-level statements are its program, and `fn main` is the fallback
+        // for a file with none.
         let main_id = *praxis_hir::entry_point(|name| ids.contains_key(name))
             .and_then(|name| ids.get(name))
             .ok_or_else(|| {

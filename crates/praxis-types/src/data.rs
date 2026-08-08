@@ -42,16 +42,13 @@ impl EnumDefId {
 /// never re-declares "what the built-in scalars are" (rule 20.3). `Unit` is kept
 /// as its own variant, mirroring how [`praxis_stdlib::TypePattern`] splits `Unit`
 /// from `Scalar` (the stdlib models `Unit` as a sibling variant, not a scalar).
-/// M2 only *constructs* `Int`, `Text`, `Bool`, `Unit`, and `Never`; the reserved
-/// scalars (`UInt`, `Float`, `Byte`, `Char`) surface as "unknown type" name
-/// diagnostics if a user writes them (ADR-007), per §4.3.
+/// `UInt` and `Byte` are reserved but not constructible: an annotation naming
+/// one surfaces as an "unknown type" name diagnostic (ADR-007), per §4.3.
 ///
-/// M5 adds [`Collection`](Self::Collection) so the inference engine can represent
-/// `Vec[T]` and drive method dispatch (ADR-010) against the receiver type. The
-/// full collection set (Map/Set/Counter/Heap/Deque) lands in M8; M5 focuses on
-/// `Vec`.
+/// [`Collection`](Self::Collection) lets the inference engine represent `Vec[T]`
+/// and drive method dispatch (ADR-010) against the receiver type.
 ///
-/// M7 adds [`Record`](Self::Record) and [`Enum`](Self::Enum) via def-id
+/// [`Record`](Self::Record) and [`Enum`](Self::Enum) go through def-id
 /// indirection (ADR-025): the heavy field/variant data lives in side-tables on
 /// [`TypeDb`](crate::db::TypeDb), keeping `Type` a cheap copyable `u32` handle
 /// and avoiding recursive size/cycles. Both nominal (source-declared) and
@@ -68,10 +65,9 @@ pub enum TypeData {
     /// Its own variant, not a [`Scalar`](Self::Scalar). A scalar is a type with
     /// a runtime representation — a descriptor, a payload width, a value you
     /// can hold — and `Never` has none of those *by definition*: no value ever
-    /// has this type. Sitting in `ScalarType` made every "is this a scalar?"
-    /// question answer yes for it, and made [`join`](crate::db::TypeDb::join)'s
-    /// absorbing case a special case *inside* the scalar arm rather than an
-    /// arm of its own (TY-19).
+    /// has this type. Keeping it out of `ScalarType` is what lets every "is this
+    /// a scalar?" question answer no for it, and lets
+    /// [`join`](crate::db::TypeDb::join)'s absorbing case be an arm of its own.
     Never,
     /// A tuple `(T, U, …)`. A one-element "tuple" never exists as data — the
     /// parser keeps single parenthesized types as the inner type, so this variant
@@ -81,8 +77,8 @@ pub enum TypeData {
     Func { params: Vec<Type>, result: Type },
     /// A collection `Ctor[T, …]`, e.g. `Vec[Int]` (§4.4, §11.2). The `ctor`
     /// names the collection kind (shared with `TypePattern::Collection`); `args`
-    /// are the type arguments (one for `Vec[T]`, two for `Map[K, V]`, …). M5
-    /// constructs `Vec` only; other ctors are reserved.
+    /// are the type arguments (one for `Vec[T]`, two for `Map[K, V]`, none for
+    /// the nullary `BitSet` and `Range`).
     Collection {
         ctor: CollectionCtor,
         args: Vec<Type>,
@@ -99,7 +95,7 @@ pub enum TypeData {
     /// An enum type (§4.6). `def` indexes
     /// [`TypeDb::enum_defs`](crate::db::TypeDb); `args` instantiates the def's
     /// [`params`](EnumDef::params), so `Option[Int]` and `Option[Text]` are one
-    /// def with two argument lists rather than two nominal definitions (TY-06).
+    /// def with two argument lists rather than two nominal definitions.
     Enum { def: EnumDefId, args: Vec<Type> },
     /// A type variable, in one of its lifecycle states (see [`VarState`]).
     Var(VarState),
@@ -109,13 +105,12 @@ pub enum TypeData {
 /// restored on leaving it; a variable records the level it was created at, and
 /// generalization quantifies exactly the variables deeper than the binding site.
 ///
-/// # Why a newtype (F10)
+/// # Why a newtype
 ///
-/// The level was a bare `u32` compared by hand at each of its three uses, and
-/// one of those comparisons was **backwards** (TY-01). ADR-008's rule is
-/// `level(w) := min(level(w), level(v))` — a level only ever *decreases* — so
-/// [`clamp_to`](Self::clamp_to) is the only mutator and it cannot be written to
-/// raise one.
+/// ADR-008's rule is `level(w) := min(level(w), level(v))` — a level only ever
+/// *decreases* — so [`clamp_to`](Self::clamp_to) is the only mutator and it
+/// cannot be written to raise one. A bare `u32` compared by hand at each use
+/// puts the direction of that comparison back in the caller's hands.
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Level(u32);
 
@@ -156,13 +151,12 @@ impl Level {
 /// - [`unify`](crate::unify)ing one [`Link`](VarState::Linked)s it to a concrete
 ///   type (or another var), resolving via [`TypeDb::prune`](crate::TypeDb::prune).
 ///
-/// There is no third state. A `Generalized` variant used to record "this
-/// variable is quantified by *some* scheme" as a flag **on the arena** — global
-/// state that a later `generalize` could set under a scheme that had already
-/// been built as a monotype, leaving a `Scheme` whose body pointed at variables
-/// it did not list (TY-03). Quantification is now recorded by the
-/// [`Scheme`](crate::Scheme) that does the quantifying, which is the only thing
-/// that knows it.
+/// There is no third state. Quantification is not a property of the variable:
+/// it is recorded by the [`Scheme`](crate::Scheme) that does the quantifying,
+/// which is the only thing that knows it. A "generalized" flag on the arena
+/// would be global state a later `generalize` could set under a scheme already
+/// built as a monotype, leaving a `Scheme` whose body pointed at variables it
+/// did not list.
 #[derive(Clone, Debug)]
 pub enum VarState {
     /// Not yet constrained. `level` is the binding level at which the var was
@@ -197,9 +191,9 @@ pub struct RecordFieldDef {
 pub struct RecordDef {
     /// `None` for anonymous structural records; the declared name for nominal.
     pub name: Option<String>,
-    /// The def's own type parameters (F12). Empty for every record the language
-    /// can declare today — there is no `struct P[T]` syntax — so a record's
-    /// field types *are* its children. When it is non-empty, the field types are
+    /// The def's own type parameters. Empty for every record the language can
+    /// declare today — there is no `struct P[T]` syntax — so a record's field
+    /// types *are* its children. When it is non-empty, the field types are
     /// written in terms of these variables and an instance's
     /// [`args`](TypeData::Record::args) is what substitutes for them.
     pub params: Vec<VarId>,
@@ -227,10 +221,9 @@ impl RecordDef {
 /// tuple of types for the variant's data. `Empty`/`Wall` are payload-less;
 /// `Number(Int)` has a one-element payload; `Pair(Int, Text)` has two.
 ///
-/// The payload is a plain `Vec` (TY-05): an **empty** one *is* the payload-less
-/// case. It used to be an `Option<Vec<Type>>` whose two "no payload" spellings
-/// this very file documented as equivalent — and which `unify` then rejected as
-/// a mismatch, because `(None, Some([]))` fell through to its catch-all arm.
+/// The payload is a plain `Vec`: an **empty** one *is* the payload-less case.
+/// An `Option<Vec<Type>>` would give "no payload" two spellings, and `unify`
+/// would have to treat `None` and `Some([])` as the same thing.
 #[derive(Clone, Debug)]
 pub struct EnumVariantDef {
     pub name: String,
@@ -272,12 +265,10 @@ impl EnumVariantDef {
 pub struct EnumDef {
     /// `None` for anonymous enums; the declared name for nominal.
     pub name: Option<String>,
-    /// The def's own type parameters (F12). The prelude `Option` is the one
-    /// generic def today: `params = [T]`, `variants = [Some(T), None]`, and
-    /// every `Option[X]` is that def with `args = [X]`. It used to be a *fresh
-    /// nominal def per annotation site and per instantiation* (TY-06), which is
-    /// why `unify` needed a name-and-signature arm to put the copies back
-    /// together and why the monomorphizer's display-string cache key collided.
+    /// The def's own type parameters. The prelude `Option` is the one generic
+    /// def today: `params = [T]`, `variants = [Some(T), None]`, and every
+    /// `Option[X]` is that def with `args = [X]` — one def, many argument lists,
+    /// so `unify` compares def-ids rather than names and signatures.
     pub params: Vec<VarId>,
     pub variants: Vec<EnumVariantDef>,
 }

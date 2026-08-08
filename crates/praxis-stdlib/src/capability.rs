@@ -15,8 +15,8 @@
 
 /// One structural property a type either has or does not (§5.4, §5.5).
 ///
-/// The five are not independent, and the two hash-shaped ones are the pair
-/// TY-32 exists for. See [`CapKind::HashStable`].
+/// The five are not independent; the two hash-shaped ones are a pair, see
+/// [`CapKind::HashStable`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum CapKind {
     /// Comparable with `==` / `!=` (§5.5). Scalars and `Unit` are; a composite
@@ -32,7 +32,7 @@ pub enum CapKind {
     /// be a key.
     Hash,
     /// Hashable **and immutable**, which is what a `Map` key or `Set` element
-    /// must be (D4, TY-32/RT-08).
+    /// must be (D4).
     ///
     /// A `Vec` is hashable: the runtime can hash its current contents. It is
     /// not *stably* hashable, because `key.push(2)` after `table.insert(key,
@@ -48,7 +48,7 @@ pub enum CapKind {
     HashStable,
     /// Numeric: admits `+`, `-`, `*`, `/`, unary minus, and the numeric sinks
     /// (`sum`, `product`). `Int`, `UInt`, `Byte` and `Float` are; nothing else
-    /// is. `%` is narrower still and is not this capability (TY-27).
+    /// is. `%` is narrower still and is not this capability.
     Numeric,
 }
 

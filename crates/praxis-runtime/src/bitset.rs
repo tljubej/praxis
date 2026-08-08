@@ -1,4 +1,4 @@
-//! `BitSet` (M8-WS5, §6.1).
+//! `BitSet` (§6.1).
 //!
 //! A compact set of non-negative integers, backed by a [`ReprCVec<u64>`] of
 //! words. Occupancy is bit `i` of word `i / 64`. Nullary in user syntax
@@ -20,11 +20,10 @@ use crate::repr_c_vec::ReprCVec;
 /// A value a `BitSet` can actually hold: non-negative, and small enough that
 /// the word vector backing it stays a real allocation.
 ///
-/// This is the only route from a user-supplied `Int` to a bit position (RT-07).
-/// `insert` used to take a bare `usize` cast from an `i64`, so `bs.insert(-1)`
-/// was silently dropped and `bs.insert(10^18)` asked for a 10^16-word `Vec` —
-/// an OOM abort *inside* `extern "C"`. Neither is expressible now: the range
-/// check happens where the value enters, once.
+/// This is the only route from a user-supplied `Int` to a bit position (RT-07),
+/// so the range check happens where the value enters, once. A negative member
+/// and one whose word vector the host could not serve are both unrepresentable
+/// rather than merely unreached.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BitIndex(usize);
 
@@ -83,17 +82,11 @@ pub struct BitSetPayload {
     /// The words. Trailing zero words may be present; equality/hash trim them.
     ///
     /// A [`ReprCVec`](crate::ReprCVec) rather than a `std::Vec` for ADR-118's
-    /// reason, now applied to the second payload: generated code reads the
-    /// words pointer and the word count inline for `bs.contains(x)`, and
-    /// `std::Vec` is `#[repr(Rust)]` — its three words live inside a private
-    /// `RawVec` in no guaranteed order. The container holds the same three
-    /// words the `Vec` held and `Vec` still does every allocation.
-    ///
-    /// **W4a migrated `VecPayload` and not this one**, on the reading that
-    /// `praxis_bitset_contains` was "the cleanest" of W4b's three primitives
-    /// (handover 26 §4). It is the cleanest in every other respect — `Pure`, no
-    /// allocation, no fault, no pacing obligation — and it was the one with no
-    /// legal number to read.
+    /// reason: generated code reads the words pointer and the word count inline
+    /// for `bs.contains(x)`, and `std::Vec` is `#[repr(Rust)]` — its three words
+    /// live inside a private `RawVec` in no guaranteed order. The container
+    /// gives those three words a fixed layout; `Vec` still does every
+    /// allocation.
     pub words: ReprCVec<u64>,
 }
 
@@ -101,8 +94,8 @@ pub struct BitSetPayload {
 // the tree rather than in a sentence. `words` is the only field, so its
 // element pointer is at payload+0 and its length at payload+8.
 const _: () = assert!(std::mem::offset_of!(BitSetPayload, words) == 0);
-// The payload is one container and nothing else, so the block's size class and
-// the pacer's page density are exactly what they were before the migration.
+// The payload is one container and nothing else, which is what fixes the
+// block's size class and the pacer's page density.
 const _: () = assert!(std::mem::size_of::<BitSetPayload>() == 24);
 const _: () = assert!(std::mem::align_of::<BitSetPayload>() == 8);
 
@@ -238,7 +231,7 @@ unsafe fn bitset_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     hasher.write_bytes(&acc.to_le_bytes());
 }
 
-/// Descriptor for `BitSet` (§6.1, TypeId 19). Equatable and hashable (structural
+/// Descriptor for `BitSet` (§6.1, TypeId 15). Equatable and hashable (structural
 /// over the set of bits), so a BitSet can be a value in another collection.
 pub static BITSET: TypeDescriptor = TypeDescriptor::builtin::<BitSetPayload>(
     BuiltinTypeId::BitSet,

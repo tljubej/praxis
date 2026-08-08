@@ -1,8 +1,8 @@
 //! Tests for the core inference engine (ADR-007/008).
 //!
 //! These exercise the type arena, unification, generalization, and rendering in
-//! isolation — no syntax, no HIR. They are the foundation the rest of M2 builds
-//! on, so a regression here is caught before anything downstream.
+//! isolation — no syntax, no HIR. They are the foundation the rest of the front
+//! end builds on, so a regression here is caught before anything downstream.
 
 #![cfg(test)]
 
@@ -316,15 +316,14 @@ fn generalize_walks_into_tuples_and_functions() {
     assert_eq!(rendered, "forall T U. (T, (T) -> U)");
 }
 
-/// **Rewritten** for TY-03/F10. It asserted that `generalize` sets a
-/// `VarState::Generalized` flag on the arena slot — global state recording that
-/// *some* scheme quantifies this variable, which is a fact no arena can hold:
-/// a monotype built before the flag was set has a body containing a variable it
-/// does not bind, and unification refuses to link one.
+/// A scheme owns its binders: generalization *collects* and mutates nothing,
+/// and the variable it collected is still an ordinary unbound variable in the
+/// arena.
 ///
-/// The scheme owns its binders now, so the property is stated where it lives:
-/// generalization *collects* and mutates nothing, and the variable it collected
-/// is still an ordinary unbound variable in the arena.
+/// A `VarState::Generalized` flag on the arena slot would be global state
+/// recording that *some* scheme quantifies this variable, which is a fact no
+/// arena can hold: a monotype built before the flag was set has a body
+/// containing a variable it does not bind, and unification refuses to link one.
 #[test]
 fn a_scheme_owns_its_binders_and_generalization_mutates_nothing() {
     let mut db = TypeDb::new();
@@ -357,13 +356,13 @@ fn a_scheme_owns_its_binders_and_generalization_mutates_nothing() {
     assert_eq!(db.render(body), "(?T) -> ?T");
 }
 
-/// TY-03 directly: the state a `Scheme` could encode and cannot any more.
+/// Generalizing one binding must not disturb another's type.
 ///
 /// A monotype built from a type containing `v`, followed by generalization of a
-/// *different* binding that also reaches `v`, used to leave the monotype's body
-/// pointing at a `Generalized` slot — a variable it does not list, and one
-/// `unify` has no arm for. The monotype silently stopped unifying with
-/// anything.
+/// *different* binding that also reaches `v`, must leave the monotype's body
+/// pointing at an ordinary unbound variable. A `Generalized` slot there would be
+/// a variable the monotype does not list and `unify` has no arm for, so the
+/// monotype would silently stop unifying with anything.
 #[test]
 fn generalizing_one_scheme_does_not_change_another() {
     let mut db = TypeDb::new();
@@ -383,11 +382,11 @@ fn generalizing_one_scheme_does_not_change_another() {
         .expect("a monotype's body is still an ordinary unbound variable");
 }
 
-// --- collection types (M5 foundation: §4.4, §11.2) -------------------------
+// --- collection types (§4.4, §11.2) ----------------------------------------
 //
-// Collection types drive the entire M5 method-dispatch surface, yet the
-// unification, occurs check, and rendering paths for `TypeData::Collection`
-// were entirely uncovered. These mirror the tuple/function coverage above.
+// Collection types drive the whole method-dispatch surface. These mirror the
+// tuple/function coverage above over `TypeData::Collection`'s unification,
+// occurs check and rendering paths.
 
 #[test]
 fn unify_vec_same_element_unifies() {
@@ -414,11 +413,10 @@ fn unify_vec_mismatched_element_fails() {
     );
 }
 
-/// TY-07. A wrong-arity collection used to be one `db.collection` call away,
-/// and the only thing that noticed was a *unification* against a correctly
-/// shaped one — which is the wrong place to notice, because a `Vec[Int, Text]`
-/// that is never unified against anything simply flows on. This asserted that
-/// mismatch; it now asserts that the type cannot be built at all.
+/// A wrong-arity collection cannot be built at all. Catching it at a
+/// *unification* against a correctly shaped type is the wrong place to catch
+/// it, because a `Vec[Int, Text]` that is never unified against anything simply
+/// flows on.
 #[test]
 fn a_wrong_arity_collection_is_unconstructible() {
     let mut db = TypeDb::new();
@@ -447,9 +445,9 @@ fn a_wrong_arity_collection_is_unconstructible() {
         .is_ok());
 }
 
-/// TY-07's other two shapes: a one-element tuple, and a def with a repeated
-/// name. All three were representable, and the duplicate cases were checked
-/// only at whichever syntax caller remembered to.
+/// Two more shapes the constructors refuse: a degenerate tuple, and a def with
+/// a repeated field or variant name. The check lives in the constructor rather
+/// than in whichever syntax caller remembers to make it.
 #[test]
 fn degenerate_tuples_and_duplicate_names_are_unconstructible() {
     let mut db = TypeDb::new();
@@ -519,14 +517,13 @@ fn render_collection_types() {
     assert_eq!(db.render(nested), "Vec[Map[Text, Int]]");
 }
 
-/// REP-13: the brackets belong to the arguments, so a ctor with none has none.
+/// The brackets belong to the arguments, so a ctor with none has none.
 ///
-/// The collection arm wrote `[` and `]` unconditionally, so every diagnostic
-/// about a nullary collection named a type nobody can write: a `Y001` said
-/// "found `Range[]`". `BitSet` has done it since it existed; `Range` (TY-34)
-/// made it visible. Both nullary ctors are here because the rule is the arity,
-/// not the name — and the unary and binary cases are re-asserted alongside so a
-/// fix that dropped *every* bracket could not pass.
+/// Writing `[` and `]` unconditionally makes every diagnostic about a nullary
+/// collection name a type nobody can write — a `Y001` saying "found
+/// `Range[]`". Both nullary ctors are here because the rule is the arity, not
+/// the name, and the unary and binary cases are re-asserted alongside so a
+/// change that dropped *every* bracket could not pass.
 #[test]
 fn a_collection_with_no_type_arguments_renders_without_brackets() {
     let mut db = TypeDb::new();
@@ -546,18 +543,14 @@ fn a_collection_with_no_type_arguments_renders_without_brackets() {
     assert_eq!(db.render(map), "Map[BitSet, Int]");
 }
 
-/// **REP-56, ADR-091 Decision 4.** An anonymous enum renders its variants.
+/// **ADR-091 Decision 4.** An anonymous enum renders its variants.
 ///
-/// It used to render as **nothing at all** — the arm wrote the name when there
-/// was one and fell off the end when there was not — so every diagnostic about a
-/// `choice(...)` type named a type that looked absent.
-///
-/// **Observed red before the arm was written**: `var x: Int = read choice(A:
-/// `{a:int}`, B: int)` reported "error[Y001]: expected Int, found " with the
-/// message stopping mid-sentence, and a misspelled variant reported "error[Y122]:
-/// `` has no variant `Bogus`". The rendering is *total* — every variant, every
-/// payload — because the anonymous record beside it is total for the same reason:
-/// a type a message cannot name is a type the reader cannot fix.
+/// The rendering is *total* — every variant, every payload — because the
+/// anonymous record beside it is total for the same reason: a type a message
+/// cannot name is a type the reader cannot fix. Without it a `choice(...)` type
+/// renders as nothing at all, and `var x: Int = read choice(A: `{a:int}`, B:
+/// int)` reports "error[Y001]: expected Int, found " with the message stopping
+/// mid-sentence.
 #[test]
 fn an_anonymous_enum_renders_its_variants() {
     let mut db = TypeDb::new();
@@ -582,7 +575,7 @@ fn an_anonymous_enum_renders_its_variants() {
     );
 
     // A payload-less variant writes no parentheses — the parens belong to the
-    // payload, which is REP-13's rule at a third shape.
+    // payload, which is the bracket rule at a third shape.
     let bare = anon_enum(&mut db, vec![("A".into(), vec![]), ("B".into(), vec![i])]);
     assert_eq!(db.render(bare), "{ A | B(Int) }");
 
@@ -591,18 +584,19 @@ fn an_anonymous_enum_renders_its_variants() {
     assert_eq!(db.render(named), "Move");
 
     // …and an anonymous enum nested inside another type still prints, which is
-    // what "total" buys — `Vec[]` of nothing was the shape REP-13 closed.
+    // what "total" buys.
     let v = db.vec(bare);
     assert_eq!(db.render(v), "Vec[{ A | B(Int) }]");
 }
 
-// --- record & enum types (M7, ADR-025) --------------------------------------
+// --- record & enum types (ADR-025) ------------------------------------------
 //
 // Records and enums use def-id indirection: the heavy field/variant data lives
 // in side-tables on TypeDb, referenced from TypeData::Record/Enum by a small
 // index. These tests exercise construction, unification, generalization,
-// instantiation, and rendering — the four recursions that had to be extended
-// (unify_concrete, lower_levels, occurs, generalize_walk, instantiate_walk).
+// instantiation, and rendering — the recursions that have to follow the
+// indirection (`unify_concrete`, `lower_levels`, `occurs`, and the folds
+// generalization and instantiation run).
 
 #[test]
 fn nominal_record_renders_by_name() {
@@ -859,16 +853,12 @@ fn anon_record_display_preserves_source_order() {
     let _ = RecordDefId(0); // exercise the debug impl / keep the import used
 }
 
-// ---- M9: enum unification for polymorphic / anonymous enums ----------------
+// ---- enum unification for polymorphic / anonymous enums --------------------
 
-/// TY-06. There is one `Option` def, so two uses of it are the *same nominal
-/// type* applied to arguments — not two definitions a relaxed unification arm
-/// has to put back together.
-///
-/// Rewritten from `same_named_enums_unify_structurally`, which stamped two
-/// `Option` defs by hand and asserted they merged. That was the workaround, and
-/// asserting it would be asserting the defect: two same-named nominal enums are
-/// two types, exactly as two same-named records are.
+/// There is one `Option` def, so two uses of it are the *same nominal type*
+/// applied to arguments — not two definitions a relaxed unification arm has to
+/// put back together. Two same-named nominal enums are two types, exactly as
+/// two same-named records are.
 #[test]
 fn every_option_names_the_one_option_def() {
     let mut db = TypeDb::new();
@@ -888,8 +878,8 @@ fn every_option_names_the_one_option_def() {
 }
 
 /// Unifying two instances fixes the element type: `Option[?T]` unified with
-/// `Option[Int]` pins `?T = Int`. The work happens in the *arguments* now; it
-/// used to happen in a pairwise walk over two defs' variant payloads.
+/// `Option[Int]` pins `?T = Int`. The work happens in the *arguments*, not in a
+/// pairwise walk over two defs' variant payloads.
 #[test]
 fn option_instances_unify_through_their_arguments() {
     let mut db = TypeDb::new();
@@ -905,9 +895,9 @@ fn option_instances_unify_through_their_arguments() {
     );
 }
 
-/// …and two instances at *different* arguments do not. `Option` printed as a
-/// bare name and carried its element type in a fresh def, so nothing about the
-/// type told `Option[Int]` from `Option[Text]` (MONO-03's collision).
+/// …and two instances at *different* arguments do not. The element type is an
+/// argument rather than something buried in a per-use def, so `Option[Int]` and
+/// `Option[Text]` are two types and print as two.
 #[test]
 fn option_at_two_element_types_is_two_types() {
     let mut db = TypeDb::new();
@@ -923,8 +913,8 @@ fn option_at_two_element_types_is_two_types() {
     assert_eq!(db.render(opt_text), "Option[Text]");
 }
 
-/// A wrong type-argument count is refused rather than interned (TY-07's rule,
-/// now applying to nominal defs too).
+/// A wrong type-argument count is refused rather than interned — the collection
+/// arity rule, at a nominal def.
 #[test]
 fn a_wrong_type_argument_count_is_unconstructible() {
     let mut db = TypeDb::new();
@@ -948,15 +938,13 @@ fn a_wrong_type_argument_count_is_unconstructible() {
     ));
 }
 
-/// **TY-06.** Instantiating a polymorphic scheme whose body names a nominal
-/// type must not mint a *new definition* of that type.
+/// Instantiating a polymorphic scheme whose body names a nominal type must not
+/// mint a *new definition* of that type.
 ///
-/// This is the finding stated at the level it lived at. `instantiate` walked
-/// the body and, reaching an enum, rebuilt it — which meant `register_enum`,
-/// which meant a fresh `EnumDefId`. Every `Some(x)` in a program therefore
-/// produced a nominally distinct `Option`, and the only thing holding the
-/// program together was a unification arm that merged two enums when their
-/// names and variant names matched.
+/// An `instantiate` that rebuilt the enum it reached would go through
+/// `register_enum` and mint a fresh `EnumDefId`, so every `Some(x)` in a program
+/// would produce a nominally distinct `Option` and only a unification arm that
+/// merged same-named enums would hold the program together.
 #[test]
 fn instantiating_a_scheme_does_not_mint_a_nominal_definition() {
     let mut db = TypeDb::new();
@@ -1014,8 +1002,8 @@ fn an_instantiated_option_is_the_canonical_def_at_a_fresh_argument() {
 }
 
 /// The payload a *use* sees is the use's argument, not the definition's
-/// parameter. Reading a variant payload straight off the def is what a caller
-/// did when the def was per-site; now it has to go through the instance.
+/// parameter, so a caller reads a variant payload through the instance rather
+/// than straight off the def.
 #[test]
 fn a_variant_payload_is_read_through_the_instances_arguments() {
     let mut db = TypeDb::new();
@@ -1039,8 +1027,8 @@ fn a_variant_payload_is_read_through_the_instances_arguments() {
     );
 }
 
-/// `canonical_key` is identity, where `render` was display (MONO-03). Two
-/// separately-interned `Vec[Int]`s are one key; a nominal type keys by its def.
+/// `canonical_key` is identity; `render` is display. Two separately-interned
+/// `Vec[Int]`s are one key; a nominal type keys by its def.
 #[test]
 fn a_canonical_key_groups_by_structure_and_by_definition() {
     let mut db = TypeDb::new();
@@ -1210,13 +1198,10 @@ fn deep_resolve_rewrites_record_field_links() {
     );
 }
 
-/// TY-05. `EnumVariantDef` documented `Some(vec![])` as equivalent to `None`
-/// and `unify` then rejected the pair, because the two spellings fell through
-/// its three-way payload match to a catch-all.
-///
-/// There is now one spelling, so the test says so at both levels the bug lived
-/// at: the *representation* admits only the empty vector, and the two
-/// constructors that used to disagree produce defs that unify.
+/// There is one payload-less spelling, stated at both levels: the
+/// *representation* admits only the empty vector, and the two constructors that
+/// could disagree produce defs that unify. Two spellings would fall through
+/// `unify`'s payload match to a catch-all and be rejected.
 #[test]
 fn empty_enum_payload_and_no_payload_are_equivalent() {
     let mut db = TypeDb::new();
@@ -1226,19 +1211,19 @@ fn empty_enum_payload_and_no_payload_are_equivalent() {
     assert!(!empty.has_payload());
     assert_eq!(bare.payload, empty.payload, "one payload-less spelling");
 
-    // Two independently-stamped anonymous defs, which is the arm that still
-    // merges by signature — a *nominal* pair would be two types (F12).
+    // Two independently-stamped anonymous defs, which is the arm that merges by
+    // signature — a *nominal* pair would be two types.
     let no_payload = db.enum_(None, VariantSet::new(vec![bare]).expect("one variant"));
     let empty_payload = db.enum_(None, VariantSet::new(vec![empty]).expect("one variant"));
     db.unify(no_payload, empty_payload)
         .expect("a payload-less variant unifies with itself however it was built");
 }
 
-// --- TY-19: Never is the bottom type, and a branch point joins ---------------
+// --- Never is the bottom type, and a branch point joins ---------------------
 
 /// `Never` is not a scalar. A scalar is a type with a runtime representation —
 /// a descriptor, a payload width, a value you can hold — and no value ever has
-/// type `Never`. Sitting in `ScalarType` made every "is this a scalar?"
+/// type `Never`. Sitting in `ScalarType` would make every "is this a scalar?"
 /// question answer yes for it.
 #[test]
 fn never_is_its_own_type_and_not_a_scalar() {
@@ -1323,7 +1308,7 @@ fn join_all_seeds_with_never_and_reports_which_element_failed() {
     assert_eq!(index, 2, "the failure names the element that disagreed");
 }
 
-// --- the constraint channel (F10, TY-29) -----------------------------------
+// --- the constraint channel -------------------------------------------------
 
 /// A `FileSpan` for a constraint that has to have one. The channel does not
 /// read it; the diagnostic that reports a failure does.
@@ -1411,8 +1396,9 @@ fn a_monotype_carries_no_constraints_and_claims_none() {
 }
 
 /// A pinned variable is one generalization will not quantify — that is the whole
-/// of `pin_to_level`, and it is what TY-30 needs: a receiver a method was called
-/// on has to stay one type, because there is one lowered body per function.
+/// of `pin_to_level`, and it is what monomorphization needs: a receiver a method
+/// was called on has to stay one type, because there is one lowered body per
+/// function.
 ///
 /// Both halves matter. The pin reaches *into* a composite (a receiver is usually
 /// `Vec[?e]`, not a bare variable, and the element is what would otherwise be
@@ -1530,8 +1516,7 @@ fn a_type_carrying_capability_is_substituted_at_the_use_site() {
 
 /// Discharge is by *resolution*, not by age: a constraint whose variable has
 /// been linked to a concrete type is ready to check; one that is still a
-/// variable is not wrong yet, and answering it now is the optimism TY-29 is
-/// about.
+/// variable is not wrong yet, and answering it now would be guessing.
 #[test]
 fn only_a_resolved_constraint_is_dischargeable() {
     let mut db = TypeDb::new();

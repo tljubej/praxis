@@ -7,10 +7,6 @@
 //! documentation generator, and language-server completion all consume *this*
 //! catalog. So the schema has to carry everything each of those consumers needs
 //! in one place (§16.2).
-//!
-//! Milestone 0 ships the schema plus seed entries that prove lookups and the
-//! "reject duplicate entries" invariant. The full method set is filled in
-//! alongside the features that exercise each method.
 
 pub mod abi;
 pub mod builtins;

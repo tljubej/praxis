@@ -6,10 +6,10 @@
 //! crash REPL with `bt`, `frame`, `locals`, `p EXPR`, `type EXPR`, `source`,
 //! `input`, `parser`, `heap`, `restart`, `reload`, `quit`, `help`.
 //!
-//! **M10a:** snapshot rendering + the noninteractive fallback (§9.6) + the
-//! interactive REPL navigation/locals (`bt`/`frame`/`up`/`down`/`locals`).
-//! **M10b:** the read-only `p EXPR`/`type EXPR` evaluator, the `source`/
-//! `input`/`parser`/`heap` context commands, and `restart`/`reload`. The
+//! The pieces: snapshot rendering, the noninteractive fallback (§9.6), the
+//! interactive REPL's navigation and locals (`bt`/`frame`/`up`/`down`/
+//! `locals`), the read-only `p EXPR`/`type EXPR` evaluator, and the `source`/
+//! `input`/`parser`/`heap` context commands with `restart`/`reload`. The
 //! [`session`] module owns the live compile/run state those commands reach.
 
 pub mod evaluate;
@@ -21,8 +21,7 @@ pub mod synth;
 pub mod tui;
 pub mod value;
 
-/// Marker documenting that this crate was a skeleton through Milestone 9 and
-/// fills at Milestone 10.
+/// The milestone this crate's implementation belongs to.
 pub const FILLED_AT_MILESTONE: u32 = 10;
 
 #[cfg(test)]

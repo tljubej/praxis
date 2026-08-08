@@ -1,5 +1,5 @@
 //! Crash snapshots: a stable, deep-copied view of the debug frames taken at the
-//! moment a fault begins to unwind (§9.3, M10-WS3).
+//! moment a fault begins to unwind (§9.3).
 //!
 //! When a fault fires, each generated function's fault epilogue restores the
 //! shadow and debug stack tops it saved as it returns to its caller. By the time
@@ -11,21 +11,19 @@
 //! stable because the collector is precise and non-moving (ADR-011): a `GcRef`
 //! copied into a snapshot keeps pointing at the same object.
 //!
-//! Copying eagerly at the first fault epilogue is ADR-033 decision 1, and it
-//! survives ADR-104 unchanged even though a stack — unlike the `Box`ed chain it
-//! replaced — does not *destroy* the words a pop releases. Reading them lazily
-//! from the host would be possible and is rejected: values above `top` are in no
-//! arm of [`crate::roots::RuntimeRoots`], so a collection between the unwind and
-//! the read could free what they name.
+//! Copying eagerly at the first fault epilogue is ADR-033 decision 1. Reading
+//! the words lazily from the host would be possible and is rejected: values
+//! above `top` are in no arm of [`crate::roots::RuntimeRoots`], so a collection
+//! between the unwind and the read could free what they name.
 //!
-//! ADR-106 sharpens that into the reason the eager copy is *sound* rather than
-//! merely conventional. Values **below** `top` are the weak arm: every
-//! collection clears the debug slots whose objects it reclaimed, so at the
-//! moment [`copy_stack`] reads a slot, that slot holds a live object or `None`.
-//! Values **above** `top` are still in no arm at all — nothing scans them,
-//! nothing clears them, and a popped frame's words are exactly as stale as they
-//! always were. The eager copy is what keeps the snapshot on the first side of
-//! that line, and the weak arm is what makes the first side mean something.
+//! ADR-106 is what makes the eager copy *sound* rather than merely
+//! conventional. Values **below** `top` are the weak arm: every collection
+//! clears the debug slots whose objects it reclaimed, so at the moment
+//! [`copy_stack`] reads a slot, that slot holds a live object or `None`. Values
+//! **above** `top` are in no arm at all — nothing scans them, nothing clears
+//! them, and a popped frame's words are stale. The eager copy is what keeps the
+//! snapshot on the first side of that line, and the weak arm is what makes the
+//! first side mean something.
 //!
 //! GC rooting (the §19.10 acceptance criterion "GC retains all objects
 //! reachable from snapshots"): [`CrashSnapshot`] implements [`RootSet`],
@@ -33,9 +31,9 @@
 //! [`DebugValue::Reference`](crate::debug::DebugValue) — a slot holding an
 //! elided box's scalar payload (ADR-120 part 2) names no object and roots
 //! nothing, and `DebugValue::reference` is where it drops out. Transitive
-//! reachability is the
-//! collector's job; the snapshot just pins the entry points. The host registers
-//! the snapshot as a root when collecting during the REPL/noninteractive render.
+//! reachability is the collector's job; the snapshot just pins the entry
+//! points. The host registers the snapshot as a root when collecting during the
+//! REPL/noninteractive render.
 //!
 //! Idempotency: a snapshot is taken at most once per fault. The
 //! [`SnapshotSlot`] guards with a `taken` flag; subsequent fault epilogues (the
@@ -52,7 +50,8 @@ use crate::roots::RootSet;
 /// The `value` GcRefs point at the same non-moving objects the live frame did.
 #[derive(Debug)]
 pub struct SnapshotFrame {
-    /// The caller's snapshot frame, chained to mirror the live `parent` chain.
+    /// The caller's index in [`CrashSnapshot::frames`], or `usize::MAX` for the
+    /// outermost frame.
     pub parent: usize,
     /// The function name (copied from the live frame's `'static` name pointer;
     /// safe to keep as a raw pointer since the compiler embedded it `'static`).
@@ -61,8 +60,8 @@ pub struct SnapshotFrame {
     /// The copied locals. `value` fields are the GC roots.
     pub locals: Vec<DebugLocal>,
     /// The function's source span `[start, end)` byte offsets (§9.3). Copied
-    /// from the live frame; `(0, 0)` means "unknown" (M10b-WS1 fills it from
-    /// the AST; the `source` REPL command renders it).
+    /// from the live frame; `(0, 0)` means "unknown". The `source` REPL command
+    /// renders it.
     pub source_span: (u32, u32),
 }
 
@@ -127,11 +126,11 @@ impl RootSet for CrashSnapshot {
     fn push_roots(&self, out: &mut Vec<GcRef>) {
         // Walk every copied local's value. A slot no value was ever spilled
         // into is `None` and roots nothing — an absence the type carries, not a
-        // sentinel pointer to be compared against (F18). A slot holding an
-        // elided box's scalar payload (ADR-120 part 2) roots nothing either,
-        // and `reference()` is where it drops out: a snapshot *is* a strong
-        // root set, so a scalar reaching this line would be a payload traced as
-        // an object.
+        // sentinel pointer to be compared against. A slot holding an elided
+        // box's scalar payload (ADR-120 part 2) roots nothing either, and
+        // `reference()` is where it drops out: a snapshot *is* a strong root
+        // set, so a scalar reaching this line would be a payload traced as an
+        // object.
         for frame in &self.frames {
             out.extend(
                 frame
@@ -237,15 +236,14 @@ pub unsafe extern "C" fn praxis_snapshot_debug_chain(ctx: *mut crate::RuntimeCon
 /// parent is `usize::MAX` (sentinel for "no parent").
 ///
 /// `entries` is in push order — outermost first — so this walks it in reverse.
-/// That reversal is what ADR-021's `parent` pointer used to buy, and the stack's
-/// order is a stronger statement of the same thing: the frames *are* the run, so
-/// a chain cannot be truncated or looped by a bad pointer.
+/// The stack's order *is* the chain: it cannot be truncated or looped by a bad
+/// pointer.
 ///
-/// Reassembling a [`DebugLocal`] here is what keeps `SnapshotFrame`,
-/// `CrashSnapshot` and every consumer in `praxis-debugger` unchanged across
-/// ADR-104: the static half of each local comes from the function's
-/// [`crate::debug::FunctionDebugMeta`] and the value from the call's own slot,
-/// where they used to be pre-joined in a heap frame the prologue built.
+/// A [`DebugLocal`] is reassembled here from the two halves ADR-104 keeps
+/// apart: the static half comes from the function's
+/// [`crate::debug::FunctionDebugMeta`] and the value from the call's own slot.
+/// That is what lets `SnapshotFrame`, `CrashSnapshot` and every consumer in
+/// `praxis-debugger` see one joined local.
 ///
 /// # Safety
 /// Every entry's `meta` must point at a live `FunctionDebugMeta` whose `locals`
@@ -363,10 +361,10 @@ mod tests {
     /// A snapshot taken *out* of the runtime outlives it in both hosts: the CLI
     /// moves the runtime into the `DebugSession` the `Repl` owns alongside the
     /// snapshot, and the debugger REPL replaces its snapshot after a restart.
-    /// Now that `Heap` finalizes live payloads on `Drop` (RT-02), that ordering
-    /// is load-bearing — so the property this pins is that dropping the
-    /// snapshot after the runtime is *itself* harmless: a `CrashSnapshot` holds
-    /// `GcRef`s but has no `Drop` that dereferences one (hazard H8).
+    /// `Heap` finalizes live payloads on `Drop`, so that ordering is
+    /// load-bearing — the property this pins is that dropping the snapshot
+    /// after the runtime is *itself* harmless: a `CrashSnapshot` holds `GcRef`s
+    /// but has no `Drop` that dereferences one.
     #[test]
     fn a_snapshot_may_be_dropped_after_the_runtime_it_names() {
         let snapshot = {
@@ -395,21 +393,21 @@ mod tests {
             // `runtime` — and its heap, which finalizes `value` — dies here.
         };
         // The frames are still readable as plain data; only the objects they
-        // *name* are gone. Reading `value.as_int()` here would be the
-        // use-after-free the audit warns about, and is deliberately not done.
+        // *name* are gone. Reading `value.as_int()` here would be a
+        // use-after-free, and is deliberately not done.
         assert_eq!(snapshot.len(), 1);
         drop(snapshot);
     }
 
-    /// The defect ADR-106 closes, end to end at the level the snapshot is taken.
+    /// ADR-106's rule, end to end at the level the snapshot is taken.
     ///
     /// The setup is what every Praxis function produces at a local's last use:
-    /// `RootSlots::dead` nulls the shadow slot (MIR-01) and the debug slot keeps
-    /// the value (MIR-16), so between the two the debugger names an object no
-    /// arm of the root set reaches. A collection in that window reclaims it and
-    /// the *next* allocation of the same layout takes the block back — here as a
-    /// `Float`, since `Float`'s payload has `Int`'s size and alignment, so it
-    /// lands on the same rung of the ladder.
+    /// `RootSlots::dead` nulls the shadow slot and the debug slot keeps the
+    /// value, so between the two the debugger names an object no arm of the
+    /// root set reaches. A collection in that window reclaims it and the *next*
+    /// allocation of the same layout takes the block back — here as a `Float`,
+    /// since `Float`'s payload has `Int`'s size and alignment, so it lands on
+    /// the same rung of the ladder.
     ///
     /// **The reissue is the whole point.** Without the weak arm the snapshot
     /// copies a `GcRef` that is now a live `Float` under a local whose static

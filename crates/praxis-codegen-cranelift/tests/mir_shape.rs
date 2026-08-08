@@ -3,10 +3,10 @@
 //! This file exists to prove one thing about the machinery rather than
 //! anything about the backend: `praxis_mir::test_support` is reachable from
 //! another crate's tests, through `praxis-mir = { features = ["test-support"] }`
-//! in this crate's `[dev-dependencies]` and nowhere else. Wave 0 built it
-//! because the packages that verify their headline by counting instructions are
-//! split across the MIR crate and this one (handover 26 §2), and a helper only
-//! the MIR crate could reach would have been copied into this one within a wave.
+//! in this crate's `[dev-dependencies]` and nowhere else. The tests that verify
+//! a change by counting instructions are split across the MIR crate and this
+//! one, and a helper only the MIR crate could reach would be copied into this
+//! one instead.
 //!
 //! Keep it small. The census tests that assert about a *program* belong beside
 //! the pass that changes it; what belongs here is the shape of the input the
@@ -19,14 +19,14 @@ use praxis_mir::test_support::{lower_src_to_mir, Census, InstKind};
 /// backend's input: a float temporary reaches `lower_inst` as a
 /// `Materialize{Float}`, which is the `praxis_alloc_float` call ADR-113's
 /// interning does *not* cover — there is no table for a value space that is not
-/// enumerable — and which handover 25 measured at 14% of `mandelbrot`.
+/// enumerable — and which measures at 14% of `mandelbrot`.
 ///
-/// **One box, where before ADR-120 there were two.** The builder writes one per
-/// node of `a * b + b`; the block-local forwarding deletes the interior one,
-/// because `a * b`'s box has exactly one consumer and that consumer is the
-/// `+`'s reload in the same block. What reaches the backend is the boxes a
-/// program's *results* need — here the returned sum — which is the point of
-/// the pass and the reason this file's count is the honest one to assert.
+/// **One box, not two.** The builder writes one per node of `a * b + b`;
+/// ADR-120's block-local forwarding deletes the interior one, because `a * b`'s
+/// box has exactly one consumer and that consumer is the `+`'s reload in the
+/// same block. What reaches the backend is the boxes a program's *results* need
+/// — here the returned sum — which is the point of the pass and the reason this
+/// file's count is the honest one to assert.
 #[test]
 fn a_float_temporary_reaches_the_backend_as_a_materialize_of_a_float() {
     let lowered = lower_src_to_mir("fn f(a: Float, b: Float) -> Float { a * b + b }");
@@ -43,51 +43,28 @@ fn a_float_temporary_reaches_the_backend_as_a_materialize_of_a_float() {
     );
 }
 
-/// **Handover 25 §3's loop proves no scalar's descriptor at all. It proved
-/// five, before that nine, and handover 25 said seven.**
+/// **The sample loop proves no scalar's descriptor at all.**
 ///
 /// Every `ExtractScalar` of a wired scalar is one `emit_scalar_load`, and
 /// `emit_scalar_load` is the language's only descriptor-proof emitter, so this
 /// census *is* the site count.
 ///
-/// ### Why the number moved, and what it was
+/// The count is zero because two passes each remove a share of it. ADR-120's
+/// block-local forwarding removes the box/unbox pair at every interior node of
+/// the expression trees, and the whole `Materialize{Bool}` →
+/// `ExtractScalar{Bool}` → `Branch` shape of the `while` condition. ADR-121's
+/// promotion removes what the rest read from: `i`, `acc` and `limit` are
+/// `Scalar` slots, so there is no object whose descriptor could be proved. The
+/// loop body is `ConstInt`, `IntBinOp`, `IntCmp`, `CheckFault` and `MoveScalar`
+/// and nothing else.
 ///
-/// The four answers are four different trees, and each was right on its own:
-///
-/// | tree | proofs per iteration |
-/// |---|---:|
-/// | handover 25 §3, hand-counted at `e4f42e6` | 7 (wrong) |
-/// | this census when W6 and W7 wrote it (ADR-116, ADR-117) | **9** |
-/// | with ADR-120's block-local forwarding merged | **5** |
-/// | this tree, with ADR-121's promotion merged | **0** |
-///
-/// Nine was the count of what `build.rs` *emits* — eight `ExtractScalar{Int}`
-/// (two operands each for `i * 3`, `acc + …`, `i + 1` and `i < limit`) plus the
-/// condition's `ExtractScalar{Bool}`. ADR-120 part 1 deleted four of them: the
-/// box/unbox pair at every interior node of the expression trees, and the whole
-/// `Materialize{Bool}` → `ExtractScalar{Bool}` → `Branch` shape of the `while`
-/// condition. **ADR-121 deleted the remaining five by deleting what they read
-/// from**: `i`, `acc` and `limit` are `Scalar` slots now, so there is no object
-/// whose descriptor could be proved. The loop body is `ConstInt`, `IntBinOp`,
-/// `IntCmp`, `CheckFault` and `MoveScalar` and nothing else.
-///
-/// **The 9 → 5 step is the double count handover 21 §3.6 recorded and handover
-/// 26 §7 trap 7 warned about**, and it arrived as a failing test rather than as
-/// a wrong number in a report — which is the wave structure working. W6 and W7
-/// each independently counted nine and each pinned it, correcting handover 25;
-/// both were right, and neither could see that the package beside them in the
-/// same wave was about to delete four of the nine.
-///
-/// **ADR-116's headline has no denominator left in this loop, and that is the
-/// consequence to carry forward rather than a tidy ending.** W6 traded three
-/// ALU operations for one L1 load *per descriptor proof*; at zero proofs it is
-/// worth zero here. It is not worth zero everywhere — a proof site survives
-/// wherever the value came out of the runtime, which `provable`'s suite census
-/// counts at 122 sites across the eight benchmarks — but any figure quoted for
-/// W6 or W7 "per iteration of the sample loop" is now a figure about a loop that
-/// no longer contains the thing being measured. Handover 28 §2 is the record of
-/// this repo misreading two such numbers; this note exists so the third is not
-/// misread the same way.
+/// **ADR-116's headline therefore has no denominator left in this loop.** That
+/// trade — three ALU operations for one L1 load *per descriptor proof* — is
+/// worth zero at zero proofs. It is not worth zero everywhere: a proof site
+/// survives wherever the value came out of the runtime, which `provable`'s
+/// suite census counts at 122 sites across the eight benchmarks. Any figure
+/// quoted "per iteration of the sample loop" is a figure about a loop that does
+/// not contain the thing being measured.
 #[test]
 fn the_sample_loop_proves_no_scalars_descriptor_at_all() {
     let lowered = lower_src_to_mir(

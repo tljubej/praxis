@@ -1,16 +1,13 @@
-//! Crash-debugger frame registration (§9.3, M5, ADR-021, ADR-104).
+//! Crash-debugger frame registration (§9.3, ADR-021, ADR-104).
 //!
 //! What the crash debugger reads for `bt`/`locals` is, per live frame, a
-//! function's *static* metadata plus that call's *current* local values. ADR-021
-//! carried both in one heap-allocated `DebugFrame` that every generated prologue
-//! `Box`ed and chained onto `ctx.debug_top`; ADR-104 splits them, because only
-//! one of the two halves varies per call:
+//! function's *static* metadata plus that call's *current* local values. The two
+//! are stored apart (ADR-104), because only one of them varies per call:
 //!
 //! - **Static:** [`FunctionDebugMeta`] — the function's name, source span, and
 //!   the [`DebugLocalMeta`] array. One per function, interned in the JIT
 //!   generation arena at compile time, shared by every call and every recursion
-//!   level. This is what made `praxis_set_frame_source_span` a *runtime* call to
-//!   record a *compile-time* constant, which is why that wrapper is gone.
+//!   level. Nothing records it at runtime; it is a compile-time constant.
 //! - **Per call:** one machine word per `Gc` local, claimed from a contiguous
 //!   [`DebugValueStack`] the runtime owns, and one [`DebugFrameEntry`] pairing
 //!   the meta with the base of that run, claimed from a contiguous
@@ -22,12 +19,11 @@
 //! Both stacks are [`SlotStack`]s — the mechanism ADR-101 built for the shadow
 //! stack and made generic for exactly this. A prologue claims its slots by
 //! bumping a `top` inline; an epilogue restores the saved base. **No malloc, no
-//! free, no extern call, no `catch_unwind` landing pad**, where ADR-021's frame
-//! cost two to three allocations and three calls per Praxis call.
+//! free, no extern call, no `catch_unwind` landing pad.**
 //!
-//! The values are written **once per definition** by the backend (ADR-104), not
-//! re-written over the whole `DebugSlots` set at every safepoint, and they are
-//! never cleared: a value that has been produced stays renderable, which is
+//! The values are written **once per definition** by the backend (ADR-104),
+//! rather than re-written over the whole live set at every safepoint, and they
+//! are never cleared: a value that has been produced stays renderable, which is
 //! MIR-16's contract and what `locals` in the crash REPL is for.
 //!
 //! ## The value slots are not a *strong* root set, and cannot become one by accident
@@ -47,30 +43,27 @@
 //!
 //! ## …but the collector does *write* them (ADR-106)
 //!
-//! Not tracing them left a hole, and ADR-104's Consequences registered it: a
-//! value whose shadow slot `RootSlots::dead` nulled, but whose debug slot still
-//! names it, is unreachable. A collection in that window frees it, `poison()`
-//! nulls its descriptor, and the block is then handed back out — after which the
-//! debug slot names a live object of an entirely different type, and
-//! `praxis_snapshot_debug_chain` copies that into a `CrashSnapshot`, which *is*
-//! a strong root set.
+//! Not tracing them leaves a hazard: a value whose shadow slot `RootSlots::dead`
+//! nulled, but whose debug slot still names it, is unreachable. A collection in
+//! that window frees it, `poison()` nulls its descriptor, and the block is then
+//! handed back out — after which the debug slot names a live object of an
+//! entirely different type, and `praxis_snapshot_debug_chain` copies that into a
+//! `CrashSnapshot`, which *is* a strong root set.
 //!
 //! So the debug frames are [`RuntimeRoots`](crate::RuntimeRoots)' one **weak**
 //! arm. [`DebugFrameStackHeader::clear_reclaimed`] runs once per collection,
-//! immediately after the sweep, and turns every slot naming reclaimed storage
-//! into `None`. The slots retain nothing — a dead local's object still dies on
-//! schedule — and what the debugger renders for it changes from freed memory to
-//! `<uninit>`, which is the honest answer and the one the `None` niche already
-//! spells.
+//! immediately after the sweep, and overwrites every slot naming reclaimed
+//! storage with [`RECLAIMED_WORD`]. The slots retain nothing — a dead local's
+//! object still dies on schedule — and what the debugger renders for it is
+//! `<collected>` rather than freed memory.
 //!
-//! ## …and one slot in three now holds no reference at all (ADR-120 part 2)
+//! ## …and one slot in three holds no reference at all (ADR-120 part 2)
 //!
 //! ADR-120's block-local forwarding deletes the box a value is put into so the
 //! next instruction can take it straight back out — and with the box goes the
-//! definition that wrote the debugger's slot, so `<tmp#7: Int> @ "a + b"`
-//! rendered `= 30` before the pass and `= <uninit>` after it. Part 2 gives that
+//! definition that would have written the debugger's slot. Part 2 gives that
 //! slot the *scalar* the box would have held, which means a value slot's word
-//! is no longer always an `Option<GcRef>`.
+//! is not always an `Option<GcRef>`.
 //!
 //! That is a memory-safety statement, not a display one, because of the
 //! paragraph above: this stack is scanned after every sweep and the scan
@@ -93,11 +86,9 @@ use crate::MAX_RECURSION_DEPTH;
 /// boundary: `0` = a binding, `1` = a compiler temp. "Binding" is ADR-125's
 /// sense — a `var`, a parameter, a `for` variable and a name a pattern
 /// introduces — so that the FFI constant and the compiler agree about what the
-/// byte means; the compiler reading it more narrowly than this is what left a
-/// `match` arm's payload sitting among the temps (ADR-139). Stored on
-/// each [`DebugLocalMeta`] so the debugger can separate the two in its display
-/// and name temps with their materializing expression instead of the old
-/// `"<tmp>"` placeholder.
+/// byte means (ADR-139). Stored on each [`DebugLocalMeta`] so the debugger can
+/// separate the two in its display and name temps with their materializing
+/// expression.
 pub const LOCAL_KIND_USER: u8 = 0;
 pub const LOCAL_KIND_TEMP: u8 = 1;
 
@@ -105,11 +96,10 @@ pub const LOCAL_KIND_TEMP: u8 = 1;
 /// (`MirType::Opaque`) — a pipeline accumulator, a fused-loop item.
 ///
 /// A `Type` is an index into the compiler's arena, so every small integer is a
-/// valid handle and there is no in-band "none": the old lowering wrote `0`,
-/// which the debugger faithfully rendered as whatever type the arena interned
-/// first. `u32::MAX` is outside any arena the debugger will ever pair this with
-/// (`type_str` already omits an out-of-range id), and the metadata's null
-/// descriptor says the same thing in the other field.
+/// valid handle and there is no in-band "none" — `0` would render as whatever
+/// type the arena interned first. `u32::MAX` is outside any arena the debugger
+/// will ever pair this with (`type_str` already omits an out-of-range id), and
+/// the metadata's null descriptor says the same thing in the other field.
 pub const NO_STATIC_TYPE: u32 = u32::MAX;
 
 /// What a debug value slot's word **is** — and the only thing in the process
@@ -138,16 +128,14 @@ pub const NO_STATIC_TYPE: u32 = u32::MAX;
 /// can fail to test: there is no path from a scalar slot to a `GcRef`.
 ///
 /// Every [`praxis_mir::ir::ScalarKind`](../../praxis_mir/ir/enum.ScalarKind.html)
-/// has a variant here, including the two ADR-120's forwarding cannot reach
-/// today (`Char`, whose producer faults, and `Byte`, which is unwired). The map
-/// is total on purpose: a partial map would have to answer *something* for a
-/// kind it did not cover, and the only available answer is `Reference` — which
-/// is precisely the unsound one.
+/// has a variant here, including `Byte`, which is unwired and which ADR-120's
+/// forwarding therefore cannot reach. The map is total on purpose: a partial map
+/// would have to answer *something* for a kind it did not cover, and the only
+/// available answer is `Reference` — which is precisely the unsound one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum DebugSlotKind {
     /// The slot holds an `Option<GcRef>`: a reference into the heap, or the
-    /// all-zero `None`. Every local had this before ADR-120 part 2, and every
-    /// local whose box survives still does.
+    /// all-zero `None`. Every local whose box survives compilation has this.
     Reference,
     /// `i64` — an `Int` payload whose box ADR-120's forwarding deleted.
     Int,
@@ -167,7 +155,7 @@ impl DebugSlotKind {
     /// slot, and what [`DebugLocalMeta::read`] subtracts on the way out
     /// (ADR-121 decision 2).
     ///
-    /// # The problem this solves, and why it could be ignored until now
+    /// # The problem this solves
     ///
     /// A slot is one word and a claim zeroes its run, so the all-zero word means
     /// "nothing written here yet". For a [`Reference`](Self::Reference) slot
@@ -175,12 +163,9 @@ impl DebugSlotKind {
     /// there are 2^64 payloads and 2^64 words, so **some** payload must collide
     /// with "unwritten", and no encoding avoids it. The only question is which.
     ///
-    /// Storing the payload raw makes the collision `0` — and therefore `false`,
-    /// and `0.0`. ADR-120 part 2 accepted that, correctly, because the only
-    /// slots it reached were temps whose box the block-local forwarding had
-    /// elided, and `<tmp#3: Int> @ "0" = <uninit>` is a poor line in a rare
-    /// place. ADR-121 promotes *bindings*, so the same collision reaches
-    /// `var i = 0` — which is not a rare place. It is close to the most common
+    /// Storing the payload raw would make the collision `0` — and therefore
+    /// `false`, and `0.0`. ADR-121 promotes *bindings* into scalar slots, so
+    /// that collision reaches `var i = 0`, which is close to the most common
     /// line a Praxis program has.
     ///
     /// # What each kind gives up instead
@@ -285,9 +270,9 @@ pub enum DebugValue {
     ///
     /// Carries nothing, deliberately: the object is gone, and this variant
     /// exists to say *that* rather than to say anything about it. It is the
-    /// third thing a slot can be, and until it existed the first and the third
-    /// were the same word — so a `var` the program had finished using rendered
-    /// `<uninit>`, which reads as "this never ran" about a line that did.
+    /// third thing a slot can be, and it is distinct from "never written": one
+    /// is a line that never ran, the other a line that ran and whose result is
+    /// no longer around to show.
     ///
     /// Reaching one is ordinary, not exceptional. ADR-044 decision 2 nulls a
     /// shadow slot the moment its local dies, so a binding stops being a root at
@@ -321,13 +306,12 @@ impl DebugValue {
 
     /// Whether this slot still holds something the debugger can render.
     ///
-    /// The question `value.is_some()` used to answer on its own, back when the
-    /// only two states were "a value" and "nothing yet". A reclaimed slot is
-    /// `Some` — a value *was* written — but there is nothing left to show, so
-    /// every consumer that used to branch on `Option` has to say which of the
-    /// two it meant. This is the "renderable" half; `fault_span`'s question is
-    /// the other one, and it wants `is_some()`: a temp whose expression finished
-    /// is not where the frame faulted, whatever became of the result.
+    /// [`DebugLocalMeta::read`] answers `Some` for a reclaimed slot — a value
+    /// *was* written — but there is nothing left to show, so a consumer
+    /// branching on that `Option` alone has to say which of the two it means.
+    /// This is the "renderable" half; `fault_span`'s question is the other one,
+    /// and it wants `is_some()`: a temp whose expression finished is not where
+    /// the frame faulted, whatever became of the result.
     #[must_use]
     pub fn is_live(self) -> bool {
         !matches!(self, DebugValue::Reclaimed)
@@ -380,13 +364,13 @@ pub struct DebugLocalMeta {
     /// The local's static type descriptor (§9.3). The backend embeds the
     /// `'static TypeDescriptor` resolved from the MIR local's `Type`.
     pub descriptor: *const crate::TypeDescriptor,
-    /// The full static `Type` id (`praxis_types::Type(u32)` handle, M10-WS1b).
-    /// Lets the debugger reconstruct the exact local type (incl. collection
-    /// element types / record shapes) the runtime `descriptor` alone loses.
+    /// The full static `Type` id (`praxis_types::Type(u32)` handle). Lets the
+    /// debugger reconstruct the exact local type (incl. collection element
+    /// types / record shapes) the runtime `descriptor` alone loses.
     pub type_id: u32,
     /// The debugger classification: `LOCAL_KIND_USER` (a binding the programmer
-    /// wrote) or `LOCAL_KIND_TEMP` (a compiler intermediate). Replaces the old
-    /// `"<tmp>"` string placeholder — the split is now structural.
+    /// wrote) or `LOCAL_KIND_TEMP` (a compiler intermediate). The split is
+    /// structural, not a name convention.
     pub kind: u8,
     /// The local's source span `[start, end)` (byte offsets into program
     /// source) for debugger provenance. User locals carry their binding's span;
@@ -395,9 +379,9 @@ pub struct DebugLocalMeta {
     pub span_start: u32,
     pub span_end: u32,
     /// What this local's value slot holds (ADR-120 part 2). [`DebugSlotKind::Reference`]
-    /// for every local whose box the compiler kept, which is every local there
-    /// was before ADR-120; a scalar kind for a temp whose box the block-local
-    /// forwarding deleted and whose payload the definition now stores raw.
+    /// for every local whose box the compiler kept; a scalar kind for a temp
+    /// whose box the block-local forwarding deleted and whose payload the
+    /// definition stores raw.
     ///
     /// A real `enum`, not the `u8` its neighbours `kind` and `type_id` are,
     /// because nothing outside Rust ever writes this struct: `#[repr(C)]` is
@@ -422,25 +406,22 @@ pub struct DebugLocalMeta {
 /// **interpreted** in a [`DebugSlotKind::Reference`] slot — and a reference slot
 /// has far fewer than 2^64 inhabitants. `align_of::<GcHeader>()` is 8 (asserted
 /// in `crate::gc`, and `BLOCK_GRANULE` is that same alignment), so no `GcRef`
-/// can ever be 1. Scalar slots keep every payload they had; `Int` still loses
-/// only `i64::MIN`, to the bias, and nothing to this.
+/// can ever be 1. Scalar slots keep every payload they had; `Int` loses only
+/// `i64::MIN`, to the bias, and nothing to this.
 ///
-/// The clear used to write `None`, which is the *other* reserved word — and
-/// therefore said "nothing was ever written here" about a slot whose value the
-/// collector had just taken. Those are different facts about the program: one is
-/// a line that never ran, the other a line that ran and whose result is simply
-/// no longer around to show.
+/// `None` — the *other* reserved word — would say "nothing was ever written
+/// here" about a slot whose value the collector had just taken. Those are
+/// different facts about the program: one is a line that never ran, the other a
+/// line that ran and whose result is simply no longer around to show.
 ///
-/// ### Not an ABI change
+/// ### Not part of the ABI
 ///
 /// Generated code only ever **stores** into a debug value slot
 /// (`store_debug_local` is a `str` at a fixed displacement, with no matching
 /// load), so no compiled program can observe this word — a store past the clear
 /// overwrites it, which is exactly the right behaviour if a local is written
-/// again. That is why this does not join the `RUNTIME_ABI_VERSION` changelog
-/// alongside ADR-120 part 2's entry: that one versioned a word generated code
-/// *writes and the runtime reads*, and this one is written and read by the
-/// runtime alone.
+/// again. It is therefore not a `RUNTIME_ABI_VERSION` concern: this word is
+/// written and read by the runtime alone.
 pub const RECLAIMED_WORD: usize = 1;
 
 /// No `GcRef` can collide with [`RECLAIMED_WORD`]: a `GcRef` points at a
@@ -472,10 +453,9 @@ impl DebugLocalMeta {
     /// For a scalar slot it cannot be exact — 2^64 payloads do not fit in 2^64
     /// words beside an "unwritten" state — so exactly one payload per kind reads
     /// back as `<uninit>`. **Which one is [`DebugSlotKind::store_bias`]'s
-    /// choice**, and since ADR-121 it is no longer `0`: three kinds lose nothing,
-    /// `Float` loses one NaN, and `Int` loses `i64::MIN`. The direction of the
-    /// error is unchanged and is the safe one — a slot under-reports a value it
-    /// holds and never reports a value it does not.
+    /// choice**: three kinds lose nothing, `Float` loses one NaN, and `Int`
+    /// loses `i64::MIN`. The direction of the error is the safe one — a slot
+    /// under-reports a value it holds and never reports a value it does not.
     /// `an_int_slot_holding_i64_min_reads_as_uninit_and_zero_does_not` pins both
     /// halves.
     ///
@@ -506,11 +486,11 @@ impl DebugLocalMeta {
         // Not a reference: recover the raw bits without ever forming something
         // dereferenceable from them. `GcRef` is `#[repr(transparent)]` over a
         // `NonNull`, so this is the address-as-integer read `strict_provenance`
-        // sanctions and not a load through the pointer.
-        // …and undo the bias generated code applied on the way in (ADR-121
-        // decision 2). Wrapping, because the bias is chosen precisely so that
-        // one payload wraps to the all-zero word — and that payload is the one
-        // the `word?` above has already answered `None` for.
+        // sanctions and not a load through the pointer — then undo the bias
+        // generated code applied on the way in (ADR-121 decision 2). Wrapping,
+        // because the bias is chosen precisely so that one payload wraps to the
+        // all-zero word — and that payload is the one the `word?` above has
+        // already answered `None` for.
         let bits = (word.as_ptr() as usize as u64).wrapping_sub(self.slot_kind.store_bias() as u64);
         let scalar = match self.slot_kind {
             // Unreachable: the branch above returned. Spelled out rather than
@@ -537,10 +517,7 @@ impl DebugLocalMeta {
 /// One of these exists per lowered function, interned by content in the JIT
 /// generation arena (ADR-043), so a debugger session that recompiles the same
 /// function on every `p EXPR` (DBG-05) pays for it once. A generated prologue
-/// stores its address into a [`DebugFrameEntry`] — one immediate, one store —
-/// where ADR-021 passed the same four words as *arguments* to
-/// `praxis_push_debug_frame` and a fifth call, `praxis_set_frame_source_span`,
-/// wrote a compile-time constant at runtime.
+/// stores its address into a [`DebugFrameEntry`] — one immediate, one store.
 ///
 /// `#[repr(C)]` because generated code writes its address and
 /// [`crate::crash_snapshot`] reads its fields across the ABI boundary.
@@ -559,12 +536,10 @@ pub struct FunctionDebugMeta {
     /// [`crate::crash_snapshot`] and [`DebugFrameStackHeader::clear_reclaimed`]
     /// rely on when they zip the two.
     ///
-    /// This said "in shadow-slot order: a local's shadow slot index doubles as
-    /// its debug-local index" until ADR-128 decision 3, and that is now false in
-    /// both halves. A shadow slot index is a *colour* — `is_prime`'s shadow
-    /// indices are `{0}` while its debug indices are `0..33` — and the two stacks
-    /// are no longer index-parallel. Nothing about this array changed; what
-    /// changed is that the other stack stopped agreeing with it.
+    /// Debug-slot order is **not** shadow-slot order (ADR-128 decision 3): a
+    /// shadow slot index is a *colour* — `is_prime`'s shadow indices are `{0}`
+    /// while its debug indices are `0..33` — so the two stacks are not
+    /// index-parallel with each other.
     pub locals: *const DebugLocalMeta,
     /// The function's source span `[start, end)` as byte offsets into the
     /// program source (§9.3 "current source span", ADR-035 decision 3). `(0, 0)`
@@ -575,12 +550,9 @@ pub struct FunctionDebugMeta {
 
 /// One live call's debug frame: which function, and where its value slots are.
 ///
-/// This is the whole of what a frame *is* now. ADR-021's `DebugFrame` was a
-/// `Box` with a `parent` pointer, a name, a length, a locals pointer, a count, a
-/// span and two reserved parser-path words; six of those nine are static and
-/// live in [`FunctionDebugMeta`], the `parent` is the entry below this one on
-/// the stack, and the two parser-path fields were null from M10a onward and no
-/// `SnapshotFrame` ever carried them.
+/// This is the whole of what a frame is — everything else about the call is
+/// static and lives in [`FunctionDebugMeta`], and the parent frame is the entry
+/// below this one on the stack.
 ///
 /// Claimed by bumping the [`DebugFrameStack`]'s `top` in the prologue and
 /// released by restoring the saved base in the epilogue.
@@ -647,17 +619,15 @@ pub type DebugFrameStackHeader = SlotStackHeader<DebugFrameEntry>;
 
 /// The size of the debug value reservation, in slots.
 ///
-/// **Sized by its own headroom term since ADR-128 decision 3**, where it used to
-/// be written as `SHADOW_STACK_SLOTS` on the strength of "they are indexed by the
-/// same slot number for the same local". That is no longer true: root slots are
-/// colored by live range and debug value slots stay dense, one per `Gc` local, so
-/// the two index spaces answer different questions and are bounded by different
-/// caps ([`MAX_SHADOW_SLOTS`](crate::MAX_SHADOW_SLOTS) and
+/// **Sized by its own headroom term** (ADR-128 decision 3), not written as
+/// `SHADOW_STACK_SLOTS`: root slots are colored by live range and debug value
+/// slots stay dense, one per `Gc` local, so the two index spaces answer
+/// different questions and are bounded by different caps
+/// ([`MAX_SHADOW_SLOTS`](crate::MAX_SHADOW_SLOTS) and
 /// [`MAX_DEBUG_VALUE_SLOTS`]).
 ///
-/// The first two terms are unchanged, and they are unchanged *for the same
-/// reason* rather than by inheritance. Exhaustion is unrepresentable here exactly
-/// as it is on the shadow stack: every generated prologue rejects
+/// Exhaustion is unrepresentable here exactly as it is on the shadow stack, and
+/// for the same reason: every generated prologue rejects
 /// `stack_left < frame_cost(slots)` before it claims anything, and
 /// [`frame_cost`](crate::frame_cost) charges the **dense** count of `Gc` locals
 /// (ADR-128 decision 4) — which is precisely this stack's width. So the claimed
@@ -700,11 +670,10 @@ const _: () = assert!(
      be more of them than there are locals"
 );
 
-// The two reservations are no longer the same size, and the asymmetry is the
-// whole of decision 3 in one line: same budget-derived terms, different headroom.
-// A `const` block rather than a test for the reason the capacity identity above
-// is one — this is arithmetic over constants, so a build that disagrees with it
-// should not link.
+// The two reservations differ only in their headroom terms — same budget-derived
+// terms, different headroom (ADR-128 decision 3). A `const` block rather than a
+// test for the reason the capacity identity above is one: this is arithmetic over
+// constants, so a build that disagrees with it should not link.
 const _: () = assert!(
     DEBUG_VALUE_STACK_SLOTS - crate::SHADOW_STACK_SLOTS == MAX_DEBUG_VALUE_SLOTS - MAX_SHADOW_SLOTS,
     "the two slot reservations differ by exactly their headroom terms, because \
@@ -712,8 +681,11 @@ const _: () = assert!(
 );
 
 /// The size of the debug frame-entry reservation, in slots — one per live call,
-/// bounded by the same depth guard, plus the headroom `SHADOW_STACK_SLOTS`
-/// keeps for Rust-side pushes.
+/// bounded by the same depth guard, plus one entry of headroom for the
+/// Rust-side [`push_frame`] callers, who spend no budget and so are not covered
+/// by that guard. This is `SHADOW_STACK_SLOTS`' headroom term counted in
+/// frames, because a frame stack claims one entry per call rather than one per
+/// slot.
 pub const DEBUG_FRAME_STACK_SLOTS: usize = MAX_RECURSION_DEPTH as usize + 1;
 
 // ---------------------------------------------------------------------------
@@ -899,8 +871,7 @@ const _: () = {
 /// Mirrors [`crate::shadow_stack::ShadowFrameGuard`], and for the same reason:
 /// the two stacks must be popped together and in the reverse of the order they
 /// were pushed, and an RAII guard is what makes "pop one and not the other"
-/// unrepresentable from Rust. The tests this replaces reached into a
-/// `Box<DebugFrame>`'s `locals` array by hand.
+/// unrepresentable from Rust.
 pub struct DebugFrameGuard {
     frames: *mut DebugFrameStackHeader,
     values: *mut DebugValueStackHeader,
@@ -970,7 +941,7 @@ impl DebugFrameGuard {
     /// two different questions a test can ask. That one writes a machine word
     /// and is what an adversarial state needs (a payload that *is* a plausible
     /// heap address). This one writes a *payload* and is what a round-trip needs:
-    /// since the bias, a test that stores a raw word and expects
+    /// with the bias in place, a test that stores a raw word and expects
     /// [`DebugLocalMeta::read`] to answer it back is asserting that the encoding
     /// does not exist.
     pub fn set_scalar_payload(&mut self, index: usize, kind: DebugSlotKind, payload: u64) {
@@ -1113,11 +1084,8 @@ mod tests {
         }
     }
 
-    /// ADR-021's §4.2 guarantee, rebuilt on the metadata's new home. The whole
-    /// reason ADR-021 exists is that "shadowed locals are distinguishable in
-    /// debugger frames by source name and symbol ID" is testable without a REPL
-    /// — so moving the metadata out of the frame must not cost that test, only
-    /// change where it looks.
+    /// §4.2's guarantee (ADR-021): shadowed locals are distinguishable in
+    /// debugger frames by source name and symbol ID.
     #[test]
     fn a_functions_metadata_distinguishes_shadowed_bindings() {
         let metas = shadowed_a_metas();
@@ -1143,8 +1111,8 @@ mod tests {
         assert_eq!(locals[0].type_id, 1);
         assert_eq!(locals[0].kind, LOCAL_KIND_USER);
         assert_eq!((locals[1].span_start, locals[1].span_end), (20, 21));
-        // The span is the function's, and it is static: nothing wrote it at
-        // runtime, which is `praxis_set_frame_source_span` not existing.
+        // The span is the function's, and it is static: nothing writes it at
+        // runtime.
         assert_eq!((seen.span_start, seen.span_end), (0, 12));
         drop(guard);
     }
@@ -1172,9 +1140,9 @@ mod tests {
 
     #[test]
     fn pushing_and_popping_restores_both_tops() {
-        // The balance property ADR-021's `praxis_pop_debug_frame` had and this
-        // must keep: `m10ws2_debug_frame_pushpop_balanced_across_recursion` is
-        // its end-to-end form, and `Runtime::clear_for_rerun` asserts on it.
+        // The balance property: pushes and pops match on both stacks.
+        // `m10ws2_debug_frame_pushpop_balanced_across_recursion` is its
+        // end-to-end form, and `Runtime::clear_for_rerun` asserts on it.
         let metas = shadowed_a_metas();
         let outer_meta = meta_for(b"outer", &metas, (0, 0));
         let inner_meta = meta_for(b"inner", &metas[..1], (0, 0));
@@ -1203,11 +1171,11 @@ mod tests {
         assert!(f.rt.debug_value_stack().is_empty());
     }
 
-    /// ADR-106, the defect it closes. A value the shadow stack has stopped
-    /// naming — which is every `Gc` local after its last use, by ADR-044
-    /// decision 2 — is unreachable while the debugger still names it. The
-    /// collection that reclaims it must leave the debug slot as an absence, not
-    /// as a reference into storage the allocator is now free to hand out.
+    /// ADR-106's invariant. A value the shadow stack has stopped naming — which
+    /// is every `Gc` local after its last use, by ADR-044 decision 2 — is
+    /// unreachable while the debugger still names it. The collection that
+    /// reclaims it must leave the debug slot as an absence, not as a reference
+    /// into storage the allocator is now free to hand out.
     ///
     /// The `9_999` is past the interned small-`Int` range on purpose: an
     /// interned `Int` is an immortal that no sweep touches, so a value inside
@@ -1257,10 +1225,9 @@ mod tests {
             None,
             "and nothing can follow it back into the heap"
         );
-        // The contrast this test exists to draw, now that the slot can draw it:
-        // slot 1 was written and collected, slot 0 was never written, and the
-        // two used to be the same word. A debugger reading them apart is the
-        // difference between `<collected>` and `<uninit>` on a locals line.
+        // The contrast this test exists to draw: slot 1 was written and
+        // collected, slot 0 was never written. A debugger reading them apart is
+        // the difference between `<collected>` and `<uninit>` on a locals line.
         assert_eq!(unwritten, None, "slot 0 was never written");
         assert_ne!(written, unwritten, "the two absences are not one absence");
         drop(guard);
@@ -1345,11 +1312,9 @@ mod tests {
         f.rt.collect_now();
 
         // **The claim is about the word**, asserted on the word itself rather
-        // than through `read`. It used to be asserted through `read`, which was
-        // the same statement while a scalar slot stored its payload verbatim;
-        // since ADR-121 decision 2 biases the encoding, a decode here would be
-        // comparing `bits` against `bits - i64::MIN` and the test would be about
-        // the bias rather than about the scan.
+        // than through `read`: the encoding is biased (ADR-121 decision 2), so a
+        // decode here would compare `bits` against `bits - i64::MIN` and the
+        // test would be about the bias rather than about the scan.
         assert_eq!(
             guard.values()[1].map(|v| v.as_ptr() as usize as u64),
             Some(bits),
@@ -1476,20 +1441,17 @@ mod tests {
         }
     }
 
-    /// **The one thing an `Int` slot cannot say**, pinned so a later package
-    /// changes it deliberately rather than discovers it — and pinned at the
-    /// value ADR-121 decision 2 moved it *to*.
+    /// **The one thing an `Int` slot cannot say**, pinned so a later change
+    /// moves it deliberately rather than discovers it.
     ///
     /// A claim zeroes its run and zero means "nothing written here yet", which
     /// is exact for a `Reference` slot (a `GcRef` is `NonNull`) and cannot be
     /// exact for a scalar one: 2^64 payloads do not fit in 2^64 words beside an
     /// "unwritten" state. Exactly one payload per kind is therefore lost, and
-    /// the bias chooses which.
+    /// the bias chooses which — for `Int`, `i64::MIN` (ADR-121 decision 2).
     ///
-    /// It used to be `0`, which is what made `var i = 0` render `<uninit>` the
-    /// moment ADR-121 started promoting bindings. It is now `i64::MIN`. Both
-    /// halves are asserted here, because the test is worth nothing without the
-    /// second: a bias that lost *both* would pass the first line.
+    /// Both halves are asserted here, because the test is worth nothing without
+    /// the second: a bias that lost *both* would pass the first line.
     #[test]
     fn an_int_slot_holding_i64_min_reads_as_uninit_and_zero_does_not() {
         let metas = one_reference_and_one_scalar(DebugSlotKind::Int);
@@ -1668,11 +1630,9 @@ mod tests {
     // -----------------------------------------------------------------------
     // ADR-128 decision 3: this stack is bounded on its own terms.
     //
-    // The shadow stack's three sizing tests, restated here. They were not
-    // duplicated before because `DEBUG_VALUE_STACK_SLOTS` *was*
-    // `SHADOW_STACK_SLOTS`, so the shadow tests covered both by construction.
-    // The two are now sized independently and only one of them is being tested
-    // by the tests in `shadow_stack.rs`.
+    // The shadow stack's three sizing tests, restated here because the two
+    // stacks are sized independently and `shadow_stack.rs`'s tests cover only
+    // the other one.
     // -----------------------------------------------------------------------
 
     /// The sibling of `rejects_an_oversized_frame`: a function with more `Gc`
@@ -1709,7 +1669,7 @@ mod tests {
     }
 
     /// The sibling of `a_wide_frame_spends_more_budget_than_a_narrow_one`, and
-    /// the test that says decision 4 actually happened.
+    /// what pins ADR-128 decision 4.
     ///
     /// A function's *debug* width is what the guard charges for, so a function
     /// with many `Gc` locals recurses less deeply than one with few — whatever

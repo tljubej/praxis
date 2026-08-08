@@ -266,9 +266,9 @@ mod tests {
         assert_eq!(doc.lines().line_count(), 2, "the line map was rebuilt");
     }
 
-    /// Re-opening a URI is a **new** state, never the cached one. A per-document
-    /// counter starting at zero made `didClose`/`didOpen` — and an editor
-    /// reloading from disk — reuse the previous analysis.
+    /// Re-opening a URI is a **new** state, never the cached one. A
+    /// per-document counter starting at zero would make `didClose`/`didOpen` —
+    /// and an editor reloading from disk — reuse the previous analysis.
     #[test]
     fn reopening_a_uri_is_a_new_revision() {
         let mut store = DocumentStore::new();

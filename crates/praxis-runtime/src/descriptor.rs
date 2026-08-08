@@ -14,9 +14,9 @@ use std::hash::{Hash, Hasher};
 /// The closed set of built-in runtime types (§11.4).
 ///
 /// This enum *is* the type-id registry: a descriptor's [`TypeId`] is derived
-/// from its variant, so two built-ins can no longer be labelled with the same
-/// id (which is how `Float` and `Text` both became `TypeId(5)`). Uniqueness
-/// reduces to enum-discriminant uniqueness, which rustc already enforces.
+/// from its variant, so two built-ins cannot be labelled with the same id.
+/// Uniqueness reduces to enum-discriminant uniqueness, which rustc already
+/// enforces.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 #[repr(u32)]
 pub enum BuiltinTypeId {
@@ -41,7 +41,8 @@ pub enum BuiltinTypeId {
     Enum,
     Closure,
     VarCell,
-    /// `Range` (§4.11, ADR-059). Appended, so every existing id is unchanged.
+    /// `Range` (§4.11, ADR-059). New variants are appended, so no existing id
+    /// ever moves.
     Range,
 }
 
@@ -93,7 +94,7 @@ impl BuiltinTypeId {
 ///
 /// The inner word is **private**: the only producers are
 /// [`TypeDescriptor::builtin`] (which derives it from a [`BuiltinTypeId`]) and
-/// the test-only escape hatch, so a hand-written integer literal can no longer
+/// the test-only escape hatch, so a hand-written integer literal cannot
 /// impersonate a built-in.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct TypeId(u32);
@@ -129,7 +130,7 @@ pub trait DynamicHasher {
 }
 
 /// The built-in [`DynamicHasher`] backed by [`DefaultHasher`]. Used by every
-/// descriptor's `hash` callback in M3.
+/// descriptor's `hash` callback.
 pub struct StructHasher(DefaultHasher);
 
 impl StructHasher {
@@ -216,10 +217,9 @@ pub enum FormatStyle {
 /// The writer a `format` callback appends to, carrying the [`FormatStyle`] it is
 /// rendering under.
 ///
-/// A plain `&mut dyn fmt::Write` was enough while every type rendered one way.
-/// This is that, plus the one bit, and it is a wrapper rather than an extra
-/// parameter so that a container passing its writer to an element descriptor
-/// passes the style with it and cannot forget to.
+/// A wrapper rather than an extra parameter, so that a container passing its
+/// writer to an element descriptor passes the style with it and cannot forget
+/// to.
 pub struct FormatSink<'a> {
     out: &'a mut dyn fmt::Write,
     style: FormatStyle,
@@ -303,8 +303,8 @@ pub type HashFn = unsafe fn(payload: *const u8, hasher: &mut dyn DynamicHasher);
 /// constructor argument.
 ///
 /// The collector's pacing counter reads it at allocation. Without it a 1 MiB
-/// `Text` charged the same 40 bytes as an `Int`, so a text-heavy program
-/// under-reported its own pressure by essentially its whole footprint (RT-04).
+/// `Text` would charge the same 40 bytes as an `Int`, and a text-heavy program
+/// would under-report its own pressure by essentially its whole footprint.
 ///
 /// # Safety
 /// `payload` must point at a value of the descriptor's type.
@@ -422,12 +422,12 @@ impl TypeDescriptor {
     }
 
     /// Declare that this type owns memory outside its allocation block, and how
-    /// to measure it (RT-04).
+    /// to measure it.
     ///
     /// A builder rather than a constructor argument because the default —
     /// "nothing beyond the payload" — is right for every scalar and for
-    /// `VarCell`, and a required argument would make twenty-one declarations
-    /// spell out the same `None`.
+    /// `VarCell` and `Range`, and a required argument would make each of those
+    /// declarations spell out the same `None`.
     #[must_use]
     pub const fn with_owned_bytes(self, owned_bytes: OwnedBytesFn) -> TypeDescriptor {
         TypeDescriptor {
@@ -489,8 +489,11 @@ impl TypeDescriptor {
         self.equals.is_some()
     }
 
-    /// True iff values of this type may be used as a map/set key (§5.5).
-    /// Equatable + hashable together.
+    /// True iff values of this type have a structural hash (§5.5).
+    ///
+    /// Not the same as "may be a `Map` key": a `Vec` hashes and can never be a
+    /// key (ADR-057 D4). That question is
+    /// `praxis_hir::capability::supports_hash_stable`.
     #[inline]
     pub fn is_hashable(&self) -> bool {
         self.hash.is_some()
@@ -508,17 +511,15 @@ impl TypeDescriptor {
     }
 }
 
-/// A descriptor together with the Rust type of the payload it describes
-/// (REP-02).
+/// A descriptor together with the Rust type of the payload it describes.
 ///
 /// [`TypeDescriptor::builtin`] takes the payload type `P`, derives `size`/`align`
-/// from it, and then **erases it**. So every allocator downstream took the
-/// payload as a bare generic and could only compare widths at *runtime* —
+/// from it, and then **erases it**. An allocator that took the payload as a bare
+/// generic could therefore only compare widths at *runtime* —
 /// `gc_alloc(ctx, &scalars::INT, 0)` passes an `i32`, because Rust's default
-/// integer type is not `i64`, and it aborted the process with "payload size
-/// mismatch for descriptor Int" from inside `extern "C"`. A non-unwinding panic
-/// across the ABI is exactly what §10.4 forbids, and the assertion could not
-/// fire until the wrong call ran.
+/// integer type is not `i64`, and aborts the process with "payload size mismatch
+/// for descriptor Int" from inside `extern "C"`. That is the non-unwinding panic
+/// across the ABI §10.4 forbids, and it cannot fire until the wrong call runs.
 ///
 /// `Payload<T>` re-attaches the type. The pairing is checked once, where the
 /// handle is declared — [`Payload::new`] is a `const fn` whose assertions run
@@ -580,9 +581,9 @@ impl<T: Copy> Payload<T> {
     /// The **width is the compiler's**: it is `size_of::<T>()`, and
     /// [`Payload::new`] proved during const evaluation that that is exactly the
     /// descriptor's declared width. A caller therefore cannot pick a width, and
-    /// cannot pick the wrong one — which is what REP-37 did by hand, reading a
-    /// one-byte `Bool` through an `i64` and consuming seven bytes of arena
-    /// padding the allocator never initialized.
+    /// cannot pick the wrong one — a hand-written read of a one-byte `Bool`
+    /// through an `i64` consumes seven bytes of arena padding the allocator
+    /// never initialized.
     ///
     /// This is the read half of what `Payload<T>` already does for allocation.
     /// It does **not** check the object's descriptor — a handle names a type but
@@ -661,10 +662,10 @@ pub static BUILTINS: [&TypeDescriptor; BuiltinTypeId::COUNT] = [
 /// **Derived rather than written out, which is the point.** Generated code
 /// proves a value's type by loading slot `id` of that array and comparing it
 /// against the header's descriptor word (ADR-102), so a slot holding a
-/// neighbour's descriptor would be a proof of the wrong type — REP-37 with the
-/// table as its source. Mapping `BUILTINS` here leaves the registry as the one
-/// place the index-to-descriptor correspondence is stated, and
-/// `builtins_are_indexed_by_their_id` as the one gate on it.
+/// neighbour's descriptor would be a proof of the wrong type. Mapping
+/// `BUILTINS` here leaves the registry as the one place the index-to-descriptor
+/// correspondence is stated, and `builtins_are_indexed_by_their_id` as the one
+/// gate on it.
 ///
 /// A `fn` and not a `const fn`: const evaluation may not read a `static`, and
 /// `BUILTINS` is one deliberately — the addresses *are* the identities
@@ -683,7 +684,7 @@ mod tests {
     /// Smoke test: a descriptor can be constructed and copied, and the
     /// `is_equatable` / `is_hashable` flags reflect the optional callbacks.
     /// The function pointers here are dummies that must never be called — the
-    /// point is that the *type* is well-formed at Milestone 0.
+    /// point is that the *type* is well-formed.
     unsafe fn dummy_trace(_: *mut u8, _: &mut dyn Tracer) {}
     unsafe fn dummy_drop(_: *mut u8) {}
     unsafe fn dummy_format(_: *const u8, _: &mut FormatSink<'_>) {}

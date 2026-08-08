@@ -1,5 +1,5 @@
 //! Constraints: the capabilities a type variable must have, carried alongside
-//! the scheme that quantified it (F10, TY-29).
+//! the scheme that quantified it.
 //!
 //! # The channel this is
 //!
@@ -15,8 +15,8 @@
 //! fn main() -> Bool { equal(f, g) }  // instantiated at a function type
 //! ```
 //!
-//! Before this channel, the requirement was discarded at generalization and the
-//! program compiled. A constraint survives generalization by riding on the
+//! Discarding the requirement at generalization would let that program compile.
+//! A constraint survives generalization by riding on the
 //! [`Scheme`](crate::Scheme), and every instantiation **re-emits** it against
 //! the fresh variables the use site chose — so the check happens once per use,
 //! against that use's types, which is the only place it can be right.
@@ -40,7 +40,7 @@ use crate::type_id::{Type, VarId};
 /// A capability requirement, including the ones that carry types.
 ///
 /// [`Capability::Kind`] is the payload-free vocabulary (`praxis_stdlib::CapKind`);
-/// the other two exist because their requirement is not "this type is X" but
+/// the other three exist because their requirement is not "this type is X" but
 /// "this type is X **at** these types", and the inner types have to travel with
 /// the constraint or the check cannot be made.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -51,32 +51,31 @@ pub enum Capability {
     /// with `item` bound to `x`'s, so pinning either pins the other.
     Iterable { item: Type },
     /// Has a method `name` taking `params` and returning `result`. Emitted by a
-    /// method call on a receiver whose type is not yet known (TY-30): it is
-    /// what lets `fn total(values) { values.sum() }` constrain `values` rather
-    /// than give up.
+    /// method call on a receiver whose type is not yet known: it is what lets
+    /// `fn total(values) { values.sum() }` constrain `values` rather than give
+    /// up.
     HasMethod {
         name: String,
         params: Vec<Type>,
         result: Type,
     },
     /// Has a field `name` of type `ty`. Emitted by every field read a record
-    /// definition cannot answer on the spot (REP-28) — the third capability
-    /// discharged by *resolving* rather than by answering a yes/no, because the
-    /// field's type is something the read produces and nothing else says.
+    /// definition cannot answer on the spot — the third capability discharged
+    /// by *resolving* rather than by answering a yes/no, because the field's
+    /// type is something the read produces and nothing else says.
     ///
-    /// Without it a field read constrained its receiver not at all: the read
-    /// answered a fresh variable and recorded no requirement, so
-    /// `fn dist(a) -> Int { a.x + a.y }` / `out(dist(3))` passed `praxis check`
-    /// and then failed under `praxis run` with `Y112`. **The call site is part of
-    /// the reproduction**: an *uncalled* `dist` pins nothing, so there is no
-    /// receiver for anyone to reject, and it compiles — that is the same tolerance
-    /// an uncalled `fn f(a) { a + 1 }` gets, and it is what lets §4.9's own fence
-    /// stand as written.
+    /// Without it a field read would constrain its receiver not at all, so
+    /// `fn dist(a) -> Int { a.x + a.y }` / `out(dist(3))` would pass
+    /// `praxis check` and fail only under `praxis run`, with `Y112`. An
+    /// *uncalled* `dist` still compiles: it pins nothing, so there is no
+    /// receiver for anyone to reject — the same tolerance an uncalled
+    /// `fn f(a) { a + 1 }` gets, and what lets §4.9's own fence stand as
+    /// written.
     HasField { name: String, ty: Type },
 }
 
 impl Capability {
-    /// The [`CapKind`] this is, or `None` for the two type-carrying arms.
+    /// The [`CapKind`] this is, or `None` for the three type-carrying arms.
     #[must_use]
     pub fn kind(&self) -> Option<CapKind> {
         match self {

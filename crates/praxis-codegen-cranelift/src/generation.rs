@@ -1,23 +1,18 @@
 //! One reclaimable JIT generation: the arena that owns every piece of metadata
-//! generated code and the runtime read by raw pointer (F13, §10.5).
+//! generated code and the runtime read by raw pointer (§10.5).
 //!
-//! Before S8, the backend minted its metadata with `Box::leak` and cached the
-//! expensive parts in process-global `OnceLock<Mutex<HashMap<…>>>`s. That had
-//! two consequences, one a leak and one a correctness bug:
+//! A [`Generation`] is *the* owner of that metadata: an arena plus the caches
+//! that key into it, so a cache entry cannot outlive the type database that
+//! justified it, and the whole thing can be handed back to the allocator at
+//! once. A `reload` or a `p EXPR` compiles a whole new program, so anything
+//! leaked per compile would grow a debugger session without bound.
 //!
-//! * **MIR-13/DBG-05** — a `reload` or a `p EXPR` compiles a whole new program,
-//!   and everything the previous one leaked stayed leaked. Nothing was ever
-//!   reclaimable, so a long debugger session grew without bound.
-//! * **MIR-12/DBG-06** — the record-schema cache was keyed on a bare
-//!   `RecordDefId(u32)`, which is a *per-`TypeDb` positional index*. The
-//!   debugger mints a fresh `TypeDb` per `p` and per `reload`, so
-//!   `RecordDefId(0)` in one session names a different struct than in the next
-//!   and the cache handed back a schema built for the wrong shape — whose field
-//!   descriptors then read a `Text` header as an `i64`.
-//!
-//! A [`Generation`] fixes both by being *the* owner: an arena plus the caches,
-//! so a cache entry cannot outlive the type database that justified it, and the
-//! whole thing can be handed back to the allocator at once.
+//! **A `RecordDefId` is a per-`TypeDb` positional index, not an identity.** The
+//! debugger mints a fresh `TypeDb` per `p` and per `reload`, so `RecordDefId(0)`
+//! in one session names a different struct than in the next; a schema cache
+//! shared across generations would hand back a schema built for the wrong shape,
+//! whose field descriptors then read a `Text` header as an `i64`. Owning the
+//! caches per generation is what rules that out.
 //!
 //! # Reclamation is proof-gated
 //!
@@ -29,9 +24,8 @@
 //! [`HeapDrained`](praxis_runtime::HeapDrained), which only
 //! [`Runtime::teardown`](praxis_runtime::Runtime::teardown) can mint.
 //!
-//! A generation that is merely *dropped* leaks its arena — deliberately. That
-//! is exactly the pre-S8 behaviour, so forgetting to retire costs memory rather
-//! than soundness.
+//! A generation that is merely *dropped* leaks its arena — deliberately, so
+//! forgetting to retire costs memory rather than soundness.
 //!
 //! # Everything is interned
 //!
@@ -84,10 +78,10 @@ impl GenerationId {
 
 /// The key a record schema is cached under: the generation *and* the def id.
 ///
-/// The generation half is what MIR-12/DBG-06 were missing. It is redundant
-/// while a generation owns its own map — and that redundancy is the point: the
-/// key states the invariant, so a future change that shares one map between
-/// generations cannot silently reintroduce the bug.
+/// The generation half is what a bare def id lacks. It is redundant while a
+/// generation owns its own map — and that redundancy is the point: the key
+/// states the invariant, so a future change that shares one map between
+/// generations cannot silently reintroduce a cross-`TypeDb` schema.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct RecordKey(GenerationId, u32);
 
@@ -95,10 +89,10 @@ struct RecordKey(GenerationId, u32);
 /// the resolved payload-descriptor sequence of every variant.
 ///
 /// The last part is what a record key does not need. `Option` is a *generic*
-/// def (F12), so one `EnumDefId` covers `Option[Int]` and `Option[Text]`, whose
-/// `Some` slots must not share a schema — a schema is what `equals`/`hash`
-/// dispatch through, and the wrong one there reads a `Text` header as an `i64`
-/// (P0-11). The generation half carries MIR-12/DBG-06's lesson unchanged.
+/// def, so one `EnumDefId` covers `Option[Int]` and `Option[Text]`, whose `Some`
+/// slots must not share a schema — a schema is what `equals`/`hash` dispatch
+/// through, and the wrong one there reads a `Text` header as an `i64`. The
+/// generation half is [`RecordKey`]'s, for the same reason.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct EnumKey(GenerationId, u32, Box<[Box<[usize]>]>);
 
@@ -246,11 +240,11 @@ impl Generation {
             // SAFETY: `_proof` is a `HeapDrained`, minted only by
             // `Runtime::teardown`, which drops the heap and so finalizes every
             // payload that could hold a `*const RecordSchema`, a
-            // `*const TupleSchema` or a `*const EnumSchema` into this arena. Nothing dereferences the
-            // arena after this point: the caches are dropped with `owned`, and
-            // generated code that embedded these addresses lives in the
-            // `JITModule`, which `Jit` declares *before* the generation and
-            // therefore drops first.
+            // `*const TupleSchema` or a `*const EnumSchema` into this arena.
+            // Nothing dereferences the arena after this point: the caches are
+            // dropped with `owned`, and generated code that embedded these
+            // addresses lives in the `JITModule`, which `Jit` declares *before*
+            // the generation and therefore drops first.
             unsafe { ManuallyDrop::drop(&mut owned.arena) };
         }
     }
@@ -390,8 +384,8 @@ impl Generation {
     /// content, and return `(ptr, len)`.
     ///
     /// Deduplication is what makes repeated compilation of the same source into
-    /// one generation cost nothing (DBG-05): the same function lowered twice
-    /// yields the same metadata, down to the interned name pointers.
+    /// one generation cost nothing: the same function lowered twice yields the
+    /// same metadata, down to the interned name pointers.
     pub fn debug_local_metas(&self, metas: Vec<DebugLocalMeta>) -> (*const DebugLocalMeta, usize) {
         let key: Box<[DebugMetaKey]> = metas.iter().map(DebugMetaKey::of).collect();
         if let Some(&hit) = self.debug_metas.borrow().get(&key) {
@@ -408,14 +402,12 @@ impl Generation {
     /// locals — deduplicated by content, and return the address the prologue
     /// writes into its [`DebugFrameEntry`](praxis_runtime::DebugFrameEntry).
     ///
-    /// This is where ADR-104's static half lands. Everything here was previously
-    /// passed as *arguments*: four to `praxis_push_debug_frame` and two more to
-    /// `praxis_set_frame_source_span`, on every call, to describe something that
-    /// is the same for every call of the function. Interning it means the
-    /// prologue names it with one immediate, and a debugger session that
-    /// recompiles the same function on every `p EXPR` still allocates nothing
-    /// new — the property `repeated_identical_metadata_stops_growing_the_arena`
-    /// pins.
+    /// This is where ADR-104's static half lands. All of it is the same for
+    /// every call of the function, so interning it lets the prologue name it
+    /// with one immediate instead of passing six arguments per call, and a
+    /// debugger session that recompiles the same function on every `p EXPR`
+    /// still allocates nothing new — the property
+    /// `repeated_identical_metadata_stops_growing_the_arena` pins.
     pub fn function_debug_meta(
         &self,
         func_name: &'static str,
@@ -468,9 +460,9 @@ impl Drop for Generation {
     ///
     /// A `Generation` reaching its destructor has *not* been handed a
     /// [`HeapDrained`], so nothing here knows whether a live `RecordPayload`
-    /// still points into the arena. Leaking is the pre-S8 behaviour and is
-    /// safe; freeing would be a use-after-free at the next `==`.
-    /// [`Generation::retire`] is the route that actually reclaims.
+    /// still points into the arena. Leaking is safe; freeing would be a
+    /// use-after-free at the next `==`. [`Generation::retire`] is the route that
+    /// actually reclaims.
     fn drop(&mut self) {
         // `arena` is `ManuallyDrop`: doing nothing here is the leak.
     }
@@ -491,9 +483,9 @@ mod tests {
         assert!(a.id().get() > 0 && b.id().get() > 0);
     }
 
-    /// The same record def id in two generations gets two schemas. This is
-    /// MIR-12/DBG-06 in miniature: `RecordDefId(0)` means different things in
-    /// different type databases, so sharing a schema across them is the bug.
+    /// The same record def id in two generations gets two schemas:
+    /// `RecordDefId(0)` means different things in different type databases, so
+    /// sharing a schema across them would be the bug.
     #[test]
     fn the_same_def_id_in_two_generations_gets_two_schemas() {
         let a = Generation::new();
@@ -568,7 +560,7 @@ mod tests {
     }
 
     /// Interning is what bounds a long debugger session: the same metadata
-    /// requested a hundred times costs what it costs once (DBG-05, MIR-13).
+    /// requested a hundred times costs what it costs once.
     #[test]
     fn repeated_identical_metadata_stops_growing_the_arena() {
         let gen = Generation::new();

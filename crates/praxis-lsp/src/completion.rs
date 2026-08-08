@@ -1,4 +1,4 @@
-//! Completion (WS5, §15.2's context list).
+//! Completion (§15.2's context list).
 //!
 //! Two halves: [`context_at`] decides *what kind of place* the cursor is in, and
 //! [`items`] turns that into a list. The split matters because the first half is
@@ -10,10 +10,10 @@
 //! not *what* to offer but *whether the editor was right to ask*.
 //!
 //! **Nothing here carries a second list of names.** A method comes from
-//! `praxis_stdlib::completion::completion_data`, generated from the catalog the
-//! compiler dispatches through; an atomic from `AtomicKind::ALL`; a constructor
-//! and its keyword argument from `Constructor::ALL`/`keyword_arg`. That is what
-//! makes "a constructor added later is offered" true by construction.
+//! `praxis_stdlib::builtin_catalog()`, the catalog the compiler dispatches
+//! through; an atomic from `AtomicKind::ALL`; a constructor and its keyword
+//! argument from `Constructor::ALL`/`keyword_arg`. That is what makes "a
+//! constructor added later is offered" true by construction.
 
 use lsp_types::{CompletionItem, CompletionItemKind, Documentation, InsertTextFormat};
 use praxis_hir::{ParserMode, SymbolKind};
@@ -57,10 +57,11 @@ pub fn context_at(snapshot: &Snapshot, offset: u32) -> CompletionContext {
 /// needs a menu over text that is not yet an expression — but the same
 /// characters carry ordinary meanings outside a template, and `{` carries the
 /// most ordinary one there is: it opens every block. `fn main() {`, `if x {`,
-/// `match d {` each resolved to [`CompletionContext::Lexical`] with an empty
-/// prefix, so the editor was handed every name in the file, pre-selected, at the
-/// exact moment the user was about to *invent* a name — and an editor that
-/// accepts a selected row on <kbd>Enter</kbd> then commits the first one.
+/// `match d {` each resolve to [`CompletionContext::Lexical`] with an empty
+/// prefix, so an ungated `{` hands the editor every name in the file,
+/// pre-selected, at the exact moment the user is about to *invent* a name — and
+/// an editor that accepts a selected row on <kbd>Enter</kbd> then commits the
+/// first one.
 ///
 /// So each character answers only where it means what it was registered for.
 /// The gate is on trigger characters **alone**: an explicit request
@@ -107,8 +108,7 @@ fn word_prefix(text: &str, offset: u32) -> String {
 /// the type inference already recorded for that node. `grid.` parses as
 /// `EXPR_STMT [ PATH_EXPR "grid", DOT ]` — the postfix loop breaks, the
 /// checkpoint never becomes a node, and the receiver is nonetheless whole. No
-/// parser recovery and no speculative edit is needed, which is why WS5 does not
-/// open by rewriting recovery.
+/// parser recovery and no speculative edit is needed.
 fn receiver_before_dot(snapshot: &Snapshot, offset: u32) -> Option<Type> {
     let token = snapshot.token_before(offset)?;
     let dot = if token.kind() == SyntaxKind::DOT {
@@ -166,7 +166,7 @@ fn parser_context(snapshot: &Snapshot, offset: u32, prefix: &str) -> Option<Comp
     // not convert, so there is no index and no mode to read — and rather than
     // re-deriving where the capture ends (ADR-098's whole point), the fallback
     // simply does not claim to know: it answers `Expression`, whose item list is
-    // the same one a capture body takes (D10).
+    // the same one a capture body takes.
     let mode = snapshot
         .input_parser_at(offset)
         .map_or(ParserMode::Expression, |idx| idx.mode_at(offset));
@@ -238,10 +238,9 @@ pub fn items(snapshot: &Snapshot, ctx: &CompletionContext) -> Vec<CompletionItem
 
 /// Receiver methods **and** record fields after a `.`.
 ///
-/// The methods come from `completion_data`, which M8 generated from
-/// `builtin_catalog()` and gated 1:1 against it — so the signatures shown are
-/// the ones the compiler dispatches on, and criterion 2's "with signatures" is
-/// `params`/`result` rather than a second table.
+/// The methods are the `builtin_catalog()` rows whose receiver pattern matches,
+/// so the signatures shown are the ones the compiler dispatches on — read off
+/// each entry's `params`/`result` rather than from a second table.
 fn dot_items(snapshot: &Snapshot, receiver: Type) -> Vec<CompletionItem> {
     let analysis = snapshot.analyze();
     let db = &analysis.db;
@@ -256,10 +255,8 @@ fn dot_items(snapshot: &Snapshot, receiver: Type) -> Vec<CompletionItem> {
     let catalog = praxis_stdlib::builtin_catalog();
     for entry in catalog.entries() {
         // The *same function* dispatch uses, not the same rule restated
-        // (ADR-127 decision 1). This used to be a local copy with the LSP's own
-        // comment admitting it — "the same rule … restated" — and the two are
-        // filtered differently only in that dispatch also asks name and arity,
-        // which completion must not.
+        // (ADR-127 decision 1). Completion differs from dispatch only in not
+        // asking name and arity.
         if !praxis_stdlib::pattern_matches(&entry.receiver, &pattern) {
             continue;
         }
@@ -285,9 +282,9 @@ fn dot_items(snapshot: &Snapshot, receiver: Type) -> Vec<CompletionItem> {
 /// `.`.
 ///
 /// `v[0]`, `m[k] = x` and `best[k] max= s` are catalog entries because dispatch
-/// goes through the catalog for them too (§6.2, REP-16/REP-21) — their names are
-/// `[]`, `[]=`, `[]min=` and `[]max=`. Offering them as completions would put
-/// `grid.[]` in the list, which is not syntax.
+/// goes through the catalog for them too (§6.2) — their names are `[]`, `[]=`,
+/// `[]min=` and `[]max=`. Offering them as completions would put `grid.[]` in
+/// the list, which is not syntax.
 fn is_operator(name: &str) -> bool {
     use praxis_stdlib::catalog::{INDEX_READ, INDEX_STORE, INDEX_STORE_MAX, INDEX_STORE_MIN};
     matches!(
@@ -391,9 +388,7 @@ fn parser_items(enclosing: Option<Constructor>) -> Vec<CompletionItem> {
         }
         // The same rule for the one bare flag: `Constructor::flag_arg` says
         // which constructor has one and what it is called, so the editor
-        // cannot offer `ragged` where the compiler would not take it. This was
-        // a `ctor == Constructor::Grid` test beside a `RAGGED_FLAG` constant,
-        // which is the same name kept in two places.
+        // cannot offer `ragged` where the compiler would not take it.
         if let Some(flag) = ctor.flag_arg() {
             out.push(CompletionItem {
                 label: flag.to_string(),
@@ -416,10 +411,8 @@ fn parser_items(enclosing: Option<Constructor>) -> Vec<CompletionItem> {
 /// question and it agrees with the resolver wherever a name resolves at all.
 ///
 /// A **prelude** name carries §16.1's own sentence, and a built-in type name
-/// carries §4.2's. Those two are most of this list — thirty-one prelude names
-/// and seven type names against however many the file declares — and before this
-/// they were offered with a signature and nothing else, the seven type names
-/// with not even that.
+/// carries §4.2's. Those two tables are most of this list, against however many
+/// names the file itself declares.
 fn lexical_items(snapshot: &Snapshot) -> Vec<CompletionItem> {
     let analysis = snapshot.analyze();
     let db = &analysis.db;

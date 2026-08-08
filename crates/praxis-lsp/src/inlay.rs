@@ -200,8 +200,8 @@ fn annotatable_owner(token: &SyntaxToken) -> Option<SyntaxNode> {
 ///
 /// **Not its first child token.** A `fn` parameter writes its name as a bare
 /// `Ident`, and a *closure* parameter writes a `PATTERN` around it — so a search
-/// of direct children finds the first and misses the second, which is how
-/// `|q: Int|` came to be offered a hint next to the annotation it already has.
+/// of direct children would find the first and miss the second, leaving
+/// `|q: Int|` with a hint next to the annotation it already has.
 fn declared_name(owner: &SyntaxNode) -> Option<SyntaxToken> {
     owner
         .descendants_with_tokens()

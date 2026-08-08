@@ -35,7 +35,7 @@ use crate::GcRef;
 /// Both fields are private and the descriptor is *derived* from the value, so
 /// "a key whose descriptor names a different type than its payload" is
 /// unrepresentable: [`DynamicKey::new`] is the only way in, and it reads the
-/// descriptor out of the object's header (RT-09).
+/// descriptor out of the object's header.
 #[derive(Clone, Copy)]
 pub struct DynamicKey {
     /// The rooted key value. Stable for the object's lifetime (non-moving GC,
@@ -74,12 +74,13 @@ impl DynamicKey {
 
 impl PartialEq for DynamicKey {
     fn eq(&self, other: &Self) -> bool {
-        // Runtime type identity comes first (RT-09). Without it a key of one
-        // type dispatches the *left* descriptor's `equals` against the *right*
+        // Runtime type identity comes first. Without it a key of one type
+        // dispatches the *left* descriptor's `equals` against the *right*
         // payload — a read through the wrong layout — and the result can also
         // disagree with `Hash`, which is keyed on the descriptor below.
         // Descriptors are `static`, so pointer identity is the authoritative
-        // test (ADR-038); the id is not, while two built-ins may share one.
+        // test (ADR-038); `TypeId` is the other correct spelling, kept for
+        // diagnostics and for readability at comparison sites.
         if !std::ptr::eq(self.descriptor, other.descriptor) {
             return false;
         }
@@ -116,9 +117,8 @@ impl std::fmt::Debug for DynamicKey {
         // SAFETY: `value` is a live GcRef matching the descriptor.
         let payload = self.value.payload::<u8>() as *const u8;
         // The format callback returns fmt::Result; discard it (debug rendering
-        // is best-effort).
-        // In the debug style, which is the one a Rust `Debug` impl means: a
-        // `DynamicKey` over `""` used to render `DynamicKey(Text:)`.
+        // is best-effort). The sink is in the debug style, which is the one a
+        // Rust `Debug` impl means: a `Text` key renders quoted.
         unsafe {
             (self.descriptor.format)(payload, &mut crate::FormatSink::debug(&mut s));
         }
@@ -130,8 +130,8 @@ impl Hash for DynamicKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         // The descriptor id leads, mirroring `eq`'s descriptor check: keys that
         // can never be equal because they are of different types are then also
-        // unlikely to share a bucket. Ids are globally unique (P0-01) and
-        // deterministic, unlike a descriptor's address.
+        // unlikely to share a bucket. Ids are globally unique and deterministic
+        // (ADR-038), unlike a descriptor's address.
         self.descriptor.id().hash(state);
         // Delegate to the descriptor's structural `hash` callback (§11.3),
         // routing its bytes through a `DynamicHasher` shim into Rust's `Hasher`.
@@ -231,10 +231,10 @@ mod tests {
         None,
     );
 
-    // The payload handles for the three fixtures (REP-02). Declared as
-    // `static`s, which is what makes `Payload::new`'s layout check a
-    // compile-time one — a fixture whose type argument disagreed with its
-    // `for_test::<P>` payload would not build.
+    // The payload handles for the three fixtures. Declared as `static`s, which
+    // is what makes `Payload::new`'s layout check a compile-time one — a fixture
+    // whose type argument disagreed with its `for_test::<P>` payload would not
+    // build.
     static A_PAYLOAD: crate::descriptor::Payload<i64> = crate::descriptor::Payload::new(&LOGICAL_A);
     static B_PAYLOAD: crate::descriptor::Payload<i64> = crate::descriptor::Payload::new(&LOGICAL_B);
     static C_PAYLOAD: crate::descriptor::Payload<u8> = crate::descriptor::Payload::new(&LOGICAL_C);
@@ -348,7 +348,7 @@ mod tests {
     }
 
     /// `Hash`'s contract is one-directional — equal keys hash equal — and the
-    /// descriptor is now part of both. Distinct types are free to collide, but
+    /// descriptor is part of both. Distinct types are free to collide, but
     /// they must never be *equal*, which is what would corrupt a bucket.
     #[test]
     fn keys_of_different_types_are_unequal_in_a_real_hash_set() {
@@ -367,33 +367,23 @@ mod tests {
         assert_eq!(set.len(), 2);
     }
 
-    /// **Rewritten**, not un-ignored (plan §8.2). It asserted that a `Vec` key
-    /// stays findable after it is mutated, which no structural hash can
-    /// deliver — and named the alternative the language actually took: reject
-    /// the state. **D4 chose rejection**, so no Praxis program can build this
-    /// `HashSet` any more.
+    /// A `DynamicKey` hashes by the value's *contents*, so mutating a stored
+    /// key really does move its bucket. **D4 rejects the state** rather than
+    /// trying to make a mutated key stay findable, which no structural hash can
+    /// deliver; `a_mutable_collection_is_not_a_key` (`infer_tests.rs`) is the
+    /// compile-time half, and this is why that half has to exist.
     ///
-    /// What it pins now is the fact that makes the rejection necessary rather
-    /// than the impossible property it asked for: a `DynamicKey` hashes by the
-    /// value's *contents*, so mutating a stored key really does move its
-    /// bucket. `a_mutable_collection_is_not_a_key` (`infer_tests.rs`) is the
-    /// compile-time half; this is why that half has to exist.
-    /// **The observation is rewritten** (REP-48). It used to insert the key into
-    /// a `HashSet`, mutate the `Vec` in place, and assert `!set.contains(&
-    /// wrapped)` — and it failed about once in five hundred runs. The reason is
-    /// that `wrapped` is the *same* `GcRef`, so `DynamicKey`'s equality is
-    /// trivially true and the whole assertion rested on the mutated key's new
-    /// hash not probing the stored entry's slot. A one-element hashbrown table
-    /// is a single 16-byte control group, so a new hash whose top seven bits
-    /// happen to match the stored tag lands on that slot, equality says yes, and
-    /// `contains` answers `true` — one time in about 128 across the two nested
-    /// chances. The rule being pinned is real; the way it was being *watched*
-    /// was a probability.
-    ///
-    /// So the hashes are compared directly, with the same `RandomState` a
-    /// `HashMap` builds its hasher from. Two 64-bit hashes colliding is not a
-    /// number this suite has to care about, and the assertion now measures the
-    /// property in the sentence rather than a consequence of it.
+    /// The hashes are compared directly, with the same `RandomState` a
+    /// `HashMap` builds its hasher from, rather than by asking
+    /// `!set.contains(&wrapped)`. `wrapped` is the *same* `GcRef`, so
+    /// `DynamicKey`'s equality is trivially true and such an assertion would
+    /// rest on the mutated key's new hash not probing the stored entry's slot:
+    /// a one-element hashbrown table is a single 16-byte control group, so a
+    /// new hash whose top seven bits match the stored tag lands on that slot
+    /// and `contains` answers `true` — about one run in 128. Two 64-bit hashes
+    /// colliding is not a number this suite has to care about, so comparing
+    /// them measures the property in the sentence rather than a consequence
+    /// of it.
     #[test]
     fn a_structural_key_hashes_by_contents_so_mutating_it_moves_its_bucket() {
         use std::collections::hash_map::RandomState;

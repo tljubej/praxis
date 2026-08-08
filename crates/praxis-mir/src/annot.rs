@@ -1,12 +1,10 @@
-//! The two slot sets a safepoint carries, and why they are two (MIR-16, F17).
+//! The two slot sets a safepoint carries, and why they are two (F17).
 //!
-//! One `Vec<LocalId>` used to serve both the GC's shadow frame and the crash
-//! debugger's `DebugFrame`, and one `emit_spill` wrote it into both. That is
-//! why the debugger's rendered values were *accidentally* correct: liveness
-//! over-approximated (its forward walk never killed a definition), so a local
-//! whose last use had passed stayed in the list and stayed visible. Making the
-//! GC root set exact — which is what [`RootSlots`] is for — would have silently
-//! turned those rendered values into `<uninit>`.
+//! One `Vec<LocalId>` cannot serve both the GC's shadow frame and the crash
+//! debugger's `DebugFrame`: an exact GC root set drops a local whose last use
+//! has passed, and that is exactly the local the debugger must still render.
+//! Sharing one set makes the rendered values *accidentally* correct — correct
+//! only for as long as the root set stays over-approximate.
 //!
 //! So the sets are split by *purpose*, not by convenience:
 //!
@@ -19,7 +17,7 @@
 //!
 //! Neither has a public constructor that takes ids: only
 //! [`crate::liveness::annotate`] may fill one, so a builder cannot hand-write a
-//! root set that the pass then silently overwrites (61 such literals existed).
+//! root set that the pass then silently overwrites.
 
 use crate::ir::{Inst, LocalId};
 
@@ -27,14 +25,13 @@ use crate::ir::{Inst, LocalId};
 /// kind of instruction does not have.
 ///
 /// **One match, three readers.** The `&mut` twin of this lives in
-/// [`crate::liveness`] and is what *fills* the sets; this is what reads them, and
-/// before ADR-128 it was written out a second time inside
-/// [`crate::verify`]'s `check_slot_sets`. The backend needs a third reader — the
-/// root colouring of ADR-128 decision 2 walks every safepoint's
-/// [`RootSlots::live`] before it lowers anything — and a third hand-written copy
-/// of the variant list is how the debugger silently stops seeing a local. ADR-044
-/// fixes the count of exhaustive matches over [`Inst`] at five; this consolidates
-/// two of them into one rather than adding a sixth.
+/// [`crate::liveness`] and is what *fills* the sets; this is what reads them,
+/// for [`crate::verify`]'s `check_slot_sets`, for [`crate::liveness`]'s own
+/// "is this a safepoint?" question, and for the backend — the root colouring of
+/// ADR-128 decision 2 walks every safepoint's [`RootSlots::live`] before it
+/// lowers anything. A hand-written copy of the variant list is how
+/// the debugger silently stops seeing a local, so this is the only copy;
+/// ADR-044 fixes the count of exhaustive matches over [`Inst`] at five.
 #[must_use]
 pub fn slot_sets(inst: &Inst) -> (Option<&RootSlots>, Option<&DebugSlots>) {
     match inst {
@@ -55,16 +52,15 @@ pub fn slot_sets(inst: &Inst) -> (Option<&RootSlots>, Option<&DebugSlots>) {
 ///
 /// It is also how [`crate::liveness`]'s dirty-slot dataflow asks *whether*
 /// `inst` is a safepoint — `roots_of(inst).is_some()` — because carrying a
-/// [`RootSlots`] is what being one means. That caller used to spell the
-/// question as its own `matches!` over the five variants: the third
-/// hand-written copy [`slot_sets`] exists to be the only copy of.
+/// [`RootSlots`] is what being one means, and a `matches!` over the five
+/// variants there would be a second copy of the list [`slot_sets`] owns.
 #[must_use]
 pub fn roots_of(inst: &Inst) -> Option<&RootSlots> {
     slot_sets(inst).0
 }
 
 /// The GC root set at one safepoint: the `Gc` locals live *across* it, plus the
-/// slots whose stale values must be cleared there (MIR-01).
+/// slots whose stale values must be cleared there.
 ///
 /// There is no public constructor taking ids. A builder writes
 /// [`RootSlots::unannotated`]; [`crate::liveness::annotate`] is the only thing
@@ -76,8 +72,8 @@ pub struct RootSlots {
     /// these into the shadow frame.
     live: Vec<LocalId>,
     /// The `Gc` locals whose shadow slot may still hold a value from an earlier
-    /// safepoint but which are **dead** here (MIR-01). The backend nulls
-    /// exactly these. Disjoint from `live` by construction.
+    /// safepoint but which are **dead** here. The backend nulls exactly these.
+    /// Disjoint from `live` by construction.
     dead: Vec<LocalId>,
     /// Whether [`crate::liveness::annotate`] has run over this safepoint.
     annotated: bool,
@@ -130,10 +126,10 @@ impl RootSlots {
 /// safepoint at all: `CheckFault` allocates nothing, so it roots nothing, but
 /// it is where a fault diverts and therefore where a snapshot is taken.
 ///
-/// **It is a contract, not a store list** (ADR-104). The backend used to emit
-/// one store per member of [`DebugSlots::visible`] at every annotated point;
-/// it now emits one store per `Gc` *definition*, which realizes the same
-/// contents at every point a snapshot can be taken and rather fewer stores. The
+/// **It is a contract, not a store list** (ADR-104). The backend emits one
+/// store per `Gc` *definition* rather than one per member of
+/// [`DebugSlots::visible`] at every annotated point: that realizes the same
+/// contents at every point a snapshot can be taken, in rather fewer stores. The
 /// set stays exactly as defined here — narrowing it to a per-point delta would
 /// be the shrink `the_debug_set_still_shows_what_the_root_set_dropped` exists
 /// to refuse.

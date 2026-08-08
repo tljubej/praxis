@@ -32,10 +32,10 @@ mod tests {
     /// rustc defaults to `-Zmerge-functions=aliases`, so at any `opt-level > 0`
     /// LLVM emits one body for a set of identical functions and makes the other
     /// `#[no_mangle]` names aliases of it. Rust has never promised that two
-    /// functions have two addresses, and this is where that shows: in a release
-    /// build the 186 `praxis_*` symbols occupy 179 addresses. Nothing is broken
-    /// by it — merging happens *because* the instructions already agree, so
-    /// every alias computes the answer its own name promises.
+    /// functions have two addresses, and a release build of the `praxis_*`
+    /// wrappers is where that shows. Nothing is broken by it — merging happens
+    /// *because* the instructions already agree, so every alias computes the
+    /// answer its own name promises.
     ///
     /// Listing the sets is what keeps the copy-paste guard below meaningful: an
     /// address shared by two wrappers that are *not* listed here is a table

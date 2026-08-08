@@ -9,9 +9,9 @@
 //! MIR locals map to Cranelift `Variable`s; Cranelift turns the slot-based CFG
 //! into SSA automatically (§13.5: "the Cranelift lowering layer creates SSA").
 //!
-//! Milestone 4 fills this crate. GC root tracking via a generated shadow-stack
-//! frame (§12.3) is implemented; the per-safepoint root set comes from MIR
-//! liveness (`live_roots`).
+//! GC root tracking goes through a generated shadow-stack frame (§12.3); the
+//! per-safepoint root set is the `roots` field MIR liveness (`annotate`) puts on
+//! each safepoint instruction, read back through `praxis_mir::roots_of`.
 //!
 //! # Reading the emitted code
 //!
@@ -28,7 +28,7 @@
 //!
 //! They are permanent because an instruction count is the deterministic result
 //! for a change that removes a few instructions from a loop, and the clock is
-//! not (handover 26 §6). The module doc of `dump.rs` has the rest of the why.
+//! not. The module doc of `dump.rs` has the rest of the why.
 
 mod dump;
 pub mod generation;

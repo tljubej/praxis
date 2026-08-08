@@ -293,9 +293,8 @@ fn workspace_symbols_span_the_folder_and_prefer_the_open_buffer() {
 // Inlay hints
 // ---------------------------------------------------------------------------
 
-/// **The milestone's headline.** `fn foo(a, b)` reads as `fn foo(a: Int, b: Int)`
-/// in the editor, and a parameter inference could not pin shows `?T` rather than
-/// nothing.
+/// `fn foo(a, b)` reads as `fn foo(a: Int, b: Int)` in the editor, and a
+/// parameter inference could not pin shows `?T` rather than nothing.
 #[test]
 fn hints_write_the_inferred_type_beside_a_parameter() {
     let src = "fn foo(a, b) { a + b }\nfn id(t) { t }\nout(foo(1, 2))\n";
@@ -629,10 +628,9 @@ fn hovering_a_parser_constructor_shows_its_documentation() {
 
 /// A **prelude** name's hover carries §16.1's own sentence beside the scheme.
 ///
-/// The scheme alone was what hover answered for all thirty-one of these, and for
-/// the graph helpers it is the least useful thing that could be said: `bfs:
-/// forall T. (T, (T) -> Vec[T]) -> Vec[T]` names two type variables and does not
-/// say that the closure is the graph.
+/// The scheme alone is the least useful thing that could be said about the
+/// graph helpers: `bfs: forall T. (T, (T) -> Vec[T]) -> Vec[T]` names two type
+/// variables and does not say that the closure is the graph.
 #[test]
 fn hovering_a_prelude_name_shows_the_preludes_own_sentence() {
     let src = "var v = Vec()\nv.push(1)\nout(bfs(1, |s| v).len())\nout(abs(-1))\n";
@@ -657,7 +655,7 @@ fn hovering_a_prelude_name_shows_the_preludes_own_sentence() {
 ///
 /// This is the mistake a by-spelling lookup makes, and it is silent: hover's
 /// scheme line would say `out: Int` — the local — while the sentence under it
-/// described the builtin the local hides. The declaration site is what
+/// describes the builtin the local hides. The declaration site is what
 /// distinguishes them, because a seeded symbol has none.
 #[test]
 fn a_binding_that_shadows_a_prelude_name_is_described_as_itself() {
@@ -677,9 +675,8 @@ fn a_binding_that_shadows_a_prelude_name_is_described_as_itself() {
 /// A name in **type position** hovers, and says what the type is.
 ///
 /// Type references are kept apart from value references by name resolution, so
-/// every one of these fell through hover's four lookups and returned nothing —
-/// `Int` in `var n: Int` had no answer at all, and neither did the `Vec` in
-/// `Vec[Int]`.
+/// hover has to look a name up as a type as well: a value-only lookup answers
+/// nothing for the `Int` in `var n: Int`, or for the `Vec` in `Vec[Int]`.
 #[test]
 fn hovering_a_built_in_type_says_what_it_is() {
     let src = "var n: Int = 1\nvar v: Vec[Text] = Vec()\nvar r: Range = 0..3\n";
@@ -711,10 +708,9 @@ fn hovering_a_built_in_type_says_what_it_is() {
 
 /// **Every name the prelude declares is offered with its description**, and so
 /// is every built-in type name — a sweep over both tables rather than a
-/// spot-check, so a name added to either cannot ship undocumented in the editor.
-///
-/// The seven type names are the ones this catches: they had no `detail` and no
-/// `documentation`, so the completion list offered `Never` as a bare word.
+/// spot-check, so a name added to either cannot ship undocumented in the
+/// editor: no `detail`, no `documentation`, and a bare word in the completion
+/// list.
 #[test]
 fn completion_offers_every_stdlib_name_with_its_documentation() {
     let src = "var q = 1\nout(q)\n";
@@ -835,7 +831,7 @@ fn parser_completion_offers_the_sublanguages_documentation() {
 }
 
 /// Signature help carries the callee's documentation — for a prelude function
-/// and for a parser constructor, the two callees that had none.
+/// and for a parser constructor alike.
 ///
 /// The parameter list is where a description is worth the most: `clamp`'s three
 /// parameters render as `Int, Int, Int`, and which one is the low bound is

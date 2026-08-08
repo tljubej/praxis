@@ -1,7 +1,7 @@
 //! Runtime heap, type descriptors, and runtime context for Praxis.
 //!
 //! This crate is the contract between JIT-generated code and the Rust runtime,
-//! and (as of Milestone 3) it holds the real GC implementation.
+//! and it holds the GC implementation.
 //!
 //! - Every language value is a uniform [`GcRef`] (§4.3, §11.1).
 //! - Every generated function follows `fn(RuntimeContext*, GcRef...) -> GcRef`

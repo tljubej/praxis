@@ -32,7 +32,7 @@ unsafe fn sample(rt: &Runtime, ctx: *mut RuntimeContext, builtin: BuiltinTypeId)
                 praxis_alloc_text(ctx, s.as_ptr(), s.len())
             }
             // A *non-empty* Vec[Text]: the whole point of the inverse is that it
-            // recovers `Text`, not the `Int` the old debugger guessed.
+            // recovers `Text` from the element rather than guessing `Int`.
             B::Vec => {
                 let v = praxis_vec_new(ctx, text_desc);
                 let s = "e";
@@ -174,8 +174,8 @@ fn every_builtin_value_round_trips() {
         let recovered = unsafe { type_for_value(value, &mut db) };
         match builtin {
             // The four the runtime genuinely does not record. Each is a stated
-            // limitation with an owner: nominal identity is F12 (S10); a
-            // closure has no runtime signature; a VarCell is not a source type.
+            // limitation: nominal identity is F12; a closure has no runtime
+            // signature; a VarCell is not a source type.
             B::Record | B::Enum | B::Closure | B::VarCell => {
                 assert!(
                     recovered.is_err(),
@@ -196,8 +196,8 @@ fn every_builtin_value_round_trips() {
     }
 }
 
-/// DBG-02's half of P0-11: the inverse used to answer `Vec[Int]` for every
-/// vector and `Map[Int, Int]` for every map. It must read the payload.
+/// The inverse reads the payload rather than assuming `Int`: a vector of `Text`
+/// recovers as `Vec[Text]`, and a map by its real key and value types.
 #[test]
 fn the_inverse_recovers_real_element_types_not_int() {
     let mut rt = Runtime::new();
@@ -243,8 +243,8 @@ fn a_nested_collection_recovers_through_its_elements() {
     assert_eq!(db.render(ty), "Vec[Vec[Text]]");
 }
 
-/// P0-11 itself: the four types that used to arrive at the `INT` descriptor
-/// through a `_ =>` arm now arrive at their own.
+/// `Float`, `Unit` and a tuple each resolve to their own descriptor, not to
+/// `INT` through a catch-all arm.
 #[test]
 fn the_types_that_used_to_fall_back_to_int_resolve_to_themselves() {
     let mut db = TypeDb::new();
@@ -276,7 +276,7 @@ fn the_types_that_used_to_fall_back_to_int_resolve_to_themselves() {
     );
 }
 
-/// A function value is a closure object, not an `Int` (P0-11's Func arm).
+/// A function value is a closure object, not an `Int`.
 #[test]
 fn a_function_type_resolves_to_the_closure_descriptor() {
     let mut db = TypeDb::new();
@@ -288,9 +288,9 @@ fn a_function_type_resolves_to_the_closure_descriptor() {
     ));
 }
 
-/// The types with no runtime object must say so rather than name one. Each of
-/// these used to reach `INT`, which is what made a wrong-layout payload read
-/// reachable from a compiler bug.
+/// The types with no runtime object must say so rather than name one: naming
+/// `INT` for one of these is what makes a wrong-layout payload read reachable
+/// from a compiler bug.
 #[test]
 fn a_type_with_no_runtime_object_has_no_descriptor() {
     let mut db = TypeDb::new();
@@ -299,9 +299,8 @@ fn a_type_with_no_runtime_object_has_no_descriptor() {
     let int = db.int();
     // `Seq` is the compiler-internal unary sequence: it is fused away before
     // codegen and never materializes (§6.3), so it is the one collection ctor
-    // with no runtime object. `Range` **used to be** on this list and is not any
-    // more — it has a descriptor as of TY-34 (ADR-059), and
-    // `a_range_has_a_descriptor_now` is where that is asserted.
+    // with no runtime object. `Range` is not on this list: it has a descriptor
+    // (ADR-059), which `a_range_has_a_descriptor_now` asserts.
     let seq = db.unary_collection(CollectionCtor::Seq, int);
     let var = db.fresh_var();
 
@@ -321,10 +320,9 @@ fn a_type_with_no_runtime_object_has_no_descriptor() {
     }
 }
 
-/// The half of TY-34 this bridge can see: `Range` is a real runtime object now,
-/// so it round-trips through both directions like every other nullary
-/// collection. It was on `a_type_with_no_runtime_object_has_no_descriptor`'s list
-/// until this stage, which is why the *positive* statement is written down.
+/// `Range` is a real runtime object (ADR-059), so it round-trips through both
+/// directions like every other nullary collection — the positive counterpart of
+/// `a_type_with_no_runtime_object_has_no_descriptor`.
 #[test]
 fn a_range_has_a_descriptor_now() {
     let mut db = TypeDb::new();

@@ -1,9 +1,7 @@
 //! Opening the `.px` file named on the command line.
 //!
-//! `check` and `run` both begin here, and each used to begin with its own copy
-//! of the same seven lines — including the message string, which is the part a
-//! user sees. Stated once, so a mistyped path cannot read differently depending
-//! on which of the two commands was typed.
+//! `check` and `run` both begin here, message text included, so a mistyped path
+//! cannot read differently depending on which of the two commands was typed.
 
 use crate::exit_code;
 

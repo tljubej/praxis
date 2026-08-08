@@ -7,22 +7,20 @@
 //! payload word itself (ADR-121). The Cranelift backend turns this slot-based
 //! CFG into SSA.
 //!
-//! **A `Scalar` local may cross a GC safepoint, and this paragraph used to say
-//! it may not.** The rule the lowering actually follows is the `Gc`-side one:
-//! the collector dereferences everything the shadow frame holds, so no raw word
-//! may enter a rootable slot (P0-03), and [`crate::verify`]'s `RootIsNotGc` and
-//! `MoveGcFromScalar` are that rule stated directly. The converse — a *payload*
-//! outliving a safepoint — was never the same claim and was never checked:
-//! `ScalarLiveAcrossSafepoint` is unimplemented on purpose, and
+//! **A `Scalar` local may cross a GC safepoint.** The rule the lowering follows
+//! is the `Gc`-side one: the collector dereferences everything the shadow frame
+//! holds, so no raw word may enter a rootable slot, and [`crate::verify`]'s
+//! `RootIsNotGc` and `MoveGcFromScalar` are that rule stated directly. The
+//! converse — a *payload* outliving a safepoint — is not the same claim and is
+//! not checked: `ScalarLiveAcrossSafepoint` is unimplemented on purpose, and
 //! [`crate::verify`]'s header carries the argument, which is that a scalar is a
 //! **copy** of a payload and so cannot dangle when the object it was loaded from
-//! is collected. The eager `lower_seq_*` accumulators have depended on that
-//! since they were written. ADR-121 depends on it deliberately rather than
-//! incidentally, which is why the sentence is now stated instead of contradicted.
+//! is collected. The eager `lower_seq_*` accumulators and ADR-121 both depend on
+//! that deliberately.
 //!
-//! The two transitions between the kinds are unchanged: [`Inst::Materialize`]
-//! (`Scalar` → `Gc`, an allocation and therefore a safepoint) and
-//! [`Inst::ExtractScalar`] (`Gc` → `Scalar`, a guarded payload read).
+//! The two transitions between the kinds are [`Inst::Materialize`] (`Scalar` →
+//! `Gc`, an allocation and therefore a safepoint) and [`Inst::ExtractScalar`]
+//! (`Gc` → `Scalar`, a guarded payload read).
 //! [`Inst::MoveGc`] and [`Inst::MoveScalar`] each move a word within one kind,
 //! and neither crosses.
 //!
@@ -30,8 +28,8 @@
 //! context's `pending_fault` and diverts to a [`Terminator::Fault`] edge when a
 //! runtime wrapper reports overflow / division-by-zero.
 
-#![allow(dead_code)] // Some variants/fields are consumed by the Cranelift backend
-                     // (praxis-codegen-cranelift) which lands later in M4.
+#![allow(dead_code)] // Some variants/fields are consumed only by the Cranelift
+                     // backend (praxis-codegen-cranelift).
 
 use praxis_stdlib::abi::RuntimeSymbol;
 use praxis_types::Type;
@@ -52,8 +50,8 @@ pub struct Function {
     pub locals: Vec<Local>,
     /// The basic blocks, indexed by `BlockId`. Block 0 is the entry.
     pub blocks: Vec<Block>,
-    /// Source-name metadata per local, for fault snapshots (§19 M4 acceptance:
-    /// "named locals are available as `GcRef` values in fault snapshots").
+    /// Source-name metadata per local, so named locals are available as `GcRef`
+    /// values in fault snapshots.
     pub debug_names: Vec<Option<String>>,
     /// The debugger classification per local (user binding vs. compiler temp),
     /// threaded to the backend so the crash debugger can separate the two in
@@ -76,12 +74,11 @@ pub struct Function {
     ///
     /// The fourth of the parallel debug tables, and the only one written after
     /// lowering rather than during it. A box the forwarding elides defines
-    /// nothing, so the backend's store-at-definition (ADR-104) never writes its
-    /// debug slot and the temp renders `<uninit>` where it rendered `= 30`.
-    /// This is the link that repairs it: the entry says *this `Gc` local's
-    /// debug slot is fed by that `Scalar` local's definition*, and it is
-    /// written at the only point in the compiler that still knows the two are
-    /// one value.
+    /// nothing, so the backend's store-at-definition (ADR-104) would never write
+    /// its debug slot and the temp would render `<uninit>`. The entry says
+    /// *this `Gc` local's debug slot is fed by that `Scalar` local's
+    /// definition*, and it is written at the only point in the compiler that
+    /// still knows the two are one value.
     ///
     /// Read through [`Function::debug_scalar_source`], never directly, because
     /// the accessor is what makes the pairing's invariant observable: it
@@ -89,10 +86,10 @@ pub struct Function {
     /// so a backend handed one of these cannot be handed a reference kind.
     pub debug_scalar_sources: Vec<Option<LocalId>>,
     /// The function's source span `[start, end)` as byte offsets into the
-    /// program source (§9.3, M10-WS1). Threaded AST → HIR → MIR → backend so
-    /// the crash debugger's `source` command can render the faulting function.
-    /// `(0, 0)` for synthetic functions with no source (closures get the
-    /// literal's span; the `__p_expr` debugger function is span-less).
+    /// program source (§9.3). Threaded AST → HIR → MIR → backend so the crash
+    /// debugger's `source` command can render the faulting function. `(0, 0)`
+    /// for synthetic functions with no source (closures get the literal's span;
+    /// the `__p_expr` debugger function is span-less).
     pub span: (u32, u32),
 }
 
@@ -101,8 +98,7 @@ pub struct Function {
 /// `User` locals are bindings the programmer wrote (`var x`, params, captures);
 /// they render as `name: Type = value`. `Temp` locals are compiler-generated
 /// intermediates (the hidden slot holding `a+b` in `a+b+c`); they render as
-/// `<tmp#N: Type> @ "expr" = value`. This replaces the old `"<tmp>"` string
-/// placeholder: the split is now structural, not string-based.
+/// `<tmp#N: Type> @ "expr" = value`. The split is structural, not string-based.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LocalDebugKind {
     /// A user-written binding, parameter, or capture: has a source name.
@@ -113,21 +109,17 @@ pub enum LocalDebugKind {
 }
 
 /// The static language type of a MIR slot — or the explicit statement that
-/// lowering does not have one (P0-02).
+/// lowering does not have one.
 ///
 /// `praxis_types::Type` is an index into the [`TypeDb`](praxis_types::TypeDb)
-/// arena, so *every* integer is a valid handle: the old `Type(0)` "unknown"
-/// sentinel silently denoted whichever type happened to be interned first, and
-/// fed that type into descriptor resolution, schema construction and debug
-/// metadata. Making the absence its own variant means "no type here" can no
-/// longer be mistaken for a type, and a consumer that needs a real one has to
-/// say so.
+/// arena, so *every* integer is a valid handle: a `Type(0)` "unknown" sentinel
+/// would silently denote whichever type happened to be interned first, and feed
+/// that type into descriptor resolution, schema construction and debug metadata.
+/// Making the absence its own variant means "no type here" cannot be mistaken
+/// for a type, and a consumer that needs a real one has to say so.
 ///
 /// `Opaque` is not a shortcut — it is the honest answer at the sites where the
-/// lowering genuinely has no type (pipeline accumulators, fused-loop items),
-/// which stays true until HIR-01 carries inferred per-use types into lowering.
-/// The MIR verifier's "no `Opaque` in a descriptor-producing position" rule
-/// lands with that work, not here.
+/// lowering genuinely has no type (pipeline accumulators, fused-loop items).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MirType {
     /// A real, inference-produced type handle.
@@ -169,8 +161,9 @@ pub enum LocalKind {
     /// at a safepoint (§12.3).
     Gc,
     /// A transient scalar payload extracted from a `GcRef` for a local
-    /// computation. Must be rematerialized into a `GcRef` before any safepoint,
-    /// call, store, or return (§10.3).
+    /// computation. Never rooted, so it must be rematerialized into a `GcRef`
+    /// before it can be a call argument, a store, or a return value (§10.3). It
+    /// *may* stay live across a safepoint — see the module header for why.
     Scalar(ScalarKind),
 }
 
@@ -187,7 +180,7 @@ pub enum ScalarKind {
     Int,
     /// `u8` — the payload of a `Byte` object (reserved; not yet wired).
     Byte,
-    /// `u32` — the payload of a `Char` object (M6 wires it end-to-end).
+    /// `u32` — the payload of a `Char` object.
     Char,
     /// `bool` — the payload of a `Bool` object (represented as `i8`/`u8`).
     Bool,
@@ -202,12 +195,10 @@ pub enum ScalarKind {
 impl ScalarKind {
     /// The wrapper an [`Inst::Materialize`] of this payload calls to re-box it.
     ///
-    /// **This is the one statement of the mapping** (MIR-10). It used to live
-    /// inline in the Cranelift backend's `Materialize` arm and nowhere else,
-    /// which meant [`Inst::can_fault`] would have had to restate it — and the
-    /// verifier's answer and the call the backend emits would then be two
-    /// statements of one fact, drifting the first time someone changed a symbol
-    /// in `lower_inst`. The backend reads this function now.
+    /// **This is the one statement of the mapping.** Both the Cranelift
+    /// backend's `Materialize` arm and [`Inst::can_fault`] read it, so the
+    /// verifier's answer and the call the backend emits cannot become two
+    /// statements of one fact and drift apart.
     ///
     /// # Panics
     /// On [`ScalarKind::Byte`], which has no boxing wrapper. See
@@ -247,17 +238,16 @@ impl ScalarKind {
     /// [`load_symbol`](ScalarKind::load_symbol) refuse [`ScalarKind::Byte`]
     /// instead of answering for it.
     ///
-    /// Both arms used to name `Int`'s wrapper "defensively", and neither
-    /// defended anything. `load_symbol`'s `IntLoad` is an eight-byte read of a
-    /// one-byte `BytePayload`, so it returns the byte plus seven bytes of
-    /// whatever the allocator put next to it; `alloc_symbol`'s `AllocInt` mints
-    /// an object carrying the `INT` descriptor over a byte's worth of value, so
-    /// every later `descriptor()` check — the inline scalar-load guard, `==`,
-    /// `Map` keying, `out` — reads it as an `Int`. Neither is a memory-safety
-    /// bug today, because nothing constructs a `ScalarKind::Byte`: `build` maps
-    /// `ScalarType::Byte` to the descriptor channel in `compare_kind` and never
-    /// mentions `ScalarKind::Byte` at all. That is precisely the problem — the
-    /// wrong answer is invisible until the day somebody wires `Byte`, and on
+    /// Naming `Int`'s wrapper instead would be silently wrong. `load_symbol`'s
+    /// `IntLoad` is an eight-byte read of a one-byte `BytePayload`, so it would
+    /// return the byte plus seven bytes of whatever the allocator put next to
+    /// it; `alloc_symbol`'s `AllocInt` would mint an object carrying the `INT`
+    /// descriptor over a byte's worth of value, so every later `descriptor()`
+    /// check — the inline scalar-load guard, `==`, `Map` keying, `out` — would
+    /// read it as an `Int`. Nothing constructs a `ScalarKind::Byte` today
+    /// (`build` maps `ScalarType::Byte` to the descriptor channel in
+    /// `compare_kind` and never mentions `ScalarKind::Byte` at all), so a wrong
+    /// answer would stay invisible until the day somebody wires `Byte` — and on
     /// that day it is a silently wrong program rather than a failed build.
     ///
     /// A refusal is the smallest thing that cannot go quiet. There is no
@@ -305,13 +295,13 @@ pub enum Inst {
     /// out of the [`RuntimeContext`](praxis_runtime::RuntimeContext) — no call,
     /// no `catch_unwind`, no pacing check, no shadow-frame spill.
     ///
-    /// That is the whole of the win. An `Int` literal in a loop body used to be
-    /// `ConstInt` + `Alloc { Int }`, and the `Alloc` was a safepoint: a call to
+    /// That is the whole of the win, and it is a per-iteration one: the
+    /// alternative for an `Int` literal in a loop body is `ConstInt` +
+    /// `Alloc { Int }`, and the `Alloc` is a safepoint — a call to
     /// `praxis_alloc_int` *and* a store of every live root into the shadow frame
-    /// before it, on every iteration
-    /// (docs/handovers/21-where-the-time-goes.md §3.5). Interning the value in
-    /// the runtime (`praxis_runtime::small_int`) removed the allocation; this
-    /// removes everything that surrounded it.
+    /// before it, on every iteration. Interning the value in the runtime
+    /// (`praxis_runtime::small_int`) removes the allocation; this form removes
+    /// everything that surrounds it.
     ///
     /// **This is not the shape a fresh allocation may take.** A value the
     /// runtime has not already minted still needs [`Alloc`](Self::Alloc): the
@@ -327,7 +317,7 @@ pub enum Inst {
         /// The GC root set at this safepoint — filled by the liveness pass. The
         /// backend spills exactly [`RootSlots::live`] into the shadow stack and
         /// nulls exactly [`RootSlots::dead`]. Separate from the debugger's view
-        /// of the same point (MIR-16); see [`crate::annot`].
+        /// of the same point; see [`crate::annot`].
         roots: RootSlots,
         /// What the crash debugger must see here. Over-approximate on purpose,
         /// and never shrunk by making `roots` exact.
@@ -388,13 +378,13 @@ pub enum Inst {
     /// changes nothing else (§4.12). Never faults, like every other float
     /// operation.
     ///
-    /// This exists because a negation is **not** a subtraction from zero, and
-    /// spelling it that way is what REP-50 was: `0.0 - x` answers `+0.0` at
-    /// `x = +0.0`, so the literal `-0.0` evaluated to `+0.0` and printed
-    /// `0.0` — a rendering that does not read back as the value it came from,
-    /// which is the one rule ADR-083 states. ADR-045 had already decided the
-    /// two zeros are distinct values (a container orders them apart), so
-    /// losing the sign is losing a value the language admits.
+    /// This exists because a negation is **not** a subtraction from zero:
+    /// `0.0 - x` answers `+0.0` at `x = +0.0`, so lowering the literal `-0.0`
+    /// that way evaluates to `+0.0` and prints `0.0` — a rendering that does not
+    /// read back as the value it came from, which is the one rule ADR-083
+    /// states. ADR-045 decides the two zeros are distinct values (a container
+    /// orders them apart), so losing the sign is losing a value the language
+    /// admits.
     /// Operand/result are bit-pattern `i64`s; the backend bit-casts and emits
     /// an `fneg`.
     FloatNeg { dst: LocalId, src: LocalId },
@@ -428,7 +418,7 @@ pub enum Inst {
     ///
     /// Used where the operand type has no ordering the scalar channel can
     /// express — `Text` today, whose payload is a pointer-and-length structure
-    /// that an `i64` load turned into an address comparison (P0-12).
+    /// that an `i64` load would turn into an address comparison.
     ///
     /// **Not a GC safepoint**: `praxis_value_cmp` is `Effect::Faults`, so it
     /// allocates nothing and carries no [`RootSlots`]. It *can* fault (a
@@ -448,25 +438,24 @@ pub enum Inst {
     /// [`StructEq`](Self::StructEq)'s and [`ValueCmp`](Self::ValueCmp)'s
     /// precedent, and it buys two separate things.**
     ///
-    /// The first is the box. `praxis_bitset_contains` used to answer a boxed
-    /// `Bool`, and every use in the language immediately unboxed it: `if
-    /// bs.contains(x)` is a [`ExtractScalar`](Self::ExtractScalar) of the
-    /// call's result feeding the block's terminator. A `Scalar(Bool)` dst puts
-    /// the value where the consumer wanted it; the builder re-boxes through
-    /// [`Materialize`](Self::Materialize) only where a `Gc` is genuinely
-    /// wanted, which is what leaves `lower_expr_gc`'s contract unchanged.
+    /// The first is the box. Every use in the language wants the answer
+    /// unboxed: `if bs.contains(x)` feeds the block's terminator directly. A
+    /// `Scalar(Bool)` dst puts the value where the consumer wants it; the
+    /// builder re-boxes through [`Materialize`](Self::Materialize) only where a
+    /// `Gc` is genuinely wanted, which is what leaves `lower_expr_gc`'s
+    /// contract unchanged.
     ///
     /// The second is the safepoint, and it is the larger one. **Not a GC
     /// safepoint**: `praxis_bitset_contains` is `Effect::Pure` — it allocates
     /// nothing, faults for nothing, and a `BitSet` query is total — so
-    /// [`crate::liveness::is_gc_safepoint`] does not match this variant, and
-    /// the shadow-frame spill in front of it is gone. That spill existed only
-    /// because `is_gc_safepoint` matches *every* `Inst::Call` regardless of the
-    /// symbol's effect, which is a property of the instruction shape and not of
-    /// the wrapper. Stating the narrowing here rather than in a backend arm is
-    /// what makes it ADR-113's rule satisfied rather than bent: the decision
-    /// about which instructions the collector may run at is MIR's, and this is
-    /// MIR making it.
+    /// [`crate::liveness::is_gc_safepoint`] does not match this variant and no
+    /// shadow-frame spill precedes it. The same call written as an
+    /// [`Inst::Call`] would carry that spill, because `is_gc_safepoint` matches
+    /// *every* `Inst::Call` regardless of the symbol's effect: a property of the
+    /// instruction shape and not of the wrapper. Stating the narrowing here
+    /// rather than in a backend arm is what makes it ADR-113's rule satisfied
+    /// rather than bent: the decision about which instructions the collector
+    /// may run at is MIR's, and this is MIR making it.
     ///
     /// No [`CheckFault`](Self::CheckFault) follows, for the same `Effect::Pure`
     /// reason, and [`Inst::fault_reason`] answers that from the manifest rather
@@ -485,7 +474,7 @@ pub enum Inst {
         roots: RootSlots,
         debug: DebugSlots,
     },
-    /// Call a closure value indirectly (M7, §4.10). `callee` is the `Gc` local
+    /// Call a closure value indirectly (§4.10). `callee` is the `Gc` local
     /// holding the closure `GcRef`. The codegen reads the closure's `fn_ptr`
     /// via `praxis_closure_fn_ptr`, then emits a Cranelift `call_indirect` with
     /// the signature `fn(ctx, closure, args...) -> GcRef` (Approach B: the
@@ -511,7 +500,7 @@ pub enum Inst {
         debug: DebugSlots,
     },
     /// Copy one `Gc` local into another (a move; no allocation). **`Gc` → `Gc`
-    /// only**: a raw scalar word may not enter a rootable slot this way (P0-03).
+    /// only**: a raw scalar word may not enter a rootable slot this way.
     /// [`Materialize`](Self::Materialize) is the one legal `Scalar` → `Gc`
     /// transition.
     MoveGc { dst: LocalId, src: LocalId },
@@ -523,7 +512,7 @@ pub enum Inst {
     ///
     /// [`MoveGc`]: Self::MoveGc
     ///
-    /// **Why this exists, when [`crate::forward`] deliberately did without it.**
+    /// **Why this exists, when [`crate::forward`] does without it.**
     /// That pass is block-local and rewrites a *consuming instruction's operand
     /// field*, so it never needs to move a word between two slots; ADR-120
     /// records refusing this variant for exactly that reason. [`crate::promote`]
@@ -552,21 +541,20 @@ pub enum Inst {
         kind: ScalarKind,
     },
     /// Read capture slot `index` out of a closure's environment into a `Gc`
-    /// local (M7, §4.10). Emitted once per capture in a synthetic closure
+    /// local (§4.10). Emitted once per capture in a synthetic closure
     /// function's prologue.
     ///
     /// `index` is an **immediate**, following the [`LoadField`](Self::LoadField)
-    /// precedent, because it is a raw ABI word and not a value: the previous
-    /// lowering boxed it as `ConstInt` + `MoveGc` into a `Gc` local so it could
-    /// ride the call's argument list, which put the integer `1` in a slot the
-    /// collector may dereference (P0-03). Not a safepoint —
-    /// `praxis_closure_capture` is `Effect::Pure`, so no fault check follows.
+    /// precedent, because it is a raw ABI word and not a value: boxing it so it
+    /// could ride the call's argument list would put an integer in a slot the
+    /// collector may dereference. Not a safepoint — `praxis_closure_capture` is
+    /// `Effect::Pure`, so no fault check follows.
     LoadCapture {
         dst: LocalId,
         closure: LocalId,
         index: u32,
     },
-    /// Read a field out of a record `GcRef` into a `Gc` local (M7, §4.5).
+    /// Read a field out of a record `GcRef` into a `Gc` local (§4.5).
     /// `field_idx` is the field's index in the record's `RecordSchema`. Not a
     /// safepoint (no allocation).
     LoadField {
@@ -582,14 +570,14 @@ pub enum Inst {
     /// `record` rather than a def of it. The index is an **immediate**, for
     /// [`LoadField`](Self::LoadField)'s reason: it is a raw ABI word, and boxing
     /// it to ride a call's argument list would put an integer in a slot the
-    /// collector may dereference (P0-03).
+    /// collector may dereference.
     StoreField {
         record: LocalId,
         field_idx: u32,
         value: LocalId,
     },
-    /// Read an element out of a tuple `GcRef` into a `Gc` local (REP-08, §4.4).
-    /// `index` is the element's position. Not a safepoint (no allocation).
+    /// Read an element out of a tuple `GcRef` into a `Gc` local (§4.4). `index`
+    /// is the element's position. Not a safepoint (no allocation).
     ///
     /// Its own instruction rather than a [`Inst::LoadField`] with a flag: the two
     /// call different runtime symbols (`praxis_tuple_get` and
@@ -601,11 +589,11 @@ pub enum Inst {
         src: LocalId,
         index: u32,
     },
-    /// Read the variant tag of an enum `GcRef` into a `Scalar(Int)` local (M7,
-    /// §4.6). The codegen reads the tag directly from the payload without
+    /// Read the variant tag of an enum `GcRef` into a `Scalar(Int)` local
+    /// (§4.6). The codegen reads the tag directly from the payload without
     /// allocating. Not a safepoint.
     EnumTag { dst: LocalId, src: LocalId },
-    /// Read payload slot `idx` of an enum `GcRef` into a `Gc` local (M7, §4.6).
+    /// Read payload slot `idx` of an enum `GcRef` into a `Gc` local (§4.6).
     /// Not a safepoint (no allocation).
     EnumPayloadGet {
         dst: LocalId,
@@ -622,10 +610,6 @@ impl Inst {
     /// answer both it and the sites in [`crate::build`] read, and it derives
     /// from the ABI manifest — [`RuntimeSymbol::faults`] — through the same
     /// instruction→symbol mapping the Cranelift backend uses to emit the call.
-    /// Before it, "can this instruction fault" was ~34 local judgements in the
-    /// builder, and about half of them were wrong in one direction or the other
-    /// (REP-52 forgot a check the fused `collect` needed; REP-53 emitted one
-    /// after every method call, including the `Effect::Allocates` ones).
     #[inline]
     #[must_use]
     pub fn can_fault(&self) -> bool {
@@ -646,10 +630,9 @@ impl Inst {
             // An allocation is one constructor call plus, for a composite, one
             // filler call per slot. `praxis_alloc_char` validates its payload
             // (`INVALID_CHAR`) and `praxis_grid_new` its dimensions; the rest
-            // only allocate. `praxis_alloc_text` was in the first group until
-            // ADR-111 made UTF-8 its caller's precondition, and the code here
-            // did not change when it left — the answer comes from the manifest,
-            // which is ADR-088 §2's entire point.
+            // only allocate. The answer comes from the manifest rather than
+            // from this list, which is ADR-088 §2's entire point: a row that
+            // changes its effect changes the answer without an edit here.
             Inst::Alloc { alloc, .. } => alloc.symbols().find_map(faulting),
             // Re-boxing a payload: `Char`'s wrapper validates the Unicode
             // scalar, the others do not.
@@ -673,8 +656,8 @@ impl Inst {
             Inst::StructEq { .. } => faulting(RuntimeSymbol::StructEq),
             // `praxis_bitset_contains` is `Effect::Pure`: a `BitSet` query is
             // total, so a member the set cannot hold is absent rather than a
-            // fault (RT-07). The arm goes through `faulting` anyway, so a row
-            // that ever grows a fault is observed without editing this.
+            // fault. The arm goes through `faulting` anyway, so a row that ever
+            // grows a fault is observed without editing this.
             Inst::BitsetContains { .. } => faulting(RuntimeSymbol::BitsetContains),
             Inst::LoadCapture { .. } => faulting(RuntimeSymbol::ClosureCapture),
             Inst::LoadField { .. } => faulting(RuntimeSymbol::RecordField),
@@ -744,37 +727,33 @@ pub enum GcConst {
     SmallInt(i64),
     /// The `Unit` singleton (`ctx.unit_ref`).
     ///
-    /// `Unit` has been an immortal since M3, so `AllocKind::Unit` never
-    /// allocated anything — `praxis_alloc_unit` returns the cached reference and
-    /// the manifest declares it `Effect::Pure`. What it *did* cost was an extern
-    /// call and, because `liveness::is_gc_safepoint` matches `Inst::Alloc`
+    /// `Unit` is an immortal, so `AllocKind::Unit` allocates nothing —
+    /// `praxis_alloc_unit` returns the cached reference and the manifest
+    /// declares it `Effect::Pure`. What it does cost is an extern call and,
+    /// because `liveness::is_gc_safepoint` matches `Inst::Alloc`
     /// unconditionally, a full shadow-frame spill at a point where no collection
-    /// can happen. Both are gone here: the two answers to "is this a safepoint"
-    /// — the manifest's and the instruction shape's — become one.
+    /// can happen. This variant has neither: the two answers to "is this a
+    /// safepoint" — the manifest's and the instruction shape's — become one.
     Unit,
     /// One of the two `Bool` singletons (`ctx.true_ref` / `ctx.false_ref`), for
-    /// [`Unit`](Self::Unit)'s reason: `praxis_alloc_bool` has answered from the
-    /// context since ABI v10 and its row is `Effect::Pure`.
+    /// [`Unit`](Self::Unit)'s reason: `praxis_alloc_bool` answers from the
+    /// context and its row is `Effect::Pure`.
     ///
     /// Only a *literal* takes this form. A computed `Bool` — a comparison's
     /// result, `contains`, `is_empty` — is a `Scalar(Bool)` the backend
     /// re-boxes through [`Inst::Materialize`], which does not know the value.
     Bool(bool),
-    /// A `Char` inside `praxis_runtime::small_char`'s interned range, for
-    /// [`SmallInt`](Self::SmallInt)'s reason and read the same way: the backend
-    /// loads `ctx.small_chars` and indexes it by `small_char::index_of(code)`,
-    /// an offset it computes at compile time from the function the runtime
-    /// allocates through.
+    /// A `Char` inside `praxis_runtime::small_char`'s interned range — what a
+    /// character literal (ADR-141) lowers to — for [`SmallInt`](Self::SmallInt)'s
+    /// reason and read the same way: the backend loads `ctx.small_chars` and
+    /// indexes it by `small_char::index_of(code)`, an offset it computes at
+    /// compile time from the function the runtime allocates through.
     ///
     /// The range is `0..=127`, so a literal above U+007F gets no constant and
     /// takes `AllocKind::Char` — a real call, and a `CheckFault` after it,
     /// because `praxis_alloc_char` validates its Unicode scalar. That asymmetry
     /// is the table's, not this enum's, and [`GcConst::small_char`] is where it
     /// is decided.
-    ///
-    /// ADR-107 Decision 2 predicted this variant in as many words and declined
-    /// to write it, because there was no character literal to produce one.
-    /// ADR-141 is that literal.
     Char(u32),
 }
 
@@ -790,11 +769,11 @@ impl GcConst {
     /// value "is obviously small" produces MIR that verifies, passes every test
     /// that runs early in a fresh process, and panics the JIT later.
     ///
-    /// The concrete case that motivated this is `run_parser_plan`: plan ids come
-    /// from a process-wide arena bounded by `MAX_PLANS = 1 << 20`, not by
-    /// `SMALL_INT_MAX = 1024`, so an unconditional `SmallInt(plan_id)` would
-    /// have failed on the 1025th plan a long-lived process registered — the LSP
-    /// or a big test binary, sporadically, never on `praxis run`. Asking
+    /// The concrete case is `run_parser_plan`: plan ids come from a process-wide
+    /// arena bounded by `MAX_PLANS = 1 << 20`, not by `SMALL_INT_MAX = 1024`, so
+    /// an unconditional `SmallInt(plan_id)` fails on the 1025th plan a
+    /// long-lived process registers — the LSP or a big test binary,
+    /// sporadically, never on `praxis run`. Asking
     /// `index_of` here means the question and the answer are one step: a caller
     /// holding a `GcConst::SmallInt` is holding proof the slot exists.
     #[inline]
@@ -846,14 +825,14 @@ pub enum AllocKind {
     Unit,
     /// A boxed `Text` from a literal (the string is embedded in the MIR).
     Text { value: String },
-    /// A boxed `Char` initialized from a `u32` Unicode scalar (a `Scalar` local;
-    /// M6 wires it for the input parser's `char`/`grid(char)`).
+    /// A boxed `Char` initialized from a `u32` Unicode scalar (a `Scalar`
+    /// local).
     Char { value: LocalId },
     /// A boxed `Float` initialized from an `f64` bit pattern (a `Scalar(Float)`
     /// local; §4.12). The runtime wrapper `praxis_alloc_float` reassembles the
     /// `f64` from the `i64` bits.
     Float { value: LocalId },
-    /// A boxed nominal record (M7, §4.5). `record_def_id` identifies the struct
+    /// A boxed nominal record (§4.5). `record_def_id` identifies the struct
     /// type (index into `TypeDb::record_defs`); `fields` are the field-value
     /// locals in declaration order. The builder builds a `RecordSchema` from the
     /// def and leaks it to `&'static`.
@@ -861,13 +840,13 @@ pub enum AllocKind {
         record_def_id: u32,
         fields: Vec<LocalId>,
     },
-    /// A boxed enum value (M7, §4.6). `enum_def_id` identifies the enum,
+    /// A boxed enum value (§4.6). `enum_def_id` identifies the enum,
     /// `variant_idx` is the discriminant, and `args` are the payload values.
     ///
     /// `ty` is the value's static type — `Option[Int]`, not `Option` — because
     /// the backend resolves an `EnumSchema` from it and the def alone cannot
     /// say what `Some`'s payload descriptor is for a *generic* def. `Option` is
-    /// the one the language has (F12), and it is exactly the one every
+    /// the one the language has, and it is exactly the one every
     /// `Map.get`/`Grid.find`/graph-walk result is. [`MirType::Opaque`] means
     /// the lowering had no type; the payload slots then go unknown (null) and
     /// the values' own descriptors answer, as they do for a tuple.
@@ -877,23 +856,22 @@ pub enum AllocKind {
         ty: MirType,
         args: Vec<LocalId>,
     },
-    /// A boxed tuple (M7, §4.5 structural tuples). `ty` is the tuple's static
-    /// type (the codegen resolves it to a `TupleSchema` keyed on the type's
+    /// A boxed tuple (§4.5 structural tuples). `ty` is the tuple's static type
+    /// (the codegen resolves it to a `TupleSchema` keyed on the type's
     /// element-type sequence); `elements` are the element-value locals in
     /// positional order. Unlike records, tuples have no def-id — their shape is
     /// the element-type sequence alone, so the schema is keyed by the `Type`.
     ///
     /// [`MirType::Opaque`] means the lowering has no tuple type at all. Every
-    /// site that builds a tuple has one now — a fused `enumerate`/`zip` pair
-    /// reads it off the call node (MIR-05), which was the last exception — so
-    /// the case that remains is a *half* of a known pair whose element type is
-    /// still an inference variable. The backend answers either with a schema of
-    /// `elements.len()` slots, filling in the descriptors it can resolve and
-    /// leaving the rest **null** for the runtime to read off each value's own
-    /// header (REP-23, ADR-066 decision 5).
+    /// site that builds a tuple has one — a fused `enumerate`/`zip` pair reads
+    /// it off the call node — so the case that remains is a *half* of a known
+    /// pair whose element type is still an inference variable. The backend
+    /// answers either with a schema of `elements.len()` slots, filling in the
+    /// descriptors it can resolve and leaving the rest **null** for the runtime
+    /// to read off each value's own header (ADR-066 decision 5).
     Tuple { ty: MirType, elements: Vec<LocalId> },
-    /// A boxed closure value (M7, §4.10). `fn_name` is the synthetic MIR
-    /// function's name (the codegen takes its address via `func_addr`); `captures`
+    /// A boxed closure value (§4.10). `fn_name` is the synthetic MIR function's
+    /// name (the codegen takes its address via `func_addr`); `captures`
     /// are the captured-value locals in env-slot order. The codegen allocates via
     /// `praxis_alloc_closure(ctx, fn_ptr, n)` then fills each slot with
     /// `praxis_closure_set_capture`.
@@ -901,8 +879,8 @@ pub enum AllocKind {
         fn_name: String,
         captures: Vec<LocalId>,
     },
-    /// An empty collection constructed via `Vec[T]()`, `Deque[T]()`, etc. (M8,
-    /// §11.1/§11.2). The codegen resolves the element/key descriptor(s) from
+    /// An empty collection constructed via `Vec[T]()`, `Deque[T]()`, etc.
+    /// (§11.1/§11.2). The codegen resolves the element/key descriptor(s) from
     /// `ctor` + `args` (the static type args) via [`descriptor_for_type`] and
     /// calls `praxis_<kind>_new`. Carrying the type args (not a pre-resolved
     /// pointer) mirrors `AllocKind::Tuple { ty, .. }`: the descriptor is resolved
@@ -934,8 +912,8 @@ pub enum AllocKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CollectionInit {
     /// `Vec()`, `Grid()`, `Map()`, a list literal, a pipeline's collect target —
-    /// every construction that existed before ADR-146, and every one of the
-    /// seven constructors that has no sized form.
+    /// every unsized construction, and every one of the seven constructors that
+    /// has no sized form.
     Empty,
     /// `Vec(count, fill)`: `count` slots, each holding `fill`.
     Filled { count: LocalId, fill: LocalId },
@@ -1002,7 +980,7 @@ impl AllocKind {
     /// A *filled* collection answers its own wrapper, which is what gives
     /// `Inst::fault_reason` — and therefore the verifier's `CheckFault`
     /// requirement — the right answer for a sized construction with nothing
-    /// restating it (MIR-10). `praxis_vec_new` only allocates; `praxis_vec_filled`
+    /// restating it. `praxis_vec_new` only allocates; `praxis_vec_filled`
     /// faults on a negative count, and the difference is read off the row here.
     #[inline]
     #[must_use]
@@ -1091,16 +1069,16 @@ pub const fn collection_new_symbol(ctor: praxis_types::CollectionCtor) -> Option
     }
 }
 
-/// A call target. M4 resolves user functions by name; the backend mints a symbol.
+/// A call target. User functions are named; the backend mints a symbol.
 #[derive(Clone, Debug)]
 pub enum CallTarget {
     /// A user-defined function, by its MIR-local index-resolved name. The
     /// backend resolves this to the JIT'd function pointer.
     User(String),
     /// A built-in runtime wrapper, named by the ABI manifest
-    /// (`praxis_stdlib::abi`, M5, §11.1). The backend derives the call
-    /// signature from the symbol's row rather than from the argument count.
-    /// Method calls (`receiver.push(x)`) lower to this variant.
+    /// (`praxis_stdlib::abi`, §11.1). The backend derives the call signature
+    /// from the symbol's row rather than from the argument count. Method calls
+    /// (`receiver.push(x)`) lower to this variant.
     Runtime(RuntimeSymbol),
 }
 
@@ -1111,10 +1089,10 @@ pub enum CallTarget {
 /// exists for the arithmetic the *compiler* writes: a `for` loop's index bump
 /// and a `count()` accumulator are bounded above by a collection's length, so
 /// reaching `i64::MAX` is not a state the program can be in. Emitting the
-/// overflow predicate and the raise call for those was two wasted instructions
-/// and a call per iteration — and it left the fault protocol looking violated,
-/// since none of them is followed by a [`Inst::CheckFault`] (the verifier's
-/// "a faulting instruction is observed" rule, MIR-10).
+/// overflow predicate and the raise call for those costs two instructions and a
+/// call per iteration, and leaves the fault protocol looking violated, since
+/// none of them is followed by a [`Inst::CheckFault`] (the verifier's
+/// "a faulting instruction is observed" rule).
 ///
 /// [`Overflow::Bounded`] is a claim about the *site*, not about the operator.
 /// It is only legal on `Add`/`Sub`/`Mul`: `Div`/`Rem` also trap on a zero
@@ -1199,12 +1177,10 @@ impl Function {
     /// [`new_block`](Self::new_block) fill it in.
     ///
     /// **The ten fields are spelled once here, and that is the point.** A
-    /// `Function` carries four parallel debug tables, and the fourth —
-    /// `debug_scalar_sources` — arrived with ADR-120 part 2, long after the
-    /// fixtures that build one by hand were written. Every one of them had to
-    /// grow the same `Vec::new()`, and the module that noticed last carried an
-    /// apology in a comment where the field should have been. A constructor is
-    /// what makes the fifth table a single edit instead of nine.
+    /// `Function` carries four parallel debug tables, and every fixture that
+    /// builds one by hand would otherwise have to spell each of them. A
+    /// constructor is what makes a fifth table a single edit instead of one per
+    /// construction site.
     ///
     /// `return_local` is `LocalId(0)`, which names no slot until one is
     /// allocated: a caller assigns the local it actually returns from, as
@@ -1279,8 +1255,8 @@ impl Function {
             .and_then(Option::as_deref)
     }
 
-    /// The debugger classification (user vs. temp) for a local. Defaults to
-    /// `Temp` for locals allocated before the kinds table existed (defensive).
+    /// The debugger classification (user vs. temp) for a local. An id past the
+    /// end of the table answers `Temp` (defensive).
     pub fn debug_kind(&self, local: LocalId) -> LocalDebugKind {
         self.debug_kinds
             .get(local.0 as usize)
@@ -1342,8 +1318,8 @@ impl Function {
     /// be unsound: the backend turns this kind into the runtime's
     /// `DebugSlotKind`, and there is no way to reach that conversion holding a
     /// source that is not a scalar. A recorded id that somehow named a `Gc`
-    /// local reads back as "no scalar source", which is the pre-ADR-120
-    /// behaviour — a `<uninit>` temp, not a payload the collector walks.
+    /// local reads back as "no scalar source" — a `<uninit>` temp, not a
+    /// payload the collector walks.
     #[must_use]
     pub fn debug_scalar_source(&self, local: LocalId) -> Option<(LocalId, ScalarKind)> {
         let src = (*self.debug_scalar_sources.get(local.0 as usize)?)?;
@@ -1357,11 +1333,9 @@ impl Function {
 /// The locals a hand-built fixture allocates, beside the [`Function::empty`]
 /// it allocates them into.
 ///
-/// [`crate::liveness`], [`crate::verify`] and [`crate::provable`] each carried
-/// their own copy of these — three spellings of the same `Gc` temp, and two of
-/// the same `Scalar(Int)` one. A fixture is a `Function` plus the slots it
-/// hands [`Function::new_local`], and there is no reason for the two halves to
-/// live apart.
+/// A fixture is a `Function` plus the slots it hands [`Function::new_local`],
+/// so [`crate::liveness`], [`crate::verify`] and [`crate::provable`] share one
+/// spelling of each rather than one apiece.
 ///
 /// The pair that is *not* collapsed is the named one: [`user_gc_local`] and
 /// [`gc_local`] differ in [`LocalDebugKind`], which is a rule the verifier
@@ -1452,12 +1426,11 @@ mod tests {
     /// does not hold, at either end of the range.
     ///
     /// This is what turns the backend's `small_int::index_of(n).expect(..)` in
-    /// `load_gc_const` into a documented fact rather than a hope. Nothing in
-    /// [`crate::verify`] checks the range, so before the constructor existed the
-    /// only thing standing between a lowering site's private opinion about what
-    /// counts as "small" and a JIT panic was that no site had one — and
-    /// `run_parser_plan`, whose ids come from an arena bounded by `1 << 20`, was
-    /// exactly the site about to form one.
+    /// `load_gc_const` into a documented fact rather than a hope: nothing in
+    /// [`crate::verify`] checks the range, so the constructor is the only thing
+    /// standing between a lowering site's private opinion about what counts as
+    /// "small" and a JIT panic. `run_parser_plan`, whose ids come from an arena
+    /// bounded by `1 << 20`, is such a site.
     #[test]
     fn a_gc_const_small_int_cannot_name_a_slot_the_table_does_not_have() {
         use praxis_runtime::small_int::{SMALL_INT_MAX, SMALL_INT_MIN};
@@ -1508,10 +1481,10 @@ mod tests {
     /// A `Byte` payload has no boxing wrapper, and asking for one is refused
     /// rather than answered with `Int`'s.
     ///
-    /// The arm used to answer `RuntimeSymbol::AllocInt`, which mints an object
-    /// carrying the `INT` descriptor over a byte's worth of value. Nothing
-    /// constructs a [`ScalarKind::Byte`] today, so the wrong answer was
-    /// invisible — which is the whole reason it had to stop being an answer.
+    /// `RuntimeSymbol::AllocInt` would mint an object carrying the `INT`
+    /// descriptor over a byte's worth of value, and nothing constructs a
+    /// [`ScalarKind::Byte`] today — so that wrong answer would be invisible,
+    /// which is exactly why it may not be an answer.
     #[test]
     #[should_panic(expected = "ScalarKind::Byte has no boxing wrapper")]
     fn boxing_a_byte_payload_is_refused_because_there_is_no_byte_wrapper() {
@@ -1519,10 +1492,10 @@ mod tests {
     }
 
     /// The mirror of
-    /// [`boxing_a_byte_payload_is_refused_because_there_is_no_byte_wrapper`],
-    /// and the arm handover 23 §4 named: `IntLoad` is an eight-byte read of a
-    /// one-byte `BytePayload`, so it answers the byte plus seven bytes of
-    /// whatever the allocator happened to put beside it.
+    /// [`boxing_a_byte_payload_is_refused_because_there_is_no_byte_wrapper`]:
+    /// `IntLoad` is an eight-byte read of a one-byte `BytePayload`, so it would
+    /// answer the byte plus seven bytes of whatever the allocator happened to
+    /// put beside it.
     #[test]
     #[should_panic(expected = "ScalarKind::Byte has no boxing wrapper")]
     fn reading_a_byte_payload_is_refused_because_there_is_no_byte_wrapper() {

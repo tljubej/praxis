@@ -1,4 +1,4 @@
-//! The `--debug` flag modes for `praxis run` (§9.6, M10).
+//! The `--debug` flag modes for `praxis run` (§9.6).
 //!
 //! Controls whether a runtime fault drops into the interactive crash REPL or
 //! prints the noninteractive diagnostic and exits:

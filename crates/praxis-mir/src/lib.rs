@@ -6,12 +6,11 @@
 //! debug-local metadata. MIR does not need to be SSA initially — the Cranelift
 //! lowering layer creates SSA values and block parameters.
 //!
-//! Milestone 4 fills this crate (ADR-015). The data structures live in [`ir`];
-//! the GC-liveness pass (§12.3) that computes the minimal root set per
-//! safepoint lives in [`liveness`]; the HIR→MIR lowering lives in [`build`];
-//! and [`verify`] is what keeps the rooting invariant fixed once a stage has
-//! fixed it — every host runs it after `annotate` and refuses to compile MIR
-//! that fails.
+//! The data structures live in [`ir`] (ADR-015); the GC-liveness pass (§12.3)
+//! that computes the minimal root set per safepoint lives in [`liveness`]; the
+//! HIR→MIR lowering lives in [`build`]; and [`verify`] is what keeps the rooting
+//! invariant fixed once a stage has fixed it — every host runs it after
+//! `annotate` and refuses to compile MIR that fails.
 //!
 //! [`forward`] and [`promote`] are the crate's *optimizations*, and both run
 //! inside `lower_module` rather than beside it, because each deletes safepoints
@@ -34,8 +33,8 @@ pub mod promote;
 pub mod provable;
 pub mod verify;
 
-/// Shape assertions over lowered MIR, for the packages whose gate is a count of
-/// emitted instructions (handover 26 §2).
+/// Shape assertions over lowered MIR, for tests whose gate is a count of
+/// emitted instructions.
 ///
 /// `cfg(test)` **and** the feature, because there are two consumers and they
 /// need different doors: this crate's own tests get it with no flag to

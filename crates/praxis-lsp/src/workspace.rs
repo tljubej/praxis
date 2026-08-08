@@ -1,9 +1,8 @@
 //! Workspace symbols (§15.2, §19.12), and the `file:` URI ⇄ path conversion
 //! they need.
 //!
-//! M11 was one document: every query answered about the file the cursor was in,
-//! and the server never looked at the disk. `workspace/symbol` is the first
-//! query that cannot, so this module is where "the workspace" becomes a thing
+//! `workspace/symbol` is the one query that cannot be answered from the file
+//! the cursor is in, so this module is where "the workspace" becomes a thing
 //! the server has at all.
 //!
 //! # The index is the walk
@@ -201,8 +200,7 @@ fn push_matching(
     }
 }
 
-/// The `SymbolKind` a picker shows for a file with no parsed symbols. Exists so
-/// the constant is named where it is used rather than being a magic variant.
+/// The `SymbolKind` a picker shows for a file with no parsed symbols.
 pub const FILE_KIND: SymbolKind = SymbolKind::FILE;
 
 /// A `file:` URI for `path`, or `None` if the path is not absolute.

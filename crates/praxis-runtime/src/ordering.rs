@@ -1,15 +1,13 @@
 //! The order a container walks its keys in (ADR-138).
 //!
 //! `Map`, `Set` and `Counter` are hash-backed, and Rust randomizes hash-table
-//! iteration order *per process*. ADR-066 answered that by sorting before
+//! iteration order *per process*. ADR-066 answers that by sorting before
 //! printing and before snapshotting, so `out(s)` and `for x in s` are
-//! reproducible. The sort key it reached for was the *rendered* form, because
-//! at the time no descriptor carried a comparison callback — so `{10, 2}`
-//! printed and iterated `10` first, and an Advent-of-Code solve that walked a
-//! `Set[Int]` got a silently wrong answer out of it.
+//! reproducible.
 //!
-//! This module is the replacement sort key: the value's own order, taken from
-//! [`TypeDescriptor::compare`]. Three rules, applied in this sequence:
+//! This module is that sort key: the value's own order, taken from
+//! [`TypeDescriptor::compare`], so `{10, 2}` walks `2` first rather than in
+//! the order the rendered forms fall. Three rules, applied in this sequence:
 //!
 //! 1. **Different types order by descriptor id.** By the id, never by the
 //!    descriptor's *address*: addresses are assigned by the loader and differ

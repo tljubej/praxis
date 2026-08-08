@@ -8,11 +8,9 @@
 //!
 //! Design notes:
 //!
-//! - A span's carets never overrun the visible line. The earlier renderer drew
-//!   `max(1, end − start)` carets all on the *first* line, so a multi-line span
-//!   (e.g. the whole `fn`) produced a caret line far wider than the source —
-//!   the runaway `^^^…` seen in M2. We now clamp the underline on each rendered
-//!   line to that line's content extent.
+//! - A span's carets never overrun the visible line: the underline on each
+//!   rendered line is clamped to that line's content extent, so a multi-line
+//!   span (e.g. the whole `fn`) cannot draw a caret run wider than the source.
 //! - For a span that crosses several lines we underline each covered line:
 //!   from the span start to the line end on the first line, the full content
 //!   width on middle lines, and from the line start to the span end on the last
@@ -20,23 +18,17 @@
 //!   capped so a pathological whole-file span stays readable.
 //! - The `message` (when non-empty) trails the carets on the *first* underlined
 //!   line, matching §8.2 (`^^^^ this value is Text`).
-//! - **A column is a count of characters, not of bytes** (REP-35). Spans are
-//!   byte ranges — that is what every other layer needs — but a rendered column
-//!   is a position in the line as it is *printed*, and the two only coincide in
-//!   ASCII. The renderer used the byte offset directly for the header column,
-//!   for the caret padding and for the caret run, so one `λ` earlier on the
-//!   line pushed the caret one column right, and a `λ` under the caret drew two
-//!   carets for one character. Every caret in every diagnostic on a line
-//!   holding non-ASCII text was wrong. The conversion belongs here, not in
-//!   `LineMap`: `LineCol` round-trips through `linecol_to_offset` and is a byte
-//!   column on purpose.
-//! - **A header column is 1-based, like its line** (REP-62). `LineCol::col`
-//!   counts from zero so it can be inverted; the *header* printed that number
-//!   raw, so an error on a file's first character read `f.px:1:0` — a 1-based
-//!   line beside a 0-based column, and one off from every other compiler's
-//!   `line:col`. The `+ 1` is applied here, at the one place a column is
-//!   printed, and nothing about `LineMap` changed. The caret padding keeps the
-//!   0-based number: it is a count of characters to skip, not a position.
+//! - **A column is a count of characters, not of bytes.** Spans are byte
+//!   ranges — that is what every other layer needs — but a rendered column is a
+//!   position in the line as it is *printed*, and the two only coincide in
+//!   ASCII: one `λ` earlier on the line would otherwise push the caret one
+//!   column right, and a `λ` under the caret would draw two carets for one
+//!   character. The conversion belongs here, not in `LineMap`: `LineCol`
+//!   round-trips through `linecol_to_offset` and is a byte column on purpose.
+//! - **A header column is 1-based, like its line.** `LineCol::col` counts from
+//!   zero so it can be inverted; the `+ 1` is applied here, at the one place a
+//!   column is printed, and `LineMap` is unaffected. The caret padding keeps
+//!   the 0-based number: it is a count of characters to skip, not a position.
 
 use std::fmt::Write;
 
@@ -135,13 +127,10 @@ pub fn render_span_snippet_styled(
     // it. `byte_col` is the distance from the line start in bytes, which is how
     // the line start is recovered.
     //
-    // **`+ 1` because a header column is 1-based** (REP-62). `LineCol::col`
-    // counts from zero — deliberately, so `linecol_to_offset` can invert it —
-    // and printing it raw put a 0-based column beside a 1-based line, so an
-    // error on a file's first character read `f.px:1:0` and every header
-    // disagreed with the caret drawn under it by one. The caret is unchanged:
-    // it is drawn from a *count* of characters to skip, which is the 0-based
-    // number.
+    // **`+ 1` because a header column is 1-based**, like its line.
+    // `LineCol::col` counts from zero — deliberately, so `linecol_to_offset`
+    // can invert it. The caret does not get the `+ 1`: it is drawn from a
+    // *count* of characters to skip, which is the 0-based number.
     let col = char_width(text, BytePos(start.to_u32() - byte_col), start) + 1;
 
     out.push('\n');
@@ -239,8 +228,8 @@ fn render_caret_line(
     let pad: String = " ".repeat(gutter_width);
     let gutter = palette.paint(Style::Location, &format!("  {pad} | "));
     let _ = write!(out, "{gutter}");
-    // **Characters, not bytes** (REP-35). The padding has to be as wide as the
-    // line's text is *printed*, and the caret run as wide as what it underlines.
+    // **Characters, not bytes.** The padding has to be as wide as the line's
+    // text is *printed*, and the caret run as wide as what it underlines.
     let caret_col = char_width(text, line_start, seg_start);
     for _ in 0..caret_col {
         out.push(' ');
@@ -391,16 +380,10 @@ mod tests {
 "#);
     }
 
-    /// **REP-35.** A column is a count of characters, not of bytes.
+    /// **A column is a count of characters, not of bytes**, for both the
+    /// padding before the carets and the length of the caret run.
     ///
-    /// The renderer used the span's byte offset as the display column, so every
-    /// multi-byte character earlier on the line pushed the caret one column
-    /// right per *extra* UTF-8 byte — and a multi-byte character under the
-    /// caret drew one caret per byte. Every caret in every diagnostic on a line
-    /// holding non-ASCII text was wrong, on this branch and on `main`.
-    ///
-    /// `λ` is two bytes, so `name` sits at **byte** 15 and **column** 13 — and
-    /// the caret used to be drawn at column 15, two past the `n`.
+    /// `λ` is two bytes, so `name` sits at **byte** 15 and **column** 13.
     #[test]
     fn a_caret_counts_characters_and_not_bytes() {
         let src = "var y = λλ + name\n";
@@ -432,13 +415,8 @@ mod tests {
 "#);
     }
 
-    /// **REP-62.** A header column is 1-based, like its line, and it names the
+    /// **A header column is 1-based**, like its line, and it names the
     /// character the caret is drawn under.
-    ///
-    /// `LineCol::col` counts from zero so `linecol_to_offset` can invert it, and
-    /// the header printed that number raw — so a span on a file's very first
-    /// character read `f.px:1:0`: a 1-based line beside a 0-based column, one
-    /// off from the caret below it and from every other compiler's `line:col`.
     ///
     /// Asserted as a *relation* rather than as another literal snapshot: the
     /// column is read back out of the header and used to index the source line,
@@ -452,7 +430,7 @@ mod tests {
             ("abc\n", 2, 1, 'c'),
             ("total += line\n", 9, 4, 'l'),
             // A multi-byte character earlier on the line: the column counts
-            // characters (REP-35), so the `+ 1` must not be applied to bytes.
+            // characters, so the `+ 1` must not be applied to bytes.
             ("var y = λλ + name\n", 15, 4, 'n'),
         ] {
             let out = render(src, start, start + len, CaretLabel::Plain);
