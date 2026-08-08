@@ -509,6 +509,66 @@ impl SyntaxKind {
         matches!(self, Self::TYPE_REF | Self::TUPLE_TYPE | Self::FN_TYPE)
     }
 
+    /// Whether this kind is a token the parser wraps in a
+    /// [`LITERAL`](Self::LITERAL) node: the four scalar literals, `true`/`false`,
+    /// and both backtick-template kinds.
+    ///
+    /// Here for [`is_type_node`](Self::is_type_node)'s reason. The parser writes
+    /// this set when it builds the node and `praxis_ast::Literal::token` reads it
+    /// back, and the two copies had already drifted: the reader omitted
+    /// [`UnterminatedBacktickTemplate`](Self::UnterminatedBacktickTemplate), so
+    /// for a `LITERAL` the parser really does build it answered `None`, and both
+    /// HIR passes fell to their "no token at all" branch.
+    ///
+    /// **Both template kinds are in.** A template in value position has no
+    /// meaning — §7.1 enters the parser sublanguage at `read`/`parse` and nowhere
+    /// else — and is reported as `Y023`, but it is reported *about the token*,
+    /// and an accessor that cannot see the token cannot report on it. The
+    /// unterminated one draws no `Y023`, since that advice cannot close a
+    /// template (ADR-094); it types as a fresh variable, which is exactly what
+    /// the missing-token branch happened to produce.
+    ///
+    /// `true`/`false` are literals too. They used to be parsed by an arm of their
+    /// own *because* it was the one that did not eat leading trivia first, so
+    /// `true` spanned `" true"` where `1` spanned `"1"` (REP-63).
+    #[must_use]
+    pub fn is_literal_token(self) -> bool {
+        matches!(
+            self,
+            Self::IntLit
+                | Self::FloatLit
+                | Self::TextLit
+                | Self::CharLit
+                | Self::BacktickTemplate
+                | Self::UnterminatedBacktickTemplate
+                | Self::KW_TRUE
+                | Self::KW_FALSE
+        )
+    }
+
+    /// Whether this kind is a literal a **pattern** may test against (§4.6): an
+    /// integer, text, a character, `true` or `false`.
+    ///
+    /// Strictly narrower than [`is_literal_token`](Self::is_literal_token), and
+    /// the difference is that a pattern tests a *constant*. There is no float
+    /// pattern (§4.6), and a backtick template is not a constant either — nor is
+    /// an interpolated literal, which the parser refuses in pattern position
+    /// outright (ADR-147): `match s { "{x}" => … }` would otherwise leave a
+    /// pattern whose only direct `Ident` is the hole's `x`, read as a variable
+    /// bind, and swallow every value.
+    ///
+    /// `CharLit` is in the set (ADR-141), and dropping it is REP-10's regression
+    /// class: while one caller's copy of this list omitted it, a `match` arm list
+    /// stopped after `'#' => …` and every arm below it left the tree with no
+    /// diagnostic at all.
+    #[must_use]
+    pub fn is_pattern_literal(self) -> bool {
+        matches!(
+            self,
+            Self::IntLit | Self::TextLit | Self::CharLit | Self::KW_TRUE | Self::KW_FALSE
+        )
+    }
+
     /// The largest discriminant. Sound because the enum declares no explicit
     /// discriminants, so its values are consecutive from zero — which
     /// [`SyntaxKind::from_raw_u16`] relies on and
@@ -629,6 +689,29 @@ mod tests {
         assert!(SyntaxKind::PARSE_ERROR.is_node());
         assert!(!SyntaxKind::Ident.is_node());
         assert!(!SyntaxKind::EOF.is_node());
+    }
+
+    #[test]
+    fn every_pattern_literal_is_a_literal_token() {
+        // Swept, not listed: the pattern set is a strict subset of the literal
+        // set, so a kind added to one and forgotten in the other is caught here
+        // rather than by a `Literal::token` that quietly answers `None`.
+        for raw in 0..=SyntaxKind::LAST {
+            let kind = SyntaxKind::from_raw_u16(raw);
+            assert!(
+                !kind.is_pattern_literal() || kind.is_literal_token(),
+                "{kind:?} tests as a pattern literal but is not a literal token"
+            );
+        }
+        // The three the pattern grammar leaves out, each for the doc's reason.
+        assert!(!SyntaxKind::FloatLit.is_pattern_literal()); // §4.6: no float pattern
+        assert!(!SyntaxKind::BacktickTemplate.is_pattern_literal());
+        assert!(!SyntaxKind::UnterminatedBacktickTemplate.is_pattern_literal());
+        // …and the two whose absence was a real regression.
+        assert!(SyntaxKind::CharLit.is_pattern_literal()); // ADR-141, REP-10
+        assert!(SyntaxKind::UnterminatedBacktickTemplate.is_literal_token()); // ADR-094
+        assert!(!SyntaxKind::Ident.is_literal_token());
+        assert!(!SyntaxKind::UNDERSCORE.is_pattern_literal());
     }
 
     #[test]

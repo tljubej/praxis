@@ -147,13 +147,6 @@ impl MirType {
             MirType::Opaque => None,
         }
     }
-
-    /// Whether lowering left this slot without a static type.
-    #[inline]
-    #[must_use]
-    pub fn is_opaque(self) -> bool {
-        matches!(self, MirType::Opaque)
-    }
 }
 
 /// A local slot.
@@ -1201,6 +1194,37 @@ pub struct LocalId(pub u32);
 pub struct BlockId(pub u32);
 
 impl Function {
+    /// A named function with nothing in it: no params, no locals, no blocks and
+    /// no source span. [`new_local`](Self::new_local) and
+    /// [`new_block`](Self::new_block) fill it in.
+    ///
+    /// **The ten fields are spelled once here, and that is the point.** A
+    /// `Function` carries four parallel debug tables, and the fourth —
+    /// `debug_scalar_sources` — arrived with ADR-120 part 2, long after the
+    /// fixtures that build one by hand were written. Every one of them had to
+    /// grow the same `Vec::new()`, and the module that noticed last carried an
+    /// apology in a comment where the field should have been. A constructor is
+    /// what makes the fifth table a single edit instead of nine.
+    ///
+    /// `return_local` is `LocalId(0)`, which names no slot until one is
+    /// allocated: a caller assigns the local it actually returns from, as
+    /// [`crate::build`] does when it finishes a body.
+    #[must_use]
+    pub fn empty(name: &str) -> Function {
+        Function {
+            name: name.to_string(),
+            params: Vec::new(),
+            return_local: LocalId(0),
+            locals: Vec::new(),
+            blocks: Vec::new(),
+            debug_names: Vec::new(),
+            debug_kinds: Vec::new(),
+            debug_spans: Vec::new(),
+            debug_scalar_sources: Vec::new(),
+            span: (0, 0),
+        }
+    }
+
     /// Append a new local, returning its id. `debug_name`/`debug_kind`/`debug_span`
     /// are the per-local debugger metadata (name, user-vs-temp classification,
     /// source span); only meaningful for `Gc` locals (the backend skips others).
@@ -1235,6 +1259,17 @@ impl Function {
             term: Terminator::Jump { target: id }, // placeholder; overwritten.
         });
         id
+    }
+
+    /// Write `block`'s terminator, replacing [`new_block`](Self::new_block)'s
+    /// self-jump placeholder (or a terminator written earlier).
+    ///
+    /// The counterpart of `new_block`: a block is *created* with a placeholder
+    /// and *closed* here. Terminating through a named method rather than by
+    /// indexing `blocks` by hand is what keeps the index arithmetic
+    /// (`id.0 as usize`) in one place.
+    pub fn terminate(&mut self, block: BlockId, term: Terminator) {
+        self.blocks[block.0 as usize].term = term;
     }
 
     /// The debug name for a local, if any.
@@ -1319,24 +1354,74 @@ impl Function {
     }
 }
 
+/// The locals a hand-built fixture allocates, beside the [`Function::empty`]
+/// it allocates them into.
+///
+/// [`crate::liveness`], [`crate::verify`] and [`crate::provable`] each carried
+/// their own copy of these — three spellings of the same `Gc` temp, and two of
+/// the same `Scalar(Int)` one. A fixture is a `Function` plus the slots it
+/// hands [`Function::new_local`], and there is no reason for the two halves to
+/// live apart.
+///
+/// The pair that is *not* collapsed is the named one: [`user_gc_local`] and
+/// [`gc_local`] differ in [`LocalDebugKind`], which is a rule the verifier
+/// enforces rather than a default a caller may take or leave.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use super::{Function, LocalDebugKind, LocalId, LocalKind, MirType, ScalarKind};
+
+    /// A `Gc` local with no debugger name — a compiler temp, which is what a
+    /// fixture wants unless the test is about the name.
+    pub(crate) fn gc_local(f: &mut Function) -> LocalId {
+        f.new_local(
+            LocalKind::Gc,
+            MirType::Opaque,
+            None,
+            LocalDebugKind::Temp,
+            None,
+        )
+    }
+
+    /// A `Gc` local a binding owns. The name and [`LocalDebugKind::User`]
+    /// travel together because they must: `User` covers every binding form
+    /// ADR-125 lists, all of which the programmer wrote a name for, and
+    /// [`crate::verify`] rejects a `User` local without one.
+    pub(crate) fn user_gc_local(f: &mut Function, name: &str) -> LocalId {
+        f.new_local(
+            LocalKind::Gc,
+            MirType::Opaque,
+            Some(name.into()),
+            LocalDebugKind::User,
+            None,
+        )
+    }
+
+    /// A `Scalar` local of `kind`. Always a temp: the backend shows no scalar
+    /// in the debugger, so a name on one would be metadata nothing reads.
+    pub(crate) fn scalar_local(f: &mut Function, kind: ScalarKind) -> LocalId {
+        f.new_local(
+            LocalKind::Scalar(kind),
+            MirType::Opaque,
+            None,
+            LocalDebugKind::Temp,
+            None,
+        )
+    }
+
+    /// [`scalar_local`] at the width most fixtures want, since an `Int` is what
+    /// an `AllocKind::Int` and an `Inst::ConstInt` take.
+    pub(crate) fn int_local(f: &mut Function) -> LocalId {
+        scalar_local(f, ScalarKind::Int)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn new_local_and_block_increment_ids() {
-        let mut f = Function {
-            name: "f".into(),
-            params: Vec::new(),
-            return_local: LocalId(0),
-            locals: Vec::new(),
-            blocks: Vec::new(),
-            debug_names: Vec::new(),
-            debug_kinds: Vec::new(),
-            debug_spans: Vec::new(),
-            debug_scalar_sources: Vec::new(),
-            span: (0, 0),
-        };
+        let mut f = Function::empty("f");
         let a = f.new_local(
             LocalKind::Gc,
             MirType::Opaque,

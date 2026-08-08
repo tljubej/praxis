@@ -389,9 +389,14 @@ fn parser_items(enclosing: Option<Constructor>) -> Vec<CompletionItem> {
                 ..CompletionItem::default()
             });
         }
-        if ctor == Constructor::Grid {
+        // The same rule for the one bare flag: `Constructor::flag_arg` says
+        // which constructor has one and what it is called, so the editor
+        // cannot offer `ragged` where the compiler would not take it. This was
+        // a `ctor == Constructor::Grid` test beside a `RAGGED_FLAG` constant,
+        // which is the same name kept in two places.
+        if let Some(flag) = ctor.flag_arg() {
             out.push(CompletionItem {
-                label: RAGGED_FLAG.to_string(),
+                label: flag.to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
                 detail: Some("permit uneven rows, padded with `fill:` (§7.5)".to_string()),
                 ..CompletionItem::default()
@@ -400,10 +405,6 @@ fn parser_items(enclosing: Option<Constructor>) -> Vec<CompletionItem> {
     }
     out
 }
-
-/// The one bare-keyword argument in §7.5. Named here so the semantic-token
-/// layer and the completion layer spell it the same way.
-pub(crate) const RAGGED_FLAG: &str = "ragged";
 
 /// Lexical identifiers visible at the cursor.
 ///

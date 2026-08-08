@@ -8,15 +8,13 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-fn bin_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_praxis"))
-}
+mod common;
 
+use common::bin_path;
+
+/// A path under this crate's `tests/fixtures/run`.
 fn fixture(name: &str) -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("tests/fixtures/run");
-    p.push(name);
-    p
+    common::fixture(&format!("run/{name}"))
 }
 
 /// A scratch directory this **process** owns, for the tests that must write a
@@ -89,8 +87,7 @@ fn assert_faults(name: &str, fault_msg: &str) {
 
 #[test]
 fn missing_explicit_input_file_is_a_usage_error() {
-    let missing = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/run/definitely-missing-input.txt");
+    let missing = fixture("definitely-missing-input.txt");
     let output = Command::new(bin_path())
         .args(["run", "--input"])
         .arg(&missing)

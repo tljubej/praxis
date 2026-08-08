@@ -11,6 +11,14 @@ use praxis_stdlib::type_pattern::{CollectionCtor, ScalarType};
 use crate::data::{RecordDefId, TypeData, VarState};
 use crate::{CollectionArgs, FieldSet, Scheme, TupleElems, Type, TypeDb, VariantSet};
 
+// The record and enum fixtures this module shares with `fold.rs`'s test module.
+// They live beside the tests that use them, and `fold.rs` reaches them as
+// `crate::types_tests::test_util`.
+#[path = "test_util.rs"]
+pub(crate) mod test_util;
+
+use test_util::{anon_enum, anon_record, enum_ty, record};
+
 fn is_int(db: &TypeDb, t: crate::Type) -> bool {
     matches!(db.data(db.follow(t)), TypeData::Scalar(ScalarType::Int))
 }
@@ -36,31 +44,6 @@ fn tup(db: &mut TypeDb, elements: Vec<Type>) -> Type {
 fn coll(db: &mut TypeDb, ctor: CollectionCtor, args: Vec<Type>) -> Type {
     let args = CollectionArgs::new(ctor, args).expect("arity matches the ctor");
     db.collection(ctor, args).expect("arity matches the ctor")
-}
-
-/// A nominal record from `(name, type)` pairs.
-fn record(db: &mut TypeDb, name: &str, fields: Vec<(String, Type)>) -> Type {
-    let fields = FieldSet::from_pairs(fields).expect("distinct field names");
-    db.record(Some(name.to_string()), fields)
-}
-
-/// An anonymous structural record (§5.6).
-fn anon_record(db: &mut TypeDb, fields: Vec<(String, Type)>) -> Type {
-    let fields = FieldSet::from_pairs(fields).expect("distinct field names");
-    db.record(None, fields)
-}
-
-/// A nominal enum from `(name, payload)` pairs. An empty payload is a
-/// payload-less variant (TY-05).
-fn enum_ty(db: &mut TypeDb, name: &str, variants: Vec<(String, Vec<Type>)>) -> Type {
-    let variants = VariantSet::from_pairs(variants).expect("distinct variant names");
-    db.enum_(Some(name.to_string()), variants)
-}
-
-/// An anonymous enum (`choice(...)`, §7.5).
-fn anon_enum(db: &mut TypeDb, variants: Vec<(String, Vec<Type>)>) -> Type {
-    let variants = VariantSet::from_pairs(variants).expect("distinct variant names");
-    db.enum_(None, variants)
 }
 
 #[test]

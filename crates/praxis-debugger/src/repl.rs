@@ -96,11 +96,6 @@ impl Repl {
         self.session.as_ref()
     }
 
-    /// Mutably borrow the live session, if any. `restart`/`reload` mutate it.
-    pub fn session_mut(&mut self) -> Option<&mut DebugSession> {
-        self.session.as_mut()
-    }
-
     /// Borrow the crash snapshot. M10b rendering commands (`source`,
     /// `render_frame_locals`) read frame spans/locals from it.
     pub fn snapshot(&self) -> &CrashSnapshot {
@@ -360,35 +355,19 @@ impl Repl {
                     .unwrap_or("");
                 let _ = render_parser_context(out, detail, source_text);
             }
-            // M10b-WS4: the read-only `p EXPR` / `type EXPR` JIT evaluator
-            // (§9.5). Synthesizes `fn __p_expr(<typed params>) { EXPR }`,
-            // type-checks against the selected frame's locals, purity-gates,
-            // JITs a fresh function, and calls it with the snapshot locals.
-            "p" => {
+            // M10b-WS4/WS5: the read-only expression evaluator (§9.5, §9.4).
+            // The three commands differ only in the mode they hand
+            // `evaluate_expr`; [`crate::evaluate::Mode`] documents what each one
+            // does with the synthesized function and owns the word → variant
+            // mapping.
+            "p" | "type" | "heap" => {
                 if rest.is_empty() {
-                    let _ = writeln!(out, "usage: p EXPR");
+                    let _ = writeln!(out, "usage: {cmd} EXPR");
                     return Control::Continue;
                 }
-                let result = self.evaluate_expr(rest, crate::evaluate::Mode::Print);
-                let _ = crate::evaluate::write_eval_result(out, &result);
-            }
-            "type" => {
-                if rest.is_empty() {
-                    let _ = writeln!(out, "usage: type EXPR");
-                    return Control::Continue;
-                }
-                let result = self.evaluate_expr(rest, crate::evaluate::Mode::Type);
-                let _ = crate::evaluate::write_eval_result(out, &result);
-            }
-            // M10b-WS5: `heap EXPR` recursively inspects a value (§9.4). Like
-            // `p EXPR` but prefixes the result with its type, so the structure
-            // and type are visible at a glance.
-            "heap" => {
-                if rest.is_empty() {
-                    let _ = writeln!(out, "usage: heap EXPR");
-                    return Control::Continue;
-                }
-                let result = self.evaluate_expr(rest, crate::evaluate::Mode::Heap);
+                let mode = crate::evaluate::Mode::from_command(cmd)
+                    .expect("this arm's pattern lists exactly `Mode::from_command`'s words");
+                let result = self.evaluate_expr(rest, mode);
                 let _ = crate::evaluate::write_eval_result(out, &result);
             }
             // M10b-WS6: `restart` reruns the same code+input; `reload`

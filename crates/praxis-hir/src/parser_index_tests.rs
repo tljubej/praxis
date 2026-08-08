@@ -7,17 +7,10 @@
 
 #![cfg(test)]
 
-use praxis_parser::parse;
-use praxis_source::SourceMap;
+use praxis_source::Span;
 
-use crate::{analyze_root, Analysis, ParserMode};
-
-fn analyze(text: &str) -> Analysis {
-    let map = SourceMap::new();
-    let id = map.intern("parser_index_test.px", text);
-    let parsed = parse(id, text);
-    analyze_root(id, &parsed.tree)
-}
+use crate::hir_tests::test_util::analyze;
+use crate::ParserMode;
 
 /// The byte offset of the first occurrence of `needle` in `src`, plus `within`.
 fn at(src: &str, needle: &str) -> u32 {
@@ -26,6 +19,13 @@ fn at(src: &str, needle: &str) -> u32 {
             .unwrap_or_else(|| panic!("`{needle}` in source")),
     )
     .unwrap()
+}
+
+/// The source text `span` covers. Every span in this module is a claim about
+/// what the compiler pointed at, so the assertion is against the *text* rather
+/// than against offsets nobody can read.
+fn text_at(src: &str, span: Span) -> &str {
+    &src[span.start().to_u32() as usize..span.end().to_u32() as usize]
 }
 
 /// **ADR-098's gate.** Hovering `lines(...)` *inside* `sections(lines(...))`
@@ -116,20 +116,13 @@ fn a_capture_reports_its_name_and_parser_spans_separately() {
 
     let first = captures[0];
     assert_eq!(
-        &src[first.span.start().to_u32() as usize..first.span.end().to_u32() as usize],
+        text_at(src, first.span),
         "{name:word}",
         "the capture span covers both braces"
     );
     let name_span = first.name_span.expect("a named capture has a name span");
-    assert_eq!(
-        &src[name_span.start().to_u32() as usize..name_span.end().to_u32() as usize],
-        "name"
-    );
-    assert_eq!(
-        &src[first.parser_span.start().to_u32() as usize
-            ..first.parser_span.end().to_u32() as usize],
-        "word"
-    );
+    assert_eq!(text_at(src, name_span), "name");
+    assert_eq!(text_at(src, first.parser_span), "word");
     assert_ne!(
         name_span, first.parser_span,
         "four distinct ranges, not two"
@@ -161,7 +154,7 @@ fn a_padded_capture_name_spans_only_the_name() {
     let captures = analysis.parser_exprs[0].captures();
     let name_span = captures[0].name_span.expect("named");
     assert_eq!(
-        &src[name_span.start().to_u32() as usize..name_span.end().to_u32() as usize],
+        text_at(src, name_span),
         "n",
         "the span is the trimmed name, not the padding around it"
     );
@@ -184,7 +177,7 @@ fn a_template_literal_run_spans_the_source_it_was_decoded_from() {
         .filter(|s| s.end().to_u32() > s.start().to_u32())
         .collect();
     assert_eq!(lits.len(), 1, "one literal run, got {lits:?}");
-    let s = &src[lits[0].start().to_u32() as usize..lits[0].end().to_u32() as usize];
+    let s = text_at(src, lits[0]);
     assert_eq!(s, "a\\`b", "four source bytes for three decoded characters");
 }
 
@@ -198,12 +191,7 @@ fn a_constructor_reports_its_keyword_span() {
     let ctors = analysis.parser_exprs[0].constructors();
     let named: Vec<(&str, &str)> = ctors
         .iter()
-        .map(|(span, kw)| {
-            (
-                &src[span.start().to_u32() as usize..span.end().to_u32() as usize],
-                *kw,
-            )
-        })
+        .map(|(span, kw)| (text_at(src, *span), *kw))
         .collect();
     assert_eq!(named, vec![("sections", "sections"), ("lines", "lines")]);
 }

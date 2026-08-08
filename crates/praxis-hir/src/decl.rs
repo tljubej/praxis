@@ -28,8 +28,8 @@
 use std::collections::{HashMap, HashSet};
 
 use praxis_ast::{AstNode, EnumItem, FnItem, SourceFile, StructItem, TypeRef};
-use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
-use praxis_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use praxis_source::{Diagnostic, FileId, FileSpan};
+use praxis_syntax::{span_bridge::range_to_span, SyntaxKind, SyntaxNode, SyntaxToken};
 use praxis_types::{
     CollectionArgs, CollectionCtor, EnumVariantDef, FieldSet, ScalarType, Scheme, Type, TypeDb,
     VariantSet,
@@ -123,13 +123,7 @@ struct Declare<'a> {
 
 impl Declare<'_> {
     fn file_span(&self, range: TextRange) -> FileSpan {
-        FileSpan::new(
-            self.file,
-            Span::new(
-                BytePos::from(u32::from(range.start())),
-                BytePos::from(u32::from(range.end())),
-            ),
-        )
+        FileSpan::new(self.file, range_to_span(range))
     }
 
     fn annotations(&mut self) -> Annotations<'_> {
@@ -497,13 +491,7 @@ impl<'a> Annotations<'a> {
     }
 
     fn file_span(&self, range: TextRange) -> FileSpan {
-        FileSpan::new(
-            self.file,
-            Span::new(
-                BytePos::from(u32::from(range.start())),
-                BytePos::from(u32::from(range.end())),
-            ),
-        )
+        FileSpan::new(self.file, range_to_span(range))
     }
 
     /// Resolve a written annotation. `None` means the annotation named

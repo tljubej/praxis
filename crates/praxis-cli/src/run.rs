@@ -2,14 +2,12 @@
 //! (parse → analyze → typed HIR → MIR → Cranelift JIT → execute), and print the
 //! result of the program's `main` function.
 //!
-//! Exit codes:
-//! - `0` — program ran to completion with no fault.
-//! - `1` — one or more language errors (parse/type/lowering) reported, OR the
-//!   program faulted at runtime (overflow / division by zero / …).
-//! - `2` — usage error (file missing, unreadable, etc.).
-//!
-//! `run::run` prints its own diagnostics and never returns `Err` for a
-//! user-facing problem, so the exit code it returns is the final one.
+//! Exit codes are [`crate::exit_code`]'s closed set: `OK` when the program ran
+//! to completion with no fault, `FAILED` for a language error (parse / type /
+//! lowering) *or* a runtime fault (overflow / division by zero / …), `USAGE`
+//! when a source or `--input` file cannot be read. `run::run` prints its own
+//! diagnostics and never returns `Err` for a user-facing problem, so the code
+//! it returns is the final one.
 
 use std::path::Path;
 
@@ -18,10 +16,11 @@ use praxis_codegen_cranelift::Jit;
 use praxis_hir::{analyze_root, lower, mono::monomorphize, TypedItem};
 use praxis_mir::{annotate, lower_module, verify};
 use praxis_runtime::{Runtime, RuntimeContext};
+use praxis_source::diagnostic::sort_by_position;
 use praxis_types::TypeData;
 
 use crate::debug_mode::DebugMode;
-use crate::diagnostic_render;
+use crate::{diagnostic_render, exit_code, source_file};
 
 /// Run the `run` command against `file`. Returns the process exit code.
 ///
@@ -37,33 +36,34 @@ pub fn run(
     color: crate::color_mode::ColorMode,
 ) -> anyhow::Result<i32> {
     let path = Path::new(file);
-    let text = match std::fs::read_to_string(path) {
+    let text = match source_file::read(file) {
         Ok(t) => t,
-        Err(err) => {
-            eprintln!("error: failed to read source file `{file}`: {err}");
-            return Ok(2);
-        }
+        Err(code) => return Ok(code),
     };
 
     let source = praxis_source::SourceMap::new();
     let id = source.intern(path, text.clone());
 
     // Front end: parse → resolve → infer.
+    //
+    // Spelled out here rather than through `praxis_lsp::query::Snapshot`, which
+    // is where ADR-097 put this sequence and where `praxis check` reads it from:
+    // `run` goes on to lower the tree, and `Snapshot::parse` is crate-private so
+    // that a `SyntaxNode` never crosses the crate boundary (ADR-095). The order
+    // is the shared one either way — `sort_by_position` is the same comparator
+    // `Snapshot::diagnostics` sorts with.
     let parsed = praxis_parser::parse(id, &text);
     let mut diagnostics = parsed.diagnostics;
     let mut analysis = analyze_root(id, &parsed.tree);
     diagnostics.extend(analysis.diagnostics.clone());
-    diagnostics.sort_by_key(|d| {
-        let s = d.primary().span;
-        (s.start(), s.end())
-    });
+    sort_by_position(&mut diagnostics);
 
     // Honesty gate: never JIT malformed input. If any language errors exist
     // (parse / type / lowering), report them and stop.
     let rendered = diagnostic_render::render_all(&source, &diagnostics, color.palette());
     if rendered.has_errors() {
         diagnostic_render::write_to(&mut std::io::stderr(), &rendered)?;
-        return Ok(1);
+        return Ok(exit_code::FAILED);
     }
 
     // Lower to typed HIR, then MIR, then JIT. HIR lowering may emit its own
@@ -72,19 +72,16 @@ pub fn run(
         Some(r) => r,
         None => {
             eprintln!("error: internal — parse tree root is not a SOURCE_FILE");
-            return Ok(1);
+            return Ok(exit_code::FAILED);
         }
     };
     let module = lower(id, &root, &mut analysis);
     if !module.diagnostics.is_empty() {
         let mut all = module.diagnostics.clone();
-        all.sort_by_key(|d| {
-            let s = d.primary().span;
-            (s.start(), s.end())
-        });
+        sort_by_position(&mut all);
         let rendered = diagnostic_render::render_all(&source, &all, color.palette());
         diagnostic_render::write_to(&mut std::io::stderr(), &rendered)?;
-        return Ok(1);
+        return Ok(exit_code::FAILED);
     }
 
     // Which function the host calls, and its declared return type — both read
@@ -124,7 +121,7 @@ pub fn run(
         // it is reported as one and no code is generated from it.
         if let Err(errs) = verify(f) {
             eprintln!("internal error: {}", praxis_mir::verify::report(&errs));
-            return Ok(1);
+            return Ok(exit_code::FAILED);
         }
     }
 
@@ -132,14 +129,14 @@ pub fn run(
         Ok(j) => j,
         Err(e) => {
             eprintln!("error: could not initialize the JIT: {e}");
-            return Ok(1);
+            return Ok(exit_code::FAILED);
         }
     };
     let ids = match jit.compile(&funcs, &mut analysis.db) {
         Ok(ids) => ids,
         Err(e) => {
             eprintln!("error: JIT compilation failed: {e}");
-            return Ok(1);
+            return Ok(exit_code::FAILED);
         }
     };
 
@@ -147,7 +144,7 @@ pub fn run(
         Some(id) => *id,
         None => {
             eprintln!("error: no statements to run and no `main` function");
-            return Ok(1);
+            return Ok(exit_code::FAILED);
         }
     };
 
@@ -159,7 +156,7 @@ pub fn run(
     // into empty input: a program that reads a missing `--input` file would
     // otherwise "succeed" against input the user never supplied, and a
     // truncated read would silently produce a wrong answer. Same exit code
-    // (2, usage/I-O) as an unreadable source file.
+    // (`exit_code::USAGE`) as an unreadable source file.
     //
     // `--input FILE` is read here, before the program runs. A regular file
     // cannot block, and an unreadable one is worth reporting before any output
@@ -186,7 +183,7 @@ pub fn run(
             }
             Err(err) => {
                 eprintln!("error: failed to read input file `{path}`: {err}");
-                return Ok(2);
+                return Ok(exit_code::USAGE);
             }
         },
         None => praxis_runtime::install_input_reader(lazy_stdin::read),
@@ -237,7 +234,6 @@ pub fn run(
                 let session = praxis_debugger::session::DebugSession {
                     jit,
                     main_entry: entry,
-                    func_ids: ids,
                     runtime,
                     analysis,
                     source_text: text.clone(),
@@ -248,7 +244,6 @@ pub fn run(
                     // restart sees the same input; `clear_input_reader` below
                     // is what stops a second read of an exhausted stdin.
                     input_text: lazy_stdin::text(),
-                    input_path: input_file.map(Path::new).map(std::path::Path::to_path_buf),
                     eval_generation: std::rc::Rc::new(praxis_codegen_cranelift::Generation::new()),
                 };
                 // The session owns the input from here: every re-run
@@ -309,7 +304,7 @@ pub fn run(
             )?;
             jit.retire(runtime.teardown());
         }
-        return Ok(1);
+        return Ok(exit_code::FAILED);
     }
 
     // Print the result value through its descriptor (§11.4) — but only when
@@ -332,7 +327,7 @@ pub fn run(
     let proof = runtime.teardown();
     praxis_runtime::retire_parser_plans(&proof);
     jit.retire(proof);
-    Ok(0)
+    Ok(exit_code::OK)
 }
 
 /// Standard input, read by the program's **first** `read` and not before
@@ -374,12 +369,12 @@ mod lazy_stdin {
     /// A terminal stdin reads as empty rather than blocking on a human who was
     /// not asked for anything — the same rule the eager read used, kept here.
     ///
-    /// An I/O failure exits the process with the same message and the same
-    /// code (2, usage/I-O) the eager read used. It cannot be returned instead:
-    /// the runtime's reader is infallible by design, because what an unreadable
-    /// stdin *means* is the host's question. Laundering it into empty input is
-    /// the one thing that would be wrong — a truncated read would silently
-    /// produce a wrong answer.
+    /// An I/O failure exits the process with the same message and the same code
+    /// ([`crate::exit_code::USAGE`]) the eager read used. It cannot be returned
+    /// instead: the runtime's reader is infallible by design, because what an
+    /// unreadable stdin *means* is the host's question. Laundering it into empty
+    /// input is the one thing that would be wrong — a truncated read would
+    /// silently produce a wrong answer.
     pub(super) fn read() -> Vec<u8> {
         use std::io::IsTerminal;
         if std::io::stdin().is_terminal() {
@@ -393,7 +388,7 @@ mod lazy_stdin {
             }
             Err(err) => {
                 eprintln!("error: failed to read input from stdin: {err}");
-                std::process::exit(2);
+                std::process::exit(crate::exit_code::USAGE);
             }
         }
     }

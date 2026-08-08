@@ -207,7 +207,12 @@ pub fn build_call(
             for arg in args {
                 match arg {
                     CallArg::Parser(p) => child = Some(p),
-                    CallArg::Keyword { name, value } if name == "skip" => {
+                    // The keyword's name comes from the constructor, not from a
+                    // literal here: `Constructor::keyword_arg` is the one place
+                    // that says `chars` takes `skip:`.
+                    CallArg::Keyword { name, value }
+                        if Some(name.as_str()) == ctor.keyword_arg() =>
+                    {
                         // An unrecognized policy used to leave the default in
                         // place, so `skip: wihtespace` silently ran as
                         // `whitespace`.
@@ -243,7 +248,12 @@ pub fn build_call(
             for arg in args {
                 match arg {
                     CallArg::Parser(p) => child = Some(p),
-                    CallArg::Keyword { name, value } if name == "fill" => {
+                    // `fill:` is spelled by `Constructor::keyword_arg` and not
+                    // here, so the name this arm reads and the name the front
+                    // ends mint cannot drift apart.
+                    CallArg::Keyword { name, value }
+                        if Some(name.as_str()) == ctor.keyword_arg() =>
+                    {
                         // The decode lives here, once, so both front ends
                         // agree: `fill: "-"` reached the plan as `"\"-\""`,
                         // quotes and all, because the value was carried as raw
@@ -271,10 +281,12 @@ pub fn build_call(
                         fill = Some(decoded);
                     }
                     // `ragged` carries nothing: it exists so the shape table
-                    // can *require* it beside `fill:`. Named here rather than
+                    // can *require* it beside `fill:`. Matched here rather than
                     // swept up by a wildcard, so it is a decision and not a
-                    // leak.
-                    CallArg::Flag(f) if f == "ragged" => {}
+                    // leak — and matched against `Constructor::flag_arg`, so
+                    // the flag is `grid`'s and not a bare word this arm agrees
+                    // with by coincidence.
+                    CallArg::Flag(f) if Some(f.as_str()) == ctor.flag_arg() => {}
                     other => return Err(unexpected(&other)),
                 }
             }

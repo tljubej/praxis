@@ -221,12 +221,6 @@ impl RecordDef {
             .position(|f| f.name == name)
             .map(|i| (i, self.fields[i].ty))
     }
-
-    /// The field type at `index`, in definition order.
-    #[must_use]
-    pub fn field_at(&self, index: usize) -> Option<Type> {
-        self.fields.get(index).map(|f| f.ty)
-    }
 }
 
 /// One variant of an enum definition (§4.6). A variant carries a payload — a
@@ -299,14 +293,5 @@ impl EnumDef {
     #[must_use]
     pub fn variant(&self, name: &str) -> Option<usize> {
         self.variants.iter().position(|v| v.name == name)
-    }
-}
-
-impl TypeData {
-    /// `true` iff this slot currently holds an unbound (as-yet-unconstrained)
-    /// variable. Convenience used by diagnostics and occurs checks.
-    #[must_use]
-    pub fn is_unbound_var(&self) -> bool {
-        matches!(self, Self::Var(VarState::Unbound { .. }))
     }
 }

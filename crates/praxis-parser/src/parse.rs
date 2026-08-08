@@ -12,6 +12,7 @@
 //! (including `out(...)`), `fn` items, arithmetic, `if`/`else`, and `while`.
 //! Other constructs are not parsed; they recover with a diagnostic.
 
+use praxis_source::diagnostic::sort_by_position;
 use praxis_source::{BytePos, Span};
 use praxis_source::{DiagCode, Diagnostic, FileId, FileSpan, Severity};
 use praxis_syntax::{PraxisLanguage, SyntaxKind, SyntaxNode, Token};
@@ -48,10 +49,7 @@ pub fn parse(file: FileId, text: &str) -> ParseOutput {
     parser.parse_source_file();
     let (green, parse_diags) = parser.finish();
     diagnostics.extend(parse_diags);
-    diagnostics.sort_by_key(|d| {
-        let span = d.primary().span;
-        (span.start(), span.end())
-    });
+    sort_by_position(&mut diagnostics);
     let tree = SyntaxNode::new_root(green);
     ParseOutput {
         tree,
@@ -168,27 +166,26 @@ fn is_assignment_op(op: SyntaxKind) -> bool {
 /// Whether `kind` can start a match pattern (M7, §4.6). Used to decide whether
 /// to continue parsing arms after a newline (arms are comma-OR-newline separated).
 fn is_pattern_start(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::UNDERSCORE
-            | SyntaxKind::IntLit
-            | SyntaxKind::TextLit
-            // A character pattern (ADR-141). REP-10's regression class again:
-            // without it the arm list stops after `'#' => …` and every arm
-            // below it leaves the tree with no diagnostic at all.
-            | SyntaxKind::CharLit
-            | SyntaxKind::KW_TRUE
-            | SyntaxKind::KW_FALSE
-            | SyntaxKind::Ident
-            // A tuple pattern (REP-10). Without it a `match` arm after
-            // `(a, b) => …` stopped the arm list, so the second arm and every
-            // arm after it vanished from the tree.
-            | SyntaxKind::L_PAREN
-            // A headless record pattern (ADR-091). Same regression as REP-10's,
-            // one brace over: without it the arm list stopped *before*
-            // `{a, b} => …` and it, with every arm after it, left the tree.
-            | SyntaxKind::L_BRACE
-    )
+    // The literal half is `SyntaxKind::is_pattern_literal` — the same set
+    // `parse_pattern` consumes and `praxis_ast::Pattern` reads back, so a
+    // pattern this admits is one that parses. The character literal's ADR-141
+    // membership was REP-10's regression class here in particular: without it
+    // the arm list stopped after `'#' => …` and every arm below it left the
+    // tree with no diagnostic at all.
+    kind.is_pattern_literal()
+        || matches!(
+            kind,
+            SyntaxKind::UNDERSCORE
+                | SyntaxKind::Ident
+                // A tuple pattern (REP-10). Without it a `match` arm after
+                // `(a, b) => …` stopped the arm list, so the second arm and every
+                // arm after it vanished from the tree.
+                | SyntaxKind::L_PAREN
+                // A headless record pattern (ADR-091). Same regression as REP-10's,
+                // one brace over: without it the arm list stopped *before*
+                // `{a, b} => …` and it, with every arm after it, left the tree.
+                | SyntaxKind::L_BRACE
+        )
 }
 
 const fn bp(left: u8, right: u8) -> BindingPower {
@@ -236,6 +233,12 @@ enum StmtSeparator {
     /// `}` or end of file: there is no next statement to separate from.
     EndOfBlock,
 }
+
+/// What `(1,)` and `(Int,)` are told, in one place because they are one rule
+/// (§4.4, F5). The expression and the type position both reach it through
+/// [`Parser::parse_parenthesized`]; a second copy of the sentence is a second
+/// thing to forget to change.
+const ONE_ELEMENT_TUPLE_MSG: &str = "a tuple has two elements or more, so this comma names nothing";
 
 // ---------------------------------------------------------------------------
 // Parser state.
@@ -1259,18 +1262,14 @@ impl<'t> Parser<'t> {
     fn parse_atom(&mut self, lit: StructLit) {
         let kind = self.peek();
         match kind {
-            // `true`/`false` are literals too, and used to be a separate arm
-            // *because* it was the one that did not eat leading trivia first —
-            // so `true` spanned `" true"` where `1` spanned `"1"`. `start_node`
-            // owns that rule now (REP-63), so there is one arm.
-            SyntaxKind::IntLit
-            | SyntaxKind::FloatLit
-            | SyntaxKind::TextLit
-            | SyntaxKind::CharLit
-            | SyntaxKind::BacktickTemplate
-            | SyntaxKind::UnterminatedBacktickTemplate
-            | SyntaxKind::KW_TRUE
-            | SyntaxKind::KW_FALSE => {
+            // The `LITERAL` set is `SyntaxKind::is_literal_token`, because this
+            // is the site that *builds* the node and `praxis_ast::Literal::token`
+            // is the one that reads it back — the two had drifted over the
+            // unterminated template. `true`/`false` are literals too, and used to
+            // be a separate arm *because* it was the one that did not eat leading
+            // trivia first — so `true` spanned `" true"` where `1` spanned `"1"`.
+            // `start_node` owns that rule now (REP-63), so there is one arm.
+            k if k.is_literal_token() => {
                 self.start_node(SyntaxKind::LITERAL);
                 self.bump();
                 self.finish_node();
@@ -1369,22 +1368,50 @@ impl<'t> Parser<'t> {
     }
 
     fn parse_paren(&mut self) {
-        // Either `( expr )` (PAREN_EXPR) or `( e1, e2, … )` (TUPLE_EXPR). We do
-        // not know which until we see a comma after the first element, so take a
-        // checkpoint *before* the `(`, emit the shared prefix, then retroactively
-        // open the correct node kind at that checkpoint. Both `(` and `)` end up
-        // inside the single resulting node (no double nesting).
+        // Either `( expr )` (PAREN_EXPR) or `( e1, e2, … )` (TUPLE_EXPR) — the
+        // decision, and everything that follows from it, is
+        // `parse_parenthesized`'s.
         let cp = self.checkpoint_lhs();
         self.bump(); // `(`
+        self.parse_parenthesized(
+            cp,
+            SyntaxKind::TUPLE_EXPR,
+            SyntaxKind::PAREN_EXPR,
+            Self::parse_expr,
+        );
+    }
+
+    /// A parenthesized list, in either position: `( x )` / `( T )` groups,
+    /// `( a, b, … )` / `( T, U, … )` is a tuple. The caller has taken `cp`
+    /// *before* the `(` and consumed the `(`; `element` parses one element —
+    /// `parse_expr` in expression position, `parse_type` in type position.
+    ///
+    /// Which node this is cannot be known until a comma turns up after the first
+    /// element, so the shared prefix is emitted first and the right kind is then
+    /// opened *retroactively* at `cp`. Both `(` and `)` end up inside the single
+    /// resulting node (no double nesting).
+    ///
+    /// Expressions and types were two copies of this, which is how the §4.4/F5
+    /// arity rule below came to be written twice.
+    fn parse_parenthesized(
+        &mut self,
+        cp: rowan::Checkpoint,
+        tuple_kind: SyntaxKind,
+        single_kind: SyntaxKind,
+        mut element: impl FnMut(&mut Self),
+    ) {
         if self.at(SyntaxKind::R_PAREN) {
-            // Empty `()`: a degenerate paren expr, and it is `Unit` — the same
-            // type `()` names in an annotation, and the value `out(())` prints.
+            // Empty `()`, `single_kind` in both positions but for two reasons.
+            // As an expression it is a degenerate paren expr, and it is `Unit` —
+            // the same type `()` names in an annotation, and the value `out(())`
+            // prints. As a type it is recorded as a plain `TYPE_REF` and left
+            // for type resolution to reject.
             self.expect(SyntaxKind::R_PAREN, "`)`");
-            self.start_node_at(cp, SyntaxKind::PAREN_EXPR);
+            self.start_node_at(cp, single_kind);
             self.finish_node();
             return;
         }
-        self.parse_expr(); // first element
+        element(self); // first element
         let is_tuple = self.at(SyntaxKind::COMMA);
         let mut elements = 1usize;
         let mut trailing_comma = None;
@@ -1401,7 +1428,7 @@ impl<'t> Parser<'t> {
                     trailing_comma = Some(comma);
                     break;
                 }
-                self.parse_expr();
+                element(self);
                 elements += 1;
                 // Guarantee termination on any input.
                 self.ensure_progress(before);
@@ -1415,21 +1442,24 @@ impl<'t> Parser<'t> {
         // disagreeing is what MIR verification caught, and it caught it as an
         // abort, three passes past the comma that caused it (REP-69).
         //
+        // `(Int,)` is the type-position spelling of the same mistake, refused
+        // for the same reason: the annotation names a type the language does not
+        // have. It resolved to `Int` and accepted quietly, which meant
+        // `var t: (Int,) = 1` was a program whose annotation and whose value
+        // agreed by accident.
+        //
         // So the comma is refused here, and the node recovers as the grouping
         // the author most likely meant. `(1, 2,)` is untouched — a trailing
         // comma is punctuation at every arity the type exists at.
         let one_element_tuple = is_tuple && elements < 2;
         if one_element_tuple {
             let at = trailing_comma.unwrap_or_else(|| self.current_span());
-            self.error(
-                at,
-                "a tuple has two elements or more, so this comma names nothing",
-            );
+            self.error(at, ONE_ELEMENT_TUPLE_MSG);
         }
         let kind = if is_tuple && !one_element_tuple {
-            SyntaxKind::TUPLE_EXPR
+            tuple_kind
         } else {
-            SyntaxKind::PAREN_EXPR
+            single_kind
         };
         self.expect(SyntaxKind::R_PAREN, "`)`");
         self.start_node_at(cp, kind);
@@ -1582,7 +1612,7 @@ impl<'t> Parser<'t> {
     ///
     /// ```text
     /// pattern := "_"                                  // wildcard
-    ///          | literal                              // Int / Text / true / false
+    ///          | literal                              // `SyntaxKind::is_pattern_literal`
     ///          | Ident                                 // variable bind or payload-less variant
     ///          | Ident "(" [pattern ("," pattern)*] ")" // enum variant
     ///          | Ident "{" [pattern_field ("," pattern_field)*] "}" // record (§4.5)
@@ -1616,11 +1646,7 @@ impl<'t> Parser<'t> {
             SyntaxKind::UNDERSCORE => {
                 self.bump(); // `_`
             }
-            SyntaxKind::IntLit
-            | SyntaxKind::TextLit
-            | SyntaxKind::CharLit
-            | SyntaxKind::KW_TRUE
-            | SyntaxKind::KW_FALSE => {
+            k if k.is_pattern_literal() => {
                 self.bump(); // literal
             }
             // An interpolated literal is not a constant, so it is not a pattern
@@ -1794,59 +1820,17 @@ impl<'t> Parser<'t> {
             return;
         }
         if self.at(SyntaxKind::L_PAREN) {
-            // `( T )` (grouped) or `( T, U, … )` (tuple). Same checkpoint trick
-            // as `parse_paren`: emit the shared prefix, then open the right kind.
+            // `( T )` (grouped) or `( T, U, … )` (tuple) — the same list, the
+            // same arity rule and the same retroactive node as `parse_paren`'s,
+            // over `parse_type` instead of `parse_expr`.
             let cp = self.checkpoint_lhs();
             self.bump(); // `(`
-            if self.at(SyntaxKind::R_PAREN) {
-                // Empty `()` — degenerate; record as TYPE_REF and let type
-                // resolution reject it.
-                self.expect(SyntaxKind::R_PAREN, "`)`");
-                self.start_node_at(cp, SyntaxKind::TYPE_REF);
-                self.finish_node();
-                return;
-            }
-            self.parse_type(); // first element
-            let is_tuple = self.at(SyntaxKind::COMMA);
-            let mut elements = 1usize;
-            let mut trailing_comma = None;
-            if is_tuple {
-                loop {
-                    let before = self.meaningful_index();
-                    let comma = self.current_span();
-                    if !self.eat(SyntaxKind::COMMA) {
-                        break;
-                    }
-                    if self.at(SyntaxKind::R_PAREN) {
-                        trailing_comma = Some(comma); // trailing comma
-                        break;
-                    }
-                    self.parse_type();
-                    elements += 1;
-                    self.ensure_progress(before);
-                }
-            }
-            // `(Int,)` is the type-position spelling of `(1,)`, refused for the
-            // same reason: a tuple has two elements or more (§4.4, F5), so this
-            // annotation names a type the language does not have. It resolved to
-            // `Int` and accepted quietly, which meant `var t: (Int,) = 1` was a
-            // program whose annotation and whose value agreed by accident.
-            let one_element_tuple = is_tuple && elements < 2;
-            if one_element_tuple {
-                let at = trailing_comma.unwrap_or_else(|| self.current_span());
-                self.error(
-                    at,
-                    "a tuple has two elements or more, so this comma names nothing",
-                );
-            }
-            let kind = if is_tuple && !one_element_tuple {
-                SyntaxKind::TUPLE_TYPE
-            } else {
-                SyntaxKind::TYPE_REF
-            };
-            self.expect(SyntaxKind::R_PAREN, "`)`");
-            self.start_node_at(cp, kind);
-            self.finish_node();
+            self.parse_parenthesized(
+                cp,
+                SyntaxKind::TUPLE_TYPE,
+                SyntaxKind::TYPE_REF,
+                Self::parse_type,
+            );
             return;
         }
         // Nothing recognizable: emit a diagnostic + a PARSE_ERROR node, but make

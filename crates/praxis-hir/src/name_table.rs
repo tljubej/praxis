@@ -5,20 +5,15 @@
 //! shadowed bindings have distinct ids" invariant structural (AGENTS.md):
 //! `insert` always allocates a new slot, never reuses one.
 
-use std::collections::HashMap;
-
 use crate::symbol::{Symbol, SymbolId};
 
 /// All symbols in one compilation unit, addressable by id and by name+scope via
 /// the [`ScopeTree`](crate::scope::ScopeTree). The table owns the symbols; the
-/// scope tree owns the name→id mapping.
+/// scope tree owns the name→id mapping — there is deliberately no second
+/// name→id map here to disagree with it.
 #[derive(Clone, Debug, Default)]
 pub struct NameTable {
     symbols: Vec<Symbol>,
-    /// Quick lookup by id is the common path (index into `symbols`); this map is
-    /// kept for future reverse queries (e.g. "all symbols named `a`").
-    #[allow(dead_code)]
-    by_name: HashMap<String, Vec<SymbolId>>,
 }
 
 impl NameTable {
@@ -27,7 +22,6 @@ impl NameTable {
     pub fn insert(&mut self, mut sym: Symbol) -> SymbolId {
         let id = SymbolId(self.symbols.len() as u32);
         sym.id = id;
-        self.by_name.entry(sym.name.clone()).or_default().push(id);
         self.symbols.push(sym);
         id
     }

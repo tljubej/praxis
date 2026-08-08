@@ -9,7 +9,7 @@
 //! `praxis-source` stays dependency-free; this crate resolves `auto` to a
 //! concrete yes/no by checking the terminal, then hands a plain [`Palette`] down.
 
-use praxis_source::style::{ColorMode as SourceColorMode, Palette};
+use praxis_source::style::Palette;
 use std::io::IsTerminal;
 
 /// The `--color` mode. Parsed by clap from the flag value.
@@ -25,17 +25,8 @@ pub enum ColorMode {
 }
 
 impl ColorMode {
-    /// Resolve to the `praxis-source` color mode (for `should_style` checks).
-    #[must_use]
-    pub fn to_source(self) -> SourceColorMode {
-        match self {
-            ColorMode::Auto => SourceColorMode::Auto,
-            ColorMode::Always => SourceColorMode::Always,
-            ColorMode::Never => SourceColorMode::Never,
-        }
-    }
-
     /// Resolve to a concrete [`Palette`] by checking the terminal for `Auto`.
+    /// `Never` and `Always` need no I/O check.
     #[must_use]
     pub fn palette(self) -> Palette {
         let enabled = match self {

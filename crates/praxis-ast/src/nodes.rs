@@ -4,28 +4,22 @@
 //! are intentionally minimal: only nodes walked by name resolution or type
 //! inference appear here. The pattern is the rust-analyzer/rowan idiom — `cast`
 //! by kind, `syntax` for the borrow, accessors that find the relevant child.
+//!
+//! The newtype and its [`AstNode`] impl are declared by `ast_node!`; the
+//! accessors that follow each declaration are written by hand, since they are
+//! the only part that differs between wrappers.
 
 use praxis_syntax::{SyntaxKind as K, SyntaxNode, SyntaxToken};
 
-use crate::{child, children, name_token, AstNode};
+use crate::{ast_node, child, children, name_token, token_matching, AstNode};
 
 // ---------------------------------------------------------------------------
 // Root + items
 // ---------------------------------------------------------------------------
 
-/// The root of a parsed file. Children are statements / `fn` items.
-#[derive(Clone, Debug)]
-pub struct SourceFile {
-    syntax: SyntaxNode,
-}
-impl AstNode for SourceFile {
-    const KIND: K = K::SOURCE_FILE;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// The root of a parsed file. Children are statements / `fn` items.
+    SourceFile, SOURCE_FILE
 }
 impl SourceFile {
     /// The top-level statements and items, in source order. Items are returned
@@ -35,21 +29,11 @@ impl SourceFile {
     }
 }
 
-/// A `var name = expr` binding — the language's one binding form (§4.2,
-/// ADR-125). A later `var` of the same name in the same scope shadows the
-/// earlier one and may carry an unrelated type.
-#[derive(Clone, Debug)]
-pub struct VarStmt {
-    syntax: SyntaxNode,
-}
-impl AstNode for VarStmt {
-    const KIND: K = K::VAR_STMT;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A `var name = expr` binding — the language's one binding form (§4.2,
+    /// ADR-125). A later `var` of the same name in the same scope shadows the
+    /// earlier one and may carry an unrelated type.
+    VarStmt, VAR_STMT
 }
 impl VarStmt {
     /// The bound name (a bare `Ident` token).
@@ -66,19 +50,9 @@ impl VarStmt {
     }
 }
 
-/// A `name = expr` / `name += expr` reassignment.
-#[derive(Clone, Debug)]
-pub struct AssignStmt {
-    syntax: SyntaxNode,
-}
-impl AstNode for AssignStmt {
-    const KIND: K = K::ASSIGN_STMT;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A `name = expr` / `name += expr` reassignment.
+    AssignStmt, ASSIGN_STMT
 }
 impl AssignStmt {
     /// The reassigned name.
@@ -87,17 +61,11 @@ impl AssignStmt {
     }
     /// The assignment operator token (`=`, `+=`, …).
     pub fn op(&self) -> Option<SyntaxToken> {
-        use rowan::NodeOrToken;
-        self.syntax.children_with_tokens().find_map(|e| match e {
-            NodeOrToken::Token(t)
-                if matches!(
-                    t.kind(),
-                    K::EQ | K::PLUS_EQ | K::MINUS_EQ | K::STAR_EQ | K::SLASH_EQ | K::PERCENT_EQ
-                ) =>
-            {
-                Some(t)
-            }
-            _ => None,
+        token_matching(&self.syntax, |k| {
+            matches!(
+                k,
+                K::EQ | K::PLUS_EQ | K::MINUS_EQ | K::STAR_EQ | K::SLASH_EQ | K::PERCENT_EQ
+            )
         })
     }
     /// The right-hand-side expression.
@@ -106,19 +74,9 @@ impl AssignStmt {
     }
 }
 
-/// A top-level or nested `fn name(params) -> Ret { body }`.
-#[derive(Clone, Debug)]
-pub struct FnItem {
-    syntax: SyntaxNode,
-}
-impl AstNode for FnItem {
-    const KIND: K = K::FN_ITEM;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A top-level or nested `fn name(params) -> Ret { body }`.
+    FnItem, FN_ITEM
 }
 impl FnItem {
     /// The function name.
@@ -149,19 +107,9 @@ impl FnItem {
     }
 }
 
-/// A `struct Name { field: Type, … }` declaration (M7, §4.5).
-#[derive(Clone, Debug)]
-pub struct StructItem {
-    syntax: SyntaxNode,
-}
-impl AstNode for StructItem {
-    const KIND: K = K::STRUCT_ITEM;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A `struct Name { field: Type, … }` declaration (M7, §4.5).
+    StructItem, STRUCT_ITEM
 }
 impl StructItem {
     /// The struct name.
@@ -174,19 +122,9 @@ impl StructItem {
     }
 }
 
-/// An `enum Name { Variant, Variant(Type), … }` declaration (M7, §4.6).
-#[derive(Clone, Debug)]
-pub struct EnumItem {
-    syntax: SyntaxNode,
-}
-impl AstNode for EnumItem {
-    const KIND: K = K::ENUM_ITEM;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// An `enum Name { Variant, Variant(Type), … }` declaration (M7, §4.6).
+    EnumItem, ENUM_ITEM
 }
 impl EnumItem {
     /// The enum name.
@@ -199,21 +137,11 @@ impl EnumItem {
     }
 }
 
-/// One variant of an enum declaration: `Name` or `Name(Type, …)` (M7, §4.6).
-/// Named `EnumVariantNode` to avoid clashing with the type-system
-/// `EnumVariantDef`.
-#[derive(Clone, Debug)]
-pub struct EnumVariantNode {
-    syntax: SyntaxNode,
-}
-impl AstNode for EnumVariantNode {
-    const KIND: K = K::ENUM_VARIANT;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// One variant of an enum declaration: `Name` or `Name(Type, …)` (M7, §4.6).
+    /// Named `EnumVariantNode` to avoid clashing with the type-system
+    /// `EnumVariantDef`.
+    EnumVariantNode, ENUM_VARIANT
 }
 impl EnumVariantNode {
     /// The variant name.
@@ -233,21 +161,11 @@ impl EnumVariantNode {
     }
 }
 
-/// The `{ field: Type, … }` body of a struct, or the `{ field: expr, … }` body
-/// of a record literal. Reused for both declaration types and record-literal
-/// expressions (M7).
-#[derive(Clone, Debug)]
-pub struct FieldList {
-    syntax: SyntaxNode,
-}
-impl AstNode for FieldList {
-    const KIND: K = K::FIELD_LIST;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// The `{ field: Type, … }` body of a struct, or the `{ field: expr, … }` body
+    /// of a record literal. Reused for both declaration types and record-literal
+    /// expressions (M7).
+    FieldList, FIELD_LIST
 }
 impl FieldList {
     /// The fields in declaration order.
@@ -256,20 +174,10 @@ impl FieldList {
     }
 }
 
-/// A single `name: Type` field (in a struct) or `name: expr` / `name` (pun, in
-/// a record literal). M7, §4.5.
-#[derive(Clone, Debug)]
-pub struct Field {
-    syntax: SyntaxNode,
-}
-impl AstNode for Field {
-    const KIND: K = K::FIELD;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A single `name: Type` field (in a struct) or `name: expr` / `name` (pun, in
+    /// a record literal). M7, §4.5.
+    Field, FIELD
 }
 impl Field {
     /// The field name.
@@ -292,19 +200,9 @@ impl Field {
     }
 }
 
-/// The `(...)` parameter list.
-#[derive(Clone, Debug)]
-pub struct ParamList {
-    syntax: SyntaxNode,
-}
-impl AstNode for ParamList {
-    const KIND: K = K::PARAM_LIST;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// The `(...)` parameter list.
+    ParamList, PARAM_LIST
 }
 impl ParamList {
     /// The parameters, in order.
@@ -313,19 +211,9 @@ impl ParamList {
     }
 }
 
-/// A single `name: Type` parameter.
-#[derive(Clone, Debug)]
-pub struct Param {
-    syntax: SyntaxNode,
-}
-impl AstNode for Param {
-    const KIND: K = K::PARAM;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A single `name: Type` parameter.
+    Param, PARAM
 }
 impl Param {
     /// The parameter name, when the parameter *is* one.
@@ -368,10 +256,7 @@ impl Param {
     /// it has no slot of its own, and the enclosing pattern owns the argument.
     pub fn wildcard(&self) -> Option<SyntaxToken> {
         fn underscore(node: &SyntaxNode) -> Option<SyntaxToken> {
-            node.children_with_tokens().find_map(|e| match e {
-                rowan::NodeOrToken::Token(t) if t.kind() == K::UNDERSCORE => Some(t),
-                _ => None,
-            })
+            token_matching(node, |k| k == K::UNDERSCORE)
         }
         match self.pattern() {
             // `PatternKind::Wildcard` is also what a pattern node the parser gave
@@ -386,19 +271,9 @@ impl Param {
     }
 }
 
-/// A bare expression used as a statement (including trailing exprs in a block).
-#[derive(Clone, Debug)]
-pub struct ExprStmt {
-    syntax: SyntaxNode,
-}
-impl AstNode for ExprStmt {
-    const KIND: K = K::EXPR_STMT;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A bare expression used as a statement (including trailing exprs in a block).
+    ExprStmt, EXPR_STMT
 }
 impl ExprStmt {
     /// The contained expression.
@@ -421,6 +296,9 @@ impl ExprStmt {
 /// `var`, return types, struct fields and enum payloads: six positions where a
 /// written type was silently discarded and inference invented a fresh variable
 /// instead (TY-08).
+///
+/// Overriding `cast` is why this one is spelled out rather than declared by
+/// `ast_node!` like every other wrapper.
 #[derive(Clone, Debug)]
 pub struct TypeRef {
     syntax: SyntaxNode,
@@ -586,21 +464,11 @@ impl Expr {
     }
 }
 
-/// `Name { field: expr, … }` — a record-literal expression (M7, §4.5). The
-/// first child is the `PATH_EXPR` naming the struct type; the `FIELD_LIST` holds
-/// the field initializers (explicit `name: expr` or punned `name`).
-#[derive(Clone, Debug)]
-pub struct RecordLitExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for RecordLitExpr {
-    const KIND: K = K::RECORD_LIT_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// `Name { field: expr, … }` — a record-literal expression (M7, §4.5). The
+    /// first child is the `PATH_EXPR` naming the struct type; the `FIELD_LIST` holds
+    /// the field initializers (explicit `name: expr` or punned `name`).
+    RecordLitExpr, RECORD_LIT_EXPR
 }
 impl RecordLitExpr {
     /// The struct name (a path) being constructed.
@@ -613,25 +481,15 @@ impl RecordLitExpr {
     }
 }
 
-/// `receiver.0` — tuple element access (REP-08, §4.4). The first child is the
-/// receiver expression; the index is the trailing `IntLit` token.
-///
-/// Its own node rather than a `FieldExpr` holding an `IntLit`: an element is
-/// selected by **position** and the index must be a literal, where a field is
-/// selected by name. The two lower to two different runtime calls, and keeping
-/// them apart is what makes every exhaustive match downstream ask about both.
-#[derive(Clone, Debug)]
-pub struct TupleIndexExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for TupleIndexExpr {
-    const KIND: K = K::TUPLE_INDEX_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// `receiver.0` — tuple element access (REP-08, §4.4). The first child is the
+    /// receiver expression; the index is the trailing `IntLit` token.
+    ///
+    /// Its own node rather than a `FieldExpr` holding an `IntLit`: an element is
+    /// selected by **position** and the index must be a literal, where a field is
+    /// selected by name. The two lower to two different runtime calls, and keeping
+    /// them apart is what makes every exhaustive match downstream ask about both.
+    TupleIndexExpr, TUPLE_INDEX_EXPR
 }
 impl TupleIndexExpr {
     /// The receiver expression (`p` in `p.0`).
@@ -640,10 +498,7 @@ impl TupleIndexExpr {
     }
     /// The index token (`0` in `p.0`).
     pub fn index_token(&self) -> Option<SyntaxToken> {
-        self.syntax.children_with_tokens().find_map(|e| match e {
-            rowan::NodeOrToken::Token(t) if t.kind() == K::IntLit => Some(t),
-            _ => None,
-        })
+        token_matching(&self.syntax, |k| k == K::IntLit)
     }
     /// The index as a number, or `None` when the literal does not fit a `usize`.
     ///
@@ -656,25 +511,15 @@ impl TupleIndexExpr {
     }
 }
 
-/// `receiver[index]` — a subscript (REP-16). The first child is the receiver
-/// expression; the `ARG_LIST` holds the indices.
-///
-/// The index list is a list rather than one expression because §6.4's
-/// `grid[x, y]` takes two. Arity is part of what selects the operation — a
-/// one-index `Grid` subscript is as much a mistake as a two-index `Map` one — so
-/// it is carried rather than flattened.
-#[derive(Clone, Debug)]
-pub struct IndexExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for IndexExpr {
-    const KIND: K = K::INDEX_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// `receiver[index]` — a subscript (REP-16). The first child is the receiver
+    /// expression; the `ARG_LIST` holds the indices.
+    ///
+    /// The index list is a list rather than one expression because §6.4's
+    /// `grid[x, y]` takes two. Arity is part of what selects the operation — a
+    /// one-index `Grid` subscript is as much a mistake as a two-index `Map` one — so
+    /// it is carried rather than flattened.
+    IndexExpr, INDEX_EXPR
 }
 impl IndexExpr {
     /// The receiver expression (`m` in `m[key]`).
@@ -693,24 +538,14 @@ impl IndexExpr {
     }
 }
 
-/// `place = expr` / `place += expr` — a reassignment whose target is an
-/// expression rather than a name (REP-16): `m[key] = v`, `counts[key] += 1`.
-///
-/// Two expression children, in source order: the target and the value. A bare
-/// `name = expr` is an [`AssignStmt`] instead, whose target is a *token* — which
-/// is why this is a second node and not a widened first one.
-#[derive(Clone, Debug)]
-pub struct PlaceAssignStmt {
-    syntax: SyntaxNode,
-}
-impl AstNode for PlaceAssignStmt {
-    const KIND: K = K::PLACE_ASSIGN_STMT;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// `place = expr` / `place += expr` — a reassignment whose target is an
+    /// expression rather than a name (REP-16): `m[key] = v`, `counts[key] += 1`.
+    ///
+    /// Two expression children, in source order: the target and the value. A bare
+    /// `name = expr` is an [`AssignStmt`] instead, whose target is a *token* — which
+    /// is why this is a second node and not a widened first one.
+    PlaceAssignStmt, PLACE_ASSIGN_STMT
 }
 impl PlaceAssignStmt {
     /// The assignment target — the expression left of the operator.
@@ -804,20 +639,10 @@ impl PlaceAssignOp {
     }
 }
 
-/// `receiver.field` — field access (M7, §4.5). The first child is the receiver
-/// expression; the field name is the trailing `Ident` token.
-#[derive(Clone, Debug)]
-pub struct FieldExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for FieldExpr {
-    const KIND: K = K::FIELD_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// `receiver.field` — field access (M7, §4.5). The first child is the receiver
+    /// expression; the field name is the trailing `Ident` token.
+    FieldExpr, FIELD_EXPR
 }
 impl FieldExpr {
     /// The receiver expression (`p` in `p.x`).
@@ -839,19 +664,9 @@ impl FieldExpr {
     }
 }
 
-/// `match scrutinee { pattern => expr, … }` (M7, §4.6/§4.11).
-#[derive(Clone, Debug)]
-pub struct MatchExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for MatchExpr {
-    const KIND: K = K::MATCH_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// `match scrutinee { pattern => expr, … }` (M7, §4.6/§4.11).
+    MatchExpr, MATCH_EXPR
 }
 impl MatchExpr {
     /// The scrutinee expression being matched.
@@ -865,19 +680,9 @@ impl MatchExpr {
     }
 }
 
-/// One `pattern => expr` arm of a match expression (M7, §4.6).
-#[derive(Clone, Debug)]
-pub struct MatchArm {
-    syntax: SyntaxNode,
-}
-impl AstNode for MatchArm {
-    const KIND: K = K::MATCH_ARM;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// One `pattern => expr` arm of a match expression (M7, §4.6).
+    MatchArm, MATCH_ARM
 }
 impl MatchArm {
     /// The arm's pattern.
@@ -894,22 +699,12 @@ impl MatchArm {
     }
 }
 
-/// `|params| expr` — a closure expression (M7, §4.10). The params are `PARAM`
-/// children (no `PARAM_LIST` wrapper, since closures use `|…|` not `(…)`). The
-/// body is the trailing expression child. Closures capture outer variables
-/// automatically; the capture analysis lives in HIR.
-#[derive(Clone, Debug)]
-pub struct ClosureExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for ClosureExpr {
-    const KIND: K = K::CLOSURE_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// `|params| expr` — a closure expression (M7, §4.10). The params are `PARAM`
+    /// children (no `PARAM_LIST` wrapper, since closures use `|…|` not `(…)`). The
+    /// body is the trailing expression child. Closures capture outer variables
+    /// automatically; the capture analysis lives in HIR.
+    ClosureExpr, CLOSURE_EXPR
 }
 impl ClosureExpr {
     /// The closure's parameters (bare `name` or `name: Type`), in order.
@@ -926,20 +721,10 @@ impl ClosureExpr {
     }
 }
 
-/// A pattern (M7, §4.6): `_`, literal, variable bind, or enum variant
-/// (optionally with sub-patterns).
-#[derive(Clone, Debug)]
-pub struct Pattern {
-    syntax: SyntaxNode,
-}
-impl AstNode for Pattern {
-    const KIND: K = K::PATTERN;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A pattern (M7, §4.6): `_`, literal, variable bind, or enum variant
+    /// (optionally with sub-patterns).
+    Pattern, PATTERN
 }
 impl Pattern {
     /// The kind of this pattern, as a [`PatternKind`].
@@ -965,18 +750,18 @@ impl Pattern {
         {
             return PatternKind::Wildcard;
         }
-        // Check for a literal.
+        // Check for a literal. The set is `SyntaxKind::is_pattern_literal`, the
+        // one the parser accepts here — this copy used to include `FloatLit`,
+        // which §4.6 has no pattern for and neither `parse_pattern` nor this
+        // method's own doc ever admitted.
         if syntax
             .children_with_tokens()
-            .any(|e| matches!(e, rowan::NodeOrToken::Token(t) if matches!(t.kind(), K::IntLit | K::FloatLit | K::TextLit | K::CharLit | K::KW_TRUE | K::KW_FALSE)))
+            .any(|e| matches!(e, rowan::NodeOrToken::Token(t) if t.kind().is_pattern_literal()))
         {
             return PatternKind::Literal;
         }
         // Check for an Ident — record, variant or variable bind.
-        let name_tok = syntax.children_with_tokens().find_map(|e| match e {
-            rowan::NodeOrToken::Token(t) if t.kind() == K::Ident => Some(t),
-            _ => None,
-        });
+        let name_tok = name_token(syntax);
         // `Name { … }` or a headless `{ … }` — a record pattern (REP-10,
         // ADR-091). Decided *before* the name, and from the brace: the head is
         // optional, and a head with empty braces is still a record pattern. The
@@ -1019,51 +804,31 @@ impl Pattern {
     }
     /// The name token, if this is a variant or variable-bind pattern.
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        self.syntax.children_with_tokens().find_map(|e| match e {
-            rowan::NodeOrToken::Token(t) if t.kind() == K::Ident => Some(t),
-            _ => None,
-        })
+        crate::name_token(&self.syntax)
     }
 
     /// The literal token, if this is a literal pattern (`42`, `"hi"`, `'#'`,
     /// `true`, `false`). Used by the HIR lowerer to read the value the pattern
     /// tests against.
+    ///
+    /// The set is
+    /// [`SyntaxKind::is_pattern_literal`](praxis_syntax::SyntaxKind::is_pattern_literal),
+    /// so it cannot disagree with [`Pattern::kind`]'s: a token that made a
+    /// pattern `Literal` there and nothing here would have left the lowerer with
+    /// `None` and a wildcard, which is the irrefutable-arm class REP-66 is about.
     pub fn literal_token(&self) -> Option<SyntaxToken> {
-        self.syntax.children_with_tokens().find_map(|e| match e {
-            rowan::NodeOrToken::Token(t)
-                if matches!(
-                    t.kind(),
-                    K::IntLit | K::FloatLit | K::TextLit | K::CharLit | K::KW_TRUE | K::KW_FALSE
-                ) =>
-            {
-                Some(t)
-            }
-            _ => None,
-        })
+        token_matching(&self.syntax, K::is_pattern_literal)
     }
 }
 
-/// One `name` or `name: pattern` field of a record pattern (REP-10, §4.5).
-#[derive(Clone, Debug)]
-pub struct PatternField {
-    syntax: SyntaxNode,
-}
-impl AstNode for PatternField {
-    const KIND: K = K::PATTERN_FIELD;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// One `name` or `name: pattern` field of a record pattern (REP-10, §4.5).
+    PatternField, PATTERN_FIELD
 }
 impl PatternField {
     /// The field's name token.
     pub fn name(&self) -> Option<SyntaxToken> {
-        self.syntax.children_with_tokens().find_map(|e| match e {
-            rowan::NodeOrToken::Token(t) if t.kind() == K::Ident => Some(t),
-            _ => None,
-        })
+        name_token(&self.syntax)
     }
     /// The sub-pattern the field is matched against, or `None` when the field is
     /// punned (`P { x }`) — which binds the field to its own name.
@@ -1094,23 +859,19 @@ pub enum PatternKind {
     Record(Option<String>),
 }
 
-/// A literal: `IntLit`, `FloatLit`, `TextLit`, `CharLit`, `true`/`false`,
-/// backtick template.
-#[derive(Clone, Debug)]
-pub struct Literal {
-    syntax: SyntaxNode,
-}
-impl AstNode for Literal {
-    const KIND: K = K::LITERAL;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A literal: `IntLit`, `FloatLit`, `TextLit`, `CharLit`, `true`/`false`, and
+    /// either backtick template — the set is
+    /// [`SyntaxKind::is_literal_token`](praxis_syntax::SyntaxKind::is_literal_token).
+    Literal, LITERAL
 }
 impl Literal {
     /// The single literal token.
+    ///
+    /// The set is [`SyntaxKind::is_literal_token`](praxis_syntax::SyntaxKind::is_literal_token),
+    /// which is the parser's own — this list used to be spelled out here without
+    /// `UnterminatedBacktickTemplate`, so for a `LITERAL` the parser really does
+    /// build this answered `None` and the HIR read it as a node with no token.
     pub fn token(&self) -> Option<SyntaxToken> {
         use rowan::NodeOrToken;
         self.syntax
@@ -1119,34 +880,13 @@ impl Literal {
                 NodeOrToken::Token(t) => Some(t),
                 NodeOrToken::Node(_) => None,
             })
-            .find(|t| {
-                matches!(
-                    t.kind(),
-                    K::IntLit
-                        | K::FloatLit
-                        | K::TextLit
-                        | K::CharLit
-                        | K::BacktickTemplate
-                        | K::KW_TRUE
-                        | K::KW_FALSE
-                )
-            })
+            .find(|t| t.kind().is_literal_token())
     }
 }
 
-/// An interpolated text literal: `"a{x}b"` (§8.1, ADR-147).
-#[derive(Clone, Debug)]
-pub struct InterpExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for InterpExpr {
-    const KIND: K = K::INTERP_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// An interpolated text literal: `"a{x}b"` (§8.1, ADR-147).
+    InterpExpr, INTERP_EXPR
 }
 
 /// One piece of an interpolated literal, in source order.
@@ -1207,20 +947,10 @@ pub fn interp_fragment_text(token: &SyntaxToken) -> String {
     praxis_syntax::literal::decode_text_body(&raw[1..raw.len() - 1])
 }
 
-/// A name used as a value, or a callee (a bare `Ident` token, possibly followed
-/// by a call — the call wrapper wraps the path).
-#[derive(Clone, Debug)]
-pub struct PathExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for PathExpr {
-    const KIND: K = K::PATH_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A name used as a value, or a callee (a bare `Ident` token, possibly followed
+    /// by a call — the call wrapper wraps the path).
+    PathExpr, PATH_EXPR
 }
 impl PathExpr {
     /// The name being referenced.
@@ -1229,46 +959,30 @@ impl PathExpr {
     }
 }
 
-/// A binary operator expression `a op b`.
-#[derive(Clone, Debug)]
-pub struct BinExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for BinExpr {
-    const KIND: K = K::BIN_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A binary operator expression `a op b`.
+    BinExpr, BIN_EXPR
 }
 impl BinExpr {
     /// The operator token (`+`, `==`, …).
     pub fn op(&self) -> Option<SyntaxToken> {
-        use rowan::NodeOrToken;
-        self.syntax.children_with_tokens().find_map(|e| match e {
-            NodeOrToken::Token(t)
-                if matches!(
-                    t.kind(),
-                    K::PLUS
-                        | K::MINUS
-                        | K::STAR
-                        | K::SLASH
-                        | K::PERCENT
-                        | K::EQ2
-                        | K::NEQ
-                        | K::LT
-                        | K::GT
-                        | K::LTEQ
-                        | K::GTEQ
-                        | K::PIPE2
-                        | K::AMP2
-                ) =>
-            {
-                Some(t)
-            }
-            _ => None,
+        token_matching(&self.syntax, |k| {
+            matches!(
+                k,
+                K::PLUS
+                    | K::MINUS
+                    | K::STAR
+                    | K::SLASH
+                    | K::PERCENT
+                    | K::EQ2
+                    | K::NEQ
+                    | K::LT
+                    | K::GT
+                    | K::LTEQ
+                    | K::GTEQ
+                    | K::PIPE2
+                    | K::AMP2
+            )
         })
     }
     /// The left and right operands (children that are expressions).
@@ -1285,34 +999,20 @@ impl BinExpr {
     }
 }
 
-/// A range expression: `a..b` (half-open) or `a..=b` (inclusive) — §4.11,
-/// ADR-059.
-///
-/// Both bounds are required. There is no `a..`, `..b` or `..`: a range is a
-/// collection with a known length, and an open end has no length. The
-/// inclusiveness rides on the *operator token*, so `is_inclusive` is a question
-/// about the syntax and not a flag anyone has to keep in step.
-#[derive(Clone, Debug)]
-pub struct RangeExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for RangeExpr {
-    const KIND: K = K::RANGE_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A range expression: `a..b` (half-open) or `a..=b` (inclusive) — §4.11,
+    /// ADR-059.
+    ///
+    /// Both bounds are required. There is no `a..`, `..b` or `..`: a range is a
+    /// collection with a known length, and an open end has no length. The
+    /// inclusiveness rides on the *operator token*, so `is_inclusive` is a question
+    /// about the syntax and not a flag anyone has to keep in step.
+    RangeExpr, RANGE_EXPR
 }
 impl RangeExpr {
     /// The operator token (`..` or `..=`).
     pub fn op(&self) -> Option<SyntaxToken> {
-        use rowan::NodeOrToken;
-        self.syntax.children_with_tokens().find_map(|e| match e {
-            NodeOrToken::Token(t) if matches!(t.kind(), K::DOT2 | K::DOT2EQ) => Some(t),
-            _ => None,
-        })
+        token_matching(&self.syntax, |k| matches!(k, K::DOT2 | K::DOT2EQ))
     }
 
     /// Whether the upper bound is included (`..=`). A range whose operator token
@@ -1335,19 +1035,9 @@ impl RangeExpr {
     }
 }
 
-/// A unary operator expression `op x`.
-#[derive(Clone, Debug)]
-pub struct UnaryExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for UnaryExpr {
-    const KIND: K = K::UNARY_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A unary operator expression `op x`.
+    UnaryExpr, UNARY_EXPR
 }
 impl UnaryExpr {
     /// The operand expression.
@@ -1356,27 +1046,13 @@ impl UnaryExpr {
     }
     /// The operator token (`-`, `!`).
     pub fn op(&self) -> Option<SyntaxToken> {
-        use rowan::NodeOrToken;
-        self.syntax.children_with_tokens().find_map(|e| match e {
-            NodeOrToken::Token(t) if matches!(t.kind(), K::MINUS | K::BANG) => Some(t),
-            _ => None,
-        })
+        token_matching(&self.syntax, |k| matches!(k, K::MINUS | K::BANG))
     }
 }
 
-/// A parenthesized expression `( e )`.
-#[derive(Clone, Debug)]
-pub struct ParenExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for ParenExpr {
-    const KIND: K = K::PAREN_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A parenthesized expression `( e )`.
+    ParenExpr, PAREN_EXPR
 }
 impl ParenExpr {
     /// The inner expression.
@@ -1385,19 +1061,9 @@ impl ParenExpr {
     }
 }
 
-/// A tuple expression `( e1, e2, … )`.
-#[derive(Clone, Debug)]
-pub struct TupleExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for TupleExpr {
-    const KIND: K = K::TUPLE_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A tuple expression `( e1, e2, … )`.
+    TupleExpr, TUPLE_EXPR
 }
 impl TupleExpr {
     /// The tuple elements, in order.
@@ -1406,19 +1072,9 @@ impl TupleExpr {
     }
 }
 
-/// A list expression `[ e1, e2, … ]` — a `Vec` literal (§6.1).
-#[derive(Clone, Debug)]
-pub struct ListExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for ListExpr {
-    const KIND: K = K::LIST_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A list expression `[ e1, e2, … ]` — a `Vec` literal (§6.1).
+    ListExpr, LIST_EXPR
 }
 impl ListExpr {
     /// The `[element, …]` list. `None` only for a malformed node.
@@ -1433,19 +1089,9 @@ impl ListExpr {
     }
 }
 
-/// A `{ stmt; …; expr }` block.
-#[derive(Clone, Debug)]
-pub struct BlockExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for BlockExpr {
-    const KIND: K = K::BLOCK_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A `{ stmt; …; expr }` block.
+    BlockExpr, BLOCK_EXPR
 }
 impl BlockExpr {
     /// The statements/items of the block, in source order. A trailing expression
@@ -1455,19 +1101,9 @@ impl BlockExpr {
     }
 }
 
-/// An `if cond { … } else { … }` expression.
-#[derive(Clone, Debug)]
-pub struct IfExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for IfExpr {
-    const KIND: K = K::IF_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// An `if cond { … } else { … }` expression.
+    IfExpr, IF_EXPR
 }
 impl IfExpr {
     /// The condition expression (the first expression child).
@@ -1484,19 +1120,9 @@ impl IfExpr {
     }
 }
 
-/// An `else { … }` or `else if …` arm.
-#[derive(Clone, Debug)]
-pub struct ElseBranch {
-    syntax: SyntaxNode,
-}
-impl AstNode for ElseBranch {
-    const KIND: K = K::ELSE_BRANCH;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// An `else { … }` or `else if …` arm.
+    ElseBranch, ELSE_BRANCH
 }
 impl ElseBranch {
     /// The body of the else (a block, or a nested `if`).
@@ -1505,19 +1131,9 @@ impl ElseBranch {
     }
 }
 
-/// A `while cond { … }` expression.
-#[derive(Clone, Debug)]
-pub struct WhileExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for WhileExpr {
-    const KIND: K = K::WHILE_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A `while cond { … }` expression.
+    WhileExpr, WHILE_EXPR
 }
 impl WhileExpr {
     pub fn cond(&self) -> Option<Expr> {
@@ -1528,19 +1144,9 @@ impl WhileExpr {
     }
 }
 
-/// `for name in iter { body }` (M8, §4.11).
-#[derive(Clone, Debug)]
-pub struct ForExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for ForExpr {
-    const KIND: K = K::FOR_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// `for name in iter { body }` (M8, §4.11).
+    ForExpr, FOR_EXPR
 }
 impl ForExpr {
     /// The binding pattern (`for x in …` → `x`, `for (k, v) in …` → `(k, v)`).
@@ -1561,19 +1167,9 @@ impl ForExpr {
     }
 }
 
-/// `loop { body }` (M8, §4.11).
-#[derive(Clone, Debug)]
-pub struct LoopExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for LoopExpr {
-    const KIND: K = K::LOOP_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// `loop { body }` (M8, §4.11).
+    LoopExpr, LOOP_EXPR
 }
 impl LoopExpr {
     pub fn body(&self) -> Option<BlockExpr> {
@@ -1581,19 +1177,9 @@ impl LoopExpr {
     }
 }
 
-/// `break [expr]` (M8, §4.11).
-#[derive(Clone, Debug)]
-pub struct BreakExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for BreakExpr {
-    const KIND: K = K::BREAK_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// `break [expr]` (M8, §4.11).
+    BreakExpr, BREAK_EXPR
 }
 impl BreakExpr {
     /// The optional break value (`break expr`).
@@ -1602,34 +1188,14 @@ impl BreakExpr {
     }
 }
 
-/// `continue` (M8, §4.11).
-#[derive(Clone, Debug)]
-pub struct ContinueExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for ContinueExpr {
-    const KIND: K = K::CONTINUE_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// `continue` (M8, §4.11).
+    ContinueExpr, CONTINUE_EXPR
 }
 
-/// `return [expr]` (M8, §4.11).
-#[derive(Clone, Debug)]
-pub struct ReturnExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for ReturnExpr {
-    const KIND: K = K::RETURN_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// `return [expr]` (M8, §4.11).
+    ReturnExpr, RETURN_EXPR
 }
 impl ReturnExpr {
     /// The optional return value (`return expr`).
@@ -1638,19 +1204,9 @@ impl ReturnExpr {
     }
 }
 
-/// A `callee(args)` call expression (covers `out(...)`).
-#[derive(Clone, Debug)]
-pub struct CallExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for CallExpr {
-    const KIND: K = K::CALL_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A `callee(args)` call expression (covers `out(...)`).
+    CallExpr, CALL_EXPR
 }
 impl CallExpr {
     /// The callee (a `PathExpr` naming the function/builtin). Present for a
@@ -1684,23 +1240,13 @@ impl CallExpr {
     }
 }
 
-/// The `[Type, …]` type-argument list of a constructor call (REP-09, §3.3).
-///
-/// A sibling of the `ArgList` rather than part of the callee path, because it
-/// belongs to the *call*: `Counter` alone is still just a name, and the arguments
-/// say what the one call it heads constructs.
-#[derive(Clone, Debug)]
-pub struct TypeArgList {
-    syntax: SyntaxNode,
-}
-impl AstNode for TypeArgList {
-    const KIND: K = K::TYPE_ARG_LIST;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// The `[Type, …]` type-argument list of a constructor call (REP-09, §3.3).
+    ///
+    /// A sibling of the `ArgList` rather than part of the callee path, because it
+    /// belongs to the *call*: `Counter` alone is still just a name, and the arguments
+    /// say what the one call it heads constructs.
+    TypeArgList, TYPE_ARG_LIST
 }
 impl TypeArgList {
     /// The type arguments, in source order.
@@ -1709,20 +1255,10 @@ impl TypeArgList {
     }
 }
 
-/// A `read parser_expression` prefix expression (§7.1, M6). Its single child is
-/// the parser expression applied to the whole process-input buffer.
-#[derive(Clone, Debug)]
-pub struct ReadExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for ReadExpr {
-    const KIND: K = K::READ_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A `read parser_expression` prefix expression (§7.1, M6). Its single child is
+    /// the parser expression applied to the whole process-input buffer.
+    ReadExpr, READ_EXPR
 }
 impl ReadExpr {
     /// The parser expression body.
@@ -1731,20 +1267,10 @@ impl ReadExpr {
     }
 }
 
-/// A `parse(text, parser_expression)` call (§7.1, M6). The first child is the
-/// ordinary expression yielding the `Text`; the second is the parser expression.
-#[derive(Clone, Debug)]
-pub struct ParseExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for ParseExpr {
-    const KIND: K = K::PARSE_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A `parse(text, parser_expression)` call (§7.1, M6). The first child is the
+    /// ordinary expression yielding the `Text`; the second is the parser expression.
+    ParseExpr, PARSE_EXPR
 }
 impl ParseExpr {
     /// The `Text` expression to parse.
@@ -1757,20 +1283,10 @@ impl ParseExpr {
     }
 }
 
-/// A parser expression (§7 EBNF): an atomic, a template, or a constructor call.
-/// The body of `read` and the second argument of `parse`.
-#[derive(Clone, Debug)]
-pub struct ParserExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for ParserExpr {
-    const KIND: K = K::PARSER_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A parser expression (§7 EBNF): an atomic, a template, or a constructor call.
+    /// The body of `read` and the second argument of `parse`.
+    ParserExpr, PARSER_EXPR
 }
 impl ParserExpr {
     /// Which kind of parser expression this is.
@@ -1836,32 +1352,18 @@ pub enum ParserExprKind {
     Unknown,
 }
 
-/// A named argument inside a parser constructor call (M9, §7.5):
-/// `name: parser_expr`. The name is the leading `Ident` token; the value is the
-/// nested [`ParserExpr`]. Used by heterogeneous `sections`
-/// (`rules: lines(...)`), `chars`/`grid` keyword args (`skip: whitespace`,
-/// `fill: value`), and as the `repeated(...)` tail marker of `sections`.
-#[derive(Clone, Debug)]
-pub struct ParserNamedArg {
-    syntax: SyntaxNode,
-}
-impl AstNode for ParserNamedArg {
-    const KIND: K = K::PARSER_NAMED_ARG;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A named argument inside a parser constructor call (M9, §7.5):
+    /// `name: parser_expr`. The name is the leading `Ident` token; the value is the
+    /// nested [`ParserExpr`]. Used by heterogeneous `sections`
+    /// (`rules: lines(...)`), `chars`/`grid` keyword args (`skip: whitespace`,
+    /// `fill: value`), and as the `repeated(...)` tail marker of `sections`.
+    ParserNamedArg, PARSER_NAMED_ARG
 }
 impl ParserNamedArg {
     /// The argument name (the leading `Ident`).
     pub fn name(&self) -> Option<String> {
-        use rowan::NodeOrToken;
-        self.syntax.children_with_tokens().find_map(|e| match e {
-            NodeOrToken::Token(t) if t.kind() == K::Ident => Some(t.text().to_string()),
-            _ => None,
-        })
+        name_token(&self.syntax).map(|t| t.text().to_string())
     }
 
     /// The argument's parser-expression value.
@@ -1885,21 +1387,11 @@ impl ParserNamedArg {
     }
 }
 
-/// A `receiver.method(args)` method-call expression (M5, §16.2). The receiver
-/// is the first child expression; the method name is the `Ident` token after
-/// the `DOT`; the argument list follows.
-#[derive(Clone, Debug)]
-pub struct MethodCallExpr {
-    syntax: SyntaxNode,
-}
-impl AstNode for MethodCallExpr {
-    const KIND: K = K::METHOD_CALL_EXPR;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// A `receiver.method(args)` method-call expression (M5, §16.2). The receiver
+    /// is the first child expression; the method name is the `Ident` token after
+    /// the `DOT`; the argument list follows.
+    MethodCallExpr, METHOD_CALL_EXPR
 }
 impl MethodCallExpr {
     /// The receiver expression (`vec` in `vec.push(x)`).
@@ -1910,13 +1402,11 @@ impl MethodCallExpr {
     /// the first `Ident` that is not part of a child node (i.e. not the receiver
     /// path's name, which lives inside the `PATH_EXPR` child).
     pub fn method_name(&self) -> Option<SyntaxToken> {
-        // Walk tokens; the method name is the first `Ident` token that is a
-        // *direct* child of this node (the receiver's name lives inside its own
-        // child node, so it is not a direct token child here).
-        self.syntax
-            .children_with_tokens()
-            .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == K::Ident)
+        // The method name is the first `Ident` token that is a *direct* child of
+        // this node — the receiver's name lives inside its own child node, so it
+        // is not a direct token child here, which is exactly what `name_token`
+        // walks.
+        name_token(&self.syntax)
     }
     /// The argument list, if present.
     pub fn arg_list(&self) -> Option<ArgList> {
@@ -1924,19 +1414,9 @@ impl MethodCallExpr {
     }
 }
 
-/// The `(arg, arg, …)` argument list of a call.
-#[derive(Clone, Debug)]
-pub struct ArgList {
-    syntax: SyntaxNode,
-}
-impl AstNode for ArgList {
-    const KIND: K = K::ARG_LIST;
-    fn from_syntax(syntax: SyntaxNode) -> Self {
-        Self { syntax }
-    }
-    fn syntax(&self) -> &SyntaxNode {
-        &self.syntax
-    }
+ast_node! {
+    /// The `(arg, arg, …)` argument list of a call.
+    ArgList, ARG_LIST
 }
 impl ArgList {
     /// The arguments, in order.

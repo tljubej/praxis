@@ -21,7 +21,7 @@
 use std::fmt::Write;
 
 use crate::file::SourceMap;
-use crate::span::FileSpan;
+use crate::span::{BytePos, FileSpan};
 use crate::style;
 
 /// How serious a diagnostic is. Non-exhaustive so future severities (e.g. an
@@ -531,6 +531,11 @@ impl DiagCode {
     }
 
     /// Every code, so a test can assert the allocation is injective.
+    ///
+    /// [`code`](DiagCode::code)'s exhaustive match forces a new variant to be
+    /// *numbered*; only `all_lists_every_variant` forces it to be listed here,
+    /// and a variant missing from this list is one the injectivity test never
+    /// checks. `CallArityMismatch` was missing for exactly that reason.
     pub const ALL: &'static [DiagCode] = {
         use DiagCode::*;
         &[
@@ -575,6 +580,7 @@ impl DiagCode {
             NotAnAssignmentTarget,
             NameHasNoFunctionValue,
             ParserTemplateOutsideRead,
+            CallArityMismatch,
             InternalMissingType,
             NoMethodOnType,
             NoFieldOnType,
@@ -717,6 +723,23 @@ impl Diagnostic {
         self.primary
     }
 
+    /// The key that puts diagnostics in source order: the primary span's start,
+    /// then its end.
+    ///
+    /// **The one comparator.** Every stage of the front end concatenates its own
+    /// diagnostics onto the previous stage's and re-sorts, so this used to be
+    /// spelled out by hand at five call sites across four crates — including two
+    /// inside one function of `praxis run`.
+    ///
+    /// The file is not part of the key: every list sorted this way is one file's
+    /// diagnostics. [`sort_by_position`] is how a caller normally reaches this;
+    /// the key itself is public for a caller sorting diagnostics that are
+    /// decorated with something else.
+    #[inline]
+    pub fn sort_key(&self) -> (BytePos, BytePos) {
+        (self.primary.span.start(), self.primary.span.end())
+    }
+
     #[inline]
     pub fn notes(&self) -> &[DiagnosticNote] {
         &self.notes
@@ -761,6 +784,23 @@ impl Diagnostic {
             label: label.into(),
         });
         self
+    }
+
+    /// Offer `near` as a fix over `at`, with the compiler's one "did you mean"
+    /// wording (ADR-132).
+    ///
+    /// The near-miss fix is emitted from five places — an atomic parser, a
+    /// capture's parser, a parser constructor, an unresolved name, a method —
+    /// and every one of them writes `` did you mean `x`? `` over the span the
+    /// report already underlines. The threshold that decides *whether* to offer
+    /// a candidate is [`crate::nearest`]'s; this is where the sentence the user
+    /// reads lives, so the five cannot drift apart. `praxis-lsp` asserts on this
+    /// text, for one path at a time.
+    #[must_use]
+    pub fn with_did_you_mean(self, at: FileSpan, near: impl Into<String>) -> Diagnostic {
+        let near = near.into();
+        let label = format!("did you mean `{near}`?");
+        self.with_suggestion(at, near, label)
     }
 }
 
@@ -811,6 +851,21 @@ impl DiagnosticBuilder {
     pub fn finish(self) -> Diagnostic {
         self.diag
     }
+}
+
+/// Put `diags` in source order, by [`Diagnostic::sort_key`].
+///
+/// This runs at every stage boundary of the front end, because each stage
+/// appends its diagnostics to the previous stage's and the merged list has to be
+/// re-ordered: parse onto lex, inference onto name resolution, analysis onto
+/// parse.
+///
+/// **The sort is stable, and that is load-bearing.** Two diagnostics on the same
+/// span keep the order the stages produced them in, so the earlier stage's is
+/// still printed first — a lex error before the parse error it caused. Do not
+/// reach for `sort_unstable_by_key` here.
+pub fn sort_by_position(diags: &mut [Diagnostic]) {
+    diags.sort_by_key(Diagnostic::sort_key);
 }
 
 // ---------------------------------------------------------------------
@@ -985,18 +1040,107 @@ mod tests {
 
     /// …and `ALL` really is all of them. A variant left out of the list is a
     /// variant the injectivity test never checks.
+    ///
+    /// This was `assert_eq!(DiagCode::ALL.len(), 70)`, and a count is the one
+    /// guard the omission it stood for could walk straight past: `code()`'s
+    /// exhaustive match forces a new variant to be *numbered*, nothing forced
+    /// it into `ALL`, so leaving it out left the list and the count agreeing at
+    /// 70 and the assert green. `CallArityMismatch` (`Y024`) had never been
+    /// checked. The count only ever fired in the other direction — when `ALL`
+    /// *was* updated and the number was not.
+    ///
+    /// The match below forces the list instead, the way `CapKind::ALL` is
+    /// guarded in `praxis-stdlib`: a new variant stops this test compiling, in
+    /// the test whose whole subject is `ALL`.
     #[test]
     fn all_lists_every_variant() {
-        // `ALL` holds each variant once, so its length is the variant count.
-        // Update both together; the exhaustive match in `code()` is what makes
-        // adding a variant a compile error in the first place.
-        assert_eq!(DiagCode::ALL.len(), 70);
+        use DiagCode::*;
+
         let unique: std::collections::HashSet<_> = DiagCode::ALL.iter().collect();
         assert_eq!(
             unique.len(),
             DiagCode::ALL.len(),
             "a variant is listed twice"
         );
+
+        for &code in DiagCode::ALL {
+            // Exhaustive on purpose, and the exhaustiveness is the whole of it:
+            // adding a variant fails to compile here rather than passing
+            // quietly out of `ALL`.
+            match code {
+                UnterminatedBlockComment
+                | UnterminatedTemplate
+                | UnexpectedCharacter
+                | UnterminatedTextLiteral
+                | InvalidEscape
+                | UnterminatedCharLiteral
+                | CharLiteralIsNotOneCharacter
+                | UnexpectedToken
+                | ExpectedStatementSeparator
+                | InternalNotASourceFile
+                | UnknownName
+                | UnknownType
+                | NameIsNotAType
+                | DuplicateDeclaration
+                | NestedFunction
+                | RecursiveTypeDeclaration
+                | FunctionReadsOuterBinding
+                | NotARecordLiteralHead
+                | RetiredKeyword
+                | TypeMismatch
+                | InfiniteType
+                | AnnotationConflict
+                | NotEquatable
+                | NotIterable
+                | NotOrderable
+                | WrongTypeArgumentCount
+                | DuplicateMember
+                | CompoundAssignNonNumeric
+                | ReturnOutsideFunction
+                | BreakOutsideLoop
+                | IntLiteralOutOfRange
+                | NotHashable
+                | NotNumeric
+                | OperatorNotDefined
+                | ValueBreakOutsideLoopExpression
+                | GenericFunctionAsValue
+                | NoTupleElement
+                | NotIndexable
+                | NotAnAssignmentTarget
+                | NameHasNoFunctionValue
+                | ParserTemplateOutsideRead
+                | CallArityMismatch
+                | InternalMissingType
+                | NoMethodOnType
+                | NoFieldOnType
+                | MissingRecordFields
+                | UnknownRecordField
+                | DuplicateRecordField
+                | NonExhaustiveMatch
+                | UnreachableArm
+                | UnknownEnumVariant
+                | NotAPatternForType
+                | RefutableBinding
+                | PayloadArityMismatch
+                | MalformedParserExpression
+                | ParserConversion
+                | UnknownAtomic
+                | InvalidCaptureName
+                | UnknownCaptureKind
+                | UnknownConstructor
+                | InvalidConstructorArgument
+                | MixedCaptureNaming
+                | DuplicateCaptureName
+                | ConstructorArity
+                | EmptySeparator
+                | DuplicateSectionField
+                | EmptyFieldList
+                | UnnamedScalarBlockItem
+                | DuplicateChoiceCase
+                | MisplacedRepeatedTail
+                | TemplateScan => {}
+            }
+        }
     }
 
     #[test]
@@ -1045,6 +1189,43 @@ mod tests {
         assert_eq!(d.notes().len(), 1);
         assert_eq!(d.suggestions().len(), 1);
         assert_eq!(d.suggestions()[0].replacement.as_deref(), Some("value"));
+    }
+
+    /// The near-miss wording, pinned where it is now written (ADR-132). Five
+    /// front-end sites reach it through this one method, and `praxis-lsp`'s
+    /// quick-fix tests each cover one of them.
+    #[test]
+    fn did_you_mean_labels_the_fix() {
+        let at = span(FileId::SYNTHETIC, 0, 4);
+        let d = Diagnostic::new(
+            Severity::Error,
+            DiagCode::UnknownName,
+            "cannot find `lien`",
+            at,
+        )
+        .with_did_you_mean(at, "line");
+        assert_eq!(d.suggestions()[0].replacement.as_deref(), Some("line"));
+        assert_eq!(d.suggestions()[0].label, "did you mean `line`?");
+    }
+
+    /// Source order by primary span, and **stable** — the property the front end
+    /// relies on when it appends one stage's diagnostics to the previous
+    /// stage's: two on the same span keep the order they were produced in.
+    #[test]
+    fn sort_by_position_is_stable_source_order() {
+        let f = FileId::SYNTHETIC;
+        let d = |start, end, msg: &str| {
+            Diagnostic::new(
+                Severity::Error,
+                DiagCode::UnknownName,
+                msg,
+                span(f, start, end),
+            )
+        };
+        let mut diags = vec![d(10, 12, "c"), d(0, 5, "a"), d(0, 3, "b"), d(0, 5, "a2")];
+        sort_by_position(&mut diags);
+        let order: Vec<&str> = diags.iter().map(Diagnostic::message).collect();
+        assert_eq!(order, ["b", "a", "a2", "c"]);
     }
 
     #[test]

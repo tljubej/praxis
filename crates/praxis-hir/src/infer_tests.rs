@@ -7,17 +7,12 @@
 
 #![cfg(test)]
 
-use praxis_parser::parse;
-use praxis_source::{DiagnosticCategory, SourceMap};
+use praxis_source::DiagnosticCategory;
 
+use crate::hir_tests::test_util::{
+    analyze, analyze_and_lower, entry_fn, fn_named, parse_analyze_and_lower, parse_file,
+};
 use crate::{analyze_root, SymbolKind};
-
-fn analyze(text: &str) -> crate::Analysis {
-    let map = SourceMap::new();
-    let id = map.intern("infer_test.px", text);
-    let parsed = parse(id, text);
-    analyze_root(id, &parsed.tree)
-}
 
 /// The rendered scheme of the user binding named `name` (a Let/Var/Fn/Param),
 /// or `None` if it has no scheme.
@@ -68,9 +63,7 @@ fn has_input_error(text: &str) -> bool {
 /// means no compiler says no.
 fn errors_of(text: &str) -> Vec<String> {
     use praxis_source::Severity;
-    let map = SourceMap::new();
-    let id = map.intern("infer_test.px", text);
-    let parsed = parse(id, text);
+    let (id, parsed) = parse_file(text);
     parsed
         .diagnostics
         .iter()
@@ -87,9 +80,7 @@ fn errors_of(text: &str) -> Vec<String> {
 /// how those are asserted.
 fn parser_ast_of(src: &str) -> praxis_input_parser::ParserAst {
     use praxis_ast::AstNode;
-    let map = SourceMap::new();
-    let id = map.intern("parser_ast_test.px", src);
-    let parsed = parse(id, src);
+    let (id, parsed) = parse_file(src);
     let pe = parsed
         .tree
         .descendants()
@@ -126,14 +117,7 @@ fn reports_input_code(text: &str, code: praxis_source::DiagCode) -> bool {
 /// lowering (e.g. exhaustiveness Y120/Y121, which need the lowered patterns) are
 /// included. The exhaustiveness checker runs in `lower()`, not `analyze()`.
 fn has_type_error_with_lower(text: &str) -> bool {
-    use praxis_ast::AstNode;
-    use praxis_parser::parse;
-    let map = SourceMap::new();
-    let id = map.intern("lower_test.px", text);
-    let parsed = parse(id, text);
-    let mut analysis = analyze_root(id, &parsed.tree);
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = crate::lower::lower(id, &root, &mut analysis);
+    let (analysis, module) = analyze_and_lower(text);
     analysis
         .diagnostics
         .iter()
@@ -148,26 +132,14 @@ fn has_type_error_with_lower(text: &str) -> bool {
 /// diagnostic category. Useful for invariants (missing fields, illegal
 /// assignment) where the implementation does not yet have a dedicated code.
 fn is_clean_with_lower(text: &str) -> bool {
-    use praxis_ast::AstNode;
-    let map = SourceMap::new();
-    let id = map.intern("lower_clean_test.px", text);
-    let parsed = parse(id, text);
-    let mut analysis = analyze_root(id, &parsed.tree);
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = crate::lower::lower(id, &root, &mut analysis);
+    let (analysis, module) = analyze_and_lower(text);
     analysis.diagnostics.is_empty() && module.diagnostics.is_empty()
 }
 
 /// Every diagnostic `analyze` + `lower` produce, in source order.
 fn analyze_and_lower_diags(text: &str) -> Vec<praxis_source::Diagnostic> {
-    use praxis_ast::AstNode;
-    let map = SourceMap::new();
-    let id = map.intern("lower_diags_test.px", text);
-    let parsed = parse(id, text);
-    let mut analysis = analyze_root(id, &parsed.tree);
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = crate::lower::lower(id, &root, &mut analysis);
-    let mut all = analysis.diagnostics.clone();
+    let (analysis, module) = analyze_and_lower(text);
+    let mut all = analysis.diagnostics;
     all.extend(module.diagnostics);
     all
 }
@@ -1741,12 +1713,7 @@ fn only_a_loop_may_break_with_a_value() {
 #[test]
 fn never_branch_coerces_to_the_other_branch_type() {
     let src = "fn choose(flag: Bool) -> Int { if flag { panic(\"stop\") } else { 1 } }";
-    use praxis_ast::AstNode;
-
-    let map = SourceMap::new();
-    let id = map.intern("never_lub_test.px", src);
-    let parsed = parse(id, src);
-    let mut analysis = analyze_root(id, &parsed.tree);
+    let (analysis, module) = analyze_and_lower(src);
     assert!(
         !analysis
             .diagnostics
@@ -1754,16 +1721,7 @@ fn never_branch_coerces_to_the_other_branch_type() {
             .any(|d| d.code().category() == DiagnosticCategory::Type),
         "Never is the bottom type and must not conflict with an Int branch"
     );
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = crate::lower::lower(id, &root, &mut analysis);
-    let choose = module
-        .items
-        .iter()
-        .find_map(|item| match item {
-            crate::TypedItem::Fn(f) if f.name == "choose" => Some(f),
-            _ => None,
-        })
-        .expect("choose function");
+    let choose = fn_named(&module, "choose");
     let if_ty = match &choose.body.tail {
         crate::TypedExpr::If { ty, .. } => *ty,
         other => panic!("expected if tail, got {other:?}"),
@@ -3298,23 +3256,9 @@ fn map_get_returns_option() {
 
 #[test]
 fn lowered_polymorphic_call_result_uses_the_callsite_instantiation() {
-    use praxis_ast::AstNode;
-
     let src = "fn id(value) { value }\nfn main() -> Float { id(1.5) }";
-    let map = SourceMap::new();
-    let id = map.intern("lower_call_type_test.px", src);
-    let parsed = parse(id, src);
-    let mut analysis = analyze_root(id, &parsed.tree);
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = crate::lower::lower(id, &root, &mut analysis);
-    let main = module
-        .items
-        .iter()
-        .find_map(|item| match item {
-            crate::TypedItem::Fn(f) if f.name == "main" => Some(f),
-            _ => None,
-        })
-        .expect("main function");
+    let (analysis, module) = analyze_and_lower(src);
+    let main = fn_named(&module, "main");
     let call_ty = match &main.body.tail {
         crate::TypedExpr::Call { ty, .. } => *ty,
         other => panic!("expected call tail, got {other:?}"),
@@ -3328,23 +3272,9 @@ fn lowered_polymorphic_call_result_uses_the_callsite_instantiation() {
 
 #[test]
 fn lowered_generic_method_result_uses_the_receiver_instantiation() {
-    use praxis_ast::AstNode;
-
     let src = "fn main() -> Float { var values = Vec(); values.push(1.5); values.get(0) }";
-    let map = SourceMap::new();
-    let id = map.intern("lower_method_type_test.px", src);
-    let parsed = parse(id, src);
-    let mut analysis = analyze_root(id, &parsed.tree);
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = crate::lower::lower(id, &root, &mut analysis);
-    let main = module
-        .items
-        .iter()
-        .find_map(|item| match item {
-            crate::TypedItem::Fn(f) if f.name == "main" => Some(f),
-            _ => None,
-        })
-        .expect("main function");
+    let (analysis, module) = analyze_and_lower(src);
+    let main = fn_named(&module, "main");
     let get_ty = match &main.body.tail {
         crate::TypedExpr::MethodCall { name, ty, .. } if name == "get" => *ty,
         other => panic!("expected get method tail, got {other:?}"),
@@ -3358,23 +3288,9 @@ fn lowered_generic_method_result_uses_the_receiver_instantiation() {
 
 #[test]
 fn lowering_respects_a_local_that_shadows_an_enum_variant() {
-    use praxis_ast::AstNode;
-
     let src = "enum E { A }\nfn main() -> Int { var A = 7; A }";
-    let map = SourceMap::new();
-    let id = map.intern("variant_shadow_test.px", src);
-    let parsed = parse(id, src);
-    let mut analysis = analyze_root(id, &parsed.tree);
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = crate::lower::lower(id, &root, &mut analysis);
-    let main = module
-        .items
-        .iter()
-        .find_map(|item| match item {
-            crate::TypedItem::Fn(f) if f.name == "main" => Some(f),
-            _ => None,
-        })
-        .expect("main function");
+    let (analysis, module) = analyze_and_lower(src);
+    let main = fn_named(&module, "main");
     let path_ty = match &main.body.tail {
         crate::TypedExpr::Path { ty, .. } => *ty,
         other => panic!("the shadowing local must remain a Path, got {other:?}"),
@@ -3523,9 +3439,7 @@ fn record_literal_rejects_duplicate_fields() {
 #[test]
 fn wildcard_pattern_does_not_bind_a_value_named_underscore() {
     let src = "fn main() -> Int { match 1 { _ => _ } }";
-    let map = SourceMap::new();
-    let id = map.intern("wildcard_test.px", src);
-    let parsed = parse(id, src);
+    let (_, parsed) = parse_file(src);
     assert!(
         parsed
             .diagnostics
@@ -4276,13 +4190,8 @@ fn the_lexer_and_the_scanner_agree_on_where_a_template_ends() {
 
 #[test]
 fn immediately_invoked_closure_boxes_its_mutable_capture() {
-    use praxis_ast::AstNode;
-
     let src = "fn main() -> Int { var count = 0; (|n| { count += n; count })(1) }";
-    let map = SourceMap::new();
-    let id = map.intern("immediate_closure_test.px", src);
-    let parsed = parse(id, src);
-    let mut analysis = analyze_root(id, &parsed.tree);
+    let (analysis, module) = analyze_and_lower(src);
     let count = analysis
         .names
         .all()
@@ -4290,8 +4199,6 @@ fn immediately_invoked_closure_boxes_its_mutable_capture() {
         .find(|s| s.name == "count" && s.kind == SymbolKind::Var)
         .expect("count var")
         .id;
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = crate::lower::lower(id, &root, &mut analysis);
     assert!(
         module.escaping_vars.contains(&count),
         "a closure in Call.callee_expr still requires its captured var to be boxed"
@@ -4305,19 +4212,9 @@ fn immediately_invoked_closure_boxes_its_mutable_capture() {
 /// knew was an `Int`.
 #[test]
 fn a_capture_first_seen_as_an_assignment_target_keeps_its_type() {
-    use praxis_ast::AstNode;
-
     let src =
         "fn main() -> Int { var total = 0\n  var add = |n| { total = n }\n  add(5)\n  total }";
-    let map = SourceMap::new();
-    let id = map.intern("capture_assign_test.px", src);
-    let parsed = parse(id, src);
-    let mut analysis = analyze_root(id, &parsed.tree);
-    let module = crate::lower::lower(
-        id,
-        &praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap(),
-        &mut analysis,
-    );
+    let (analysis, module) = analyze_and_lower(src);
 
     fn find_closure(e: &crate::TypedExpr) -> Option<&crate::TypedExpr> {
         if matches!(e, crate::TypedExpr::Closure { .. }) {
@@ -4365,8 +4262,6 @@ fn a_capture_first_seen_as_an_assignment_target_keeps_its_type() {
 /// binding's type is that hole reopening.
 #[test]
 fn a_curried_closures_outer_literal_carries_the_transitive_capture() {
-    use praxis_ast::AstNode;
-
     fn outer_closure(b: &crate::TypedBlock) -> &crate::TypedExpr {
         fn find(e: &crate::TypedExpr) -> Option<&crate::TypedExpr> {
             if matches!(e, crate::TypedExpr::Closure { .. }) {
@@ -4386,15 +4281,7 @@ fn a_curried_closures_outer_literal_carries_the_transitive_capture() {
     }
 
     fn captures_of(src: &str) -> Vec<(String, String, crate::capture::CaptureKind)> {
-        let map = SourceMap::new();
-        let id = map.intern("curried_capture_test.px", src);
-        let parsed = parse(id, src);
-        let mut analysis = analyze_root(id, &parsed.tree);
-        let module = crate::lower::lower(
-            id,
-            &praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap(),
-            &mut analysis,
-        );
+        let (analysis, module) = analyze_and_lower(src);
         let crate::TypedItem::Fn(main) = &module.items[0];
         let crate::TypedExpr::Closure { captures, .. } = outer_closure(&main.body) else {
             unreachable!("outer_closure returns a closure")
@@ -4444,8 +4331,6 @@ fn a_curried_closures_outer_literal_carries_the_transitive_capture() {
 /// the tree this asks about, not its types.
 #[test]
 fn the_child_walker_reaches_every_expression_position() {
-    use praxis_ast::AstNode;
-
     // One closure per position, numbered so a failure names the missing one.
     let src = concat!(
         "struct R { f: Int }\n",
@@ -4472,13 +4357,8 @@ fn the_child_walker_reaches_every_expression_position() {
         "  return |n| 25\n",                // Return.value
         "}\n"
     );
-    let map = SourceMap::new();
-    let id = map.intern("child_walk_test.px", src);
-    let parsed = parse(id, src);
+    let (parsed, _analysis, module) = parse_analyze_and_lower(src);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-    let mut analysis = analyze_root(id, &parsed.tree);
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = crate::lower::lower(id, &root, &mut analysis);
 
     fn walk_expr(e: &crate::TypedExpr, found: &mut Vec<String>) {
         if let crate::TypedExpr::Closure { fn_name, .. } = e {
@@ -4611,9 +4491,7 @@ const EVERY_EXPRESSION_POSITION: &str = concat!(
 /// fallback from lowering into whoever consumes the map.
 #[test]
 fn every_expression_node_has_a_recorded_type() {
-    let map = SourceMap::new();
-    let id = map.intern("expr_types_total.px", EVERY_EXPRESSION_POSITION);
-    let parsed = parse(id, EVERY_EXPRESSION_POSITION);
+    let (id, parsed) = parse_file(EVERY_EXPRESSION_POSITION);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let analysis = analyze_root(id, &parsed.tree);
 
@@ -4650,14 +4528,7 @@ fn every_expression_node_has_a_recorded_type() {
 /// used to fall back to a fresh variable nineteen times over.
 #[test]
 fn lowering_invents_no_type_for_any_expression_position() {
-    use praxis_ast::AstNode;
-
-    let map = SourceMap::new();
-    let id = map.intern("no_invented_types.px", EVERY_EXPRESSION_POSITION);
-    let parsed = parse(id, EVERY_EXPRESSION_POSITION);
-    let mut analysis = analyze_root(id, &parsed.tree);
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = crate::lower::lower(id, &root, &mut analysis);
+    let (_, module) = analyze_and_lower(EVERY_EXPRESSION_POSITION);
     let invented: Vec<_> = module
         .diagnostics
         .iter()
@@ -4678,9 +4549,7 @@ fn a_node_key_separates_an_expression_from_the_name_inside_it() {
     use praxis_ast::AstNode;
 
     let src = "fn main() -> Int { var x = 1\n  x }\n";
-    let map = SourceMap::new();
-    let id = map.intern("node_key.px", src);
-    let parsed = parse(id, src);
+    let (id, parsed) = parse_file(src);
     let analysis = analyze_root(id, &parsed.tree);
 
     let path = parsed
@@ -4713,8 +4582,6 @@ fn a_node_key_separates_an_expression_from_the_name_inside_it() {
 /// to, and got a different answer whenever one branch diverged.
 #[test]
 fn a_lowered_branch_carries_the_join_not_its_first_arm() {
-    use praxis_ast::AstNode;
-
     let src = concat!(
         "fn main(c: Bool, n: Int) -> Int {\n",
         "  var a = if c { panic(\"x\") } else { 1 }\n",
@@ -4722,25 +4589,13 @@ fn a_lowered_branch_carries_the_join_not_its_first_arm() {
         "  a + b\n",
         "}\n"
     );
-    let map = SourceMap::new();
-    let id = map.intern("lowered_join.px", src);
-    let parsed = parse(id, src);
-    let mut analysis = analyze_root(id, &parsed.tree);
+    let (analysis, module) = analyze_and_lower(src);
     assert!(
         analysis.diagnostics.is_empty(),
         "{:?}",
         analysis.diagnostics
     );
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = crate::lower::lower(id, &root, &mut analysis);
-    let main = module
-        .items
-        .iter()
-        .find_map(|item| match item {
-            crate::TypedItem::Fn(f) if f.name == "main" => Some(f),
-            _ => None,
-        })
-        .expect("main");
+    let main = fn_named(&module, "main");
     let mut rendered = Vec::new();
     for stmt in &main.body.stmts {
         if let crate::TypedStmt::Var { name, init, .. } = stmt {
@@ -4764,9 +4619,7 @@ fn a_lowered_branch_carries_the_join_not_its_first_arm() {
 #[test]
 fn a_method_name_is_not_a_name_reference() {
     let src = "fn main(v: Vec[Int]) -> Int { v.len() }\n";
-    let map = SourceMap::new();
-    let id = map.intern("method_ref.px", src);
-    let parsed = parse(id, src);
+    let (id, parsed) = parse_file(src);
     let analysis = analyze_root(id, &parsed.tree);
     let name_tok = parsed
         .tree
@@ -4821,23 +4674,9 @@ fn a_constructor_is_a_symbol_kind_not_a_spelling() {
 /// from a binding. Only the kind can.
 #[test]
 fn a_local_holding_a_variant_is_not_a_constructor() {
-    use praxis_ast::AstNode;
-
     let src = "enum E { A }\nfn main() -> Int {\n  var A = 7\n  A\n}\n";
-    let map = SourceMap::new();
-    let id = map.intern("variant_value.px", src);
-    let parsed = parse(id, src);
-    let mut analysis = analyze_root(id, &parsed.tree);
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = crate::lower::lower(id, &root, &mut analysis);
-    let main = module
-        .items
-        .iter()
-        .find_map(|item| match item {
-            crate::TypedItem::Fn(f) if f.name == "main" => Some(f),
-            _ => None,
-        })
-        .expect("main");
+    let (_, module) = analyze_and_lower(src);
+    let main = fn_named(&module, "main");
     assert!(
         matches!(main.body.tail, crate::TypedExpr::Path { .. }),
         "the local shadows the constructor: {:?}",
@@ -5430,24 +5269,10 @@ fn an_out_of_range_int_literal_is_reported_rather_than_saturated() {
 /// apart — the same reason `SymbolKind::EnumVariant` exists (HIR-03).
 #[test]
 fn a_fn_name_in_value_position_is_a_function_value() {
-    use praxis_ast::AstNode;
-
     let src = "fn double(n: Int) -> Int { n * 2 }\n\
                fn main() -> Int {\n  var f = double\n  var g = |n| n * 3\n  f(1) + g(1)\n}\n";
-    let map = SourceMap::new();
-    let id = map.intern("fn_value.px", src);
-    let parsed = parse(id, src);
-    let mut analysis = analyze_root(id, &parsed.tree);
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = crate::lower::lower(id, &root, &mut analysis);
-    let main = module
-        .items
-        .iter()
-        .find_map(|item| match item {
-            crate::TypedItem::Fn(f) if f.name == "main" => Some(f),
-            _ => None,
-        })
-        .expect("main function");
+    let (analysis, module) = analyze_and_lower(src);
+    let main = fn_named(&module, "main");
 
     // `var f = double` — a function value naming `double`, typed as `double`'s
     // own signature.
@@ -6442,15 +6267,9 @@ fn the_parsers_type_constructors_are_the_compilers() {
 /// then vanished between the typed tree and MIR.
 #[test]
 fn a_files_top_level_statements_become_one_generated_item() {
-    use praxis_ast::AstNode;
-    let lowered = |text: &str| {
-        let map = SourceMap::new();
-        let id = map.intern("entry_test.px", text);
-        let parsed = parse(id, text);
-        let mut analysis = analyze_root(id, &parsed.tree);
-        let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-        crate::lower::lower(id, &root, &mut analysis)
-    };
+    let lowered = |text: &str| analyze_and_lower(text).1;
+    // Not `entry_fn`: the second case asserts there is **no** entry item, which
+    // a panicking lookup could not say.
     let entry_of = |module: &crate::TypedModule| -> Option<usize> {
         module.items.iter().find_map(|item| match item {
             crate::TypedItem::Fn(f) if f.name == crate::ENTRY_NAME => Some(f.body.stmts.len()),
@@ -6481,14 +6300,7 @@ fn a_files_top_level_statements_become_one_generated_item() {
     // file have no *value*: `out(overlaps(segments, false))` is a statement and
     // not a result the host would print a second time.
     let module = lowered("out(1)\n");
-    let entry = module
-        .items
-        .iter()
-        .find_map(|item| match item {
-            crate::TypedItem::Fn(f) if f.name == crate::ENTRY_NAME => Some(f),
-            _ => None,
-        })
-        .expect("an entry item");
+    let entry = entry_fn(&module);
     assert!(entry.params.is_empty());
     assert_eq!(entry.body.stmts.len(), 1);
     assert!(matches!(
@@ -6543,23 +6355,9 @@ fn a_files_top_level_statements_become_one_generated_item() {
 /// answer wrongly.
 #[test]
 fn a_synthesized_block_tail_carries_no_span() {
-    use praxis_ast::AstNode;
-    let map = SourceMap::new();
     let src = "fn f() -> Unit {\n  var x = 1\n}\n";
-    let id = map.intern("tail_test.px", src);
-    let parsed = parse(id, src);
-    let mut analysis = analyze_root(id, &parsed.tree);
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = crate::lower::lower(id, &root, &mut analysis);
-
-    let f = module
-        .items
-        .iter()
-        .find_map(|item| match item {
-            crate::TypedItem::Fn(f) if f.name == "f" => Some(f),
-            _ => None,
-        })
-        .expect("`f` is an item");
+    let (_, module) = analyze_and_lower(src);
+    let f = fn_named(&module, "f");
     assert!(
         matches!(
             f.body.tail,
@@ -6574,19 +6372,8 @@ fn a_synthesized_block_tail_carries_no_span() {
     // A tail the source *did* write keeps its own span — the change is about
     // what the compiler invents, not about erasing provenance generally.
     let src = "fn g() -> Int {\n  var x = 1\n  x\n}\n";
-    let id = map.intern("tail_test2.px", src);
-    let parsed = parse(id, src);
-    let mut analysis = analyze_root(id, &parsed.tree);
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-    let module = crate::lower::lower(id, &root, &mut analysis);
-    let g = module
-        .items
-        .iter()
-        .find_map(|item| match item {
-            crate::TypedItem::Fn(f) if f.name == "g" => Some(f),
-            _ => None,
-        })
-        .expect("`g` is an item");
+    let (_, module) = analyze_and_lower(src);
+    let g = fn_named(&module, "g");
     let span = match &g.body.tail {
         crate::TypedExpr::Path { span, .. } => *span,
         other => panic!("expected the written tail `x`, got {other:?}"),
@@ -8245,27 +8032,9 @@ fn a_char_literal_and_a_text_subscript_are_the_same_type() {
 /// arm waiting for a producer. This is the producer.
 #[test]
 fn a_char_literal_lowers_to_a_lit_char() {
-    use praxis_ast::AstNode;
-    let lowered = |text: &str| {
-        let map = SourceMap::new();
-        let id = map.intern("char_lower_test.px", text);
-        let parsed = parse(id, text);
-        let mut analysis = analyze_root(id, &parsed.tree);
-        let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).unwrap();
-        let module = crate::lower::lower(id, &root, &mut analysis);
-        (analysis, module)
-    };
-
     // `'a'` is U+0061, and the type on the node is the one inference decided.
-    let (analysis, module) = lowered("var c = 'a'\nout(c)\n");
-    let entry = module
-        .items
-        .iter()
-        .find_map(|item| match item {
-            crate::TypedItem::Fn(f) if f.name == crate::ENTRY_NAME => Some(f),
-            _ => None,
-        })
-        .expect("an entry item");
+    let (analysis, module) = analyze_and_lower("var c = 'a'\nout(c)\n");
+    let entry = entry_fn(&module);
     let init = match &entry.body.stmts[0] {
         crate::TypedStmt::Var { init, .. } => init,
         other => panic!("expected a var statement, got {other:?}"),
@@ -8286,15 +8055,8 @@ fn a_char_literal_lowers_to_a_lit_char() {
     // to their first byte — the decoder is `praxis-syntax`'s, asked here for the
     // second time after the lexer asked it for the length.
     for (src, code) in [("'\\n'", 0x0A_u32), ("'é'", 0xE9), ("'😀'", 0x1_F600)] {
-        let (_, module) = lowered(&format!("var c = {src}\n"));
-        let entry = module
-            .items
-            .iter()
-            .find_map(|item| match item {
-                crate::TypedItem::Fn(f) if f.name == crate::ENTRY_NAME => Some(f),
-                _ => None,
-            })
-            .expect("an entry item");
+        let (_, module) = analyze_and_lower(&format!("var c = {src}\n"));
+        let entry = entry_fn(&module);
         let init = match &entry.body.stmts[0] {
             crate::TypedStmt::Var { init, .. } => init,
             other => panic!("expected a var statement, got {other:?}"),

@@ -50,7 +50,11 @@
 //! what a quote means would put the lexer's resume path and this scanner on
 //! different rules at exactly the depth nobody tests.
 
-use crate::template::template_end;
+// `quoted_run` and `skip_scalar` are `template`'s: a `'…'` in a hole is a `"…"`
+// in a capture with one byte changed, and both scanners step over a multi-byte
+// scalar the same way. This module keeps no copy of either, for the reason that
+// module's doc gives.
+use crate::template::{quoted_run, skip_scalar, template_end};
 use crate::MAX_INTERPOLATION_NESTING;
 
 /// Where a `"…"` literal ends, and whether it has any holes.
@@ -207,7 +211,7 @@ fn hole(src: &str, open: usize, level: usize) -> Result<usize, usize> {
             // stop inside the inner literal's own hole.
             b'"' => pos = run(src, pos, level + 1)?.0,
             // `'}'` is a character, not the end of the hole (ADR-141).
-            b'\'' => pos = char_literal(bytes, pos)?,
+            b'\'' => pos = quoted_run(bytes, pos, b'\'')?,
             // A backtick template's interior is the input-parser DSL's and is
             // full of braces. `template_end` is the one rule for its extent, and
             // it is the rule the lexer's `eat_template` follows.
@@ -218,26 +222,6 @@ fn hole(src: &str, open: usize, level: usize) -> Result<usize, usize> {
             // `//` eats the rest of the line, so the literal cannot close on it.
             b'/' if bytes.get(pos + 1) == Some(&b'/') => return Err(pos),
             b'/' if bytes.get(pos + 1) == Some(&b'*') => pos = block_comment(bytes, pos)?,
-            _ => pos = skip_scalar(bytes, pos),
-        }
-    }
-    Err(bytes.len())
-}
-
-/// One `'…'` run, honouring `\`. Answers the index just past the closing quote.
-fn char_literal(bytes: &[u8], open: usize) -> Result<usize, usize> {
-    let mut pos = open + 1;
-    while pos < bytes.len() {
-        match bytes[pos] {
-            b'\n' => return Err(pos),
-            b'\r' if bytes.get(pos + 1) == Some(&b'\n') => return Err(pos),
-            b'\\' => {
-                if matches!(bytes.get(pos + 1), Some(b'\n') | None) {
-                    return Err(pos + 1);
-                }
-                pos = skip_scalar(bytes, pos + 1);
-            }
-            b'\'' => return Ok(pos + 1),
             _ => pos = skip_scalar(bytes, pos),
         }
     }
@@ -268,18 +252,6 @@ fn block_comment(bytes: &[u8], open: usize) -> Result<usize, usize> {
         }
     }
     Err(bytes.len())
-}
-
-/// The index just past the whole UTF-8 scalar beginning at `pos`.
-fn skip_scalar(bytes: &[u8], pos: usize) -> usize {
-    if pos >= bytes.len() {
-        return bytes.len();
-    }
-    let mut next = pos + 1;
-    while next < bytes.len() && (bytes[next] & 0xC0) == 0x80 {
-        next += 1;
-    }
-    next
 }
 
 #[cfg(test)]
@@ -413,6 +385,33 @@ mod tests {
         );
         // End of text with nothing after it.
         assert_eq!(text_end("\"{a}", 0), TextEnd::Unterminated { stopped: 4 });
+    }
+
+    /// A dangling `\` inside a character literal in a hole is not a continuation
+    /// either, and it stops at the line terminator's *first* byte, so a CRLF is
+    /// not split. That byte is the one place the character-literal scanner
+    /// disagreed with [`fragment`] before the two became one [`quoted_run`].
+    #[test]
+    fn a_dangling_escape_in_a_char_literal_stops_at_the_line_terminator() {
+        // The `'` opens at 7 and the `\` is at 8, so 9 is the `\n` in one case
+        // and the `\r` in the other — the same index either way.
+        assert_eq!(
+            text_end("\"{c == '\\\nx'}\"", 0),
+            TextEnd::Unterminated { stopped: 9 }
+        );
+        assert_eq!(
+            text_end("\"{c == '\\\r\nx'}\"", 0),
+            TextEnd::Unterminated { stopped: 9 }
+        );
+    }
+
+    /// Only the quote that opened a run closes it: the shared scanner takes its
+    /// terminator as an argument, so a `"` inside a `'…'` is an ordinary
+    /// character and the hole is still open after it.
+    #[test]
+    fn a_quote_inside_a_char_literal_does_not_end_the_hole() {
+        assert!(closed(r#""{c == '"'}""#));
+        assert_eq!(holes(r#""{c == '"'}""#), Some(1));
     }
 
     /// Nesting is bounded, and past the bound the answer is an ordinary

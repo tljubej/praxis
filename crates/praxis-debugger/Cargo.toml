@@ -18,7 +18,6 @@ praxis-parser.workspace = true
 praxis-hir.workspace = true
 praxis-mir.workspace = true
 praxis-codegen-cranelift.workspace = true
-cranelift-module.workspace = true
 anyhow.workspace = true
 ratatui.workspace = true
 

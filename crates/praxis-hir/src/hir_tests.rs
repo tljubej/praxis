@@ -8,24 +8,24 @@
 
 #![cfg(test)]
 
+// The helpers every test module in this crate shares: the analyze/lower
+// preamble and the lookups for a lowered item. They live beside the tests that
+// use them, and the other modules reach them as `crate::hir_tests::test_util`.
+#[path = "test_util.rs"]
+pub(crate) mod test_util;
+
 use std::collections::HashMap;
 
-use praxis_parser::parse;
-use praxis_source::{DiagnosticCategory, SourceMap};
+use praxis_source::DiagnosticCategory;
 use rowan::TextRange;
 
-use crate::{analyze_root, NameRef, ResolvedRef, SymbolKind};
+use crate::{NameRef, ResolvedRef, SymbolKind};
 
-fn resolve_src(text: &str) -> crate::Analysis {
-    let map = SourceMap::new();
-    let id = map.intern("hir_test.px", text);
-    let parsed = parse(id, text);
-    analyze_root(id, &parsed.tree)
-}
+use test_util::analyze;
 
 /// Collect every resolved name reference (range → resolved ref) in source order.
 fn refs(src: &str) -> (crate::Analysis, Vec<(TextRange, ResolvedRef)>) {
-    let analysis = resolve_src(src);
+    let analysis = analyze(src);
     let mut refs: Vec<_> = analysis.refs.iter().map(|(r, v)| (*r, *v)).collect();
     refs.sort_by_key(|(r, _)| (u32::from(r.start()), u32::from(r.end())));
     (analysis, refs)
@@ -102,7 +102,7 @@ fn shadowing_initializer_resolves_to_previous_binding() {
 
 #[test]
 fn unresolved_name_emits_n001() {
-    let analysis = resolve_src("out(missing)");
+    let analysis = analyze("out(missing)");
     let name_diags: Vec<_> = analysis
         .diagnostics
         .iter()
@@ -167,7 +167,7 @@ fn out_and_panic_are_in_prelude_scope() {
 fn local_in_block_does_not_leak_outward() {
     // A `var` inside a block is not visible after the block.
     let src = "{ var inner = 1 }\nout(inner)";
-    let analysis = resolve_src(src);
+    let analysis = analyze(src);
     // `inner` reference is unresolved.
     assert!(analysis
         .diagnostics
@@ -179,7 +179,7 @@ fn local_in_block_does_not_leak_outward() {
 fn known_type_annotations_resolve_cleanly() {
     // `Int`, `Text`, `Bool`, `Unit`, `Never` are all known type names.
     let src = "var x: Int = 1\nvar s: Text = \"a\"";
-    let analysis = resolve_src(src);
+    let analysis = analyze(src);
     assert!(
         analysis.is_clean(),
         "expected no diagnostics: {:?}",
@@ -192,7 +192,7 @@ fn unknown_type_annotation_emits_n002() {
     // `Byte` is reserved but not yet constructible (§4.3) → N002. (`Float` was
     // reserved too but is now wired end-to-end, so it no longer triggers this.)
     let src = "var x: Byte = 1";
-    let analysis = resolve_src(src);
+    let analysis = analyze(src);
     assert!(analysis
         .diagnostics
         .iter()
@@ -204,7 +204,7 @@ fn unknown_type_annotation_emits_n002() {
 fn float_type_annotation_resolves() {
     // `Float` is wired end-to-end (§4.12); the annotation resolves cleanly.
     let src = "var x: Float = 2.5";
-    let analysis = resolve_src(src);
+    let analysis = analyze(src);
     assert!(
         analysis.is_clean(),
         "expected no diagnostics: {:?}",

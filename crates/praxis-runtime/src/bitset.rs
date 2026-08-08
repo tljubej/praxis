@@ -227,17 +227,13 @@ unsafe fn bitset_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
     // Order-independent: hash each set bit's value and XOR. This is more
     // expensive than hashing words but is robust to trailing-zero-word
     // differences (two equal bitsets with different word-vector lengths).
+    // The enumeration is [`BitSetPayload::members`], the module's one bit walk;
+    // its ascending order is not load-bearing here, only its membership.
     let mut acc: u64 = 0;
-    for (word_idx, &word) in p.words.iter().enumerate() {
-        let mut bits = word;
-        while bits != 0 {
-            let bit = bits.trailing_zeros() as usize;
-            let value = (word_idx * 64 + bit) as u64;
-            let mut h = crate::descriptor::StructHasher::new();
-            h.write_bytes(&value.to_le_bytes());
-            acc ^= h.finish();
-            bits &= bits - 1;
-        }
+    for value in p.members() {
+        let mut h = crate::descriptor::StructHasher::new();
+        h.write_bytes(&(value as u64).to_le_bytes());
+        acc ^= h.finish();
     }
     hasher.write_bytes(&acc.to_le_bytes());
 }
@@ -259,23 +255,13 @@ pub static BITSET: TypeDescriptor = TypeDescriptor::builtin::<BitSetPayload>(
 )
 .with_owned_bytes(bitset_owned_bytes);
 
-/// The heap bytes `BitSet` owns beyond its payload, for GC pacing (RT-04).
-/// `capacity`, not `len`: the buffer's real footprint is what the collector is
-/// paced against.
-///
-/// # Safety
-/// `payload` must point at an initialized `BitSetPayload`.
 impl BitSetPayload {
-    /// The bytes this payload owns outside its GC block — the buffer, not the
-    /// spine's three words.
+    /// The word buffer this payload owns beyond its GC block, for GC pacing
+    /// (RT-04) — `capacity`, not `len`.
     ///
-    /// **One statement of the size, with two readers** (ADR-121). The
-    /// descriptor's `owned_bytes` callback charges it once at construction;
-    /// the ABI wrapper that can *grow* this collection reads it either side of
-    /// the mutation and charges the delta, so the pacer sees a buffer that
-    /// doubled. Writing the capacity arithmetic at the growth site instead
-    /// would be a second spelling of this line, and the two would drift the
-    /// first time an element type changed width.
+    /// One statement of the size, with two readers (ADR-121):
+    /// [`VecPayload::owned_bytes`](crate::collections::VecPayload::owned_bytes)
+    /// is that statement.
     #[must_use]
     pub(crate) fn owned_bytes(&self) -> usize {
         self.words.capacity() * std::mem::size_of::<u64>()

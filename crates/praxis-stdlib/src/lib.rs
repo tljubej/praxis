@@ -22,9 +22,7 @@ pub mod type_pattern;
 
 pub use builtins::builtin_catalog;
 pub use capability::CapKind;
-pub use catalog::{
-    MethodCatalog, MethodCatalogError, MethodEntry, MethodLowering, Purity, Stability,
-};
+pub use catalog::{MethodCatalog, MethodCatalogError, MethodEntry, MethodLowering, Purity};
 pub use completion::{completion_data, CompletionItem};
 pub use prelude::{
     graph_helper, numeric_helper, prelude_doc, sized_ctor, type_doc, GraphHelper, GraphParam,

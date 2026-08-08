@@ -579,6 +579,7 @@ pub fn type_doc(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::abi::{AbiKind, AbiRet};
     use std::collections::HashSet;
 
     #[test]
@@ -747,6 +748,27 @@ mod tests {
         assert!(numeric_helper("bfs").is_none());
     }
 
+    /// A wrapper takes the context, then `leading_ptrs` raw pointer slots, then
+    /// only `Gc` operands, and returns one. That uniform shape is what lets the
+    /// MIR lowering be one path per table rather than a branch per helper, and
+    /// it is the same property for the numeric helpers, the graph helpers and
+    /// the sized constructors — the last of which spend their one leading
+    /// pointer on the static element descriptor.
+    fn assert_uniform_gc_wrapper(sym: RuntimeSymbol, name: &str, leading_ptrs: usize) {
+        let sig = sym.sig();
+        assert_eq!(sig.params[0], AbiKind::Ctx, "{name}");
+        let boxed_from = 1 + leading_ptrs;
+        assert!(
+            sig.params[1..boxed_from].iter().all(|k| *k == AbiKind::Ptr),
+            "{name}'s first {leading_ptrs} operand(s) after the context are not raw pointers"
+        );
+        assert!(
+            sig.params[boxed_from..].iter().all(|k| *k == AbiKind::Gc),
+            "{name} takes a non-Gc operand"
+        );
+        assert_eq!(sig.ret, AbiRet::Gc, "{name}");
+    }
+
     /// A helper's source arity is its wrapper's arity, because the row does not
     /// state one. This is the property the row's shape buys: `min(a)` cannot
     /// typecheck against a two-operand wrapper, and `clamp(v, lo)` cannot
@@ -764,16 +786,7 @@ mod tests {
         // returns one — the uniform shape the MIR lowering relies on to be one
         // path rather than seven.
         for h in NUMERIC_HELPERS {
-            let sig = h.symbol.sig();
-            assert_eq!(sig.params[0], crate::abi::AbiKind::Ctx, "{}", h.name);
-            assert!(
-                sig.params[1..]
-                    .iter()
-                    .all(|k| *k == crate::abi::AbiKind::Gc),
-                "{} takes a non-Gc operand",
-                h.name
-            );
-            assert_eq!(sig.ret, crate::abi::AbiRet::Gc, "{}", h.name);
+            assert_uniform_gc_wrapper(h.symbol, h.name, 0);
         }
     }
 
@@ -824,21 +837,9 @@ mod tests {
                 "{}'s row and its wrapper disagree about how many operands it takes",
                 c.name
             );
-            let sig = c.symbol.sig();
-            assert_eq!(sig.params[0], crate::abi::AbiKind::Ctx, "{}", c.name);
-            assert_eq!(
-                sig.params[1],
-                crate::abi::AbiKind::Ptr,
-                "{}'s second slot is the static element descriptor",
-                c.name
-            );
-            assert!(
-                sig.params[2..]
-                    .iter()
-                    .all(|k| *k == crate::abi::AbiKind::Gc),
-                "{}'s extents and fill are boxed (ADR-146 decision 7)",
-                c.name
-            );
+            // The one leading pointer is the static element descriptor; the
+            // extents and the fill after it are boxed (ADR-146 decision 7).
+            assert_uniform_gc_wrapper(c.symbol, c.name, 1);
         }
     }
 
@@ -908,16 +909,7 @@ mod tests {
             // Every wrapper takes only `Gc` operands after the context and
             // returns one — the uniform shape that makes the MIR lowering one
             // path for all six rather than six branches.
-            let sig = h.symbol.sig();
-            assert_eq!(sig.params[0], crate::abi::AbiKind::Ctx, "{}", h.name);
-            assert!(
-                sig.params[1..]
-                    .iter()
-                    .all(|k| *k == crate::abi::AbiKind::Gc),
-                "{} takes a non-Gc operand",
-                h.name
-            );
-            assert_eq!(sig.ret, crate::abi::AbiRet::Gc, "{}", h.name);
+            assert_uniform_gc_wrapper(h.symbol, h.name, 0);
         }
     }
 

@@ -1349,18 +1349,10 @@ impl Runtime {
 
     /// Allocate an owned `Text` (§4.3, ADR-013).
     pub fn alloc_text(&self, value: &str) -> GcRef {
-        let owned: Box<str> = value.into();
-        // SAFETY: TextPayload matches TEXT's size/align and is fully initialized.
+        // SAFETY: TextPayload is TEXT's payload type.
         unsafe {
-            self.heap.alloc_with_unpaced(
-                &crate::text::TEXT,
-                std::mem::size_of::<crate::text::TextPayload>(),
-                std::mem::align_of::<crate::text::TextPayload>(),
-                |payload| {
-                    (payload as *mut crate::text::TextPayload)
-                        .write(crate::text::TextPayload::owned(owned));
-                },
-            )
+            self.heap
+                .alloc_payload_unpaced(&crate::text::TEXT, crate::text::TextPayload::owned(value))
         }
     }
 
@@ -1380,15 +1372,8 @@ impl Runtime {
         // SAFETY: caller guarantees `owner` is a live Text.
         let slice = unsafe { crate::text::SourceSlice::new(owner, start, len) }?;
         let payload = crate::text::TextPayload::Slice(slice);
-        // SAFETY: TextPayload matches TEXT's size/align and is fully initialized.
-        Some(unsafe {
-            self.heap.alloc_with_unpaced(
-                &crate::text::TEXT,
-                std::mem::size_of::<crate::text::TextPayload>(),
-                std::mem::align_of::<crate::text::TextPayload>(),
-                |ptr| (ptr as *mut crate::text::TextPayload).write(payload),
-            )
-        })
+        // SAFETY: TextPayload is TEXT's payload type.
+        Some(unsafe { self.heap.alloc_payload_unpaced(&crate::text::TEXT, payload) })
     }
 
     /// Allocate a `Vec[T]` from a slice of already-allocated element refs and the
@@ -1398,17 +1383,13 @@ impl Runtime {
         element_descriptor: &'static TypeDescriptor,
         items: Vec<GcRef>,
     ) -> GcRef {
-        // SAFETY: VecPayload matches VEC's size/align and is fully initialized.
+        // SAFETY: VecPayload is VEC's payload type.
         unsafe {
-            self.heap.alloc_with_unpaced(
+            self.heap.alloc_payload_unpaced(
                 &crate::collections::VEC,
-                std::mem::size_of::<VecPayload>(),
-                std::mem::align_of::<VecPayload>(),
-                |payload| {
-                    (payload as *mut VecPayload).write(VecPayload {
-                        element_descriptor,
-                        items: items.into(),
-                    });
+                VecPayload {
+                    element_descriptor,
+                    items: items.into(),
                 },
             )
         }
@@ -1429,20 +1410,14 @@ impl Runtime {
             items.len(),
             width
         );
-        // SAFETY: GridPayload matches GRID's size/align and is fully initialized.
+        // SAFETY: GridPayload is GRID's payload type.
         unsafe {
-            self.heap.alloc_with_unpaced(
+            self.heap.alloc_payload_unpaced(
                 &crate::collections::GRID,
-                std::mem::size_of::<crate::collections::GridPayload>(),
-                std::mem::align_of::<crate::collections::GridPayload>(),
-                |payload| {
-                    (payload as *mut crate::collections::GridPayload).write(
-                        crate::collections::GridPayload {
-                            element_descriptor,
-                            items,
-                            width,
-                        },
-                    );
+                crate::collections::GridPayload {
+                    element_descriptor,
+                    items,
+                    width,
                 },
             )
         }
@@ -1462,16 +1437,11 @@ impl Runtime {
             items.len(),
             schema.arity()
         );
-        // SAFETY: RecordPayload matches RECORD's size/align and is fully initialized.
+        // SAFETY: RecordPayload is RECORD's payload type.
         unsafe {
-            self.heap.alloc_with_unpaced(
+            self.heap.alloc_payload_unpaced(
                 &crate::records::RECORD,
-                std::mem::size_of::<crate::records::RecordPayload>(),
-                std::mem::align_of::<crate::records::RecordPayload>(),
-                |payload| {
-                    (payload as *mut crate::records::RecordPayload)
-                        .write(crate::records::RecordPayload { schema, items });
-                },
+                crate::records::RecordPayload { schema, items },
             )
         }
     }

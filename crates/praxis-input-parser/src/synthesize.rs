@@ -81,15 +81,21 @@ fn synth_inner(
         ParserAst::Lines { child, .. }
         | ParserAst::Sections { child, .. }
         | ParserAst::Csv { child, .. }
-        | ParserAst::Ws { child, .. } => {
+        | ParserAst::Ws { child, .. }
+        | ParserAst::Sep { child, .. } => {
+            // The four ways of cutting the input into elements, plus `sep`'s
+            // fifth → `Vec[result(P)]` (§7.8). What separates the elements is a
+            // parse-time question; it is nothing to the result type, which is
+            // why `sep`'s separator does not appear here.
             let elem = synth(child, db, out)?;
             db.vec(elem)
         }
-        ParserAst::Sep { child, .. } => {
-            let elem = synth(child, db, out)?;
-            db.vec(elem)
-        }
-        ParserAst::Grid { child, .. } => {
+        ParserAst::Grid { child, .. }
+        | ParserAst::Matrix { child, .. }
+        | ParserAst::GridRagged { child, .. } => {
+            // `grid(P)` / `matrix(P)` / ragged `grid(P)` → Grid[result(P)]
+            // (§7.5, ADR-030). Ragged's `fill` pads short rows during the parse
+            // and, like `sep`'s separator, is not part of the type.
             let elem = synth(child, db, out)?;
             db.unary_collection(CollectionCtor::Grid, elem)
         }
@@ -190,29 +196,71 @@ fn synth_inner(
             let elem = synth(child, db, out)?;
             db.vec(elem)
         }
-        ParserAst::Matrix { child, .. } | ParserAst::GridRagged { child, .. } => {
-            // `matrix(P)` / ragged `grid(P)` → Grid[result(P)] (§7.5, ADR-030).
-            let elem = synth(child, db, out)?;
-            db.unary_collection(CollectionCtor::Grid, elem)
-        }
     })
 }
 
-/// The result type of an atomic parser (§7.4).
-fn atomic_type(kind: AtomicKind, db: &mut TypeDb) -> Type {
-    match kind {
-        // `uint` is `Int`, deliberately: `ScalarType::UInt` is reserved and has
-        // no runtime object (`praxis_repr::builtin_for_type` answers
-        // `NoRuntimeRepr`), so typing a `uint` capture as `UInt` would make
-        // every program containing one fail to compile under D9. The
-        // non-negativity is the *parse rule*, in `walk_atomic`.
-        AtomicKind::Int | AtomicKind::UInt | AtomicKind::Digit => db.int(),
-        AtomicKind::Float => db.float(),
-        AtomicKind::Byte => db.scalar(praxis_types::ScalarType::Byte),
-        AtomicKind::Char => db.char(),
-        AtomicKind::Word | AtomicKind::Identifier | AtomicKind::Text | AtomicKind::Rest => {
-            db.text()
+/// The class of result §7.4's ten atomics produce — five for ten kinds.
+///
+/// **Stated here because it is answered twice, on either side of the
+/// parser-planner/parser-executor boundary.** `atomic_type` turns a class
+/// into the static [`Type`]; `praxis-runtime`'s `atomic_descriptor` turns the
+/// same class into the runtime `TypeDescriptor` a collection carries for its
+/// elements. A descriptor that disagrees with the static type behind it is the
+/// defect class REP-54 and P0-11 closed, and exhaustiveness cannot prevent it:
+/// an eleventh atomic forces both sites to be *touched* (IP-11 records four
+/// landing at once) but not to make the same grouping decision. There is one
+/// decision now, and the two sides only choose how to spell its answer.
+///
+/// Deliberately its own enum rather than a [`praxis_types::ScalarType`]:
+/// `praxis-runtime` does not depend on `praxis-types` (it already depends on
+/// this crate, so there is no cycle), and `UInt` — the one scalar neither side
+/// may answer — is not nameable here at all. See [`AtomicClass::of`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtomicClass {
+    /// `int`, `uint`, `digit`.
+    Int,
+    /// `float`.
+    Float,
+    /// `byte`.
+    Byte,
+    /// `char`.
+    Char,
+    /// `word`, `identifier`, `text`, `rest`.
+    Text,
+}
+
+impl AtomicClass {
+    /// Classify an atomic by the result it produces (§7.4).
+    ///
+    /// `uint` is `Int`, deliberately, in the static type and at runtime alike
+    /// (§7.4, IP-11): `ScalarType::UInt` is reserved and has no runtime object
+    /// (`praxis_repr::builtin_for_type` answers `NoRuntimeRepr`), so there is
+    /// no descriptor for the runtime side to answer, and typing a `uint`
+    /// capture as `UInt` would make every program containing one fail to
+    /// compile under D9. The non-negativity is the *parse rule*, in
+    /// `walk_atomic`.
+    pub fn of(kind: AtomicKind) -> AtomicClass {
+        match kind {
+            AtomicKind::Int | AtomicKind::UInt | AtomicKind::Digit => AtomicClass::Int,
+            AtomicKind::Float => AtomicClass::Float,
+            AtomicKind::Byte => AtomicClass::Byte,
+            AtomicKind::Char => AtomicClass::Char,
+            AtomicKind::Word | AtomicKind::Identifier | AtomicKind::Text | AtomicKind::Rest => {
+                AtomicClass::Text
+            }
         }
+    }
+}
+
+/// The result type of an atomic parser (§7.4). Which kinds share a type is
+/// [`AtomicClass::of`]'s decision, not this function's.
+fn atomic_type(kind: AtomicKind, db: &mut TypeDb) -> Type {
+    match AtomicClass::of(kind) {
+        AtomicClass::Int => db.int(),
+        AtomicClass::Float => db.float(),
+        AtomicClass::Byte => db.scalar(praxis_types::ScalarType::Byte),
+        AtomicClass::Char => db.char(),
+        AtomicClass::Text => db.text(),
     }
 }
 

@@ -61,6 +61,7 @@ use praxis_runtime::{
 use praxis_types::{Type, TypeDb};
 
 use crate::purity::assert_read_only;
+use crate::value::UNREADABLE;
 
 /// The synthesized function's name (a reserved, unlikely-to-collide identifier).
 const P_EXPR_FN: &str = "__p_expr";
@@ -70,9 +71,35 @@ const P_EXPR_FN: &str = "__p_expr";
 /// + pipeline; `type` stops before the purity gate and JIT.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
+    /// `p EXPR` (M10b-WS4, §9.5): synthesize the read-only
+    /// `fn __p_expr(<typed params>) { EXPR }`, type-check it against the
+    /// selected frame's locals, purity-gate it, JIT a fresh function, and call
+    /// it with the snapshot locals.
     Print,
+    /// `type EXPR` (M10b-WS4, §9.5): the same synthesis and pipeline, rendering
+    /// the expression's inferred type instead of running it.
     Type,
+    /// `heap EXPR` (M10b-WS5, §9.4): recursively inspect a value. Like
+    /// [`Mode::Print`], but prefixes the result with its type, so the structure
+    /// and the type are visible at a glance.
     Heap,
+}
+
+impl Mode {
+    /// The mode a REPL command word selects, or `None` for any other word.
+    ///
+    /// The words live beside the variants they name rather than in
+    /// [`crate::repl`]'s dispatch, which carried one arm per mode that differed
+    /// only in the word and the variant.
+    #[must_use]
+    pub fn from_command(cmd: &str) -> Option<Mode> {
+        match cmd {
+            "p" => Some(Mode::Print),
+            "type" => Some(Mode::Type),
+            "heap" => Some(Mode::Heap),
+            _ => None,
+        }
+    }
 }
 
 /// What a bound local hands the synthetic function.
@@ -180,7 +207,7 @@ pub fn evaluate(
     // displays disagreeing about the same value is its own defect.
     result.format_debug(&mut out);
     Ok(if out.is_empty() {
-        "<unreadable>".to_string()
+        UNREADABLE.to_string()
     } else {
         out
     })
@@ -225,7 +252,7 @@ pub fn heap(
     // after it was never the answer.
     result.format_debug(&mut value_str);
     Ok(if value_str.is_empty() {
-        format!("{type_str}: <unreadable>")
+        format!("{type_str}: {UNREADABLE}")
     } else {
         format!("{type_str}: {value_str}")
     })

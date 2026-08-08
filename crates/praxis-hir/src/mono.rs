@@ -42,6 +42,7 @@ use std::collections::{HashMap, HashSet};
 
 use praxis_types::{Scheme, Type, TypeDb, TypeKey, VarId};
 
+use crate::lower::stmt_exprs_mut;
 use crate::name_table::NameTable;
 use crate::symbol::SymbolId;
 use crate::{TypedBlock, TypedExpr, TypedFn, TypedItem, TypedModule, TypedStmt};
@@ -249,31 +250,12 @@ fn rewrite_block(block: &mut TypedBlock, pass: &mut MonoPass<'_>) {
 }
 
 fn rewrite_stmt(stmt: &mut TypedStmt, pass: &mut MonoPass<'_>) {
-    match stmt {
-        TypedStmt::Var { init, .. } => rewrite_expr(init, pass),
-        TypedStmt::Assign { value, .. } => rewrite_expr(value, pass),
-        // Every sub-expression of a subscript store, not only the value: a
-        // receiver or an index can hold the call this pass retargets.
-        TypedStmt::IndexAssign {
-            receiver,
-            indices,
-            value,
-            ..
-        } => {
-            rewrite_expr(receiver, pass);
-            for i in indices {
-                rewrite_expr(i, pass);
-            }
-            rewrite_expr(value, pass);
-        }
-        // …and both of a field store's, for the same reason.
-        TypedStmt::FieldAssign {
-            receiver, value, ..
-        } => {
-            rewrite_expr(receiver, pass);
-            rewrite_expr(value, pass);
-        }
-        TypedStmt::Expr(e) => rewrite_expr(e, pass),
+    // Every sub-expression of the statement, not only an assignment's value: a
+    // subscript store's receiver or index, and both of a field store's, can hold
+    // the call this pass retargets. The list is `stmt_exprs`', written once —
+    // this used to name the fields by hand, as `resolve_stmt` did beside it.
+    for e in stmt_exprs_mut(stmt) {
+        rewrite_expr(e, pass);
     }
 }
 
@@ -368,31 +350,20 @@ fn resolve_block(db: &mut TypeDb, binders: &[VarId], args: &[Type], block: &mut 
 }
 
 fn resolve_stmt(db: &mut TypeDb, binders: &[VarId], args: &[Type], stmt: &mut TypedStmt) {
+    // The type this statement carries *itself*, which only a binding has.
+    // Exhaustive on purpose, exactly as `resolve_expr`'s is: a new statement
+    // variant with a type of its own is a compile error here rather than a slot
+    // the specialization silently skips.
     match stmt {
-        TypedStmt::Var { ty, init, .. } => {
-            *ty = specialize_type(db, binders, args, *ty);
-            resolve_expr(db, binders, args, init);
-        }
-        TypedStmt::Assign { value, .. } => resolve_expr(db, binders, args, value),
-        TypedStmt::IndexAssign {
-            receiver,
-            indices,
-            value,
-            ..
-        } => {
-            resolve_expr(db, binders, args, receiver);
-            for i in indices {
-                resolve_expr(db, binders, args, i);
-            }
-            resolve_expr(db, binders, args, value);
-        }
-        TypedStmt::FieldAssign {
-            receiver, value, ..
-        } => {
-            resolve_expr(db, binders, args, receiver);
-            resolve_expr(db, binders, args, value);
-        }
-        TypedStmt::Expr(e) => resolve_expr(db, binders, args, e),
+        TypedStmt::Var { ty, .. } => *ty = specialize_type(db, binders, args, *ty),
+        TypedStmt::Assign { .. }
+        | TypedStmt::IndexAssign { .. }
+        | TypedStmt::FieldAssign { .. }
+        | TypedStmt::Expr(_) => {}
+    }
+    // …and the sub-expressions, from `stmt_exprs`' list rather than by hand.
+    for e in stmt_exprs_mut(stmt) {
+        resolve_expr(db, binders, args, e);
     }
 }
 

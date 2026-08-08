@@ -718,8 +718,15 @@ fn capture_extent<'a>(cur: &mut Scan<'a>, open: usize) -> Result<CaptureExtent<'
 ///
 /// The rule is [`praxis_syntax::template::string_end`]'s, not a second copy of
 /// it: the lexer has to skip the same literals when it decides where this
-/// template's token ends.
-fn skip_string(cur: &mut Scan<'_>) -> Result<(), ScanError> {
+/// template's token ends, and [`crate::body`] has to skip the same ones again
+/// when it reads the capture's arguments — so this is the one place they live.
+///
+/// Two things a caller has to know. The error is anchored at the opening quote
+/// **in this cursor's own offsets**, so a caller scanning a sub-slice rebases it
+/// with [`ScanError::shifted`]. And on `Err` the cursor has *not* moved, so a
+/// caller that keeps scanning past the failure must advance it itself or it will
+/// re-read this same quote forever.
+pub(crate) fn skip_string(cur: &mut Scan<'_>) -> Result<(), ScanError> {
     let open = cur.pos();
     match praxis_syntax::template::string_end(cur.src(), open) {
         Some(end) => {

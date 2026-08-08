@@ -14,6 +14,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fmt::Write as _;
 
+use crate::collections::nullable;
 use crate::descriptor::{BuiltinTypeId, FormatSink, Tracer, TypeDescriptor};
 use crate::GcRef;
 
@@ -166,9 +167,7 @@ impl MaxHeapPayload {
     /// type.
     #[must_use]
     pub fn element(&self) -> Option<&'static TypeDescriptor> {
-        // SAFETY: a non-null label is always a `&'static` written by the
-        // constructor.
-        (!self.element_descriptor.is_null()).then(|| unsafe { &*self.element_descriptor })
+        nullable(self.element_descriptor)
     }
 }
 
@@ -206,23 +205,13 @@ pub static MAX_HEAP: TypeDescriptor = TypeDescriptor::builtin::<MaxHeapPayload>(
 )
 .with_owned_bytes(max_heap_owned_bytes);
 
-/// The heap bytes `MaxHeap[T]` owns beyond its payload, for GC pacing (RT-04).
-/// `capacity`, not `len`: the buffer's real footprint is what the collector is
-/// paced against.
-///
-/// # Safety
-/// `payload` must point at an initialized `MaxHeapPayload`.
 impl MaxHeapPayload {
-    /// The bytes this payload owns outside its GC block — the buffer, not the
-    /// spine's three words.
+    /// The sift array this payload owns beyond its GC block, for GC pacing
+    /// (RT-04) — `capacity`, not `len`.
     ///
-    /// **One statement of the size, with two readers** (ADR-121). The
-    /// descriptor's `owned_bytes` callback charges it once at construction;
-    /// the ABI wrapper that can *grow* this collection reads it either side of
-    /// the mutation and charges the delta, so the pacer sees a buffer that
-    /// doubled. Writing the capacity arithmetic at the growth site instead
-    /// would be a second spelling of this line, and the two would drift the
-    /// first time an element type changed width.
+    /// One statement of the size, with two readers (ADR-121):
+    /// [`VecPayload::owned_bytes`](crate::collections::VecPayload::owned_bytes)
+    /// is that statement.
     #[must_use]
     pub(crate) fn owned_bytes(&self) -> usize {
         self.items.capacity() * std::mem::size_of::<HeapEntry>()
@@ -252,9 +241,7 @@ impl MinHeapPayload {
     /// type.
     #[must_use]
     pub fn element(&self) -> Option<&'static TypeDescriptor> {
-        // SAFETY: a non-null label is always a `&'static` written by the
-        // constructor.
-        (!self.element_descriptor.is_null()).then(|| unsafe { &*self.element_descriptor })
+        nullable(self.element_descriptor)
     }
 }
 
@@ -292,23 +279,14 @@ pub static MIN_HEAP: TypeDescriptor = TypeDescriptor::builtin::<MinHeapPayload>(
 )
 .with_owned_bytes(min_heap_owned_bytes);
 
-/// The heap bytes `MinHeap[T]` owns beyond its payload, for GC pacing (RT-04).
-/// `capacity`, not `len`: the buffer's real footprint is what the collector is
-/// paced against.
-///
-/// # Safety
-/// `payload` must point at an initialized `MinHeapPayload`.
 impl MinHeapPayload {
-    /// The bytes this payload owns outside its GC block — the buffer, not the
-    /// spine's three words.
+    /// The sift array this payload owns beyond its GC block, for GC pacing
+    /// (RT-04) — `capacity`, not `len`, and of `Reverse<HeapEntry>` because
+    /// that is what a min-heap stores.
     ///
-    /// **One statement of the size, with two readers** (ADR-121). The
-    /// descriptor's `owned_bytes` callback charges it once at construction;
-    /// the ABI wrapper that can *grow* this collection reads it either side of
-    /// the mutation and charges the delta, so the pacer sees a buffer that
-    /// doubled. Writing the capacity arithmetic at the growth site instead
-    /// would be a second spelling of this line, and the two would drift the
-    /// first time an element type changed width.
+    /// One statement of the size, with two readers (ADR-121):
+    /// [`VecPayload::owned_bytes`](crate::collections::VecPayload::owned_bytes)
+    /// is that statement.
     #[must_use]
     pub(crate) fn owned_bytes(&self) -> usize {
         self.items.capacity() * std::mem::size_of::<Reverse<HeapEntry>>()

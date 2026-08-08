@@ -151,7 +151,7 @@ pub fn hover(snapshot: &Snapshot, offset: u32, enc: Encoding) -> Option<Hover> {
 /// declaration site: nothing in the file declares it, which is what "seeded into
 /// the root scope" means.
 fn prelude_sentence(analysis: &Analysis, info: &HoverInfo) -> Option<&'static str> {
-    let symbol = analysis.names.get(info.symbol)?;
+    let symbol = analysis.names.get(info.symbol?)?;
     if symbol.decl.is_some() {
         return None;
     }

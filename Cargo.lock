@@ -1356,7 +1356,6 @@ dependencies = [
  "praxis-parser",
  "praxis-source",
  "praxis-syntax",
- "praxis-test-support",
  "rowan",
 ]
 
@@ -1412,7 +1411,6 @@ name = "praxis-debugger"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "cranelift-module",
  "praxis-ast",
  "praxis-codegen-cranelift",
  "praxis-hir",

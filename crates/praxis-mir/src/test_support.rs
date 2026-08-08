@@ -21,6 +21,7 @@
 //! typed HIR.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use praxis_ast::AstNode;
 use praxis_hir::{analyze_root, lower, mono::monomorphize, Analysis};
@@ -623,6 +624,55 @@ fn reachable_from(func: &Function, start: BlockId) -> Vec<bool> {
     seen
 }
 
+// ---------------------------------------------------------------------------
+// The benchmark corpus
+// ---------------------------------------------------------------------------
+
+/// The directory `benchmarks/run.py` runs its eight programs from.
+///
+/// Derived from this crate's manifest directory, so it answers the same whether
+/// the caller is this crate's own tests or another crate's. The four copies it
+/// replaces reached the same directory two different ways, which is one more
+/// than a directory needs.
+#[must_use]
+pub fn benchmark_dir() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.pop(); // crates/praxis-mir -> crates
+    path.pop(); // crates -> the workspace root
+    path.push("benchmarks/praxis");
+    path
+}
+
+/// The eight programs `benchmarks/run.py` runs, named once.
+///
+/// Every sweep that means "all of them" reads this rather than retyping the
+/// list: a ninth benchmark added to the corpus and not to a private copy of
+/// these names is a sweep that silently keeps passing over eight, which is the
+/// failure mode a suite-wide assertion exists to rule out. Kept beside
+/// [`benchmark_dir`] because the list and the directory answer the same
+/// question.
+pub const BENCHMARK_SUITE: [&str; 8] = [
+    "bfs",
+    "collatz",
+    "hashwork",
+    "mandelbrot",
+    "pipeline",
+    "primes",
+    "tree",
+    "vm",
+];
+
+/// A benchmark's source, read from the tree rather than copied — a copy would
+/// go on asserting about a program the suite no longer runs.
+///
+/// # Panics
+/// If the named program is not in `benchmarks/praxis`.
+#[must_use]
+pub fn benchmark_source(name: &str) -> String {
+    let path = benchmark_dir().join(format!("{name}.px"));
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,11 +691,7 @@ mod tests {
     /// copied: a copy would go on asserting about a program the suite no longer
     /// runs.
     fn mandelbrot_src() -> String {
-        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.pop(); // crates/praxis-mir -> crates
-        path.pop(); // crates -> the workspace root
-        path.push("benchmarks/praxis/mandelbrot.px");
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+        benchmark_source("mandelbrot")
     }
 
     #[test]

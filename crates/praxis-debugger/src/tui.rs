@@ -11,7 +11,12 @@
 //! something you move through with the arrow keys. It is a *view*, not a second
 //! implementation: every command still runs through `Repl::handle`, so the two
 //! surfaces cannot answer the same question differently, and the REPL's tests
-//! remain the tests for command behavior.
+//! remain the tests for command behavior. What is laid out here is the
+//! *presentation* — panes, columns, colors; which locals a frame has, and how a
+//! type or a temp's provenance renders, come from [`crate::render`]
+//! ([`split_locals`](crate::render::split_locals),
+//! [`type_str`](crate::render::type_str),
+//! [`provenance`](crate::render::provenance)).
 //!
 //! ```text
 //!  ╭─ backtrace ──────────╮╭─ pick ───────────── boom.px ─╮
@@ -764,18 +769,9 @@ fn draw_locals(frame: &mut Frame, area: Rect, tui: &Tui) {
     match snap.frames.get(selected) {
         None => lines.push(muted_line("  (no frame selected)")),
         Some(frame_ref) => {
-            // The same split, and the same dead-scratch filter, as
-            // `render_frame_locals`: a temp with neither a value nor a span holds
-            // nothing and explains nothing.
-            let mut users: Vec<&DebugLocal> = Vec::new();
-            let mut temps: Vec<&DebugLocal> = Vec::new();
-            for local in &frame_ref.locals {
-                if local.is_user() {
-                    users.push(local);
-                } else if local.value.is_some() || local.span().is_some() {
-                    temps.push(local);
-                }
-            }
+            // The `locals` command's own split and dead-scratch filter, so the
+            // pane and the command cannot disagree about which slots a frame has.
+            let (users, temps) = crate::render::split_locals(frame_ref);
             if users.is_empty() && temps.is_empty() {
                 lines.push(muted_line("  (no locals in this frame)"));
             }
@@ -792,7 +788,7 @@ fn draw_locals(frame: &mut Frame, area: Rect, tui: &Tui) {
             let type_width = users
                 .iter()
                 .chain(temps.iter())
-                .map(|l| type_of(l, db).len())
+                .map(|l| crate::render::type_str(l, db).len())
                 .max()
                 .unwrap_or(0)
                 .min(22);
@@ -883,12 +879,10 @@ fn local_line<'a>(
     widths: &ColumnWidths,
     is_temp: bool,
 ) -> Line<'a> {
-    let ty = type_of(local, db);
+    let ty = crate::render::type_str(local, db);
     let value = match local.value {
         Some(v) => crate::value::format_bounded(v, widths.value),
-        // The absence is the type's, not a sentinel's (F18): a slot nothing was
-        // spilled into reads back as `None`.
-        None => "<uninit>".to_string(),
+        None => crate::value::UNINIT.to_string(),
     };
     let label = if is_temp {
         format!("tmp#{}", local.symbol_id)
@@ -940,7 +934,12 @@ fn local_line<'a>(
     // A temp's materializing expression is the only thing that says which part of
     // the line it belongs to, so it earns its place on the row.
     if is_temp && widths.provenance > 0 {
-        if let Some(expr) = provenance_of(local, source, widths.provenance) {
+        // Cut to the column with `elide`, not the value truncator: this is source
+        // text, and balancing its brackets would turn a cut inside `xs[scaled]`
+        // into `xs[sc…]` — an index expression the program never wrote.
+        if let Some(expr) = crate::render::provenance(local, source)
+            .map(|expr| crate::value::elide(&expr, widths.provenance))
+        {
             spans.push(Span::raw(" ".repeat(pad + 1)));
             spans.push(Span::styled(
                 expr,
@@ -1271,46 +1270,6 @@ fn section_line<'a>(text: &str) -> Line<'a> {
             .fg(theme::CHROME)
             .add_modifier(Modifier::BOLD),
     ))
-}
-
-/// The local's static type, rendered from the live `TypeDb`. Empty when there is
-/// no db, when the descriptor is null (a frame built before type threading), or
-/// when the id is not one this db minted (F5) — the caller omits the column.
-fn type_of(local: &DebugLocal, db: Option<&praxis_types::TypeDb>) -> String {
-    let Some(db) = db else {
-        return String::new();
-    };
-    if local.descriptor.is_null() {
-        return String::new();
-    }
-    match db.type_from_raw(local.type_id) {
-        Some(ty) => db.render(ty),
-        None => String::new(),
-    }
-}
-
-/// The temp's materializing expression, whitespace-collapsed to one line and cut
-/// to `budget` so it cannot push the row past the pane.
-fn provenance_of(local: &DebugLocal, source: Option<&str>, budget: usize) -> Option<String> {
-    let source = source?;
-    let (start, end) = local.span()?;
-    let s = usize::try_from(start).ok()?;
-    let e = usize::try_from(end).ok()?;
-    if s >= source.len() || e > source.len() || s > e {
-        return None;
-    }
-    let collapsed: String = source[s..e]
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if collapsed.is_empty() {
-        None
-    } else {
-        // `elide`, not the value truncator: this is source text, and balancing its
-        // brackets would turn a cut inside `xs[scaled]` into `xs[sc…]` — an index
-        // expression the program never wrote.
-        Some(crate::value::elide(&collapsed, budget))
-    }
 }
 
 /// The 0-based index of the line containing byte `offset`.

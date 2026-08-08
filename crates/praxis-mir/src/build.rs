@@ -346,46 +346,7 @@ struct LoopCtx {
 }
 
 fn lower_fn(f: &TypedFn, db: &mut TypeDb, bindings: Bindings<'_>) -> Function {
-    // Cache scalar handles once.
-    let int_ty = db.int();
-    let float_ty = db.float();
-    let bool_ty = db.bool();
-    let text_ty = db.text();
-    let char_ty = db.char();
-    let unit_ty = db.unit();
-
-    let mut func = Function {
-        name: f.name.clone(),
-        params: Vec::new(),
-        return_local: LocalId(0),
-        locals: Vec::new(),
-        blocks: Vec::new(),
-        debug_names: Vec::new(),
-        debug_kinds: Vec::new(),
-        debug_spans: Vec::new(),
-        debug_scalar_sources: Vec::new(),
-        span: f.span,
-    };
-    let entry = func.new_block();
-    let fault = func.new_block();
-    func.blocks[fault.0 as usize].term = Terminator::Fault;
-
-    let mut b = Builder {
-        func,
-        locals: std::collections::HashMap::new(),
-        cur: entry,
-        fault_block: fault,
-        db,
-        int_ty,
-        float_ty,
-        bool_ty,
-        text_ty,
-        char_ty,
-        unit_ty,
-        bindings,
-        loop_stack: Vec::new(),
-        loop_preheaders: Vec::new(),
-    };
+    let mut b = Builder::new(f.name.clone(), f.span, db, bindings);
 
     // Parameters: one `Gc` slot each. User locals: classified + span-less (a
     // param has no single materializing expression; its span is the fn's span).
@@ -421,13 +382,11 @@ fn lower_fn(f: &TypedFn, db: &mut TypeDb, bindings: Bindings<'_>) -> Function {
     // Lower the body. The tail expression's value is the function's result.
     let tail = lower_block_body(&mut b, &f.body);
     // Materialize the tail into the return slot and return it.
-    b.func.blocks[b.cur.0 as usize].insts.push(Inst::MoveGc {
+    b.push(Inst::MoveGc {
         dst: ret,
         src: tail,
     });
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Return { value: ret };
-
-    b.func
+    b.finish_with_return(ret)
 }
 
 /// Lower a closure literal to its synthetic MIR function (M7, §4.10). The
@@ -441,49 +400,11 @@ fn lower_fn(f: &TypedFn, db: &mut TypeDb, bindings: Bindings<'_>) -> Function {
 /// synthetic function loads its captures at entry). The call site reads `fn_ptr`
 /// and emits a `call_indirect` with the matching signature.
 fn lower_closure_fn(closure: &LiftedClosure, db: &mut TypeDb, bindings: Bindings<'_>) -> Function {
-    let int_ty = db.int();
-    let float_ty = db.float();
-    let bool_ty = db.bool();
-    let text_ty = db.text();
-    let char_ty = db.char();
-    let unit_ty = db.unit();
-
-    let mut func = Function {
-        name: closure.fn_name.clone(),
-        params: Vec::new(),
-        return_local: LocalId(0),
-        locals: Vec::new(),
-        blocks: Vec::new(),
-        debug_names: Vec::new(),
-        debug_kinds: Vec::new(),
-        debug_spans: Vec::new(),
-        debug_scalar_sources: Vec::new(),
-        // Closures are lifted to synthetic functions; the `__p_expr` debugger
-        // function is also span-less. The `source` command degrades to "no
-        // span recorded" for these, which is acceptable (the faulting frame is
-        // almost always a real source function).
-        span: (0, 0),
-    };
-    let entry = func.new_block();
-    let fault = func.new_block();
-    func.blocks[fault.0 as usize].term = Terminator::Fault;
-
-    let mut b = Builder {
-        func,
-        locals: std::collections::HashMap::new(),
-        cur: entry,
-        fault_block: fault,
-        db,
-        int_ty,
-        float_ty,
-        bool_ty,
-        text_ty,
-        char_ty,
-        unit_ty,
-        bindings,
-        loop_stack: Vec::new(),
-        loop_preheaders: Vec::new(),
-    };
+    // Closures are lifted to synthetic functions, so there is no span of their
+    // own to record; the `__p_expr` debugger function is also span-less. The
+    // `source` command degrades to "no span recorded" for these, which is
+    // acceptable (the faulting frame is almost always a real source function).
+    let mut b = Builder::new(closure.fn_name.clone(), (0, 0), db, bindings);
 
     // Param 0 (MIR): the closure value itself (`closure_self`). It is the hidden
     // first explicit arg after the implicit ctx. Bound to a local so the prologue
@@ -549,13 +470,11 @@ fn lower_closure_fn(closure: &LiftedClosure, db: &mut TypeDb, bindings: Bindings
 
     // Lower the body. Captures and params are bound in `b.locals`.
     let tail = lower_block_body(&mut b, &closure.body);
-    b.func.blocks[b.cur.0 as usize].insts.push(Inst::MoveGc {
+    b.push(Inst::MoveGc {
         dst: ret,
         src: tail,
     });
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Return { value: ret };
-
-    b.func
+    b.finish_with_return(ret)
 }
 
 /// The adapter function for a top-level `fn` used as a value (REP-01, ADR-061).
@@ -573,39 +492,6 @@ fn lower_closure_fn(closure: &LiftedClosure, db: &mut TypeDb, bindings: Bindings
 /// it. Nothing else about the closure path changes — the allocation, the fn_ptr
 /// read, the `call_indirect`, the rooting are all the existing ones.
 fn lower_fn_value_adapter(adapter: &FnValueAdapter, db: &mut TypeDb) -> Function {
-    let int_ty = db.int();
-    let float_ty = db.float();
-    let bool_ty = db.bool();
-    let text_ty = db.text();
-    let char_ty = db.char();
-    let unit_ty = db.unit();
-
-    // The parameter and result types are read off the `Func`. A use site whose
-    // type is not a `Func` cannot occur — inference gives a `fn` name its
-    // declared function type — but the fallback is a nullary adapter returning
-    // `Unit`, which is a well-formed function rather than a malformed one.
-    let (param_tys, result_ty) = match db.data(db.follow(adapter.fn_ty)) {
-        praxis_types::TypeData::Func { params, result } => (params.clone(), *result),
-        _ => (Vec::new(), unit_ty),
-    };
-
-    let mut func = Function {
-        name: FnValueAdapter::name(&adapter.target),
-        params: Vec::new(),
-        return_local: LocalId(0),
-        locals: Vec::new(),
-        blocks: Vec::new(),
-        debug_names: Vec::new(),
-        debug_kinds: Vec::new(),
-        debug_spans: Vec::new(),
-        debug_scalar_sources: Vec::new(),
-        // Synthetic, like a lifted closure: no source span of its own.
-        span: (0, 0),
-    };
-    let entry = func.new_block();
-    let fault = func.new_block();
-    func.blocks[fault.0 as usize].term = Terminator::Fault;
-
     // The adapter's body is one call forwarding its own params; it declares no
     // binding of its own, so neither set can have a member here.
     let none = std::collections::HashSet::new();
@@ -613,21 +499,16 @@ fn lower_fn_value_adapter(adapter: &FnValueAdapter, db: &mut TypeDb) -> Function
         escaping: &none,
         reassigned: &none,
     };
-    let mut b = Builder {
-        func,
-        locals: std::collections::HashMap::new(),
-        cur: entry,
-        fault_block: fault,
-        db,
-        int_ty,
-        float_ty,
-        bool_ty,
-        text_ty,
-        char_ty,
-        unit_ty,
-        bindings,
-        loop_stack: Vec::new(),
-        loop_preheaders: Vec::new(),
+    // Synthetic, like a lifted closure: no source span of its own.
+    let mut b = Builder::new(FnValueAdapter::name(&adapter.target), (0, 0), db, bindings);
+
+    // The parameter and result types are read off the `Func`. A use site whose
+    // type is not a `Func` cannot occur — inference gives a `fn` name its
+    // declared function type — but the fallback is a nullary adapter returning
+    // `Unit`, which is a well-formed function rather than a malformed one.
+    let (param_tys, result_ty) = match b.db.data(b.db.follow(adapter.fn_ty)) {
+        praxis_types::TypeData::Func { params, result } => (params.clone(), *result),
+        _ => (Vec::new(), b.unit_ty),
     };
 
     // Param 0: the closure value. Unused — the environment is empty — but it is
@@ -659,12 +540,73 @@ fn lower_fn_value_adapter(adapter: &FnValueAdapter, db: &mut TypeDb) -> Function
     // rather than be carried past as a Unit sentinel. `call_user` always
     // checks, for exactly that reason.
     b.call_user(ret, adapter.target.clone(), forwarded);
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Return { value: ret };
-
-    b.func
+    b.finish_with_return(ret)
 }
 
 impl<'a> Builder<'a> {
+    /// Open a function body: the [`Function`] shell, its entry and fault blocks,
+    /// and the cached scalar type handles.
+    ///
+    /// The one prologue for all three lowering entry points ([`lower_fn`],
+    /// [`lower_closure_fn`], [`lower_fn_value_adapter`]), which built it
+    /// character-identically three times over. `span` is the source span for a
+    /// real `fn` and `(0, 0)` for the synthetic ones — see their call sites.
+    ///
+    /// `return_local` starts as the placeholder `LocalId(0)`: the return slot is
+    /// allocated after the params (the ABI slots come first), so it cannot exist
+    /// yet, and every caller overwrites the field before lowering a body.
+    ///
+    /// The scalar type handles are cached here because the [`TypeDb`]
+    /// constructors need `&mut` while the builder holds the db shared.
+    fn new(name: String, span: (u32, u32), db: &'a mut TypeDb, bindings: Bindings<'a>) -> Self {
+        let int_ty = db.int();
+        let float_ty = db.float();
+        let bool_ty = db.bool();
+        let text_ty = db.text();
+        let char_ty = db.char();
+        let unit_ty = db.unit();
+
+        let mut func = Function {
+            name,
+            params: Vec::new(),
+            return_local: LocalId(0),
+            locals: Vec::new(),
+            blocks: Vec::new(),
+            debug_names: Vec::new(),
+            debug_kinds: Vec::new(),
+            debug_spans: Vec::new(),
+            debug_scalar_sources: Vec::new(),
+            span,
+        };
+        let entry = func.new_block();
+        let fault = func.new_block();
+        func.terminate(fault, Terminator::Fault);
+
+        Self {
+            func,
+            locals: std::collections::HashMap::new(),
+            cur: entry,
+            fault_block: fault,
+            db,
+            int_ty,
+            float_ty,
+            bool_ty,
+            text_ty,
+            char_ty,
+            unit_ty,
+            bindings,
+            loop_stack: Vec::new(),
+            loop_preheaders: Vec::new(),
+        }
+    }
+
+    /// Close the body by returning `ret` and hand back the built function: the
+    /// shared epilogue of the three lowering entry points.
+    fn finish_with_return(mut self, ret: LocalId) -> Function {
+        self.terminate(Terminator::Return { value: ret });
+        self.func
+    }
+
     /// Allocate a `Gc` local. `debug_name` is the source name (for user
     /// bindings/params/captures); `debug_kind` classifies it for the debugger;
     /// `debug_span` is the materializing expression's span (for the debugger's
@@ -718,6 +660,32 @@ impl<'a> Builder<'a> {
     /// is what makes a preheader reachable after the fact (ADR-108).
     fn push_into(&mut self, block: BlockId, inst: Inst) {
         self.func.blocks[block.0 as usize].insts.push(inst);
+    }
+
+    /// Close [`Builder::cur`] with `term`. The terminator counterpart of
+    /// [`Builder::push`]; [`Builder::jump`] and [`Builder::branch`] are the two
+    /// shapes lowering writes over and over.
+    ///
+    /// `cur` is left where it is: closing a block does not choose the next one,
+    /// and every caller either moves `cur` to a block it already made or (for a
+    /// `break`/`continue`/`return`) goes dead — see [`jump_and_go_dead`].
+    fn terminate(&mut self, term: Terminator) {
+        self.func.terminate(self.cur, term);
+    }
+
+    /// Close [`Builder::cur`] with an unconditional jump to `target`.
+    fn jump(&mut self, target: BlockId) {
+        self.terminate(Terminator::Jump { target });
+    }
+
+    /// Close [`Builder::cur`] with a two-way branch on the `Bool` scalar `cond`:
+    /// `then_block` when it is true, `else_block` when it is false.
+    fn branch(&mut self, cond: LocalId, then_block: BlockId, else_block: BlockId) {
+        self.terminate(Terminator::Branch {
+            cond,
+            then_block,
+            else_block,
+        });
     }
 
     /// The block a loop-invariant, non-faulting allocation belongs in: the
@@ -2246,13 +2214,7 @@ fn lower_extract_int(b: &mut Builder<'_>, src: LocalId) -> LocalId {
 
 /// Extract a `Float` payload into a scalar local (carried as f64 bits, §4.12).
 fn lower_extract_float(b: &mut Builder<'_>, src: LocalId) -> LocalId {
-    let dst = b.alloc_scalar(ScalarKind::Float);
-    b.push(Inst::ExtractScalar {
-        dst,
-        src,
-        scalar: ScalarKind::Float,
-    });
-    dst
+    lower_extract_scalar(b, src, ScalarKind::Float)
 }
 
 /// Lower a checked Int binary op on two `GcRef` operands, returning the scalar
@@ -2456,21 +2418,12 @@ fn lower_short_circuit(
     rhs_expr: &TypedExpr,
     skip_on: bool,
 ) -> LocalId {
-    let lhs_bool = b.alloc_scalar(ScalarKind::Bool);
-    b.push(Inst::ExtractScalar {
-        dst: lhs_bool,
-        src: lhs_gc,
-        scalar: ScalarKind::Bool,
-    });
+    let lhs_bool = lower_extract_scalar(b, lhs_gc, ScalarKind::Bool);
     let result = b.alloc_gc(MirType::Known(b.bool_ty), None, LocalDebugKind::Temp, None);
     let true_blk = b.func.new_block();
     let false_blk = b.func.new_block();
     let join = b.func.new_block();
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-        cond: lhs_bool,
-        then_block: true_blk,
-        else_block: false_blk,
-    };
+    b.branch(lhs_bool, true_blk, false_blk);
     // The block `lhs == skip_on` reaches: the answer is `skip_on` itself, and
     // `rhs` is never lowered into it.
     let (short_blk, long_blk) = if skip_on {
@@ -2484,7 +2437,7 @@ fn lower_short_circuit(
         dst: result,
         src: lit,
     });
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join };
+    b.jump(join);
     // The other block: the answer is whatever `rhs` is.
     b.cur = long_blk;
     let rhs_val = lower_expr_gc(b, rhs_expr);
@@ -2492,7 +2445,7 @@ fn lower_short_circuit(
         dst: result,
         src: rhs_val,
     });
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join };
+    b.jump(join);
     b.cur = join;
     result
 }
@@ -2500,12 +2453,7 @@ fn lower_short_circuit(
 /// Lower logical not: `!operand` flips a `Bool`. Implemented as an integer
 /// comparison against 0 (false), yielding the negation.
 fn lower_logical_not(b: &mut Builder<'_>, operand_gc: LocalId) -> LocalId {
-    let operand_bool = b.alloc_scalar(ScalarKind::Bool);
-    b.push(Inst::ExtractScalar {
-        dst: operand_bool,
-        src: operand_gc,
-        scalar: ScalarKind::Bool,
-    });
+    let operand_bool = lower_extract_scalar(b, operand_gc, ScalarKind::Bool);
     let zero = b.alloc_scalar(ScalarKind::Bool);
     // Bool is represented as i8: 0 = false, 1 = true. `!x` is `x == 0`.
     b.push(Inst::ConstInt {
@@ -2530,12 +2478,7 @@ fn lower_if(
     else_block: Option<&praxis_hir::TypedBlock>,
 ) -> LocalId {
     let cond_gc = lower_expr_gc(b, cond);
-    let cond_scalar = b.alloc_scalar(ScalarKind::Bool);
-    b.push(Inst::ExtractScalar {
-        dst: cond_scalar,
-        src: cond_gc,
-        scalar: ScalarKind::Bool,
-    });
+    let cond_scalar = lower_extract_scalar(b, cond_gc, ScalarKind::Bool);
 
     let result = b.alloc_gc(
         MirType::Known(then_block.ty),
@@ -2547,11 +2490,7 @@ fn lower_if(
     let else_blk = b.func.new_block();
     let join = b.func.new_block();
 
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-        cond: cond_scalar,
-        then_block: then_blk,
-        else_block: else_blk,
-    };
+    b.branch(cond_scalar, then_blk, else_blk);
 
     // Then branch.
     b.cur = then_blk;
@@ -2560,7 +2499,7 @@ fn lower_if(
         dst: result,
         src: then_val,
     });
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join };
+    b.jump(join);
 
     // Else branch.
     b.cur = else_blk;
@@ -2572,7 +2511,7 @@ fn lower_if(
         dst: result,
         src: else_val,
     });
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join };
+    b.jump(join);
 
     b.cur = join;
     result
@@ -2584,7 +2523,7 @@ fn lower_while(b: &mut Builder<'_>, cond: &TypedExpr, body: &praxis_hir::TypedBl
     let body_blk = b.func.new_block();
     let exit = b.func.new_block();
 
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.jump(header);
     // The preheader opens *before* the condition, unlike `LoopCtx` below: the
     // condition's blocks belong to the loop and re-run per iteration, so a
     // literal in one is worth hoisting (ADR-108). `mandelbrot`'s `4.0` is in a
@@ -2593,17 +2532,8 @@ fn lower_while(b: &mut Builder<'_>, cond: &TypedExpr, body: &praxis_hir::TypedBl
     b.cur = header;
 
     let cond_gc = lower_expr_gc(b, cond);
-    let cond_scalar = b.alloc_scalar(ScalarKind::Bool);
-    b.push(Inst::ExtractScalar {
-        dst: cond_scalar,
-        src: cond_gc,
-        scalar: ScalarKind::Bool,
-    });
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-        cond: cond_scalar,
-        then_block: body_blk,
-        else_block: exit,
-    };
+    let cond_scalar = lower_extract_scalar(b, cond_gc, ScalarKind::Bool);
+    b.branch(cond_scalar, body_blk, exit);
 
     // Push the loop context so `break`/`continue` inside the body resolve.
     b.loop_stack.push(LoopCtx {
@@ -2614,7 +2544,7 @@ fn lower_while(b: &mut Builder<'_>, cond: &TypedExpr, body: &praxis_hir::TypedBl
     b.cur = body_blk;
     let _ = lower_block_body(b, body);
     b.loop_stack.pop();
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.jump(header);
 
     b.loop_preheaders.pop();
     b.cur = exit;
@@ -2663,7 +2593,7 @@ fn lower_for(
     let incr = b.func.new_block();
     let exit = b.func.new_block();
 
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.jump(header);
     // The preheader, for the hoist (ADR-108). It already holds the iterator
     // snapshot and the index materialization for the same reason a hoisted
     // literal joins them: one call per loop, not one per step.
@@ -2749,15 +2679,10 @@ fn lower_for(
     b.loop_stack.pop();
     // Falling off the end of the body reaches the increment the same way
     // `continue` does.
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: incr };
+    b.jump(incr);
     b.cur = incr;
     // `i = i + 1`: extract, add, re-materialize into the Gc slot.
-    let cur_scalar = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ExtractScalar {
-        dst: cur_scalar,
-        src: idx_gc,
-        scalar: ScalarKind::Int,
-    });
+    let cur_scalar = lower_extract_int(b, idx_gc);
     let one_scalar = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ConstInt {
         dst: one_scalar,
@@ -2779,7 +2704,7 @@ fn lower_for(
         roots: RootSlots::unannotated(),
         debug: DebugSlots::unannotated(),
     });
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.jump(header);
 
     b.loop_preheaders.pop();
     b.cur = exit;
@@ -2808,7 +2733,7 @@ fn lower_loop(
         praxis_types::TypeData::Unit | praxis_types::TypeData::Never => None,
         _ => Some(b.alloc_gc(MirType::Known(ty), None, LocalDebugKind::Temp, None)),
     };
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.jump(header);
     b.loop_preheaders.push(b.cur);
     b.cur = header;
     b.loop_stack.push(LoopCtx {
@@ -2819,7 +2744,7 @@ fn lower_loop(
     let _ = lower_block_body(b, body);
     b.loop_stack.pop();
     // Fall through the body → jump back to the header (infinite loop).
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.jump(header);
     b.loop_preheaders.pop();
     b.cur = exit;
     result.unwrap_or_else(|| lower_lit_gc(b, &Lit::Unit, espan))
@@ -2852,11 +2777,7 @@ fn lower_break(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
         }
         (None, None) => {}
     }
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
-        target: ctx.break_target,
-    };
-    // A fresh unreachable block so subsequent lowering has somewhere to go.
-    b.cur = b.func.new_block();
+    jump_and_go_dead(b, ctx.break_target);
 }
 
 /// `continue` (M8-WS6, §4.11). Jump to the enclosing loop's continue target.
@@ -2866,10 +2787,7 @@ fn lower_continue(b: &mut Builder<'_>) {
         .loop_stack
         .last()
         .expect("`continue` outside a loop is Y012, reported before MIR");
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump {
-        target: ctx.continue_target,
-    };
-    b.cur = b.func.new_block();
+    jump_and_go_dead(b, ctx.continue_target);
 }
 
 /// `return [expr]` (M8-WS6, §4.11). Write the value (or Unit) into the function
@@ -2881,8 +2799,7 @@ fn lower_return(b: &mut Builder<'_>, value: &Option<Box<TypedExpr>>) {
         None => lower_lit_gc(b, &Lit::Unit, None),
     };
     b.push(Inst::MoveGc { dst: ret, src: val });
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Return { value: ret };
-    b.cur = b.func.new_block();
+    return_and_go_dead(b, ret);
 }
 
 // ===========================================================================
@@ -3346,7 +3263,7 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     let body_blk = b.func.new_block();
     let incr_blk = b.func.new_block();
     let exit = b.func.new_block();
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.jump(header);
     b.cur = header;
 
     // Header: `if idx < src.len() { body } else { exit }`.
@@ -3370,7 +3287,7 @@ fn lower_pipeline(b: &mut Builder<'_>, plan: PipelinePlan) -> LocalId {
     // Increment block: `idx += 1`, jump to header.
     b.cur = incr_blk;
     emit_increment(b, idx);
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.jump(header);
 
     // Exit: materialize the sink's result out of its accumulator(s).
     b.cur = exit;
@@ -3585,11 +3502,7 @@ fn emit_step(
             // On false → jump to the continue target (skip this element); on
             // true → fall through to a fresh continuation block.
             let keep_blk = b.func.new_block();
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                cond: keep,
-                then_block: keep_blk,
-                else_block: continue_target,
-            };
+            b.branch(keep, keep_blk, continue_target);
             b.cur = keep_blk;
             item
         }
@@ -3626,11 +3539,7 @@ fn emit_step(
             // `None` → advance the sequence without reaching the sink, exactly
             // as `Step::Filter` does on a false predicate.
             let keep_blk = b.func.new_block();
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                cond: is_some,
-                then_block: keep_blk,
-                else_block: continue_target,
-            };
+            b.branch(is_some, keep_blk, continue_target);
             b.cur = keep_blk;
             // `Some(u)` → the element from here on is `u`, not the `Option`.
             let inner = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
@@ -3644,11 +3553,8 @@ fn emit_step(
         Step::TakeWhile(p) => {
             let keep = call_predicate(b, *p, item);
             let keep_blk = b.func.new_block();
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                cond: keep,
-                then_block: keep_blk,
-                else_block: pipeline_exit, // predicate false → stop the stream
-            };
+            // Predicate false → stop the stream, not just this element.
+            b.branch(keep, keep_blk, pipeline_exit);
             b.cur = keep_blk;
             item
         }
@@ -3660,11 +3566,7 @@ fn emit_step(
             let seen = take_position(b, *count);
             let stop = position_cmp_bound(b, seen, *bound, CmpOp::Ge);
             let keep_blk = b.func.new_block();
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                cond: stop,
-                then_block: pipeline_exit,
-                else_block: keep_blk,
-            };
+            b.branch(stop, pipeline_exit, keep_blk);
             b.cur = keep_blk;
             item
         }
@@ -3674,11 +3576,7 @@ fn emit_step(
             let seen = take_position(b, *count);
             let skip = position_cmp_bound(b, seen, *bound, CmpOp::Lt);
             let keep_blk = b.func.new_block();
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                cond: skip,
-                then_block: continue_target,
-                else_block: keep_blk,
-            };
+            b.branch(skip, continue_target, keep_blk);
             b.cur = keep_blk;
             item
         }
@@ -3720,11 +3618,7 @@ fn emit_step(
             // whatever the source positions happened to be.
             let stop = idx_ge_len(b, *other, *count);
             let pair_blk = b.func.new_block();
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                cond: stop,
-                then_block: pipeline_exit,
-                else_block: pair_blk,
-            };
+            b.branch(stop, pipeline_exit, pair_blk);
             b.cur = pair_blk;
             let other_item = b.alloc_gc(MirType::Opaque, None, LocalDebugKind::Temp, None);
             b.call_runtime(other_item, RuntimeSymbol::VecGet, vec![*other, *count]);
@@ -3768,7 +3662,7 @@ fn emit_splice(
     let body_blk = b.func.new_block();
     let inner_incr = b.func.new_block();
     let inner_exit = b.func.new_block();
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.jump(header);
     b.cur = header;
     emit_bounds_check(b, inner_vec, inner_idx, body_blk, inner_exit);
 
@@ -3793,7 +3687,7 @@ fn emit_splice(
     // spins the loop, the same M8-WS11 bug the outer loop guards against.)
     b.cur = inner_incr;
     emit_increment(b, inner_idx);
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.jump(header);
 
     // The splice is done with this outer element: advance the sequence feeding
     // it.
@@ -3808,12 +3702,7 @@ fn emit_splice(
 ///
 /// Read-then-increment, so the first element to arrive is at position zero.
 fn take_position(b: &mut Builder<'_>, count: LocalId) -> LocalId {
-    let seen = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ExtractScalar {
-        dst: seen,
-        src: count,
-        scalar: ScalarKind::Int,
-    });
+    let seen = lower_extract_int(b, count);
     emit_increment(b, count);
     seen
 }
@@ -3839,12 +3728,7 @@ fn position_cmp_bound(
     bound: LocalId,
     op: CmpOp,
 ) -> LocalId {
-    let bound_scalar = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ExtractScalar {
-        dst: bound_scalar,
-        src: bound,
-        scalar: ScalarKind::Int,
-    });
+    let bound_scalar = lower_extract_int(b, bound);
     let dst = b.alloc_scalar(ScalarKind::Bool);
     b.push(Inst::IntCmp {
         dst,
@@ -3860,18 +3744,8 @@ fn position_cmp_bound(
 fn idx_ge_len(b: &mut Builder<'_>, other: LocalId, idx: LocalId) -> LocalId {
     let len_dst = b.alloc_gc(MirType::Known(b.int_ty), None, LocalDebugKind::Temp, None);
     b.call_runtime(len_dst, RuntimeSymbol::VecLen, vec![other]);
-    let len_scalar = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ExtractScalar {
-        dst: len_scalar,
-        src: len_dst,
-        scalar: ScalarKind::Int,
-    });
-    let idx_scalar = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ExtractScalar {
-        dst: idx_scalar,
-        src: idx,
-        scalar: ScalarKind::Int,
-    });
+    let len_scalar = lower_extract_int(b, len_dst);
+    let idx_scalar = lower_extract_int(b, idx);
     let dst = b.alloc_scalar(ScalarKind::Bool);
     b.push(Inst::IntCmp {
         dst,
@@ -3912,18 +3786,8 @@ fn emit_index_less_than(
     then_blk: BlockId,
     els_blk: BlockId,
 ) {
-    let len_scalar = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ExtractScalar {
-        dst: len_scalar,
-        src: len,
-        scalar: ScalarKind::Int,
-    });
-    let idx_scalar = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ExtractScalar {
-        dst: idx_scalar,
-        src: idx,
-        scalar: ScalarKind::Int,
-    });
+    let len_scalar = lower_extract_int(b, len);
+    let idx_scalar = lower_extract_int(b, idx);
     let cond = b.alloc_scalar(ScalarKind::Bool);
     b.push(Inst::IntCmp {
         dst: cond,
@@ -3931,11 +3795,7 @@ fn emit_index_less_than(
         lhs: idx_scalar,
         rhs: len_scalar,
     });
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-        cond,
-        then_block: then_blk,
-        else_block: els_blk,
-    };
+    b.branch(cond, then_blk, els_blk);
 }
 
 /// Invoke a closure `f(args)` via `CallIndirect` and return the result slot.
@@ -3948,13 +3808,7 @@ fn invoke_closure(b: &mut Builder<'_>, f: LocalId, args: Vec<LocalId>) -> LocalI
 /// Call a `(T)->Bool` predicate closure and extract the Bool scalar.
 fn call_predicate(b: &mut Builder<'_>, p: LocalId, item: LocalId) -> LocalId {
     let keep_gc = invoke_closure(b, p, vec![item]);
-    let keep = b.alloc_scalar(ScalarKind::Bool);
-    b.push(Inst::ExtractScalar {
-        dst: keep,
-        src: keep_gc,
-        scalar: ScalarKind::Bool,
-    });
-    keep
+    lower_extract_scalar(b, keep_gc, ScalarKind::Bool)
 }
 
 /// Allocate the sink's accumulators up front. Returns
@@ -4101,16 +3955,12 @@ fn seeded_gc_accumulator(b: &mut Builder<'_>) -> LocalId {
 fn emit_empty_collection_guard(b: &mut Builder<'_>, seen: LocalId) {
     let empty = b.func.new_block();
     let have = b.func.new_block();
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-        cond: seen,
-        then_block: have,
-        else_block: empty,
-    };
+    b.branch(seen, have, empty);
 
     b.cur = empty;
     let sentinel = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
     b.call_runtime(sentinel, RuntimeSymbol::RaiseEmptyCollection, Vec::new());
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: have };
+    b.jump(have);
 
     b.cur = have;
 }
@@ -4118,12 +3968,7 @@ fn emit_empty_collection_guard(b: &mut Builder<'_>, seen: LocalId) {
 /// Emit `slot += 1` (extract, add, re-materialize into the Gc slot). Used for a
 /// loop cursor and for a stage's dense counter alike.
 fn emit_increment(b: &mut Builder<'_>, idx: LocalId) {
-    let cur = b.alloc_scalar(ScalarKind::Int);
-    b.push(Inst::ExtractScalar {
-        dst: cur,
-        src: idx,
-        scalar: ScalarKind::Int,
-    });
+    let cur = lower_extract_int(b, idx);
     let one = b.alloc_scalar(ScalarKind::Int);
     b.push(Inst::ConstInt { dst: one, value: 1 });
     let next = b.alloc_scalar(ScalarKind::Int);
@@ -4196,12 +4041,7 @@ fn emit_sink_body(
     match sink {
         Sink::Sum | Sink::Product => {
             let acc = acc_scalar.unwrap();
-            let item_scalar = b.alloc_scalar(ScalarKind::Int);
-            b.push(Inst::ExtractScalar {
-                dst: item_scalar,
-                src: item,
-                scalar: ScalarKind::Int,
-            });
+            let item_scalar = lower_extract_int(b, item);
             b.push(Inst::IntBinOp {
                 dst: acc,
                 op: if matches!(sink, Sink::Sum) {
@@ -4240,21 +4080,12 @@ fn emit_sink_body(
         Sink::Min | Sink::Max => {
             let acc = acc_scalar.unwrap();
             let seen = seen_flag.unwrap();
-            let item_scalar = b.alloc_scalar(ScalarKind::Int);
-            b.push(Inst::ExtractScalar {
-                dst: item_scalar,
-                src: item,
-                scalar: ScalarKind::Int,
-            });
+            let item_scalar = lower_extract_int(b, item);
             // If !seen { acc = item; seen = true } else { if cmp { acc = item } }.
             let cmp_blk = b.func.new_block();
             let set_blk = b.func.new_block();
             let cont_blk = b.func.new_block();
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                cond: seen,
-                then_block: cmp_blk,
-                else_block: set_blk,
-            };
+            b.branch(seen, cmp_blk, set_blk);
             // First element: seed.
             b.cur = set_blk;
             b.push(Inst::ConstInt {
@@ -4262,7 +4093,7 @@ fn emit_sink_body(
                 value: 1,
             });
             move_scalar(b, acc, item_scalar);
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: cont_blk };
+            b.jump(cont_blk);
             // Subsequent: compare and maybe update.
             b.cur = cmp_blk;
             let cond = b.alloc_scalar(ScalarKind::Bool);
@@ -4276,11 +4107,8 @@ fn emit_sink_body(
                 lhs: item_scalar,
                 rhs: acc,
             });
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                cond,
-                then_block: set_blk, // reuse: acc = item (seen already true)
-                else_block: cont_blk,
-            };
+            // Reuse `set_blk` for the taken side: `acc = item`, seen already true.
+            b.branch(cond, set_blk, cont_blk);
             b.cur = cont_blk;
         }
         Sink::MinBy(_) | Sink::MaxBy(_) => {
@@ -4290,11 +4118,7 @@ fn emit_sink_body(
             let cmp_blk = b.func.new_block();
             let set_blk = b.func.new_block();
             let cont_blk = b.func.new_block();
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                cond: seen,
-                then_block: cmp_blk,
-                else_block: set_blk,
-            };
+            b.branch(seen, cmp_blk, set_blk);
             b.cur = set_blk;
             b.push(Inst::ConstInt {
                 dst: seen,
@@ -4304,7 +4128,7 @@ fn emit_sink_body(
                 dst: acc,
                 src: item,
             });
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: cont_blk };
+            b.jump(cont_blk);
             b.cur = cmp_blk;
             // The comparator is "less-than": f(a, b) = a < b. For min, item is
             // better when item < acc → f(item, acc). For max, item is better
@@ -4314,17 +4138,8 @@ fn emit_sink_body(
             } else {
                 invoke_closure(b, f, vec![acc, item])
             };
-            let better = b.alloc_scalar(ScalarKind::Bool);
-            b.push(Inst::ExtractScalar {
-                dst: better,
-                src: better_gc,
-                scalar: ScalarKind::Bool,
-            });
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                cond: better,
-                then_block: set_blk,
-                else_block: cont_blk,
-            };
+            let better = lower_extract_scalar(b, better_gc, ScalarKind::Bool);
+            b.branch(better, set_blk, cont_blk);
             b.cur = cont_blk;
         }
         Sink::Any(_) | Sink::All(_) => {
@@ -4339,11 +4154,7 @@ fn emit_sink_body(
             };
             let trip_blk = b.func.new_block();
             let cont_blk = b.func.new_block();
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                cond: trip_cond,
-                then_block: trip_blk,
-                else_block: cont_blk,
-            };
+            b.branch(trip_cond, trip_blk, cont_blk);
             // trip: set acc, end the pipeline.
             b.cur = trip_blk;
             let val = if matches!(sink, Sink::Any(_)) { 1 } else { 0 };
@@ -4364,11 +4175,7 @@ fn emit_sink_body(
             let keep = call_predicate(b, pred, item);
             let found_blk = b.func.new_block();
             let cont_blk = b.func.new_block();
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                cond: keep,
-                then_block: found_blk,
-                else_block: cont_blk,
-            };
+            b.branch(keep, found_blk, cont_blk);
             b.cur = found_blk;
             match sink {
                 // `find` answers the element that matched.
@@ -4381,12 +4188,7 @@ fn emit_sink_body(
                 // `position` answers where it was: the counter's value before
                 // this element was counted.
                 _ => {
-                    let position_scalar = b.alloc_scalar(ScalarKind::Int);
-                    b.push(Inst::ExtractScalar {
-                        dst: position_scalar,
-                        src: count,
-                        scalar: ScalarKind::Int,
-                    });
+                    let position_scalar = lower_extract_int(b, count);
                     move_scalar(b, acc_scalar.unwrap(), position_scalar);
                 }
             }
@@ -4416,11 +4218,7 @@ fn emit_sink_body(
             // If !seen { acc = item; seen = true; continue } else { acc = f(acc, item) }.
             let fold_blk = b.func.new_block();
             let seed_blk = b.func.new_block();
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                cond: seen,
-                then_block: fold_blk,
-                else_block: seed_blk,
-            };
+            b.branch(seen, fold_blk, seed_blk);
             b.cur = seed_blk;
             b.push(Inst::ConstInt {
                 dst: seen,
@@ -4511,8 +4309,21 @@ fn invert_bool(b: &mut Builder<'_>, x: LocalId) -> LocalId {
 /// pipeline must not do: a chain has one exit however deeply it nests, and the
 /// innermost stack frame inside a `flat_map` splice named the inner loop's exit
 /// (MIR-08). The emitter carries both targets explicitly now.
+///
+/// `break` and `continue` (§4.11) leave the same way, which is why they call
+/// this rather than open-coding it: the dead block is not optional bookkeeping,
+/// it is what keeps a statement after a `break` from being appended to a block
+/// that already has a terminator.
 fn jump_and_go_dead(b: &mut Builder<'_>, target: BlockId) {
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target };
+    b.jump(target);
+    b.cur = b.func.new_block();
+}
+
+/// [`jump_and_go_dead`] for the other terminator that ends a path early: `return`
+/// closes the block with `Return` instead of a jump, and goes dead for the same
+/// reason.
+fn return_and_go_dead(b: &mut Builder<'_>, ret: LocalId) {
+    b.terminate(Terminator::Return { value: ret });
     b.cur = b.func.new_block();
 }
 
@@ -4627,11 +4438,7 @@ fn emit_option_of(b: &mut Builder<'_>, seen: LocalId, value: LocalId, result_ty:
     let some_blk = b.func.new_block();
     let none_blk = b.func.new_block();
     let join_blk = b.func.new_block();
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-        cond: seen,
-        then_block: some_blk,
-        else_block: none_blk,
-    };
+    b.branch(seen, some_blk, none_blk);
 
     b.cur = some_blk;
     b.alloc(
@@ -4643,7 +4450,7 @@ fn emit_option_of(b: &mut Builder<'_>, seen: LocalId, value: LocalId, result_ty:
             args: vec![value],
         },
     );
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join_blk };
+    b.jump(join_blk);
 
     b.cur = none_blk;
     b.alloc(
@@ -4655,7 +4462,7 @@ fn emit_option_of(b: &mut Builder<'_>, seen: LocalId, value: LocalId, result_ty:
             args: Vec::new(),
         },
     );
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join_blk };
+    b.jump(join_blk);
 
     b.cur = join_blk;
     dst
@@ -5014,7 +4821,7 @@ fn emit_iter_vec(b: &mut Builder<'_>, receiver: &TypedExpr, result_ty: MirType) 
     let header = b.func.new_block();
     let body = b.func.new_block();
     let exit = b.func.new_block();
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.jump(header);
     b.cur = header;
     emit_iter_bounds_check(b, src, idx, body, exit);
     b.cur = body;
@@ -5022,7 +4829,7 @@ fn emit_iter_vec(b: &mut Builder<'_>, receiver: &TypedExpr, result_ty: MirType) 
     let pushed = b.alloc_gc(MirType::Known(b.unit_ty), None, LocalDebugKind::Temp, None);
     b.call_runtime(pushed, RuntimeSymbol::VecPush, vec![out, item]);
     emit_increment(b, idx);
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: header };
+    b.jump(header);
     b.cur = exit;
     out
 }
@@ -5364,7 +5171,7 @@ fn lower_match(
             dst: result,
             src: body_val,
         });
-        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join };
+        b.jump(join);
         // Continue testing the next arm from the failure block.
         b.cur = on_fail;
     }
@@ -5375,7 +5182,7 @@ fn lower_match(
         dst: result,
         src: unit_val,
     });
-    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: join };
+    b.jump(join);
     b.cur = join;
     result
 }
@@ -5396,7 +5203,7 @@ fn emit_pattern_test(
     match pat {
         TypedPattern::Wildcard => {
             // Always matches.
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
+            b.jump(on_success);
             b.cur = on_fail;
         }
         TypedPattern::Bind {
@@ -5436,7 +5243,7 @@ fn emit_pattern_test(
                     .adopt_binding_name(scrut, name, MirType::Known(*ty), *span);
                 b.locals.insert(*symbol, scrut);
             }
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
+            b.jump(on_success);
             b.cur = on_fail;
         }
         TypedPattern::Lit { value, .. } => {
@@ -5478,26 +5285,13 @@ fn emit_pattern_test(
                         lhs: si,
                         rhs: li,
                     });
-                    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                        cond: cmp,
-                        then_block: on_success,
-                        else_block: on_fail,
-                    };
+                    b.branch(cmp, on_success, on_fail);
                 }
                 Lit::Text(_) => {
                     // Structural equality via praxis_struct_eq.
                     let eq_bool = lower_struct_eq(b, scrut, lit_gc);
-                    let eq_scalar = b.alloc_scalar(ScalarKind::Bool);
-                    b.push(Inst::ExtractScalar {
-                        dst: eq_scalar,
-                        src: eq_bool,
-                        scalar: ScalarKind::Bool,
-                    });
-                    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                        cond: eq_scalar,
-                        then_block: on_success,
-                        else_block: on_fail,
-                    };
+                    let eq_scalar = lower_extract_scalar(b, eq_bool, ScalarKind::Bool);
+                    b.branch(eq_scalar, on_success, on_fail);
                 }
                 Lit::Float(_) => {
                     // Compare two Float scalars for equality with IEEE-754
@@ -5511,17 +5305,13 @@ fn emit_pattern_test(
                         lhs: sf,
                         rhs: lf,
                     });
-                    b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                        cond: cmp,
-                        then_block: on_success,
-                        else_block: on_fail,
-                    };
+                    b.branch(cmp, on_success, on_fail);
                 }
                 Lit::Unit => {
                     // Unit patterns aren't produced by the parser today; treat
                     // as a match (defensive). Unit is a singleton, so any Unit
                     // scrutinee equals the (sole) Unit literal.
-                    b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
+                    b.jump(on_success);
                 }
             }
             b.cur = on_fail;
@@ -5551,11 +5341,7 @@ fn emit_pattern_test(
             });
             // If the tag matches, test sub-patterns; otherwise fail.
             let sub_ok = b.func.new_block();
-            b.func.blocks[b.cur.0 as usize].term = Terminator::Branch {
-                cond: tag_cmp,
-                then_block: sub_ok,
-                else_block: on_fail,
-            };
+            b.branch(tag_cmp, sub_ok, on_fail);
             b.cur = sub_ok;
             // Test each sub-pattern against its payload slot. Chain them: all
             // must succeed. Extract each payload slot and recurse.
@@ -5765,7 +5551,7 @@ fn emit_subpattern_tests(
         );
     } else {
         // All sub-patterns matched: success.
-        b.func.blocks[b.cur.0 as usize].term = Terminator::Jump { target: on_success };
+        b.jump(on_success);
         b.cur = on_fail;
     }
 }
@@ -5773,11 +5559,12 @@ fn emit_subpattern_tests(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::Lowered;
 
-    /// The pair shape these tests destructure, over the crate's one front-end
-    /// driver ([`crate::test_support::lower_src_to_mir`]). It used to be a
-    /// second copy of that driver, which is how it came to be the only one of
-    /// the three that skipped monomorphization.
+    /// The door these tests read through, over the crate's one front-end driver
+    /// ([`crate::test_support::lower_src_to_mir`]). It used to be a second copy
+    /// of that driver, which is how it came to be the only one of the three
+    /// that skipped monomorphization.
     /// **The builder's own output**, not the finished article.
     ///
     /// Every test in this module asks what `lower_*` *emitted*, so it must read
@@ -5787,9 +5574,17 @@ mod tests {
     /// can — it deletes the hoisted `Alloc` five of ADR-108's tests check the
     /// position of, and the `ExtractScalar`/`Materialize` two more name
     /// directly. See `test_support::lower_src_to_mir_unoptimized`.
-    fn lower_src_to_mir(src: &str) -> (Vec<Function>, praxis_hir::Analysis) {
-        let lowered = crate::test_support::lower_src_to_mir_unoptimized(src);
-        (lowered.funcs, lowered.analysis)
+    ///
+    /// **It hands back the whole [`Lowered`], not a `(funcs, analysis)` pair.**
+    /// Destructuring stranded [`Lowered::function`], whose panic names the
+    /// functions the module *does* have, and this module wrote
+    /// `find(|f| f.name == "main")` by hand thirty-nine times instead — under
+    /// two different `expect` strings. A test that wants only the list still
+    /// says `lower_src_to_mir(src).funcs`; one that wants a function by name,
+    /// a block by the source it lowers ([`Lowered::block_over`]) or the loop
+    /// around it ([`Lowered::innermost_loop_over`]) keeps the receiver.
+    fn lower_src_to_mir(src: &str) -> Lowered {
+        crate::test_support::lower_src_to_mir_unoptimized(src)
     }
 
     /// The builder's output **with ADR-120's forwarding applied**, for the one
@@ -5803,9 +5598,8 @@ mod tests {
     /// denominator is post-forwarding, so it is the exception the helper above
     /// is not, and it says which door it reads rather than looking like it
     /// forgot.
-    fn lower_src_forwarded(src: &str) -> (Vec<Function>, praxis_hir::Analysis) {
-        let lowered = crate::test_support::lower_src_to_mir_forwarded(src);
-        (lowered.funcs, lowered.analysis)
+    fn lower_src_forwarded(src: &str) -> Lowered {
+        crate::test_support::lower_src_to_mir_forwarded(src)
     }
 
     /// **P0-02, the half F15 unblocked.** A `for` binding's slot and the item
@@ -5814,16 +5608,16 @@ mod tests {
     /// `for` binding the debugger showed with no type at all.
     #[test]
     fn a_for_bindings_slot_carries_the_iterators_element_type() {
-        let (funcs, analysis) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn f(v: Vec[Int]) -> Int {\n  var s = 0\n  for x in v { s = s + x }\n  s\n}",
         );
-        let f = &funcs[0];
+        let f = &lowered.funcs[0];
         let named: Vec<String> = f
             .locals
             .iter()
             .filter(|l| matches!(l.kind, LocalKind::Gc))
             .filter_map(|l| l.ty.known())
-            .map(|t| analysis.db.render(t))
+            .map(|t| lowered.analysis.db.render(t))
             .collect();
         assert!(
             named.iter().any(|t| t == "Int"),
@@ -5855,9 +5649,10 @@ mod tests {
     /// to carry `None`, and the crash snapshot printed the row as `? = 3`.
     #[test]
     fn a_for_bindings_slot_carries_its_written_name() {
-        let (funcs, _) = lower_src_to_mir(
+        let funcs = lower_src_to_mir(
             "fn f(v: Vec[Int]) -> Int {\n  var s = 0\n  for item in v { s = s + item }\n  s\n}",
-        );
+        )
+        .funcs;
         let f = &funcs[0];
         assert!(
             binding_slots(f).iter().any(|n| n == "item"),
@@ -5882,9 +5677,10 @@ mod tests {
     /// as `<tmp#7> = 77` — present, but unnameable and untyped.
     #[test]
     fn a_match_arm_payload_is_a_named_user_local() {
-        let (funcs, _) = lower_src_to_mir(
+        let funcs = lower_src_to_mir(
             "fn f(o: Option[Int]) -> Int {\n  match o { Some(payload) => payload, None => 0 }\n}",
-        );
+        )
+        .funcs;
         let f = &funcs[0];
         let named = binding_slots(f);
         assert_eq!(
@@ -5901,7 +5697,7 @@ mod tests {
     /// that branch from being read as dead.
     #[test]
     fn a_bind_over_a_named_binding_does_not_steal_its_name() {
-        let (funcs, _) = lower_src_to_mir("fn f() -> Int {\n  var v = 7\n  match v { n => n }\n}");
+        let funcs = lower_src_to_mir("fn f() -> Int {\n  var v = 7\n  match v { n => n }\n}").funcs;
         let f = &funcs[0];
         let named = binding_slots(f);
         assert!(named.iter().any(|n| n == "v"), "`v` survives: {named:?}");
@@ -5917,11 +5713,12 @@ mod tests {
     /// bindings, so one loop put three `? = …` rows in the snapshot.
     #[test]
     fn a_destructuring_for_names_each_component_and_not_the_item() {
-        let (funcs, analysis) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn f(ps: Vec[(Int, Int)]) -> Int {\n  var s = 0\n  \
              for (a, b) in ps { s = s + a + b }\n  s\n}",
         );
-        let f = &funcs[0];
+        let analysis = &lowered.analysis;
+        let f = &lowered.funcs[0];
         let named = binding_slots(f);
         assert!(named.iter().any(|n| n == "a"), "{named:?}");
         assert!(named.iter().any(|n| n == "b"), "{named:?}");
@@ -5960,9 +5757,10 @@ mod tests {
     /// `(a, b): (Int, Int) = (1, 2)` beside the `a` and `b` it decomposes into.
     #[test]
     fn a_destructuring_closure_parameter_is_not_a_binding() {
-        let (funcs, _) = lower_src_to_mir(
+        let funcs = lower_src_to_mir(
             "fn f(ps: Vec[(Int, Int)]) -> Vec[Int] {\n  ps.map(|(a, b)| a + b)\n}",
-        );
+        )
+        .funcs;
         for f in &funcs {
             let named = binding_slots(f);
             assert!(
@@ -5999,7 +5797,7 @@ mod tests {
             "fn f(ps: Vec[(Int, Int)]) -> Vec[Int] {\n  ps.map(|(a, b)| a + b)\n}",
             "fn f() -> Int {\n  var n = 0\n  var g = || { n = n + 1\n n }\n  g()\n}",
         ] {
-            let (funcs, _) = lower_src_to_mir(src);
+            let funcs = lower_src_to_mir(src).funcs;
             for f in &funcs {
                 assert!(
                     !binding_slots(f).iter().any(|n| n == "<anonymous>"),
@@ -6014,13 +5812,12 @@ mod tests {
     /// call's result is the call's. Neither had a type before F15 recorded one.
     #[test]
     fn a_closure_and_its_indirect_call_carry_their_types() {
-        let (funcs, analysis) =
-            lower_src_to_mir("fn f() -> Int {\n  var g = |n| n + 1\n  g(41)\n}");
-        let rendered: Vec<String> = funcs[0]
+        let lowered = lower_src_to_mir("fn f() -> Int {\n  var g = |n| n + 1\n  g(41)\n}");
+        let rendered: Vec<String> = lowered.funcs[0]
             .locals
             .iter()
             .filter_map(|l| l.ty.known())
-            .map(|t| analysis.db.render(t))
+            .map(|t| lowered.analysis.db.render(t))
             .collect();
         assert!(
             rendered.iter().any(|t| t == "(Int) -> Int"),
@@ -6039,10 +5836,11 @@ mod tests {
     /// params are `[closure_self, forwarded…]` and its body is one direct call.
     #[test]
     fn a_fn_used_as_a_value_gets_one_adapter_per_function() {
-        let (funcs, analysis) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn double(n: Int) -> Int { n * 2 }\n\
              fn main() -> Int {\n  var f = double\n  var g = double\n  f(1) + g(2)\n}",
         );
+        let funcs = &lowered.funcs;
         let adapters: Vec<&Function> = funcs
             .iter()
             .filter(|f| f.name.starts_with("__fnvalue_"))
@@ -6082,7 +5880,7 @@ mod tests {
 
         // And the use site is a closure allocation with an empty environment,
         // not the `Unit` a `Path` to a `fn` used to lower to.
-        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let main = lowered.function("main");
         let allocs: Vec<&AllocKind> = main
             .blocks
             .iter()
@@ -6101,7 +5899,6 @@ mod tests {
             assert_eq!(fn_name, "__fnvalue_double");
             assert!(captures.is_empty(), "a top-level `fn` captures nothing");
         }
-        let _ = analysis;
     }
 
     /// …and a *direct* call is still a direct call. `lower_call` resolves a named
@@ -6109,14 +5906,15 @@ mod tests {
     /// every call in every program would allocate a closure first.
     #[test]
     fn a_direct_call_does_not_go_through_a_function_value() {
-        let (funcs, _analysis) =
+        let lowered =
             lower_src_to_mir("fn double(n: Int) -> Int { n * 2 }\nfn main() -> Int { double(21) }");
+        let funcs = &lowered.funcs;
         assert!(
             !funcs.iter().any(|f| f.name.starts_with("__fnvalue_")),
             "no adapter: {:?}",
             funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
         );
-        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let main = lowered.function("main");
         assert!(
             main.blocks.iter().flat_map(|b| b.insts.iter()).any(|i| {
                 matches!(i, Inst::Call { callee: CallTarget::User(n), .. } if n == "double")
@@ -6127,7 +5925,7 @@ mod tests {
 
     #[test]
     fn lowers_constant_int_fn_to_one_function() {
-        let (funcs, _analysis) = lower_src_to_mir("fn f() -> Int { 42 }");
+        let funcs = lower_src_to_mir("fn f() -> Int { 42 }").funcs;
         assert_eq!(funcs.len(), 1);
         assert_eq!(funcs[0].name, "f");
         assert!(!funcs[0].blocks.is_empty());
@@ -6135,7 +5933,7 @@ mod tests {
 
     #[test]
     fn lowers_arithmetic_with_extract_and_materialize() {
-        let (funcs, _analysis) = lower_src_to_mir("fn f(a: Int, b: Int) -> Int { a + b }");
+        let funcs = lower_src_to_mir("fn f(a: Int, b: Int) -> Int { a + b }").funcs;
         let f = &funcs[0];
         // Should contain ExtractScalar (for a, b) and a Materialize (the result).
         let has_extract = f.blocks.iter().any(|b| {
@@ -6166,8 +5964,7 @@ mod tests {
 
     #[test]
     fn lowers_if_into_three_blocks() {
-        let (funcs, _analysis) =
-            lower_src_to_mir("fn f(n: Int) -> Int { if n > 0 { 1 } else { 2 } }");
+        let funcs = lower_src_to_mir("fn f(n: Int) -> Int { if n > 0 { 1 } else { 2 } }").funcs;
         let f = &funcs[0];
         // entry + then + else + join = at least 4 blocks.
         assert!(
@@ -6185,8 +5982,9 @@ mod tests {
 
     #[test]
     fn lowers_while_loop_with_backedge() {
-        let (funcs, _analysis) =
-            lower_src_to_mir("fn f(n: Int) -> Int { var i = 0; while i < n { i = i + 1 }; i }");
+        let funcs =
+            lower_src_to_mir("fn f(n: Int) -> Int { var i = 0; while i < n { i = i + 1 }; i }")
+                .funcs;
         let f = &funcs[0];
         // The body block jumps back to the header (a lower block id) — a backedge.
         let has_backedge = f.blocks.iter().any(|b| match b.term {
@@ -6198,7 +5996,7 @@ mod tests {
 
     #[test]
     fn lowers_recursive_call() {
-        let (funcs, _analysis) = lower_src_to_mir("fn f(n: Int) -> Int { f(n) }");
+        let funcs = lower_src_to_mir("fn f(n: Int) -> Int { f(n) }").funcs;
         let f = &funcs[0];
         let has_call = f
             .blocks
@@ -6216,7 +6014,7 @@ mod tests {
     /// frame before it, on every iteration.
     #[test]
     fn a_small_int_literal_is_a_const_gc_and_not_a_safepoint() {
-        let (funcs, _analysis) = lower_src_to_mir("fn main() -> Int { 1 }");
+        let funcs = lower_src_to_mir("fn main() -> Int { 1 }").funcs;
         let f = &funcs[0];
 
         let konst = f.blocks.iter().find_map(|b| {
@@ -6244,7 +6042,7 @@ mod tests {
         );
         // ...and the annotated function has no safepoint at all in its body, so
         // there is nothing for the backend to spill.
-        let mut annotated = lower_src_to_mir("fn main() -> Int { 1 }").0;
+        let mut annotated = lower_src_to_mir("fn main() -> Int { 1 }").funcs;
         crate::annotate(&mut annotated[0]);
         crate::verify(&annotated[0]).expect("an interned literal verifies");
         assert!(
@@ -6267,7 +6065,7 @@ mod tests {
             "fn main() -> Int {{ {} }}",
             praxis_runtime::SMALL_INT_MAX + 1
         );
-        let (mut funcs, _analysis) = lower_src_to_mir(&src);
+        let mut funcs = lower_src_to_mir(&src).funcs;
         crate::annotate(&mut funcs[0]);
         crate::verify(&funcs[0]).expect("an allocated literal verifies");
         let f = &funcs[0];
@@ -6325,7 +6123,7 @@ mod tests {
             if value < 0 {
                 continue;
             }
-            let (funcs, _analysis) = lower_src_to_mir(&format!("fn main() -> Int {{ {value} }}"));
+            let funcs = lower_src_to_mir(&format!("fn main() -> Int {{ {value} }}")).funcs;
             let has_const_gc = funcs[0]
                 .blocks
                 .iter()
@@ -6353,8 +6151,9 @@ mod tests {
         // frame, because `is_gc_safepoint` matches `Inst::Alloc` unconditionally.
         // It is an `Inst::ConstGc` now. What this test is about — the *type* of
         // the slot — is unchanged.
-        let (funcs, analysis) = lower_src_to_mir("fn main() -> Unit { var x = 1 }");
-        let f = &funcs[0];
+        let lowered = lower_src_to_mir("fn main() -> Unit { var x = 1 }");
+        let analysis = &lowered.analysis;
+        let f = &lowered.funcs[0];
 
         let const_unit = f.blocks.iter().find_map(|b| {
             b.insts.iter().find_map(|i| match i {
@@ -6396,7 +6195,7 @@ mod tests {
             "fn main() -> Int {\n  var a = 10\n  var b = 20\n  var f = |x| x + a + b\n  f(12)\n}\n",
             "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.map(|x| x * 2).sum()\n}\n",
         ] {
-            let (funcs, _analysis) = lower_src_to_mir(src);
+            let funcs = lower_src_to_mir(src).funcs;
 
             let bad_moves: Vec<(&str, LocalId, LocalId)> = funcs
                 .iter()
@@ -6431,9 +6230,10 @@ mod tests {
         // field index — not a value that has to be built in a local first. This
         // is what makes P0-03's illegal state unconstructible rather than
         // merely absent: there is no longer a slot for the index to live in.
-        let (funcs, _analysis) = lower_src_to_mir(
+        let funcs = lower_src_to_mir(
             "fn main() -> Int {\n  var a = 10\n  var b = 20\n  var f = |x| x + a + b\n  f(12)\n}\n",
-        );
+        )
+        .funcs;
         let closure_fn = funcs
             .iter()
             .find(|f| f.name != "main")
@@ -6492,10 +6292,10 @@ mod tests {
         // `take` is typed to accept any Int expression, not literals only. The
         // intrinsic fallback must preserve that contract instead of returning
         // Unit and letting the outer pipeline reinterpret Unit as a Vec.
-        let (funcs, _analysis) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var n = 2\n  v.take(n).sum()\n}\n",
         );
-        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let main = lowered.function("main");
         let unit_fallbacks: Vec<_> = main
             .blocks
             .iter()
@@ -6511,10 +6311,10 @@ mod tests {
 
     #[test]
     fn dynamic_skip_argument_does_not_silently_lower_to_unit() {
-        let (funcs, _analysis) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  var n = 2\n  v.skip(n).sum()\n}\n",
         );
-        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let main = lowered.function("main");
         let unit_fallbacks: Vec<_> = main
             .blocks
             .iter()
@@ -6536,7 +6336,7 @@ mod tests {
     /// program that *does* contain a `Lit::Unit` is what pins it.
     #[test]
     fn the_unit_predicate_recognizes_what_lowering_emits() {
-        let (funcs, _analysis) = lower_src_to_mir("fn main() -> Unit { var x = 1 }");
+        let funcs = lower_src_to_mir("fn main() -> Unit { var x = 1 }").funcs;
         assert!(
             funcs[0]
                 .blocks
@@ -6558,10 +6358,10 @@ mod tests {
     #[test]
     fn a_take_bound_is_evaluated_once_before_the_loop() {
         for method in ["take", "skip"] {
-            let (funcs, _analysis) = lower_src_to_mir(&format!(
+            let lowered = lower_src_to_mir(&format!(
                 "fn bound() -> Int {{ 2 }}\nfn main() -> Int {{\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.{method}(bound()).sum()\n}}\n"
             ));
-            let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+            let main = lowered.function("main");
             // Blocks are appended in emission order, and so are the instructions
             // in each, so a flat walk is the emission sequence.
             let calls: Vec<&str> = main
@@ -6596,10 +6396,11 @@ mod tests {
 
     #[test]
     fn call_result_locals_retain_their_inferred_static_types() {
-        let (funcs, analysis) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn id(n: Int) -> Int { n }\nfn main() -> Int {\n  var v = Vec()\n  var n = v.len()\n  id(n)\n}\n",
         );
-        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let analysis = &lowered.analysis;
+        let main = lowered.function("main");
         let call_results: Vec<_> = main
             .blocks
             .iter()
@@ -6636,9 +6437,10 @@ mod tests {
         // `AllocKind::Collection` when P0-03 removed the null-descriptor
         // integer from its `Gc` argument slot, so the assertion covers the
         // allocation form rather than the call form.
-        let (funcs, analysis) =
+        let lowered =
             lower_src_to_mir("fn main() {\n  var v = Vec()\n  v.push(1)\n  v.map(|x| x)\n}\n");
-        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let analysis = &lowered.analysis;
+        let main = lowered.function("main");
 
         let mut saw_vec = false;
         let mut saw_push = false;
@@ -6700,8 +6502,9 @@ mod tests {
     /// makes the loop's own liveness root it.
     #[test]
     fn a_list_literal_allocates_a_vec_then_pushes_each_element() {
-        let (funcs, analysis) = lower_src_to_mir("fn main() {\n  var v = [1, 2, 3]\n}\n");
-        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let lowered = lower_src_to_mir("fn main() {\n  var v = [1, 2, 3]\n}\n");
+        let analysis = &lowered.analysis;
+        let main = lowered.function("main");
 
         // The instruction sequence, in order: the allocation first, then one
         // push per element and no more.
@@ -6774,8 +6577,8 @@ mod tests {
         );
 
         // The empty literal is the allocation and nothing else.
-        let (funcs, _) = lower_src_to_mir("fn main() {\n  var v: Vec[Int] = []\n}\n");
-        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let lowered = lower_src_to_mir("fn main() {\n  var v: Vec[Int] = []\n}\n");
+        let main = lowered.function("main");
         assert_eq!(
             main.blocks
                 .iter()
@@ -6803,9 +6606,9 @@ mod tests {
     /// correct answers, and a `Vec` materialized per loop that nothing needs.
     #[test]
     fn a_for_over_a_text_names_the_text_accessors_and_takes_no_snapshot() {
-        let (funcs, _analysis) =
+        let lowered =
             lower_src_to_mir("fn main() {\n  var t = \"ab\"\n  for c in t { out(c) }\n}\n");
-        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let main = lowered.function("main");
         let called: Vec<RuntimeSymbol> = main
             .blocks
             .iter()
@@ -6834,10 +6637,10 @@ mod tests {
 
     #[test]
     fn for_continue_targets_the_increment_block_not_the_header() {
-        let (funcs, _analysis) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  for x in v { continue }\n  0\n}\n",
         );
-        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let main = lowered.function("main");
         let (header, body) = main
             .blocks
             .iter()
@@ -6884,9 +6687,10 @@ mod tests {
         // does not make codegen infer a schema from runtime values; it creates a
         // zero-field tuple and all tuple_set calls become no-ops. Assert the
         // MIR/codegen boundary carries the actual shape.
-        let (funcs, analysis) =
+        let lowered =
             lower_src_to_mir("fn main() {\n  var v = Vec()\n  v.push(10)\n  v.enumerate()\n}\n");
-        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let analysis = &lowered.analysis;
+        let main = lowered.function("main");
         let tuple_ty = main
             .blocks
             .iter()
@@ -6914,10 +6718,11 @@ mod tests {
 
     #[test]
     fn zip_tuple_allocation_carries_a_real_two_element_type() {
-        let (funcs, analysis) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn main() {\n  var lhs = Vec()\n  lhs.push(10)\n  var rhs = Vec()\n  rhs.push(20)\n  lhs.zip(rhs)\n}\n",
         );
-        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let analysis = &lowered.analysis;
+        let main = lowered.function("main");
         let tuple_ty = main
             .blocks
             .iter()
@@ -6950,52 +6755,27 @@ mod tests {
     /// side-effect-free index, and twice the calls.
     #[test]
     fn a_compound_store_through_a_subscript_reads_once_and_writes_once() {
-        let (funcs, _) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn main() -> Int {\n  var c = Counter()\n  c[\"k\"] += 1\n  c[\"k\"]\n}",
         );
-        let main = funcs.iter().find(|f| f.name == "main").expect("main");
-        let runtime_calls = |sym: RuntimeSymbol| -> usize {
-            main.blocks
-                .iter()
-                .flat_map(|b| b.insts.iter())
-                .filter(|i| {
-                    matches!(
-                        i,
-                        Inst::Call {
-                            callee: CallTarget::Runtime(s),
-                            ..
-                        } if *s == sym
-                    )
-                })
-                .count()
-        };
+        let main = lowered.function("main");
         // Two reads in the program: the `+=`'s own, and the trailing `c["k"]`.
-        assert_eq!(runtime_calls(RuntimeSymbol::CounterGet), 2);
-        assert_eq!(runtime_calls(RuntimeSymbol::CounterSet), 1);
+        assert_eq!(runtime_calls(main, RuntimeSymbol::CounterGet), 2);
+        assert_eq!(runtime_calls(main, RuntimeSymbol::CounterSet), 1);
         // `inc` is never involved: `+= 1` is a read-modify-write, not
         // `praxis_counter_inc` in disguise — which would give the right answer
         // here and the wrong one for `+= 2`.
-        assert_eq!(runtime_calls(RuntimeSymbol::CounterInc), 0);
+        assert_eq!(runtime_calls(main, RuntimeSymbol::CounterInc), 0);
 
         // A plain store reads nothing.
-        let (funcs, _) =
+        let lowered =
             lower_src_to_mir("fn main() -> Int {\n  var m = Map()\n  m[\"k\"] = 1\n  m.len()\n}");
-        let main = funcs.iter().find(|f| f.name == "main").expect("main");
-        let map_index = main
-            .blocks
-            .iter()
-            .flat_map(|b| b.insts.iter())
-            .filter(|i| {
-                matches!(
-                    i,
-                    Inst::Call {
-                        callee: CallTarget::Runtime(RuntimeSymbol::MapIndex),
-                        ..
-                    }
-                )
-            })
-            .count();
-        assert_eq!(map_index, 0, "`m[k] = v` performs no read");
+        let main = lowered.function("main");
+        assert_eq!(
+            runtime_calls(main, RuntimeSymbol::MapIndex),
+            0,
+            "`m[k] = v` performs no read"
+        );
     }
 
     /// **The field store's MIR shape.** `p.x = 5` is one `StoreField` at the
@@ -7013,8 +6793,8 @@ mod tests {
     #[test]
     fn a_field_store_writes_one_slot_and_a_compound_one_reads_it_first() {
         let field_ops = |src: &str| -> (Vec<u32>, Vec<u32>) {
-            let (funcs, _) = lower_src_to_mir(src);
-            let main = funcs.iter().find(|f| f.name == "main").expect("main");
+            let lowered = lower_src_to_mir(src);
+            let main = lowered.function("main");
             let all = || main.blocks.iter().flat_map(|b| b.insts.iter());
             (
                 all()
@@ -7051,11 +6831,11 @@ mod tests {
 
         // The receiver is lowered once, so an allocation in it happens once —
         // the counterpart of the subscript store's evaluation rule.
-        let (funcs, _) = lower_src_to_mir(&format!(
+        let lowered = lower_src_to_mir(&format!(
             "{decl}fn pick(v: Vec[P]) -> P {{ v[0] }}\n\
              fn main() -> Int {{\n  var v = [P {{ x: 1, y: 2 }}]\n  pick(v).x += 1\n  0\n}}"
         ));
-        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let main = lowered.function("main");
         let picks = main
             .blocks
             .iter()
@@ -7105,7 +6885,7 @@ mod tests {
         for op in ['+', '-', '*', '/'] {
             for (template, shape) in shapes {
                 let src = template.replace("{}", &op.to_string());
-                let (funcs, _) = lower_src_to_mir(&src);
+                let funcs = lower_src_to_mir(&src).funcs;
                 let insts: Vec<&Inst> = funcs
                     .iter()
                     .flat_map(|f| f.blocks.iter())
@@ -7155,7 +6935,7 @@ mod tests {
                 // and the control has to change it with the literals or it is a
                 // `Float` field taking an `Int`.
                 .replace("Float", "Int");
-            let (funcs, _) = lower_src_to_mir(&src);
+            let funcs = lower_src_to_mir(&src).funcs;
             let has_int = funcs
                 .iter()
                 .flat_map(|f| f.blocks.iter())
@@ -7166,21 +6946,11 @@ mod tests {
                 "Int `+=` through {shape} is Int arithmetic\nsrc: {src}"
             );
         }
-        let (funcs, _) = lower_src_to_mir("var s = \"a\"\ns += \"b\"\nout(s)");
-        let concats = funcs
+        let funcs = lower_src_to_mir("var s = \"a\"\ns += \"b\"\nout(s)").funcs;
+        let concats: usize = funcs
             .iter()
-            .flat_map(|f| f.blocks.iter())
-            .flat_map(|b| b.insts.iter())
-            .filter(|i| {
-                matches!(
-                    i,
-                    Inst::Call {
-                        callee: CallTarget::Runtime(RuntimeSymbol::TextConcat),
-                        ..
-                    }
-                )
-            })
-            .count();
+            .map(|f| runtime_calls(f, RuntimeSymbol::TextConcat))
+            .sum();
         assert_eq!(
             concats, 1,
             "`s += \"b\"` is one `praxis_text_concat` (ADR-085)"
@@ -7197,29 +6967,13 @@ mod tests {
     /// gives the same answer too, and copies every vector any program iterates.
     #[test]
     fn a_for_snapshots_once_before_the_loop_or_not_at_all() {
-        let runtime_calls = |f: &Function, sym: RuntimeSymbol| -> usize {
-            f.blocks
-                .iter()
-                .flat_map(|b| b.insts.iter())
-                .filter(|i| {
-                    matches!(
-                        i,
-                        Inst::Call {
-                            callee: CallTarget::Runtime(s),
-                            ..
-                        } if *s == sym
-                    )
-                })
-                .count()
-        };
-
         // Six members, so "once per step" and "once" are different numbers.
-        let (funcs, _) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn main() -> Int {\n  var s = Set()\n  var i = 0\n  \
              while i < 6 { s.insert(i)\n i = i + 1 }\n  \
              var t = 0\n  for x in s { t = t + x }\n  t\n}",
         );
-        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let main = lowered.function("main");
         assert_eq!(runtime_calls(main, RuntimeSymbol::SetItems), 1);
         // …and it is not in the loop: the snapshot's block dominates the header,
         // so it holds no `Terminator::Branch` back-edge target. The cheap
@@ -7273,11 +7027,11 @@ mod tests {
 
         // A keyed collection snapshots **twice**, and pairs the two per step —
         // one `AllocKind::Tuple` inside the body, not one per collection.
-        let (funcs, _) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn main() -> Int {\n  var m = Map()\n  m.insert(1, 2)\n  \
              var t = 0\n  for kv in m { t = t + kv.1 }\n  t\n}",
         );
-        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let main = lowered.function("main");
         assert_eq!(runtime_calls(main, RuntimeSymbol::MapKeys), 1);
         assert_eq!(runtime_calls(main, RuntimeSymbol::MapValues), 1);
         assert_eq!(
@@ -7315,8 +7069,8 @@ mod tests {
             ("for x in 0..3 { t = t + x }", "Range"),
         ] {
             let src = format!("fn main() -> Int {{\n  var t = 0\n  {src}\n  t\n}}");
-            let (funcs, _) = lower_src_to_mir(&src);
-            let main = funcs.iter().find(|f| f.name == "main").expect("main");
+            let lowered = lower_src_to_mir(&src);
+            let main = lowered.function("main");
             for sym in [
                 RuntimeSymbol::SetItems,
                 RuntimeSymbol::BitsetItems,
@@ -7355,8 +7109,8 @@ mod tests {
             payloads: usize,
         }
         let reads = |src: &str| -> Reads {
-            let (funcs, _) = lower_src_to_mir(src);
-            let main = funcs.iter().find(|f| f.name == "main").expect("main");
+            let lowered = lower_src_to_mir(src);
+            let main = lowered.function("main");
             let all = || main.blocks.iter().flat_map(|b| b.insts.iter());
             Reads {
                 fields: all()
@@ -7440,8 +7194,8 @@ mod tests {
     #[test]
     fn a_bool_pattern_reads_its_scrutinee_at_a_bools_width() {
         let extracts = |src: &str| -> Vec<ScalarKind> {
-            let (funcs, _) = lower_src_to_mir(src);
-            let main = funcs.iter().find(|f| f.name == "main").expect("main");
+            let lowered = lower_src_to_mir(src);
+            let main = lowered.function("main");
             main.blocks
                 .iter()
                 .flat_map(|b| b.insts.iter())
@@ -7484,21 +7238,8 @@ mod tests {
     #[test]
     fn an_updating_store_is_one_call_and_reads_nothing() {
         let calls = |src: &str, sym: RuntimeSymbol| -> usize {
-            let (funcs, _) = lower_src_to_mir(src);
-            let main = funcs.iter().find(|f| f.name == "main").expect("main");
-            main.blocks
-                .iter()
-                .flat_map(|b| b.insts.iter())
-                .filter(|i| {
-                    matches!(
-                        i,
-                        Inst::Call {
-                            callee: CallTarget::Runtime(s),
-                            ..
-                        } if *s == sym
-                    )
-                })
-                .count()
+            let lowered = lower_src_to_mir(src);
+            runtime_calls(lowered.function("main"), sym)
         };
         const MIN: &str = "fn main() -> Int {\n  var d = Map()\n  d[\"a\"] min= 5\n  d[\"a\"]\n}";
         const MAX: &str = "fn main() -> Int {\n  var b = Map()\n  b[\"a\"] max= 5\n  b[\"a\"]\n}";
@@ -7548,10 +7289,10 @@ mod tests {
     fn a_fused_pipeline_opens_its_source_the_way_a_for_does() {
         // A `Set` is snapshotted once, before the header, and the loop walks the
         // snapshot — one `praxis_set_items`, and no read of the `Set` itself.
-        let (funcs, _) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn main() -> Int {\n  var s = Set()\n  s.insert(1)\n  s.map(|x| x * 2).sum()\n}",
         );
-        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let main = lowered.function("main");
         assert_eq!(runtime_calls(main, RuntimeSymbol::SetItems), 1);
         assert_eq!(runtime_calls(main, RuntimeSymbol::VecLen), 1);
         assert_eq!(runtime_calls(main, RuntimeSymbol::VecGet), 1);
@@ -7559,11 +7300,11 @@ mod tests {
 
         // A `Map` takes the same **two** aligned snapshots a `for kv in m` does,
         // and pairs them once per step.
-        let (funcs, _) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn main() -> Int {\n  var m = Map()\n  m.insert(1, 2)\n  \
              m.map(|kv| kv.1).sum()\n}",
         );
-        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let main = lowered.function("main");
         assert_eq!(runtime_calls(main, RuntimeSymbol::MapKeys), 1);
         assert_eq!(runtime_calls(main, RuntimeSymbol::MapValues), 1);
         assert_eq!(
@@ -7574,25 +7315,24 @@ mod tests {
 
         // A `Range` and a `Text` index themselves, through their **own**
         // accessors — `praxis_vec_get` on a `Text` is the same wrong-type read.
-        let (funcs, _) = lower_src_to_mir("fn main() -> Int {\n  (0..3).map(|x| x * 2).sum()\n}");
-        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let lowered = lower_src_to_mir("fn main() -> Int {\n  (0..3).map(|x| x * 2).sum()\n}");
+        let main = lowered.function("main");
         assert_eq!(runtime_calls(main, RuntimeSymbol::RangeLen), 1);
         assert_eq!(runtime_calls(main, RuntimeSymbol::RangeGet), 1);
         assert_eq!(runtime_calls(main, RuntimeSymbol::VecGet), 0);
 
-        let (funcs, _) =
-            lower_src_to_mir("fn main() -> Int {\n  \"ab\".filter(|c| true).count()\n}");
-        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let lowered = lower_src_to_mir("fn main() -> Int {\n  \"ab\".filter(|c| true).count()\n}");
+        let main = lowered.function("main");
         assert_eq!(runtime_calls(main, RuntimeSymbol::TextLen), 1);
         assert_eq!(runtime_calls(main, RuntimeSymbol::TextGet), 1);
         assert_eq!(runtime_calls(main, RuntimeSymbol::VecGet), 0);
 
         // And a `Vec` source stays allocation-free: nothing about `v.map(f)`
         // changed.
-        let (funcs, _) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.map(|x| x * 2).sum()\n}",
         );
-        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let main = lowered.function("main");
         for sym in [
             RuntimeSymbol::SetItems,
             RuntimeSymbol::MinHeapItems,
@@ -7635,8 +7375,8 @@ mod tests {
             let src = format!(
                 "fn main() -> Unit {{\n  var s = Set()\n  s.insert(1)\n  out(s.{name})\n}}"
             );
-            let (funcs, _) = lower_src_to_mir(&src);
-            let main = funcs.iter().find(|f| f.name == "main").expect("main");
+            let lowered = lower_src_to_mir(&src);
+            let main = lowered.function("main");
             assert_eq!(runtime_calls(main, wrapper), 1, "{name}");
             assert_eq!(
                 runtime_calls(main, RuntimeSymbol::SetItems),
@@ -7652,8 +7392,8 @@ mod tests {
                 "fn main() -> Unit {{\n  var d = Deque()\n  d.push_back(1)\n  \
                  out(d.{name})\n}}"
             );
-            let (funcs, _) = lower_src_to_mir(&src);
-            let main = funcs.iter().find(|f| f.name == "main").expect("main");
+            let lowered = lower_src_to_mir(&src);
+            let main = lowered.function("main");
             assert_eq!(runtime_calls(main, wrapper), 1, "{name}");
             assert_eq!(
                 runtime_calls(main, RuntimeSymbol::DequeGet),
@@ -7670,8 +7410,8 @@ mod tests {
             // `v.sorted()` the one call it has always been.
             let src =
                 format!("fn main() -> Unit {{\n  var v = Vec()\n  v.push(1)\n  out(v.{name})\n}}");
-            let (funcs, _) = lower_src_to_mir(&src);
-            let main = funcs.iter().find(|f| f.name == "main").expect("main");
+            let lowered = lower_src_to_mir(&src);
+            let main = lowered.function("main");
             assert_eq!(runtime_calls(main, wrapper), 1, "{name}");
             assert_eq!(
                 runtime_calls(main, RuntimeSymbol::VecPush),
@@ -7689,11 +7429,11 @@ mod tests {
     /// is one loop that inserts into the `Set` directly.
     #[test]
     fn a_conversion_fuses_into_the_target_collection() {
-        let (funcs, _) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  \
              v.map(|x| x * 2).to_set().len()\n}",
         );
-        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let main = lowered.function("main");
         assert_eq!(runtime_calls(main, RuntimeSymbol::SetInsert), 1);
         assert_eq!(
             runtime_calls(main, RuntimeSymbol::VecPush),
@@ -7707,9 +7447,9 @@ mod tests {
         // `praxis_tuple_get` MIR emits for `p.0`. The source is a `Counter` the
         // program never inserts into by hand, so the one `praxis_map_insert` is
         // unambiguously the sink's.
-        let (funcs, _) =
+        let lowered =
             lower_src_to_mir("fn main() -> Int {\n  [\"a\"].frequencies().to_map().len()\n}");
-        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let main = lowered.function("main");
         assert_eq!(runtime_calls(main, RuntimeSymbol::MapInsert), 1);
         assert_eq!(
             runtime_calls(main, RuntimeSymbol::CounterKeys),
@@ -7731,10 +7471,10 @@ mod tests {
         // coming back: it answers the same reference, so there is no push and no
         // second allocation. On the other nine receivers it is the only route to
         // a `Vec` at all.
-        let (funcs, _) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn main() -> Int {\n  var v = Vec()\n  v.push(1)\n  v.to_vec().count()\n}",
         );
-        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let main = lowered.function("main");
         assert_eq!(
             runtime_calls(main, RuntimeSymbol::VecPush),
             1,
@@ -7757,15 +7497,20 @@ mod tests {
         assert_eq!(allocs, 1, "only the `Vec()` the program wrote");
 
         // …and on a `Set` it is the snapshot, which is one call and not a loop.
-        let (funcs, _) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn main() -> Int {\n  var s = Set()\n  s.insert(1)\n  s.to_vec().count()\n}",
         );
-        let main = funcs.iter().find(|f| f.name == "main").expect("main");
+        let main = lowered.function("main");
         assert_eq!(runtime_calls(main, RuntimeSymbol::SetItems), 1);
         assert_eq!(runtime_calls(main, RuntimeSymbol::VecPush), 0);
     }
 
-    /// Every runtime call to `sym` in `f`, for the shape tests above.
+    /// Every runtime call to `sym` in `f`, for the shape tests in this module.
+    ///
+    /// A `mod tests` has no submodules, so this one item is in scope for all of
+    /// them. It stood beside three byte-identical closures and two open-coded
+    /// scans, which is four answers to "how many `praxis_set_items` does this
+    /// function call".
     fn runtime_calls(f: &Function, sym: RuntimeSymbol) -> usize {
         f.blocks
             .iter()
@@ -7864,7 +7609,7 @@ mod tests {
     /// happened to get.
     #[test]
     fn a_parse_plan_id_rides_the_interned_table_when_the_table_holds_it() {
-        let (mut funcs, _analysis) = lower_src_to_mir("fn main() -> Int { read int }");
+        let mut funcs = lower_src_to_mir("fn main() -> Int { read int }").funcs;
         crate::annotate(&mut funcs[0]);
         crate::verify(&funcs[0]).expect("the parser call verifies");
         let f = &funcs[0];
@@ -7925,7 +7670,7 @@ mod tests {
     #[test]
     fn the_plan_id_and_an_int_literal_take_the_same_branch() {
         let const_gcs = |src: &str| -> Vec<GcConst> {
-            lower_src_to_mir(src).0[0]
+            lower_src_to_mir(src).funcs[0]
                 .blocks
                 .iter()
                 .flat_map(|b| b.insts.iter())
@@ -7964,10 +7709,10 @@ mod tests {
     /// jumps to success is not defensive.
     #[test]
     fn a_char_pattern_emits_a_comparison_and_not_a_jump() {
-        let (funcs, _) = lower_src_forwarded(
+        let lowered = lower_src_forwarded(
             "fn f(c: Char) -> Int {\n  match c {\n    '#' => 1\n    '.' => 2\n    _ => 3\n  }\n}",
         );
-        let f = funcs.iter().find(|f| f.name == "f").expect("f");
+        let f = lowered.function("f");
 
         // One `IntCmp { Eq }` per literal arm — the stub emitted none.
         let cmps = f
@@ -8019,7 +7764,7 @@ mod tests {
     #[test]
     fn an_ascii_char_literal_is_a_const_gc() {
         let const_gcs = |src: &str| -> Vec<GcConst> {
-            lower_src_to_mir(src).0[0]
+            lower_src_to_mir(src).funcs[0]
                 .blocks
                 .iter()
                 .flat_map(|b| b.insts.iter())
@@ -8029,8 +7774,8 @@ mod tests {
                 })
                 .collect()
         };
-        let (funcs, _) = lower_src_to_mir("fn main() -> Int { '#'.to_int() }");
-        let main = &funcs[0];
+        let lowered = lower_src_to_mir("fn main() -> Int { '#'.to_int() }");
+        let main = &lowered.funcs[0];
         assert!(
             const_gcs("fn main() -> Int { '#'.to_int() }")
                 .iter()
@@ -8049,8 +7794,8 @@ mod tests {
         );
         // The spelling it replaces, for contrast: one `praxis_text_get` per
         // evaluation, folded by nothing.
-        let (funcs, _) = lower_src_to_mir("fn main() -> Int { \"#\"[0].to_int() }");
-        let subscript = funcs.iter().find(|f| f.name == "main").expect("main");
+        let lowered = lower_src_to_mir("fn main() -> Int { \"#\"[0].to_int() }");
+        let subscript = lowered.function("main");
         assert_eq!(runtime_calls(subscript, RuntimeSymbol::TextGet), 1);
         assert_eq!(runtime_calls(main, RuntimeSymbol::TextGet), 0);
     }
@@ -8061,7 +7806,7 @@ mod tests {
     /// `CheckFault` stays, because `praxis_alloc_char` validates its scalar.
     #[test]
     fn a_char_literal_above_the_table_still_allocates() {
-        let (funcs, _) = lower_src_to_mir("fn main() -> Int { 'é'.to_int() }");
+        let funcs = lower_src_to_mir("fn main() -> Int { 'é'.to_int() }").funcs;
         let main = &funcs[0];
         assert!(
             !main.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(
@@ -8149,7 +7894,7 @@ fn f(n: Int, x0: Float) -> Float {
     /// a dominator tree or a fault-pairing analysis.
     #[test]
     fn a_float_literal_in_a_loop_body_is_allocated_once_in_the_preheader() {
-        let (mut funcs, _analysis) = lower_src_to_mir(LOOP_WITH_A_FLOAT_LITERAL);
+        let mut funcs = lower_src_to_mir(LOOP_WITH_A_FLOAT_LITERAL).funcs;
         crate::annotate(&mut funcs[0]);
         crate::verify(&funcs[0]).expect("a hoisted literal verifies");
         let f = &funcs[0];
@@ -8176,9 +7921,10 @@ fn f(n: Int, x0: Float) -> Float {
     /// lives exactly there.
     #[test]
     fn a_float_literal_in_a_while_condition_is_hoisted_like_one_in_the_body() {
-        let (mut funcs, _analysis) = lower_src_to_mir(
+        let mut funcs = lower_src_to_mir(
             "fn f(n: Float) -> Int {\n  var i = 0\n  while n <= 4.0 {\n    i = i + 1\n  }\n  i\n}",
-        );
+        )
+        .funcs;
         crate::annotate(&mut funcs[0]);
         crate::verify(&funcs[0]).expect("a hoisted condition literal verifies");
         let f = &funcs[0];
@@ -8204,9 +7950,10 @@ fn f(n: Int, x0: Float) -> Float {
     /// allocation saved per outer step.
     #[test]
     fn a_literal_in_a_nested_loop_is_hoisted_to_the_innermost_preheader() {
-        let (mut funcs, _analysis) = lower_src_to_mir(
+        let mut funcs = lower_src_to_mir(
             "fn f(n: Int, x0: Float) -> Float {\n  var x = x0\n  var i = 0\n  while i < n {\n    var j = 0\n    while j < n {\n      x = x + 2.0\n      j = j + 1\n    }\n    i = i + 1\n  }\n  x\n}",
-        );
+        )
+        .funcs;
         crate::annotate(&mut funcs[0]);
         crate::verify(&funcs[0]).expect("a nested hoist verifies");
         let f = &funcs[0];
@@ -8241,9 +7988,10 @@ fn f(n: Int, x0: Float) -> Float {
     /// sweep-time drop *per loop entry* instead of per iteration.
     #[test]
     fn a_text_literal_in_a_loop_is_hoisted_now_that_its_alloc_cannot_fault() {
-        let (mut funcs, _analysis) = lower_src_to_mir(
+        let mut funcs = lower_src_to_mir(
             "fn f(n: Int, s0: Text) -> Text {\n  var s = s0\n  var i = 0\n  while i < n {\n    s = \"x\"\n    i = i + 1\n  }\n  s\n}",
-        );
+        )
+        .funcs;
         crate::annotate(&mut funcs[0]);
         crate::verify(&funcs[0]).expect("a hoisted Text literal verifies");
         let f = &funcs[0];
@@ -8309,8 +8057,7 @@ fn f(n: Int, x0: Float) -> Float {
     /// quietly costing three instructions and a block split per literal.
     #[test]
     fn a_text_literal_allocation_is_not_a_fault_check_site() {
-        let (mut funcs, _analysis) =
-            lower_src_to_mir("fn f() -> Text {\n  var s = \"hello\"\n  s\n}");
+        let mut funcs = lower_src_to_mir("fn f() -> Text {\n  var s = \"hello\"\n  s\n}").funcs;
         crate::annotate(&mut funcs[0]);
         crate::verify(&funcs[0]).expect("a non-faulting Text alloc verifies");
         let f = &funcs[0];
@@ -8350,7 +8097,7 @@ fn f(n: Int, x0: Float) -> Float {
     /// refactor would silently break, and the verifier has no rule for it.
     #[test]
     fn a_hoisted_literal_lands_before_the_preheaders_jump() {
-        let (mut funcs, _analysis) = lower_src_to_mir(LOOP_WITH_A_FLOAT_LITERAL);
+        let mut funcs = lower_src_to_mir(LOOP_WITH_A_FLOAT_LITERAL).funcs;
         crate::annotate(&mut funcs[0]);
         crate::verify(&funcs[0]).expect("verifies");
         let f = &funcs[0];
@@ -8388,7 +8135,7 @@ fn f(n: Int, x0: Float) -> Float {
     /// before ADR-108.
     #[test]
     fn a_float_literal_outside_a_loop_is_not_moved() {
-        let (mut funcs, _analysis) = lower_src_to_mir("fn f() -> Float { 2.0 }");
+        let mut funcs = lower_src_to_mir("fn f() -> Float { 2.0 }").funcs;
         crate::annotate(&mut funcs[0]);
         crate::verify(&funcs[0]).expect("verifies");
         let f = &funcs[0];
@@ -8412,7 +8159,7 @@ fn f(n: Int, x0: Float) -> Float {
             "fn f(n: Int) -> Int {{\n  var x = 0\n  var i = 0\n  while i < n {{\n    x = x + {}\n    i = i + 1\n  }}\n  x\n}}",
             praxis_runtime::SMALL_INT_MAX + 1
         );
-        let (mut funcs, _analysis) = lower_src_to_mir(&src);
+        let mut funcs = lower_src_to_mir(&src).funcs;
         crate::annotate(&mut funcs[0]);
         crate::verify(&funcs[0]).expect("verifies");
         let f = &funcs[0];
@@ -8528,8 +8275,8 @@ fn f(n: Int, x0: Float) -> Float {
     /// and a negative count is unobservable.
     #[test]
     fn a_sized_vec_lowers_to_one_filled_allocation_followed_by_a_fault_check() {
-        let (funcs, _) = lower_src_to_mir("fn main() {\n  var v = Vec(3, false)\n  out(v)\n}\n");
-        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let lowered = lower_src_to_mir("fn main() {\n  var v = Vec(3, false)\n  out(v)\n}\n");
+        let main = lowered.function("main");
         let insts: Vec<&Inst> = main.blocks.iter().flat_map(|b| &b.insts).collect();
 
         let at = insts
@@ -8583,10 +8330,10 @@ fn f(n: Int, x0: Float) -> Float {
     /// says the new field did not move the old path.
     #[test]
     fn a_sized_grid_lowers_to_the_grid_wrapper_and_an_empty_one_still_does_not() {
-        let (funcs, _) = lower_src_to_mir(
+        let lowered = lower_src_to_mir(
             "fn main() {\n  var g = Grid(2, 3, 0)\n  var e = Grid()\n  var v = Vec()\n  out(g)\n  out(e)\n  out(v)\n}\n",
         );
-        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let main = lowered.function("main");
         let mut seen: Vec<(Option<RuntimeSymbol>, usize)> = Vec::new();
         for inst in main.blocks.iter().flat_map(|b| &b.insts) {
             if let Inst::Alloc {
@@ -8614,9 +8361,9 @@ fn f(n: Int, x0: Float) -> Float {
     /// pushes on the floor.
     #[test]
     fn a_list_literal_is_still_an_empty_allocation() {
-        let (funcs, _) =
+        let lowered =
             lower_src_to_mir("fn main() {\n  var v = [1, 2]\n  out(v.to_set().count())\n}\n");
-        let main = funcs.iter().find(|f| f.name == "main").expect("main MIR");
+        let main = lowered.function("main");
         for inst in main.blocks.iter().flat_map(|b| &b.insts) {
             if let Inst::Alloc {
                 alloc: AllocKind::Collection { ctor, init, .. },

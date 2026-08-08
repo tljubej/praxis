@@ -99,7 +99,7 @@ fn map_scalar(s: praxis_types::ScalarType) -> PatternScalar {
 mod tests {
     use super::*;
     use praxis_stdlib::type_pattern::{CollectionCtor, ScalarType};
-    use praxis_stdlib::{MethodLowering, Purity, Stability};
+    use praxis_stdlib::{MethodLowering, Purity};
 
     fn vec_push_catalog() -> MethodCatalog {
         MethodCatalog::build()
@@ -114,7 +114,6 @@ mod tests {
                 purity: Purity::Impure,
                 lowering: MethodLowering::RuntimeSymbol(praxis_stdlib::abi::RuntimeSymbol::VecPush),
                 doc: "Append a value.",
-                stability: Stability::Stable,
             })
             .finish()
             .expect("distinct entries")

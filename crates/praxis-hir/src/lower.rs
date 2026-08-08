@@ -24,10 +24,9 @@ use praxis_ast::{
     MethodCallExpr, Param, ParamList, PathExpr, RecordLitExpr, ReturnExpr, SourceFile, StructItem,
     TupleExpr, UnaryExpr, VarStmt, WhileExpr,
 };
-use praxis_source::{DiagCode, Diagnostic, FileSpan, Severity, Span};
-use praxis_stdlib::type_pattern::ScalarType as PatternScalar;
+use praxis_source::{DiagCode, Diagnostic, FileSpan, Severity};
 use praxis_stdlib::TypePattern;
-use praxis_syntax::{SyntaxKind, SyntaxNode};
+use praxis_syntax::{span_bridge::range_to_span, SyntaxKind, SyntaxNode};
 use praxis_types::{Type, TypeDb};
 use rowan::TextRange;
 
@@ -235,6 +234,9 @@ pub enum TypedExpr {
     },
     /// A name reference (variable, parameter, function).
     Path {
+        /// [`SymbolId::UNRESOLVED`] when resolution found no declaration for
+        /// the name — lowering still emits the node so the rest of the file
+        /// keeps being checked, and the diagnostic comes from resolution.
         symbol: SymbolId,
         ty: Type,
         span: (u32, u32),
@@ -348,9 +350,18 @@ pub enum TypedExpr {
     },
     /// `callee(args)`.
     Call {
+        /// The declaration the callee name resolves to, or
+        /// [`SymbolId::UNRESOLVED`] when it resolves to none — which is also
+        /// the case for every `callee_expr` call, since those have no callee
+        /// *name* to resolve. A consumer must check `callee_expr` first rather
+        /// than dispatching on this: emitting a direct call for an unresolved
+        /// callee is what made `fs.get(0)(100)` call through nothing and
+        /// SIGSEGV.
         callee: SymbolId,
         /// The callee's source name, resolved during HIR lowering so the MIR
         /// builder (and the JIT) can name the target without a NameTable.
+        /// Empty when the call has no named callee at all; a named callee that
+        /// merely failed to resolve still records its text.
         callee_name: String,
         args: Vec<TypedExpr>,
         /// The concrete argument types at this call site (WS8, §13.6). The mono
@@ -559,6 +570,11 @@ pub enum TypedPattern {
 /// may appear in one: a wildcard, a name, and a composite whose components are
 /// themselves irrefutable. A literal tests, and an enum variant tests — a
 /// `for Some(x) in xs` would silently skip every `None`.
+///
+/// The one caller that turns a reason into `Y125` is
+/// [`crate::pattern::check_binding_patterns`], which runs at the end of analysis
+/// (ADR-133). Lowering asks this question nowhere: a second copy of the rule
+/// here would only ever fire on a case analysis missed, and would word it again.
 pub(crate) fn refutable_reason(pat: &TypedPattern) -> Option<&'static str> {
     match pat {
         TypedPattern::Wildcard | TypedPattern::Bind { .. } => None,
@@ -1064,13 +1080,7 @@ fn builtin_catalog() -> &'static praxis_stdlib::MethodCatalog {
 
 impl<'a> Lowerer<'a> {
     fn file_span(&self, range: TextRange) -> FileSpan {
-        FileSpan::new(
-            self.file,
-            Span::new(
-                praxis_source::BytePos::from(u32::from(range.start())),
-                praxis_source::BytePos::from(u32::from(range.end())),
-            ),
-        )
+        FileSpan::new(self.file, range_to_span(range))
     }
 
     /// The byte span `[start, end)` of a rowen syntax node, as a `(u32, u32)`
@@ -1175,15 +1185,7 @@ impl<'a> Lowerer<'a> {
         let body = item
             .body()
             .and_then(|b| self.lower_block(&b))
-            .unwrap_or_else(|| TypedBlock {
-                stmts: Vec::new(),
-                tail: TypedExpr::Lit {
-                    value: Lit::Unit,
-                    ty: self.unit,
-                    span: self.node_span(item.syntax()),
-                },
-                ty: self.unit,
-            });
+            .unwrap_or_else(|| self.unit_block(self.node_span(item.syntax())));
 
         Some(TypedFn {
             symbol,
@@ -1307,15 +1309,11 @@ impl<'a> Lowerer<'a> {
         // the entire block on one line, the second offers the widest possible
         // span as a candidate for the narrowest question there is.
         //
-        // `(0, 0)` is `error_expr`'s and `unit_lit`'s existing spelling for
-        // "synthetic, no source". The debugger's own dead-scratch rule then
+        // `error_expr`'s `(0, 0)` is the spelling for "synthetic, no source",
+        // which is what this is. The debugger's own dead-scratch rule then
         // drops the temp entirely when it never received a value, which is the
         // right outcome for a slot no program text asked for.
-        let tail = tail.unwrap_or(TypedExpr::Lit {
-            value: Lit::Unit,
-            ty: self.unit,
-            span: (0, 0),
-        });
+        let tail = tail.unwrap_or_else(|| self.error_expr());
         let ty = expr_ty(&tail);
         Some(TypedBlock { stmts, tail, ty })
     }
@@ -1568,17 +1566,9 @@ impl<'a> Lowerer<'a> {
         // The body is an expression. If it is a block, lower it as one; otherwise
         // wrap the single expression as a block whose tail is that expression.
         let body = match c.body() {
-            Some(praxis_ast::Expr::Block(b)) => {
-                self.lower_block(&b).unwrap_or_else(|| TypedBlock {
-                    stmts: Vec::new(),
-                    tail: TypedExpr::Lit {
-                        value: Lit::Unit,
-                        ty: self.unit,
-                        span,
-                    },
-                    ty: self.unit,
-                })
-            }
+            Some(praxis_ast::Expr::Block(b)) => self
+                .lower_block(&b)
+                .unwrap_or_else(|| self.unit_block(span)),
             Some(other) => {
                 let tail = self.lower_expr(&other);
                 let ty = expr_ty(&tail);
@@ -1588,15 +1578,7 @@ impl<'a> Lowerer<'a> {
                     ty,
                 }
             }
-            None => TypedBlock {
-                stmts: Vec::new(),
-                tail: TypedExpr::Lit {
-                    value: Lit::Unit,
-                    ty: self.unit,
-                    span,
-                },
-                ty: self.unit,
-            },
+            None => self.unit_block(span),
         };
         // A destructuring parameter takes its argument apart around the body
         // (REP-29). Done here rather than in MIR because the language already has
@@ -1720,7 +1702,10 @@ impl<'a> Lowerer<'a> {
     ///
     /// **A parameter has no second arm**, so a pattern that can fail is `Y125`,
     /// which is REP-25's rule for the `for` binding at the third binding position:
-    /// `|Some(n)| n` would have no answer for a `None` argument.
+    /// `|Some(n)| n` would have no answer for a `None` argument. That report is
+    /// [`crate::pattern::check_binding_patterns`]'s (ADR-133) — lowering is the
+    /// pass `praxis check` and the editor do not run — and here the pattern is
+    /// only built.
     ///
     /// Parameters are wrapped in reverse so the first one's `match` ends up
     /// outermost, which is the order the arguments arrive in.
@@ -1748,13 +1733,6 @@ impl<'a> Lowerer<'a> {
             };
             let param_ty = self.symbol_type(symbol);
             let pattern = self.lower_pattern(&pat, param_ty);
-            if let Some(reason) = refutable_reason(&pattern) {
-                self.diag(
-                    range,
-                    DiagCode::RefutableBinding,
-                    format!("a closure parameter must match every argument, and {reason} does not"),
-                );
-            }
             let ty = block.ty;
             let scrutinee = TypedExpr::Path {
                 symbol,
@@ -1963,7 +1941,7 @@ impl<'a> Lowerer<'a> {
         let symbol = p
             .name()
             .and_then(|t| self.resolve_symbol_at(t.text_range()))
-            .unwrap_or(SymbolId(u32::MAX));
+            .unwrap_or(SymbolId::UNRESOLVED);
         // A top-level `fn` in value position is a function value, not a binding
         // reference (REP-01, ADR-061). It reaches here only in value position —
         // `lower_call` resolves a named callee itself and never comes through
@@ -2060,8 +2038,8 @@ impl<'a> Lowerer<'a> {
         };
         TypedExpr::Bin {
             op,
-            lhs: lhs.unwrap_or_else(|| Box::new(unit_lit(self.db))),
-            rhs: rhs.unwrap_or_else(|| Box::new(unit_lit(self.db))),
+            lhs: lhs.unwrap_or_else(|| Box::new(self.error_expr())),
+            rhs: rhs.unwrap_or_else(|| Box::new(self.error_expr())),
             ty,
             span,
         }
@@ -2077,7 +2055,7 @@ impl<'a> Lowerer<'a> {
         };
         TypedExpr::Unary {
             op,
-            operand: operand.unwrap_or_else(|| Box::new(unit_lit(self.db))),
+            operand: operand.unwrap_or_else(|| Box::new(self.error_expr())),
             ty,
             span,
         }
@@ -2097,14 +2075,8 @@ impl<'a> Lowerer<'a> {
         // replaced, made `if flag { panic("x") } else { 1 }` a `Never`.
         let ty = self.node_ty(i.syntax());
         TypedExpr::If {
-            cond: cond.unwrap_or_else(|| Box::new(unit_lit(self.db))),
-            then_block: then_block.unwrap_or_else(|| {
-                Box::new(TypedBlock {
-                    stmts: Vec::new(),
-                    tail: unit_lit(self.db),
-                    ty: self.unit,
-                })
-            }),
+            cond: cond.unwrap_or_else(|| Box::new(self.error_expr())),
+            then_block: then_block.unwrap_or_else(|| Box::new(self.unit_block((0, 0)))),
             else_block: else_block.map(Box::new),
             ty,
             span,
@@ -2134,14 +2106,8 @@ impl<'a> Lowerer<'a> {
         let body = w.body().and_then(|b| self.lower_block(&b)).map(Box::new);
         let ty = self.node_ty(w.syntax());
         TypedExpr::While {
-            cond: cond.unwrap_or_else(|| Box::new(unit_lit(self.db))),
-            body: body.unwrap_or_else(|| {
-                Box::new(TypedBlock {
-                    stmts: Vec::new(),
-                    tail: unit_lit(self.db),
-                    ty: self.unit,
-                })
-            }),
+            cond: cond.unwrap_or_else(|| Box::new(self.error_expr())),
+            body: body.unwrap_or_else(|| Box::new(self.unit_block((0, 0)))),
             ty,
             span,
         }
@@ -2153,18 +2119,12 @@ impl<'a> Lowerer<'a> {
         let iter = f
             .iter()
             .map(|i| Box::new(self.lower_expr(&i)))
-            .unwrap_or_else(|| Box::new(unit_lit(self.db)));
+            .unwrap_or_else(|| Box::new(self.error_expr()));
         let body = f
             .body()
             .and_then(|b| self.lower_block(&b))
             .map(Box::new)
-            .unwrap_or_else(|| {
-                Box::new(TypedBlock {
-                    stmts: Vec::new(),
-                    tail: unit_lit(self.db),
-                    ty: self.unit,
-                })
-            });
+            .unwrap_or_else(|| Box::new(self.unit_block((0, 0))));
         // The item type is read from the iterator's inferred element type; the
         // inference pass records it on the binding **pattern**'s range. A `for`
         // binding is not an expression, so this is a `ref_types` read, not an
@@ -2174,21 +2134,14 @@ impl<'a> Lowerer<'a> {
             .and_then(|p| self.ref_types.get(&p.syntax().text_range()).copied())
             .map(|t| self.deep(t))
             .unwrap_or(self.unit);
-        // The binding is a pattern (REP-25). It has to match **every** item, so
-        // a pattern that can fail is reported here rather than silently skipping
-        // the steps it does not match — a `for` has no second arm to go to.
+        // The binding is a pattern (REP-25). It has to match **every** item — a
+        // `for` has no second arm to go to, so a pattern that can fail would
+        // silently skip the steps it does not match — and that `Y125` is
+        // `pattern::check_binding_patterns`'s, at the end of analysis (ADR-133),
+        // because lowering is the pass `praxis check` and the editor do not run.
+        // Lowering only builds the pattern.
         let binding = match f.binding() {
-            Some(p) => {
-                let pat = self.lower_pattern(&p, item_ty);
-                if let Some(reason) = refutable_reason(&pat) {
-                    self.diag(
-                        p.syntax().text_range(),
-                        DiagCode::RefutableBinding,
-                        format!("a `for` binding must match every item, and {reason} does not"),
-                    );
-                }
-                pat
-            }
+            Some(p) => self.lower_pattern(&p, item_ty),
             None => TypedPattern::Wildcard,
         };
         let ty = self.node_ty(f.syntax());
@@ -2213,13 +2166,7 @@ impl<'a> Lowerer<'a> {
             .body()
             .and_then(|b| self.lower_block(&b))
             .map(Box::new)
-            .unwrap_or_else(|| {
-                Box::new(TypedBlock {
-                    stmts: Vec::new(),
-                    tail: unit_lit(self.db),
-                    ty: self.unit,
-                })
-            });
+            .unwrap_or_else(|| Box::new(self.unit_block((0, 0))));
         let ty = self.node_ty(l.syntax());
         TypedExpr::Loop { body, ty, span }
     }
@@ -2266,7 +2213,7 @@ impl<'a> Lowerer<'a> {
         let callee = callee_tok
             .as_ref()
             .and_then(|t| self.resolve_symbol_at(t.text_range()))
-            .unwrap_or(SymbolId(u32::MAX));
+            .unwrap_or(SymbolId::UNRESOLVED);
         let callee_name = callee_tok
             .as_ref()
             .map(|t| t.text().to_string())
@@ -2569,13 +2516,41 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// A typed expression representing a lowering error (Unit-typed literal).
-    /// No source span is available (this is a synthetic fallback).
+    /// A typed expression representing a lowering error (Unit-typed literal),
+    /// and equally the placeholder a malformed subtree lowers to — a missing
+    /// operand, condition, or iterator. Those were two names for one value
+    /// (this and a free `unit_lit(db)`), which is why half the call sites
+    /// reached for each; there is now one.
+    ///
+    /// No source span is available (this is a synthetic fallback), and `(0, 0)`
+    /// is the spelling for that — see [`Lowerer::lower_block`] on why a
+    /// synthesized expression claiming a real range is worse than one claiming
+    /// nothing.
     fn error_expr(&self) -> TypedExpr {
         TypedExpr::Lit {
             value: Lit::Unit,
             ty: self.unit,
             span: (0, 0),
+        }
+    }
+
+    /// The empty `Unit`-typed block that every construct with a block body
+    /// falls back to when its body did not parse: a `fn`, a closure, and the
+    /// bodies of `if`/`while`/`for`/`loop`.
+    ///
+    /// `span` is the synthesized tail literal's, not the block's: `(0, 0)` —
+    /// [`Lowerer::error_expr`]'s "synthetic, no source" — where the fallback
+    /// stands in for a subtree that produced no node at all, and the enclosing
+    /// construct's own span where one is in hand.
+    fn unit_block(&self, span: (u32, u32)) -> TypedBlock {
+        TypedBlock {
+            stmts: Vec::new(),
+            tail: TypedExpr::Lit {
+                value: Lit::Unit,
+                ty: self.unit,
+                span,
+            },
+            ty: self.unit,
         }
     }
 
@@ -2954,6 +2929,35 @@ pub fn stmt_exprs(s: &TypedStmt) -> impl Iterator<Item = &TypedExpr> {
     out.into_iter()
 }
 
+/// [`stmt_exprs`], mutably — the two statement rewrites monomorphization runs
+/// (call retargeting and type specialization) had this same match hand-written
+/// each, which is the duplication `stmt_exprs` exists to remove.
+pub fn stmt_exprs_mut(s: &mut TypedStmt) -> impl Iterator<Item = &mut TypedExpr> {
+    let mut out: Vec<&mut TypedExpr> = Vec::new();
+    match s {
+        TypedStmt::Var { init, .. } => out.push(init),
+        TypedStmt::Assign { value, .. } => out.push(value),
+        TypedStmt::IndexAssign {
+            receiver,
+            indices,
+            value,
+            ..
+        } => {
+            out.push(receiver);
+            out.extend(indices);
+            out.push(value);
+        }
+        TypedStmt::FieldAssign {
+            receiver, value, ..
+        } => {
+            out.push(receiver);
+            out.push(value);
+        }
+        TypedStmt::Expr(e) => out.push(e),
+    }
+    out.into_iter()
+}
+
 /// The source span `[start, end)` (byte offsets) carried by a typed statement.
 /// `TypedStmt::Expr` carries the span on its inner expression.
 pub fn stmt_span(s: &TypedStmt) -> (u32, u32) {
@@ -3002,65 +3006,19 @@ pub fn expr_ty(e: &TypedExpr) -> Type {
     }
 }
 
-/// The result type of a function-typed value, if `t` (after following) is a
-/// `Func`. Used to read a postfix call's result type off its callee expression.
-fn func_result_type(db: &TypeDb, t: Type) -> Option<Type> {
-    match db.data(db.follow(t)) {
-        praxis_types::TypeData::Func { result, .. } => Some(*result),
-        _ => None,
-    }
-}
-
-/// Convert a catalog [`TypePattern`] (the schema-level result type of a method)
-/// into a real inferred [`Type`]. `Var("T")` becomes a fresh unbound var (the
-/// caller unifies it with the receiver's element type if needed); concrete
-/// scalars/collections map directly. This is the reverse of
-/// [`crate::catalog::type_to_pattern`] for result types.
+/// The public door onto [`pattern_to_type`] for the inference pass
+/// (bidirectional method-call inference, M8 §3): instantiate a row's
+/// param/result patterns before unification.
 ///
-/// Public so the inference pass can instantiate param/result patterns before
-/// unification (both passes share the one conversion).
-pub fn pattern_to_type_pub(db: &mut TypeDb, p: &TypePattern) -> Type {
-    pattern_to_type(db, p)
-}
-
-/// Public name-aware variant of [`pattern_to_type`] for the inference pass
-/// (bidirectional method-call inference, M8 §3). Shares one type variable per
-/// `Var(name)` within one instantiation via the supplied `names` map.
+/// `names` carries the per-instantiation variable sharing — pass a *fresh* map
+/// for each call site, or two unrelated uses of the same row would be forced to
+/// the one type.
 pub fn pattern_to_type_named(
     db: &mut TypeDb,
     p: &TypePattern,
     names: &mut HashMap<String, Type>,
 ) -> Type {
-    pattern_to_type_named_impl(db, p, names)
-}
-
-fn pattern_to_type(db: &mut TypeDb, p: &TypePattern) -> Type {
-    match p {
-        TypePattern::Scalar(s) => db.scalar(map_pattern_scalar(*s)),
-        TypePattern::Unit => db.unit(),
-        TypePattern::Var { .. } => db.fresh_var(),
-        TypePattern::Collection { ctor, args } => {
-            let arg_tys: Vec<Type> = args.iter().map(|a| pattern_to_type(db, a)).collect();
-            collection_from_pattern(db, *ctor, arg_tys)
-        }
-        TypePattern::Function { params, result } => {
-            let ps: Vec<Type> = params.iter().map(|p| pattern_to_type(db, p)).collect();
-            let r = pattern_to_type(db, result);
-            db.func(ps, r)
-        }
-        TypePattern::Tuple(els) => {
-            let tys: Vec<Type> = els.iter().map(|e| pattern_to_type(db, e)).collect();
-            tuple_or_degenerate(db, tys)
-        }
-        // The prelude's *one* `Option` def (F12), instantiated at the inner
-        // pattern. Registering a fresh def per row is what TY-06 was.
-        TypePattern::Option(inner) => {
-            let elem = pattern_to_type(db, inner);
-            db.option_of(elem)
-        }
-        TypePattern::Iterable { .. } => iterable_is_not_a_type(),
-        TypePattern::Opaque => db.fresh_var(),
-    }
+    pattern_to_type(db, p, names)
 }
 
 /// [`TypePattern::Iterable`] names ten types, so there is no one type to
@@ -3080,21 +3038,21 @@ fn iterable_is_not_a_type() -> ! {
     )
 }
 
-/// Like [`pattern_to_type`], but shares a single type variable for each named
-/// `Var(name)` within one instantiation. This is what the bidirectional method-
-/// call inference needs: a combinator signature like `fold`'s
+/// Convert a catalog [`TypePattern`] (the schema-level type of a method's
+/// params and result) into a real inferred [`Type`] — the reverse of
+/// [`crate::catalog::type_to_pattern`].
+///
+/// A single type variable is shared for each named `Var(name)` within one
+/// instantiation, via `names`. This is what the bidirectional method-call
+/// inference needs: a combinator signature like `fold`'s
 /// `(Acc, (Acc, T) -> Acc) -> Acc` names the accumulator `Acc` in three places,
 /// and those must be the *same* type variable so the accumulator type threads
-/// from the init argument through the closure params to the result. The
-/// `names` map carries the per-instantiation sharing; pass a fresh map for each
-/// combinator call site.
-fn pattern_to_type_named_impl(
-    db: &mut TypeDb,
-    p: &TypePattern,
-    names: &mut HashMap<String, Type>,
-) -> Type {
+/// from the init argument through the closure params to the result.
+fn pattern_to_type(db: &mut TypeDb, p: &TypePattern, names: &mut HashMap<String, Type>) -> Type {
     match p {
-        TypePattern::Scalar(s) => db.scalar(map_pattern_scalar(*s)),
+        // `praxis_stdlib`'s pattern scalar *is* `praxis_types::ScalarType` (the
+        // latter re-exports it), so there is nothing to map.
+        TypePattern::Scalar(s) => db.scalar(*s),
         TypePattern::Unit => db.unit(),
         TypePattern::Var { name: n, .. } => {
             if let Some(&t) = names.get(*n) {
@@ -3106,36 +3064,30 @@ fn pattern_to_type_named_impl(
             }
         }
         TypePattern::Collection { ctor, args } => {
-            let arg_tys: Vec<Type> = args
-                .iter()
-                .map(|a| pattern_to_type_named_impl(db, a, names))
-                .collect();
+            let arg_tys: Vec<Type> = args.iter().map(|a| pattern_to_type(db, a, names)).collect();
             collection_from_pattern(db, *ctor, arg_tys)
         }
         TypePattern::Function { params, result } => {
             let ps: Vec<Type> = params
                 .iter()
-                .map(|p| pattern_to_type_named_impl(db, p, names))
+                .map(|p| pattern_to_type(db, p, names))
                 .collect();
-            let r = pattern_to_type_named_impl(db, result, names);
+            let r = pattern_to_type(db, result, names);
             db.func(ps, r)
         }
         TypePattern::Tuple(els) => {
-            let tys: Vec<Type> = els
-                .iter()
-                .map(|e| pattern_to_type_named_impl(db, e, names))
-                .collect();
+            let tys: Vec<Type> = els.iter().map(|e| pattern_to_type(db, e, names)).collect();
             tuple_or_degenerate(db, tys)
         }
-        // As `pattern_to_type`, but the inner pattern shares this
-        // instantiation's variables: `Map[K, V].get(K) -> Option[V]` names `V`
-        // twice and both must be the one variable.
+        // The prelude's *one* `Option` def (F12), instantiated at the inner
+        // pattern. Registering a fresh def per row is what TY-06 was. The inner
+        // pattern shares this instantiation's variables too: `Map[K, V].get(K)
+        // -> Option[V]` names `V` twice and both must be the one variable.
         TypePattern::Option(inner) => {
-            let elem = pattern_to_type_named_impl(db, inner, names);
+            let elem = pattern_to_type(db, inner, names);
             db.option_of(elem)
         }
         TypePattern::Iterable { .. } => iterable_is_not_a_type(),
-        TypePattern::Opaque => db.fresh_var(),
     }
 }
 
@@ -3168,22 +3120,6 @@ fn tuple_or_degenerate(db: &mut TypeDb, mut els: Vec<Type>) -> Type {
             let elems = praxis_types::TupleElems::new(els).expect("two or more elements");
             db.tuple(elems)
         }
-    }
-}
-
-/// Map a stdlib pattern scalar to the inference scalar (they share the enum via
-/// `praxis_types::ScalarType`, so this is identity).
-fn map_pattern_scalar(s: PatternScalar) -> praxis_types::ScalarType {
-    s
-}
-
-/// A `Unit`-typed literal placeholder (for malformed subtrees). No source span
-/// is available (synthetic fallback).
-fn unit_lit(db: &mut TypeDb) -> TypedExpr {
-    TypedExpr::Lit {
-        value: Lit::Unit,
-        ty: db.unit(),
-        span: (0, 0),
     }
 }
 

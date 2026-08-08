@@ -7,44 +7,17 @@
 //!
 //! ## Design
 //!
-//! [`ColorMode`] gates whether styling is emitted at all:
-//! - `Never` (the default for the `Renderer` and for all snapshot tests) emits
-//!   plain text, so diagnostics stay byte-stable across test runs.
-//! - `Always` emits ANSI unconditionally.
-//! - `Auto` emits ANSI only when stderr is a terminal (the CLI default).
+//! [`Palette`] gates whether styling is emitted at all, and is the set of
+//! (foreground, weight) pairs the diagnostic renderer and the crash debugger
+//! use. `Palette::plain()` is a no-op palette — the default for the `Renderer`
+//! and for all snapshot tests, so diagnostics stay byte-stable across test runs;
+//! the styled palette matches rustc's conventions: errors red & bold, warnings
+//! yellow &c.
 //!
-//! [`Palette`] is the set of (foreground, weight) pairs the diagnostic renderer
-//! and the crash debugger use. `Palette::plain()` is a no-op palette; the styled
-//! palette matches rustc's conventions: errors red & bold, warnings yellow &c.
-
-/// Whether, and when, to emit ANSI styling.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ColorMode {
-    /// Never emit ANSI; produce plain text. The default for the `Renderer` and
-    /// for snapshot tests so output is byte-stable.
-    #[default]
-    Never,
-    /// Always emit ANSI, regardless of terminal detection.
-    Always,
-    /// Emit ANSI only when stderr is an interactive terminal.
-    Auto,
-}
-
-impl ColorMode {
-    /// Resolve to a plain yes/no for "should we style?", checking the terminal
-    /// for `Auto`. `Never` and `Always` need no I/O check.
-    #[must_use]
-    pub fn should_style(self) -> bool {
-        match self {
-            ColorMode::Never => false,
-            ColorMode::Always => true,
-            ColorMode::Auto => std::io::stderr().is_terminal(),
-        }
-    }
-}
-
-// We need IsTerminal only for Auto; pull it in unconditionally (it's in std).
-use std::io::IsTerminal;
+//! Deciding *when* to style — the `--color auto|always|never` tri-state, and the
+//! terminal check `auto` needs — is the CLI's job; it resolves the flag and
+//! hands down a [`Palette::from_enabled`]. Keeping that decision out of this
+//! crate keeps the leaf free of terminal I/O.
 
 /// An ANSI SGR (Select Graphic Rendition) code. Stored as the numeric parameter
 /// so the palette is data, not a method per style. The full standard set is
@@ -205,13 +178,5 @@ mod tests {
     fn from_enabled_toggles() {
         assert!(Palette::from_enabled(true).is_styled());
         assert!(!Palette::from_enabled(false).is_styled());
-    }
-
-    #[test]
-    fn colormode_should_style_never_is_false() {
-        assert!(!ColorMode::Never.should_style());
-        assert!(ColorMode::Always.should_style());
-        // Auto depends on the terminal; in tests stderr is usually not a TTY,
-        // so this is normally false, but we only assert the deterministic modes.
     }
 }

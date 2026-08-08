@@ -13,7 +13,9 @@ mod check;
 mod color_mode;
 mod debug_mode;
 mod diagnostic_render;
+mod exit_code;
 mod run;
+mod source_file;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -110,11 +112,14 @@ fn main() -> Result<()> {
         Command::Lsp { stdio: _ } => praxis_lsp::run(),
     }?;
 
+    // One of `exit_code`'s three, except from `lsp`, which returns the LSP
+    // protocol's own 0/1 (a clean `shutdown`/`exit` vs. a client that never
+    // shut down) — the same two numbers, decided by a different rule.
     std::process::exit(exit);
 }
 
-/// Emit an honest "not implemented" message and return the "usage error"
-/// exit code (2). Never silently no-op a command.
+/// Emit an honest "not implemented" message and return [`exit_code::USAGE`].
+/// Never silently no-op a command.
 ///
 /// **No milestone number**, which is what it used to end with. Both call sites
 /// passed a hardcoded `0`, so the message pointed at a milestone that completed
@@ -127,5 +132,5 @@ fn not_implemented(name: &str, file: Option<&str>) -> Result<i32> {
         None => String::new(),
     };
     eprintln!("error: `praxis {name}`{where_} is not implemented yet");
-    Ok(2)
+    Ok(exit_code::USAGE)
 }

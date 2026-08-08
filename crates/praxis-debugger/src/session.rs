@@ -44,8 +44,6 @@ pub struct DebugSession {
     pub jit: Jit,
     /// The transmuted `main` entry, ready to call. Recomputed by `reload`.
     pub main_entry: MainEntry,
-    /// The `fn name -> FuncId` map (at least `main`); used by `restart`/lookup.
-    pub func_ids: std::collections::HashMap<String, cranelift_module::FuncId>,
     /// The heap + fault/snapshot/parse-detail slots. `p EXPR` hosts its
     /// synthetic call here; `restart`/`reload` re-run `main` against it. The
     /// snapshot the REPL inspects refers into this heap (non-moving GC keeps
@@ -62,9 +60,6 @@ pub struct DebugSession {
     /// The original input bytes (for `restart`/`reload`'s "same input"
     /// guarantee, §9.7). Re-installed as `input_source` on each re-run.
     pub input_text: String,
-    /// The input source path, if `--input` was given (retained for §9.7
-    /// metadata; not re-read — `input_text` is the source of truth).
-    pub input_path: Option<PathBuf>,
     /// The JIT generation every `p EXPR` / `heap EXPR` compiles into (F13,
     /// DBG-05).
     ///
@@ -207,7 +202,6 @@ impl DebugSession {
         // JIT + snapshots only after success). The old self.jit drops here.
         self.jit = new_jit;
         self.main_entry = new_entry;
-        self.func_ids = ids;
         self.analysis = analysis;
         self.source_text = text;
         // 4. Rerun with the same input.

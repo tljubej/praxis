@@ -33,13 +33,34 @@
 
 use std::fmt;
 
+/// What a slot renders as when nothing has ever been written into it
+/// (`DebugLocal::value == None`).
+///
+/// The absence is the type's, not a sentinel pointer's (F18): a slot nothing was
+/// ever spilled into reads back as `None`, and every display turns that `None`
+/// into this one word.
+///
+/// Most usefully it is the faulting expression's own temp — the value the
+/// program never got as far as computing.
+pub const UNINIT: &str = "<uninit>";
+
 /// What a slot renders as when the value it held has been collected
 /// ([`praxis_runtime::DebugValue::Reclaimed`]).
 ///
-/// Distinct from `<uninit>`, and the distinction is the point: one is a local
+/// Distinct from [`UNINIT`], and the distinction is the point: one is a local
 /// the program never wrote, the other a local it wrote and finished with. They
 /// were one string until the slot could tell them apart.
 pub const COLLECTED: &str = "<collected>";
+
+/// What a value renders as when its descriptor wrote no bytes at all.
+///
+/// "The descriptor wrote no bytes" and "the read failed" are one observation
+/// from here, so this word answers both. It is deliberately *not* what an empty
+/// `Text` gets: the debugger's displays format with `format_debug`, which writes
+/// a quoted literal (§11.4), so `""` shows up as the value it is. `p EXPR` and
+/// the locals rows share the constant for the same reason they share that
+/// rendering — the two displays disagreeing about one value is its own defect.
+pub const UNREADABLE: &str = "<unreadable>";
 
 /// The default budget for one value on one line: how many bytes of rendered
 /// value a display keeps before cutting at the nearest element boundary.
@@ -133,7 +154,7 @@ pub fn format_bounded(value: praxis_runtime::DebugValue, budget: usize) -> Strin
     // where the middle element is not short but *absent*.
     reference.format_debug(&mut sink);
     if sink.buf.is_empty() {
-        return "<unreadable>".to_string();
+        return UNREADABLE.to_string();
     }
     truncate_rendered(&sink.buf, budget, sink.overflowed)
 }

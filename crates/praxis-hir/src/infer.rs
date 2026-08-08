@@ -23,8 +23,11 @@ use praxis_ast::{
     MethodCallExpr, Param, PathExpr, RecordLitExpr, ReturnExpr, SourceFile, UnaryExpr, VarStmt,
     WhileExpr,
 };
-use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
-use praxis_syntax::SyntaxKind;
+use praxis_source::{diagnostic::sort_by_position, Diagnostic, FileId, FileSpan};
+use praxis_syntax::{
+    span_bridge::{range_to_span, span_to_range},
+    SyntaxKind,
+};
 use praxis_types::{
     unify::UnifyError, CapKind, Capability, CollectionArgs, CollectionCtor, Constraint, Level,
     ScalarType, Scheme, Type, TypeDb,
@@ -106,10 +109,7 @@ pub(crate) fn infer_with_tree(
     inferer.infer_declaration_group(root);
     // Merge name-resolution diagnostics with type diagnostics, sorted by span.
     diagnostics.append(&mut inferer.diagnostics);
-    diagnostics.sort_by_key(|d| {
-        let s = d.primary().span;
-        (s.start(), s.end())
-    });
+    sort_by_position(&mut diagnostics);
     Inference {
         db: inferer.db,
         names: inferer.names,
@@ -277,19 +277,12 @@ fn builtin_catalog() -> &'static praxis_stdlib::MethodCatalog {
 /// method resolution has to get from one to the other: the span it recorded *is*
 /// that token, so this is a change of vocabulary and not a lookup.
 fn range_of(at: FileSpan) -> TextRange {
-    TextRange::new(at.span.start().0.into(), at.span.end().0.into())
+    span_to_range(at.span)
 }
 
 impl Inferer {
-    fn span(&self, range: TextRange) -> Span {
-        Span::new(
-            BytePos::from(u32::from(range.start())),
-            BytePos::from(u32::from(range.end())),
-        )
-    }
-
     fn file_span(&self, range: TextRange) -> FileSpan {
-        FileSpan::new(self.file, self.span(range))
+        FileSpan::new(self.file, range_to_span(range))
     }
 
     // --- the constraint channel (F10, TY-29) --------------------------------
@@ -579,13 +572,7 @@ impl Inferer {
             self.report_cap_failure(&c.cap, receiver, c.report_at(), c.origin_note());
             return;
         };
-        if let Err(e) = self.db.unify(ty, field) {
-            let mut diag = self.unify_diagnostic(c.report_at(), e);
-            if let Some(origin) = c.origin_note() {
-                diag = diag.with_note(origin, "this is the operation that requires it");
-            }
-            self.diagnostics.push(diag);
-        }
+        self.diag_unify_for(c, ty, field);
     }
 
     /// Answer an `Iterable` requirement whose receiver has since resolved: get
@@ -623,13 +610,7 @@ impl Inferer {
         };
         // `item` is what the body requires and `yielded` is what this receiver
         // provides, so the mismatch reads "expected `Int`, found `Text`".
-        if let Err(e) = self.db.unify(item, yielded) {
-            let mut diag = self.unify_diagnostic(c.report_at(), e);
-            if let Some(origin) = c.origin_note() {
-                diag = diag.with_note(origin, "this is the operation that requires it");
-            }
-            self.diagnostics.push(diag);
-        }
+        self.diag_unify_for(c, item, yielded);
     }
 
     /// Enforce what a catalog entry declares about its own type variables
@@ -665,9 +646,7 @@ impl Inferer {
                     // `praxis_types::ScalarType` *is* the pattern language's
                     // scalar (re-exported), so there is nothing to translate.
                     let want = self.db.scalar(scalar);
-                    if let Err(e) = self.db.unify(want, ty) {
-                        self.diag_unify(self.file_span(at), e);
-                    }
+                    self.unify_at(want, ty, at);
                 }
                 // Through `require_cap`, not through `capability::check`
                 // directly, and that is the whole difference between the two
@@ -731,9 +710,7 @@ impl Inferer {
         let item_ty = crate::capability::iter_item(&mut self.db, receiver_ty)
             .expect("an `Iterable` row matched a receiver that `iter_item` refuses");
         let item_param = crate::lower::pattern_to_type_named(&mut self.db, item, names);
-        if let Err(e) = self.db.unify(item_param, item_ty) {
-            self.diag_unify(self.file_span(at), e);
-        }
+        self.unify_at(item_param, item_ty, at);
     }
 
     /// Require what a collection type demands of its own arguments (TY-32,
@@ -904,8 +881,52 @@ impl Inferer {
         self.diagnostics.push(diag);
     }
 
+    /// [`diag_unify`](Self::diag_unify) on behalf of a deferred constraint: unify,
+    /// and report a mismatch at the constraint's span with its origin as the note.
+    ///
+    /// Both deferred-resolution paths end here once the receiver has resolved and
+    /// the requirement has become an ordinary mismatch —
+    /// [`resolve_deferred_field`](Self::resolve_deferred_field) against the
+    /// field's declared type, and
+    /// [`resolve_deferred_iterable`](Self::resolve_deferred_iterable) against the
+    /// item the receiver actually yields. The note is the one
+    /// [`report_cap_failure`](Self::report_cap_failure) attaches, because it is
+    /// the same explanation: a requirement discharged *later* has left the
+    /// operation that made it behind, so it reports at whatever pinned the
+    /// variable and points back at the `for` — or the field read — as the note
+    /// (ADR-057 decision 2).
+    ///
+    /// Argument order is `unify`'s and REP-61's: what the requirement wants
+    /// first, what the receiver provides second, so the diagnostic reads
+    /// "expected `Int`, found `Text`".
+    fn diag_unify_for(&mut self, c: &Constraint, expected: Type, found: Type) {
+        if let Err(e) = self.db.unify(expected, found) {
+            let mut diag = self.unify_diagnostic(c.report_at(), e);
+            if let Some(origin) = c.origin_note() {
+                diag = diag.with_note(origin, "this is the operation that requires it");
+            }
+            self.diagnostics.push(diag);
+        }
+    }
+
+    /// Unify `expected` with `found`, reporting a mismatch at `at`.
+    ///
+    /// The overwhelmingly common shape: a syntax range, a plain mismatch, no
+    /// use for the `Ok`. Argument order is `unify`'s and REP-61's — what the
+    /// context *requires* first, what the program *wrote* second — so the
+    /// diagnostic reads "expected `Bool`, found `Int`". A site that already
+    /// holds a [`FileSpan`], needs the `Ok` value, or wants
+    /// [`diag_unify_hinted`](Self::diag_unify_hinted) still spells it out.
+    fn unify_at(&mut self, expected: Type, found: Type, at: TextRange) {
+        if let Err(e) = self.db.unify(expected, found) {
+            let span = self.file_span(at);
+            self.diag_unify(span, e);
+        }
+    }
+
     /// The diagnostic for `err`, **unpushed** — for the one caller that has a
-    /// second span to attach before it goes out.
+    /// second span to attach before it goes out,
+    /// [`diag_unify_for`](Self::diag_unify_for).
     ///
     /// A deferred `Iterable` reports at the use site and explains itself at the
     /// `for` (ADR-057 decision 2), and `Diagnostic::with_note` is what adds the
@@ -1418,10 +1439,7 @@ impl Inferer {
         // since pinned — the re-derivation F15 removes, so the ordering has to
         // be right here instead.
         let signature = self.db.func(param_types.clone(), result_ty);
-        if let Err(e) = self.db.unify(placeholder, signature) {
-            let at = item.syntax().text_range();
-            self.diag_unify(self.file_span(at), e);
-        }
+        self.unify_at(placeholder, signature, item.syntax().text_range());
         self.fn_results.push(result_ty);
         let (body_ty, tail_range) = match item.body() {
             Some(b) => {
@@ -1470,11 +1488,7 @@ impl Inferer {
             .unwrap_or_else(|| self.db.fresh_var());
         // Attach the param type to its declared symbol (via decls, not lookup).
         if let Some(name_tok) = p.name() {
-            if let Some(&id) = self.decls.get(&name_tok.text_range()) {
-                if let Some(sym) = self.names.get_mut(id) {
-                    sym.scheme = Some(Scheme::monotype(ty));
-                }
-            }
+            self.bind_pattern_name(name_tok.text_range(), ty);
             return ty;
         }
         // A **wildcard** parameter (REP-32). It names nothing, so there is nothing
@@ -1482,11 +1496,7 @@ impl Inferer {
         // or lowering reads a symbol with no scheme for a parameter that is
         // certainly there.
         if let Some(tok) = p.wildcard() {
-            if let Some(&id) = self.decls.get(&tok.text_range()) {
-                if let Some(sym) = self.names.get_mut(id) {
-                    sym.scheme = Some(Scheme::monotype(ty));
-                }
-            }
+            self.bind_pattern_name(tok.text_range(), ty);
             return ty;
         }
         // A **destructuring** closure parameter (REP-29). The argument's own slot
@@ -1494,12 +1504,7 @@ impl Inferer {
         // same walk a match arm and a `for` binding go through — so each name comes
         // out at its component's type rather than at the whole argument's.
         if let Some(pat) = p.pattern() {
-            let range = pat.syntax().text_range();
-            if let Some(&id) = self.decls.get(&range) {
-                if let Some(sym) = self.names.get_mut(id) {
-                    sym.scheme = Some(Scheme::monotype(ty));
-                }
-            }
+            self.bind_pattern_name(pat.syntax().text_range(), ty);
             self.infer_pattern(&pat, ty);
         }
         ty
@@ -1534,9 +1539,7 @@ impl Inferer {
             return;
         };
         let existing = self.db.instantiate(scheme);
-        if let Err(e) = self.db.unify(existing, rhs) {
-            self.diag_unify(self.file_span(at), e);
-        }
+        self.unify_at(existing, rhs, at);
         // A compound assignment is an arithmetic operation, so its target must
         // be numeric. Matching operand types alone said nothing: `var flag =
         // true; flag += false` unified `Bool` with `Bool` and was accepted
@@ -1605,16 +1608,26 @@ impl Inferer {
         }
     }
 
-    /// Attach a scheme to the symbol declared at `name_tok`'s site. Uses the
-    /// `decls` map (keyed by the declaration's range) rather than a scope lookup,
-    /// so the scheme lands on the *exact* symbol even when the name is shadowed
-    /// (where `scopes.lookup` would return the latest binding).
+    /// Attach a scheme to the symbol declared at `name_tok`'s site, for the
+    /// callers that hold the declaring token rather than its range.
     fn attach_scheme(&mut self, name_tok: Option<praxis_syntax::SyntaxToken>, scheme: Scheme) {
         if let Some(tok) = name_tok {
-            if let Some(&id) = self.decls.get(&tok.text_range()) {
-                if let Some(sym) = self.names.get_mut(id) {
-                    sym.scheme = Some(scheme);
-                }
+            self.attach_scheme_at(tok.text_range(), scheme);
+        }
+    }
+
+    /// Attach `scheme` to the symbol *declared* at `range`.
+    ///
+    /// The one writer of `sym.scheme` that goes through `decls`. Keying by the
+    /// declaration's range rather than a scope lookup lands the scheme on the
+    /// *exact* symbol even when the name is shadowed (where `scopes.lookup`
+    /// would return the latest binding). Every declared binding — a `var`, a
+    /// parameter, a pattern name — funnels through here, so a rule added to it
+    /// reaches all of them rather than whichever copy it was written into.
+    fn attach_scheme_at(&mut self, range: TextRange, scheme: Scheme) {
+        if let Some(&id) = self.decls.get(&range) {
+            if let Some(sym) = self.names.get_mut(id) {
+                sym.scheme = Some(scheme);
             }
         }
     }
@@ -2224,9 +2237,7 @@ impl Inferer {
                 ));
             return;
         }
-        if let Err(e) = self.db.unify(field_ty, value_ty) {
-            self.diag_unify(self.file_span(at), e);
-        }
+        self.unify_at(field_ty, value_ty, at);
         let text_concat_assign =
             op == praxis_ast::PlaceAssignOp::Add && is_text_scalar(&self.db, field_ty);
         if op.reads_before_writing() && !text_concat_assign {
@@ -2297,9 +2308,7 @@ impl Inferer {
                         SyntaxKind::KW_TRUE | SyntaxKind::KW_FALSE => self.db.bool(),
                         _ => self.db.fresh_var(),
                     };
-                    if let Err(e) = self.db.unify(expected, lit_ty) {
-                        self.diag_unify(self.file_span(tok.text_range()), e);
-                    }
+                    self.unify_at(expected, lit_ty, tok.text_range());
                 }
             }
             PatternKind::Name(name) => {
@@ -2320,9 +2329,7 @@ impl Inferer {
                 match praxis_types::TupleElems::new(elems.clone()) {
                     Ok(te) => {
                         let tuple_ty = self.db.tuple(te);
-                        if let Err(e) = self.db.unify(expected, tuple_ty) {
-                            self.diag_unify(self.file_span(pat.syntax().text_range()), e);
-                        }
+                        self.unify_at(expected, tuple_ty, pat.syntax().text_range());
                     }
                     // A tuple type has two elements or more, so `(p)` matches
                     // nothing — the parser has no grouping form to have meant.
@@ -2423,9 +2430,7 @@ impl Inferer {
             self.infer_sub_patterns_freely(pat);
             return;
         };
-        if let Err(e) = self.db.unify(expected, enum_ty) {
-            self.diag_unify(self.file_span(at), e);
-        }
+        self.unify_at(expected, enum_ty, at);
         let sub_pats: Vec<_> = pat.sub_patterns().collect();
         for (i, sub) in sub_pats.iter().enumerate() {
             match payload_types.get(i) {
@@ -2453,16 +2458,14 @@ impl Inferer {
         }
     }
 
-    /// Bind the name *declared* at `range` by a pattern to `ty`.
+    /// Bind the name *declared* at `range` by a pattern — or by a parameter — to
+    /// `ty`.
     ///
-    /// A pattern binding is monomorphic: it names a piece of the scrutinee, and
-    /// the scrutinee is one value.
+    /// Such a binding is monomorphic: a pattern name is a piece of the
+    /// scrutinee and the scrutinee is one value, and a parameter is one
+    /// argument for the length of the body it is quantified outside of.
     fn bind_pattern_name(&mut self, range: TextRange, ty: Type) {
-        if let Some(&symbol) = self.decls.get(&range) {
-            if let Some(sym) = self.names.get_mut(symbol) {
-                sym.scheme = Some(Scheme::monotype(ty));
-            }
-        }
+        self.attach_scheme_at(range, Scheme::monotype(ty));
     }
 
     /// Infer a record pattern `P { x, y: p }` — or a headless `{ x, y: p }` —
@@ -2624,10 +2627,7 @@ impl Inferer {
             let text = self.db.text();
             // `text` first — `parse` requires it, `arg_ty` is what was passed
             // (REP-61).
-            if let Err(e) = self.db.unify(text, arg_ty) {
-                let at = text_expr.syntax().text_range();
-                self.diag_unify(self.file_span(at), e);
-            }
+            self.unify_at(text, arg_ty, text_expr.syntax().text_range());
         }
         match p.parser_expr() {
             Some(pe) => crate::parser_lower::synthesize_parser_type(
@@ -2838,9 +2838,7 @@ impl Inferer {
             let Some(bound) = bound else { continue };
             // `int_ty` first — the range requires it, the bound is what was
             // written (REP-61).
-            if let Err(e) = self.db.unify(int_ty, bound) {
-                self.diag_unify(self.file_span(at.unwrap_or(whole)), e);
-            }
+            self.unify_at(int_ty, bound, at.unwrap_or(whole));
         }
         self.db
             .collection(CollectionCtor::Range, CollectionArgs::Nullary)
@@ -2868,9 +2866,7 @@ impl Inferer {
         for el in l.elements() {
             let at = el.syntax().text_range();
             let el_ty = self.infer_expr(&el);
-            if let Err(e) = self.db.unify(element, el_ty) {
-                self.diag_unify(self.file_span(at), e);
-            }
+            self.unify_at(element, el_ty, at);
         }
         self.db
             .collection(CollectionCtor::Vec, CollectionArgs::Unary(element))
@@ -2943,12 +2939,8 @@ impl Inferer {
                     // operand is what the program wrote. Reversed, `"a" + "b"`
                     // read `expected Text, found Int` — the operand named as the
                     // requirement (REP-61).
-                    if let Err(e) = self.db.unify(target, l) {
-                        self.diag_unify(self.file_span(lhs_at), e);
-                    }
-                    if let Err(e) = self.db.unify(target, r) {
-                        self.diag_unify(self.file_span(rhs_at), e);
-                    }
+                    self.unify_at(target, l, lhs_at);
+                    self.unify_at(target, r, rhs_at);
                 }
                 // `%` is defined for integers only (§4.12). MIR has no Float
                 // remainder: its `lower_bin` fell through to *addition*, so
@@ -2996,9 +2988,7 @@ impl Inferer {
                     // establishes the expected type, the RHS is what failed to
                     // match it. Falls back to the whole expression.
                     let at = rhs_range.unwrap_or_else(|| b.syntax().text_range());
-                    if let Err(e) = self.db.unify(l, r) {
-                        self.diag_unify(self.file_span(at), e);
-                    }
+                    self.unify_at(l, r, at);
                     // Equality (`==`/`!=`) on a composite type (record/tuple/
                     // enum/collection) is structural (§5.5) and requires every
                     // contained type to be equatable; functions are never
@@ -3089,9 +3079,7 @@ impl Inferer {
                 .unwrap_or_else(|| u.syntax().text_range());
             // `result` first — it is the type the operator demands of its
             // operand, so `!1` reads `expected Bool, found Int` (REP-61).
-            if let Err(e) = self.db.unify(result, o) {
-                self.diag_unify(self.file_span(at), e);
-            }
+            self.unify_at(result, o, at);
         }
         result
     }
@@ -3156,10 +3144,7 @@ impl Inferer {
             let ct = self.infer_expr(&cond);
             let bool = self.db.bool();
             // Condition must be Bool: point at the condition, not the whole `if`.
-            let at = cond.syntax().text_range();
-            if let Err(e) = self.db.unify(bool, ct) {
-                self.diag_unify(self.file_span(at), e);
-            }
+            self.unify_at(bool, ct, cond.syntax().text_range());
         }
         let then_ty = i.then_branch().map(|b| self.infer_block(&b));
         let else_ty = i.else_branch().and_then(|e| self.infer_else(&e));
@@ -3219,10 +3204,7 @@ impl Inferer {
             let ct = self.infer_expr(&cond);
             let bool = self.db.bool();
             // Condition must be Bool: point at the condition, not the whole `while`.
-            let at = cond.syntax().text_range();
-            if let Err(e) = self.db.unify(bool, ct) {
-                self.diag_unify(self.file_span(at), e);
-            }
+            self.unify_at(bool, ct, cond.syntax().text_range());
         }
         if let Some(body) = w.body() {
             self.in_loop(LoopFlavour::Statement("while"), |me| {
@@ -3467,10 +3449,7 @@ impl Inferer {
                 let callee_ty = self.infer_expr(&callee_expr);
                 let result = self.db.fresh_var();
                 let expected = self.db.func(arg_types, result);
-                if let Err(e) = self.db.unify(callee_ty, expected) {
-                    let at = c.syntax().text_range();
-                    self.diag_unify(self.file_span(at), e);
-                }
+                self.unify_at(callee_ty, expected, c.syntax().text_range());
                 return result;
             }
         }
@@ -3526,10 +3505,7 @@ impl Inferer {
                         // not on the ctor's scheme.
                         self.apply_written_type_args(c, callee_ty);
                         let expected = self.db.func(arg_types, result);
-                        if let Err(e) = self.db.unify(callee_ty, expected) {
-                            let at = c.syntax().text_range();
-                            self.diag_unify(self.file_span(at), e);
-                        }
+                        self.unify_at(callee_ty, expected, c.syntax().text_range());
                         // Record the witness: the callee symbol + the concrete
                         // arg types. After unification these pin the callee's
                         // quantified vars, so the mono pass can instantiate the
@@ -3632,9 +3608,7 @@ impl Inferer {
                 // for every unresolvable annotation.
                 continue;
             };
-            if let Err(e) = self.db.unify(*param, resolved) {
-                self.diag_unify(self.file_span(written_ty.syntax().text_range()), e);
-            }
+            self.unify_at(*param, resolved, written_ty.syntax().text_range());
         }
     }
 
@@ -3796,11 +3770,7 @@ impl Inferer {
                 // wrong, and an example that does not fire is the one kind of
                 // comment a reader cannot check by reading.
                 if let Some(near) = self.nearest_method(receiver_ty, name) {
-                    diag = diag.with_suggestion(
-                        self.file_span(key),
-                        near,
-                        format!("did you mean `{near}`?"),
-                    );
+                    diag = diag.with_did_you_mean(self.file_span(key), near);
                 }
                 self.diagnostics.push(diag);
             }
@@ -3848,10 +3818,7 @@ impl Inferer {
             };
             // Unify now (not deferred) so shared vars pin before the next arg.
             if let Some(pt) = param_tys.get(i) {
-                if let Err(e) = self.db.unify(*pt, at) {
-                    let at_range = arg.syntax().text_range();
-                    self.diag_unify(self.file_span(at_range), e);
-                }
+                self.unify_at(*pt, at, arg.syntax().text_range());
             }
             arg_types.push(at);
         }

@@ -21,11 +21,11 @@
 //! drift.
 
 use praxis_source::Span;
-use praxis_syntax::ident::{is_ident_continue, is_ident_start};
+use praxis_syntax::ident::{ident_run_len, is_ident_continue, is_ident_start};
 
 use crate::ast::{shift_part_spans, AtomicKind, Constructor, ParserAst};
 use crate::call::{build_call, build_repeated_tail, CallArg};
-use crate::scan::{Scan, ScanError};
+use crate::scan::{skip_string, Scan, ScanError};
 
 /// Parse a capture body into its [`ParserAst`].
 ///
@@ -251,7 +251,7 @@ fn parse_arg(
         // marker goes through `build_repeated_tail` — the same function the HIR
         // bridge calls, so the two front ends cannot disagree about the
         // marker's own shape, its count included.
-        if peek_ident(cur) == Some("repeated") {
+        if peek_ident(cur) == Some(Constructor::Repeated.keyword()) {
             let at = cur.pos();
             take_ident(cur);
             skip_ws(cur);
@@ -269,10 +269,18 @@ fn parse_arg(
         return Ok(CallArg::Named { name, parser });
     }
 
-    // A bare flag — today only `grid(P, ragged, fill: v)`'s `ragged`.
-    if peek_ident(cur) == Some("ragged") {
-        take_ident(cur);
-        return Ok(CallArg::Flag("ragged".to_string()));
+    // A bare flag — today only `grid(P, ragged, fill: v)`'s `ragged`, and only
+    // for the constructor that has one. Asked of the *name* alone, as this was,
+    // `ragged` is a flag in **every** constructor's argument list: `lines(ragged)`
+    // was told it had written a flag where a parser belongs, and the word was
+    // reserved everywhere rather than in `grid`. That is `keyword_arg`'s bug one
+    // argument kind over, and `flag_arg` is the same answer to it.
+    //
+    // `is_some_and` and not `peek_ident(cur) == ctor.flag_arg()`: that also
+    // holds when both are `None`, which is end-of-arguments, and would mint a
+    // flag out of nothing.
+    if ctor.flag_arg().is_some_and(|f| peek_ident(cur) == Some(f)) {
+        return Ok(CallArg::Flag(take_ident(cur).to_string()));
     }
 
     // A name after `repeated`'s parser is a count that is not a literal, and
@@ -316,23 +324,11 @@ fn peek_named_prefix<'a>(cur: &mut Scan<'a>) -> Option<&'a str> {
 
 /// The identifier at the cursor, without consuming it.
 fn peek_ident<'a>(cur: &mut Scan<'a>) -> Option<&'a str> {
-    let src = cur.src();
-    let start = cur.pos();
-    let rest = src.get(start..)?;
-    let mut chars = rest.char_indices();
-    let (_, first) = chars.next()?;
-    if !is_ident_start(first) {
-        return None;
+    let rest = cur.src().get(cur.pos()..)?;
+    match ident_run_len(rest) {
+        0 => None,
+        n => Some(&rest[..n]),
     }
-    let mut end = first.len_utf8();
-    for (i, c) in chars {
-        if is_ident_continue(c) {
-            end = i + c.len_utf8();
-        } else {
-            break;
-        }
-    }
-    Some(&rest[..end])
 }
 
 /// Consume and return the identifier at the cursor.
@@ -376,24 +372,16 @@ fn take_number<'a>(cur: &mut Scan<'a>) -> &'a str {
 
 /// Consume a `"…"` literal and decode it with the workspace's one decoder
 /// (IP-08).
+///
+/// The **extent** is [`skip_string`]'s — [`praxis_syntax::template::string_end`]'s
+/// — rather than the second copy of the backslash/quote loop this used to be.
+/// The rebasing is not optional: this `Scan` runs over the capture body alone,
+/// so the offset `skip_string` reports is relative to *that* text, and without
+/// the shift every unterminated-literal caret in a capture body lands `base`
+/// bytes short.
 fn take_string(cur: &mut Scan<'_>, base: usize) -> Result<String, ScanError> {
     let start = cur.pos();
-    cur.bump(); // opening quote
-    loop {
-        match cur.bump() {
-            None => {
-                return Err(ScanError::MalformedCaptureBody {
-                    byte_offset: base + start,
-                    message: "unterminated string literal".to_string(),
-                })
-            }
-            Some((_, '\\')) => {
-                cur.bump();
-            }
-            Some((_, '"')) => break,
-            Some(_) => {}
-        }
-    }
+    skip_string(cur).map_err(|err| err.shifted(base))?;
     Ok(praxis_syntax::literal::unquote_text(
         &cur.src()[start..cur.pos()],
     ))
@@ -407,22 +395,23 @@ fn take_string(cur: &mut Scan<'_>, base: usize) -> Result<String, ScanError> {
 /// reported `unterminated string literal` for text that is not malformed, while
 /// the rowan front end accepted the very same call. A quoted value is returned
 /// with its quotes; `build_call` decodes it, so both front ends get one answer
-/// from one place.
+/// from one place. Which literal is "a string" is [`skip_string`]'s question,
+/// the same one the extent scan and the lexer ask, so a third inline copy of the
+/// backslash/quote loop cannot drift away from them.
 fn take_keyword_value(cur: &mut Scan<'_>) -> String {
     let start = cur.pos();
     while let Some(c) = cur.peek_char() {
         match c {
             ',' | ')' => break,
             '"' => {
-                cur.bump();
-                while let Some((_, c)) = cur.bump() {
-                    match c {
-                        '\\' => {
-                            cur.bump();
-                        }
-                        '"' => break,
-                        _ => {}
-                    }
+                // A literal with no end has no end to skip to, and
+                // `skip_string` reports that **without moving the cursor** — so
+                // this arm must consume the rest itself, or the loop re-reads
+                // this same quote forever. Running to the end is what the copy
+                // this replaced did: `parse_args` then reports the unbalanced
+                // `(`, which is the malformed text's real complaint.
+                if skip_string(cur).is_err() {
+                    cur.advance_to(cur.src().len());
                 }
             }
             _ => {
@@ -606,6 +595,36 @@ mod tests {
                 "`{refused}` must be refused by the shared shape check"
             );
         }
+    }
+
+    /// A `"…"` argument's extent is `scan::skip_string`'s, and the offset it
+    /// reports is the body's own — so the caret has to be rebased onto the text
+    /// the caller is scanning before it names a byte.
+    #[test]
+    fn an_unterminated_string_argument_is_reported_at_its_own_quote() {
+        match parse_capture_body(r#"sep("-, int)"#, 10, 0) {
+            Err(ScanError::MalformedCaptureBody {
+                byte_offset,
+                message,
+            }) => {
+                assert_eq!(byte_offset, 10 + 4, "the caret must be rebased by `at`");
+                assert!(message.contains("unterminated string literal"), "{message}");
+            }
+            other => panic!("expected an unterminated literal, got {other:?}"),
+        }
+    }
+
+    /// The same rule reaches a keyword argument's value, where a failure is not
+    /// reported but *consumed*: the value runs to the end of the body. The point
+    /// of the test is that this terminates at all — `skip_string` does not move
+    /// the cursor when it fails, so an arm that only asked it to skip would loop
+    /// on the opening quote.
+    #[test]
+    fn an_unterminated_keyword_value_ends_the_body_rather_than_looping() {
+        assert!(matches!(
+            parse(r#"chars(one_of("ab"), skip: "newlines)"#),
+            Err(ScanError::MalformedCaptureBody { .. })
+        ));
     }
 
     #[test]

@@ -9,18 +9,9 @@
 
 #![cfg(test)]
 
-use praxis_ast::AstNode;
-use praxis_parser::parse;
-use praxis_source::{DiagCode, SourceMap};
+use praxis_source::DiagCode;
 
-use crate::analyze_root;
-
-fn analyze(text: &str) -> crate::Analysis {
-    let map = SourceMap::new();
-    let id = map.intern("coverage_test.px", text);
-    let parsed = parse(id, text);
-    analyze_root(id, &parsed.tree)
-}
+use crate::hir_tests::test_util::{analyze, analyze_and_lower, parse_file};
 
 fn codes(analysis: &crate::Analysis, want: DiagCode) -> Vec<&praxis_source::Diagnostic> {
     analysis
@@ -55,12 +46,7 @@ fn it_is_reported_once() {
     assert_eq!(codes(&analysis, DiagCode::NonExhaustiveMatch).len(), 1);
 
     // And lowering — the other builder — adds none of its own.
-    let map = SourceMap::new();
-    let id = map.intern("coverage_test.px", src);
-    let parsed = parse(id, src);
-    let mut analysis = analyze_root(id, &parsed.tree);
-    let root = praxis_ast::SourceFile::cast(parsed.tree.clone()).expect("a source file");
-    let module = crate::lower(id, &root, &mut analysis);
+    let (_, module) = analyze_and_lower(src);
     assert_eq!(
         module
             .diagnostics
@@ -297,9 +283,7 @@ fn every_pattern_position_is_checked_by_analysis() {
                out(f((1, 2)))\n\
                var e = A(1)\n\
                out(match e { A(n) => n, B => 0 })\n";
-    let map = SourceMap::new();
-    let id = map.intern("pattern_positions.px", src);
-    let parsed = parse(id, src);
+    let (_, parsed) = parse_file(src);
     assert!(
         parsed.diagnostics.is_empty(),
         "the sample must parse: {:?}",

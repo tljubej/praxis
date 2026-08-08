@@ -11,12 +11,11 @@
 //! speaks `Content-Length` headers over stdio.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-fn bin_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_praxis"))
-}
+mod common;
+
+use common::bin_path;
 
 /// A live `praxis lsp` process with framed stdio.
 struct Session {

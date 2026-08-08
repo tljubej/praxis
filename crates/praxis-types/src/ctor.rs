@@ -42,11 +42,6 @@ impl TupleElems {
         TupleElems(vec![a, b].into_boxed_slice())
     }
 
-    #[must_use]
-    pub fn as_slice(&self) -> &[Type] {
-        &self.0
-    }
-
     pub(crate) fn into_vec(self) -> Vec<Type> {
         self.0.into_vec()
     }
@@ -144,11 +139,6 @@ impl FieldSet {
         )
     }
 
-    #[must_use]
-    pub fn as_slice(&self) -> &[RecordFieldDef] {
-        &self.0
-    }
-
     /// Re-wrap fields taken from a def that was validated when it was
     /// registered. Used by [`fold`](crate::fold) to build a *specialized* copy
     /// of an existing def: substitution rewrites field types and never field
@@ -193,11 +183,6 @@ impl VariantSet {
                 .map(|(name, payload)| EnumVariantDef { name, payload })
                 .collect(),
         )
-    }
-
-    #[must_use]
-    pub fn as_slice(&self) -> &[EnumVariantDef] {
-        &self.0
     }
 
     /// Re-wrap variants taken from an already-registered def. See

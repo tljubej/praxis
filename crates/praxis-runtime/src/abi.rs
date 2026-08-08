@@ -823,7 +823,7 @@ unsafe fn maybe_collect(ctx: *mut RuntimeContext) {
 /// Pace the collector and mint the token one allocation needs (P0-08b).
 ///
 /// Every `praxis_*` wrapper reaches the heap through [`gc_alloc`] or
-/// [`gc_alloc_with`], which call this — and even a wrapper that reached
+/// [`gc_alloc_owned`], which call this — and even a wrapper that reached
 /// `Heap::alloc` directly would have to come through here, because the token
 /// has no other producer. That is the whole point: fourteen wrappers used to
 /// gc-allocate without pacing, so a program whose pressure came from `Text`,
@@ -869,21 +869,32 @@ unsafe fn gc_alloc<T: Copy>(ctx: *mut RuntimeContext, payload: Payload<T>, value
 
 /// Pace the collector, then allocate a payload that owns Rust resources.
 ///
+/// [`gc_alloc`]'s counterpart for the payloads no [`Payload<T>`] can describe.
+/// The type is named **once**, as `P`: [`Heap::alloc_payload`] derives the size,
+/// the alignment and the write from it, where every one of these wrappers used
+/// to restate all three and keep them in agreement by hand.
+///
+/// The payload arrives as a producer rather than a value, and that is
+/// load-bearing: `init` runs *after* [`safepoint`] has given the collector its
+/// turn, so a payload built out of bare `GcRef`s — `vec![fill; n]` in
+/// [`praxis_vec_filled`] and [`praxis_grid_filled`] — is never a `Vec<GcRef>`
+/// live across a collection with no root set able to see it.
+///
 /// # Safety
-/// `ctx` must be live and wired; `init` must fully initialize `size` bytes as
-/// `descriptor`'s payload type ([`Heap::alloc_with`]'s contract).
+/// `ctx` must be live and wired, and `descriptor` must be `P`'s own descriptor
+/// ([`Heap::alloc_payload`]'s contract).
 #[inline]
-unsafe fn gc_alloc_with(
+unsafe fn gc_alloc_owned<P>(
     ctx: *mut RuntimeContext,
     descriptor: &'static TypeDescriptor,
-    size: usize,
-    align: usize,
-    init: impl FnOnce(*mut u8),
+    init: impl FnOnce() -> P,
 ) -> GcRef {
     // SAFETY: caller upholds ctx validity.
     let (h, sp) = unsafe { safepoint(ctx) };
+    // `init()` is evaluated here, downstream of the safepoint above — see the
+    // ordering note in this function's doc.
     // SAFETY: forwarded from this function's contract.
-    unsafe { h.alloc_with(sp, descriptor, size, align, init) }
+    unsafe { h.alloc_payload(sp, descriptor, init()) }
 }
 
 /// The immortal `Bool` for `value`, off the context's cached singletons.
@@ -1002,6 +1013,32 @@ unsafe fn char_ref(ctx: *mut RuntimeContext, code: u32) -> GcRef {
             unsafe { *(*ctx).small_chars.add(i) }
         }
         None => h.alloc(sp, scalars::CHAR_PAYLOAD, code),
+    }
+}
+
+/// A fresh owned `Text` holding `s`.
+///
+/// [`bool_ref`]/[`int_ref`]/[`char_ref`]'s place in the file but not their
+/// shape: there is nothing interned to answer from — every `Text` is a distinct
+/// object — so this always allocates, and always paces.
+///
+/// Eight wrappers restated this allocation, and three of them handed
+/// `TextPayload::owned` a `.clone()` of a `String` they were about to drop: a
+/// second heap copy of the whole text on every `to_text` and every `concat`,
+/// which existed only because the block had been pasted rather than called.
+/// `impl Into<Box<str>>` is what lets all eight share one: a `String` from a
+/// renderer, a `Box<str>` the caller already built ([`praxis_alloc_text`]), a
+/// `&str`.
+///
+/// # Safety
+/// `ctx` must point at a live, wired `RuntimeContext`.
+#[inline]
+unsafe fn text_ref(ctx: *mut RuntimeContext, s: impl Into<Box<str>>) -> GcRef {
+    // SAFETY: caller upholds ctx validity; `TextPayload` is `TEXT`'s payload type.
+    unsafe {
+        gc_alloc_owned(ctx, &crate::text::TEXT, || {
+            crate::text::TextPayload::owned(s)
+        })
     }
 }
 
@@ -1162,6 +1199,83 @@ unsafe fn unit_sentinel(ctx: *mut RuntimeContext) -> GcRef {
     unsafe { (*ctx).unit_ref }
 }
 
+/// The slot a source index `i` names in a container of `len` elements, or
+/// `None` when it is outside `0..len` (§9.2, §11.1).
+///
+/// **The one place a source index becomes a `usize`.** The `< 0` test has to
+/// run before the cast: a negative `i64` casts to a value near `usize::MAX` and
+/// would sail straight past a bare length comparison. That is RT-07's defect on
+/// the indexing side — the construction side guards the same hazard with a
+/// named [`GridExtent`](crate::collections::GridExtent) — and it was previously
+/// restated by hand at every accessor, so a single copy that dropped the guard
+/// would have been invisible.
+///
+/// `Vec` and `Deque` indexing is one language rule applied to two containers,
+/// so they share this rather than each spelling it out.
+fn linear_index(i: i64, len: usize) -> Option<usize> {
+    if i < 0 {
+        return None;
+    }
+    // Non-negative above, so the cast is exact.
+    let i = i as usize;
+    (i < len).then_some(i)
+}
+
+/// The row-major slot `(x, y)` names in a `width × height` grid, or `None` when
+/// either axis falls outside it.
+///
+/// Both axes go through [`linear_index`], so the 2-D rule is the 1-D rule twice
+/// and the signed-to-`usize` cast still exists in exactly one place. The
+/// product cannot overflow: `y < height` and `x < width` with
+/// `height = items.len() / width`, so the result is below `items.len()`.
+fn cell_index(x: i64, y: i64, width: usize, height: usize) -> Option<usize> {
+    let x = linear_index(x, width)?;
+    let y = linear_index(y, height)?;
+    Some(y * width + x)
+}
+
+/// [`linear_index`], raising `IndexOutOfBounds` when the index is out of range.
+/// `None` means the fault is already set and the caller owes only its sentinel
+/// return.
+///
+/// The raising wrapper is deliberately separate from the pure predicate,
+/// because not every bounds question may fault. [`praxis_grid_contains`] is
+/// declared `Pure` in the ABI manifest while `GridGet` is `Faults`, and MIR's
+/// `RedundantFaultCheck` emits no `CheckFault` after a `Pure` call — so a fault
+/// raised on every legitimate `false` would sit pending until some later check
+/// mistook it for its own. Bounds-testing sites take [`cell_index`] /
+/// [`linear_index`]; only sites the manifest says can fault take these.
+///
+/// # Safety
+/// `ctx` must be live and wired.
+unsafe fn checked_index(ctx: *mut RuntimeContext, i: i64, len: usize) -> Option<usize> {
+    let idx = linear_index(i, len);
+    if idx.is_none() {
+        unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
+    }
+    idx
+}
+
+/// [`cell_index`], raising `IndexOutOfBounds` when `(x, y)` is off the grid.
+/// See [`checked_index`] for why the raising and the predicate are two
+/// functions.
+///
+/// # Safety
+/// `ctx` must be live and wired.
+unsafe fn checked_cell(
+    ctx: *mut RuntimeContext,
+    x: i64,
+    y: i64,
+    width: usize,
+    height: usize,
+) -> Option<usize> {
+    let idx = cell_index(x, y, width, height);
+    if idx.is_none() {
+        unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
+    }
+    idx
+}
+
 // ---------------------------------------------------------------------------
 // Allocation wrappers.
 // ---------------------------------------------------------------------------
@@ -1309,19 +1423,8 @@ pub unsafe extern "C" fn praxis_alloc_text(
             Ok(s) => s.into(),
             Err(_) => text_bytes_are_not_utf8(len),
         };
-        // SAFETY: TextPayload matches TEXT's size/align and is fully initialized.
-        unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::text::TEXT,
-                std::mem::size_of::<crate::text::TextPayload>(),
-                std::mem::align_of::<crate::text::TextPayload>(),
-                |payload| {
-                    (payload as *mut crate::text::TextPayload)
-                        .write(crate::text::TextPayload::owned(owned));
-                },
-            )
-        }
+        // SAFETY: ctx/heap valid.
+        unsafe { text_ref(ctx, owned) }
     })
 }
 
@@ -1692,19 +1795,7 @@ pub unsafe extern "C" fn praxis_float_to_text(ctx: *mut RuntimeContext, r: GcRef
         let mut s = String::new();
         scalars::write_float(&mut s, f);
         // SAFETY: `s` is valid UTF-8 for the duration of the call; ctx/heap valid.
-        unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::text::TEXT,
-                std::mem::size_of::<crate::text::TextPayload>(),
-                std::mem::align_of::<crate::text::TextPayload>(),
-                |payload| {
-                    let owned: Box<str> = s.clone().into_boxed_str();
-                    (payload as *mut crate::text::TextPayload)
-                        .write(crate::text::TextPayload::owned(owned));
-                },
-            )
-        }
+        unsafe { text_ref(ctx, s) }
     })
 }
 
@@ -1727,18 +1818,7 @@ pub unsafe extern "C" fn praxis_int_to_text(ctx: *mut RuntimeContext, r: GcRef) 
         let mut s = String::new();
         scalars::write_int(&mut s, v);
         // SAFETY: `s` is valid UTF-8; ctx/heap valid.
-        unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::text::TEXT,
-                std::mem::size_of::<crate::text::TextPayload>(),
-                std::mem::align_of::<crate::text::TextPayload>(),
-                |payload| {
-                    (payload as *mut crate::text::TextPayload)
-                        .write(crate::text::TextPayload::owned(s.into_boxed_str()));
-                },
-            )
-        }
+        unsafe { text_ref(ctx, s) }
     })
 }
 
@@ -1767,18 +1847,7 @@ pub unsafe extern "C" fn praxis_char_to_text(ctx: *mut RuntimeContext, r: GcRef)
         let mut s = String::new();
         scalars::write_char(&mut s, code);
         // SAFETY: `s` is valid UTF-8; ctx/heap valid.
-        unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::text::TEXT,
-                std::mem::size_of::<crate::text::TextPayload>(),
-                std::mem::align_of::<crate::text::TextPayload>(),
-                |payload| {
-                    (payload as *mut crate::text::TextPayload)
-                        .write(crate::text::TextPayload::owned(s.into_boxed_str()));
-                },
-            )
-        }
+        unsafe { text_ref(ctx, s) }
     })
 }
 
@@ -2466,6 +2535,45 @@ pub unsafe extern "C" fn praxis_raise_div_by_zero_if(ctx: *mut RuntimeContext, c
 }
 
 // ---------------------------------------------------------------------------
+// Collection payload accessors (§11.1, §11.4).
+//
+// Every collection below reaches its payload through a named accessor —
+// `vec_payload`, `map_payload_mut`, … — and the name is the descriptor
+// assertion the wrapper is making, which is why the nine kinds keep nine
+// (shared, mut) pairs rather than calling `payload::<P>()` inline. The two
+// casts underneath were written out nine times over; they live here once, and
+// each named accessor is the one line that spells its payload type.
+// ---------------------------------------------------------------------------
+
+/// Read a `P` payload out of a `GcRef` as a shared ref.
+///
+/// # Safety
+/// `r` must be a valid `GcRef` whose descriptor's payload type is `P`.
+unsafe fn payload_ref<P>(r: GcRef) -> &'static P {
+    // SAFETY: caller guarantees `r`'s payload is a `P`; the non-moving GC
+    // (ADR-011) keeps the payload address stable for the object's lifetime. The
+    // `'static` is unbounded because the raw FFI boundary has no lifetime to
+    // carry; the caller (a wrapper that holds `ctx`) ensures the object outlives
+    // the use.
+    unsafe { &*r.payload::<P>() }
+}
+
+/// Read a `P` payload out of a rooted `GcRef` as a mutable ref — the accessor
+/// the wrappers that mutate in place go through (§11.1).
+///
+/// # Safety
+/// `r` must be a valid `GcRef` whose descriptor's payload type is `P`, rooted
+/// for `'s`.
+unsafe fn payload_mut<'s, P>(r: Rooted<'s>) -> &'s mut P {
+    // SAFETY: caller guarantees `r`'s payload is a `P`; the non-moving GC
+    // (ADR-011) keeps the payload address stable for the object's lifetime, and
+    // `Rooted` proves the object is in the collector's root set for `'s`, so a
+    // collection triggered while this reference is held cannot reclaim what it
+    // points at.
+    unsafe { &mut *r.get().payload::<P>() }
+}
+
+// ---------------------------------------------------------------------------
 // Vec[T] collection methods (§11.1, §11.2, §11.5, M5).
 //
 // `VecPayload` stores a `Box<[GcRef]>` (immutable length). `push` therefore
@@ -2481,11 +2589,8 @@ pub unsafe extern "C" fn praxis_raise_div_by_zero_if(ctx: *mut RuntimeContext, c
 /// # Safety
 /// `r` must be a valid `Vec` `GcRef`.
 unsafe fn vec_payload(r: GcRef) -> &'static VecPayload {
-    // SAFETY: caller guarantees `r` is a Vec; the non-moving GC (ADR-011) keeps
-    // the payload address stable for the object's lifetime. The `'static` is
-    // unbounded because the raw FFI boundary has no lifetime to carry; the
-    // caller (a wrapper that holds `ctx`) ensures the object outlives the use.
-    unsafe { &*r.payload::<VecPayload>() }
+    // SAFETY: caller guarantees `r` is a Vec; see `payload_ref`.
+    unsafe { payload_ref::<VecPayload>(r) }
 }
 
 /// Read the `VecPayload` out of a `GcRef` as a mutable ref, asserting it is a
@@ -2494,11 +2599,8 @@ unsafe fn vec_payload(r: GcRef) -> &'static VecPayload {
 /// # Safety
 /// `r` must be a valid `Vec` `GcRef`, rooted for `'s`.
 unsafe fn vec_payload_mut<'s>(r: Rooted<'s>) -> &'s mut VecPayload {
-    // SAFETY: caller guarantees `r` is a Vec; the non-moving GC (ADR-011) keeps
-    // the payload address stable for the object's lifetime, and `Rooted` proves
-    // the object is in the collector's root set for `'s`, so a collection
-    // triggered while this reference is held cannot reclaim what it points at.
-    unsafe { &mut *r.get().payload::<VecPayload>() }
+    // SAFETY: caller guarantees `r` is a Vec; see `payload_mut`.
+    unsafe { payload_mut::<VecPayload>(r) }
 }
 
 /// Build a `Vec[T]` holding `items`, with `element_descriptor` as its element
@@ -2553,20 +2655,12 @@ pub unsafe extern "C" fn praxis_vec_new(
         // A null descriptor is kept null: it means "the caller has no static
         // element type", which is a thing this payload can hold (P0-11). Spelling
         // it `INT` is what made an empty `Vec[Float]` claim to hold `Int`s.
-        // SAFETY: VecPayload matches VEC's size/align and is fully initialized.
+        // SAFETY: VecPayload is VEC's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::collections::VEC,
-                std::mem::size_of::<VecPayload>(),
-                std::mem::align_of::<VecPayload>(),
-                |payload| {
-                    (payload as *mut VecPayload).write(VecPayload {
-                        element_descriptor,
-                        items: ReprCVec::new(),
-                    });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::collections::VEC, || VecPayload {
+                element_descriptor,
+                items: ReprCVec::new(),
+            })
         }
     })
 }
@@ -2620,29 +2714,21 @@ pub unsafe extern "C" fn praxis_vec_filled(
         if !unsafe { adopt_or_reject(ctx, &mut descriptor, fill) } {
             return unsafe { unit_sentinel(ctx) };
         }
-        // `fill` is a bare `GcRef` argument, and `gc_alloc_with` may collect.
+        // `fill` is a bare `GcRef` argument, and `gc_alloc_owned` may collect.
         // Rooting it in a native scope is what keeps it addressable across the
         // allocation — the caller's shadow frame roots it up to the call, and
         // this roots it through it.
         let scope = unsafe { NativeScope::new(ctx) };
         let fill = scope.root(fill).get();
-        // SAFETY: VecPayload matches VEC's size/align and is fully initialized.
+        // The items are built inside the initializer, which `gc_alloc_owned`
+        // runs *after* the safepoint: no untraced `Vec<GcRef>` is ever live
+        // across a collection.
+        // SAFETY: VecPayload is VEC's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::collections::VEC,
-                std::mem::size_of::<VecPayload>(),
-                std::mem::align_of::<VecPayload>(),
-                // Built inside the initializer, which runs *after* the block is
-                // reserved: no untraced `Vec<GcRef>` is ever live across a
-                // collection.
-                |payload| {
-                    (payload as *mut VecPayload).write(VecPayload {
-                        element_descriptor: descriptor,
-                        items: ReprCVec::from_vec(vec![fill; extent.len()]),
-                    });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::collections::VEC, || VecPayload {
+                element_descriptor: descriptor,
+                items: ReprCVec::from_vec(vec![fill; extent.len()]),
+            })
         }
     })
 }
@@ -2667,24 +2753,16 @@ pub unsafe extern "C" fn praxis_alloc_record(
         let schema = unsafe { &*schema_ptr };
         let arity = schema.fields.len();
         let unit = unit_sentinel(ctx);
-        // SAFETY: RecordPayload matches RECORD's size/align and is fully initialized.
+        // SAFETY: RecordPayload is RECORD's payload type.
         // Every field slot starts as Unit (a valid GcRef), keeping the GC sound
         // before the caller fills them in via praxis_record_set_field.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::records::RECORD,
-                std::mem::size_of::<crate::records::RecordPayload>(),
-                std::mem::align_of::<crate::records::RecordPayload>(),
-                |payload| {
-                    (payload as *mut crate::records::RecordPayload).write(
-                        crate::records::RecordPayload {
-                            schema: schema_ptr,
-                            items: vec![unit; arity],
-                        },
-                    );
-                },
-            )
+            gc_alloc_owned(ctx, &crate::records::RECORD, || {
+                crate::records::RecordPayload {
+                    schema: schema_ptr,
+                    items: vec![unit; arity],
+                }
+            })
         }
     })
 }
@@ -2772,21 +2850,13 @@ pub unsafe extern "C" fn praxis_alloc_enum(
         let arity = schema.arity_of(tag as usize);
         let unit = unsafe { unit_sentinel(ctx) };
         let items = vec![unit; arity];
-        // SAFETY: EnumPayload matches ENUM's size/align and is fully initialized.
+        // SAFETY: EnumPayload is ENUM's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::enums::ENUM,
-                std::mem::size_of::<crate::enums::EnumPayload>(),
-                std::mem::align_of::<crate::enums::EnumPayload>(),
-                |payload| {
-                    (payload as *mut crate::enums::EnumPayload).write(crate::enums::EnumPayload {
-                        schema: schema_ptr,
-                        tag: tag as u32,
-                        items,
-                    });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::enums::ENUM, || crate::enums::EnumPayload {
+                schema: schema_ptr,
+                tag: tag as u32,
+                items,
+            })
         }
     })
 }
@@ -2917,24 +2987,14 @@ pub unsafe extern "C" fn praxis_alloc_tuple(
         let schema = unsafe { &*schema_ptr };
         let arity = schema.descriptors.len();
         let unit = unit_sentinel(ctx);
-        // SAFETY: TuplePayload matches TUPLE's size/align and is fully initialized.
+        // SAFETY: TuplePayload is TUPLE's payload type.
         // Every element slot starts as Unit (a valid GcRef), keeping the GC sound
         // before the caller fills them in via praxis_tuple_set.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::tuples::TUPLE,
-                std::mem::size_of::<crate::tuples::TuplePayload>(),
-                std::mem::align_of::<crate::tuples::TuplePayload>(),
-                |payload| {
-                    (payload as *mut crate::tuples::TuplePayload).write(
-                        crate::tuples::TuplePayload {
-                            schema: schema_ptr,
-                            items: vec![unit; arity],
-                        },
-                    );
-                },
-            )
+            gc_alloc_owned(ctx, &crate::tuples::TUPLE, || crate::tuples::TuplePayload {
+                schema: schema_ptr,
+                items: vec![unit; arity],
+            })
         }
     })
 }
@@ -3101,18 +3161,11 @@ pub unsafe extern "C" fn praxis_alloc_closure(
     abi_guard!("praxis_alloc_closure", ctx, {
         let unit = unit_sentinel(ctx);
         let env = vec![unit; n_captures as usize];
-        // SAFETY: ClosurePayload matches CLOSURE's size/align and is fully initialized.
+        // SAFETY: ClosurePayload is CLOSURE's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::closures::CLOSURE,
-                std::mem::size_of::<crate::closures::ClosurePayload>(),
-                std::mem::align_of::<crate::closures::ClosurePayload>(),
-                |payload| {
-                    (payload as *mut crate::closures::ClosurePayload)
-                        .write(crate::closures::ClosurePayload { fn_ptr, env });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::closures::CLOSURE, || {
+                crate::closures::ClosurePayload { fn_ptr, env }
+            })
         }
     })
 }
@@ -3196,18 +3249,11 @@ pub unsafe extern "C" fn praxis_closure_capture(
 #[no_mangle]
 pub unsafe extern "C" fn praxis_alloc_var_cell(ctx: *mut RuntimeContext, value: GcRef) -> GcRef {
     abi_guard!("praxis_alloc_var_cell", ctx, {
-        // SAFETY: VarCellPayload matches VAR_CELL's size/align and is fully initialized.
+        // SAFETY: VarCellPayload is VAR_CELL's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::var_cell::VAR_CELL,
-                std::mem::size_of::<crate::var_cell::VarCellPayload>(),
-                std::mem::align_of::<crate::var_cell::VarCellPayload>(),
-                |payload| {
-                    (payload as *mut crate::var_cell::VarCellPayload)
-                        .write(crate::var_cell::VarCellPayload { value });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::var_cell::VAR_CELL, || {
+                crate::var_cell::VarCellPayload { value }
+            })
         }
     })
 }
@@ -3352,13 +3398,13 @@ pub unsafe extern "C" fn praxis_vec_get(
         let p = unsafe { vec_payload(vec) };
         // SAFETY: caller guarantees `index` is a valid Int.
         let idx = unsafe { int_payload(index) };
-        if idx < 0 || idx as usize >= p.items.len() {
-            unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
+        // SAFETY: `abi_guard!` established that `ctx` is live and wired.
+        let Some(idx) = (unsafe { checked_index(ctx, idx, p.items.len()) }) else {
             return unsafe { unit_sentinel(ctx) };
-        }
+        };
         // Return the element by value (a copy of the GcRef). No allocation, so no
         // collection is needed; the vec stays live via `vec`.
-        p.items[idx as usize]
+        p.items[idx]
     })
 }
 
@@ -3390,15 +3436,15 @@ pub unsafe extern "C" fn praxis_vec_set(
         let p = unsafe { vec_payload_mut(scope.root(vec)) };
         // SAFETY: caller guarantees `index` is a valid Int.
         let idx = unsafe { int_payload(index) };
-        if idx < 0 || idx as usize >= p.items.len() {
-            unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
+        // SAFETY: `abi_guard!` established that `ctx` is live and wired.
+        let Some(idx) = (unsafe { checked_index(ctx, idx, p.items.len()) }) else {
             return unsafe { unit_sentinel(ctx) };
-        }
+        };
         if !unsafe { adopt_or_reject(ctx, &mut p.element_descriptor, value) } {
             return unsafe { unit_sentinel(ctx) };
         }
         // No allocation: the slot takes a `GcRef` the caller already holds.
-        p.items[idx as usize] = value;
+        p.items[idx] = value;
         unsafe { unit_sentinel(ctx) }
     })
 }
@@ -3898,18 +3944,7 @@ pub unsafe extern "C" fn praxis_vec_join(
             joined.push_str(unsafe { text_str(*item) });
         }
         // SAFETY: `joined` is valid UTF-8; ctx/heap valid.
-        unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::text::TEXT,
-                std::mem::size_of::<crate::text::TextPayload>(),
-                std::mem::align_of::<crate::text::TextPayload>(),
-                |payload| {
-                    (payload as *mut crate::text::TextPayload)
-                        .write(crate::text::TextPayload::owned(joined.into_boxed_str()));
-                },
-            )
-        }
+        unsafe { text_ref(ctx, joined) }
     })
 }
 
@@ -3942,18 +3977,7 @@ pub unsafe extern "C" fn praxis_vec_to_text(ctx: *mut RuntimeContext, vec: GcRef
             scalars::write_char(&mut rendered, code);
         }
         // SAFETY: `rendered` is valid UTF-8; ctx/heap valid.
-        unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::text::TEXT,
-                std::mem::size_of::<crate::text::TextPayload>(),
-                std::mem::align_of::<crate::text::TextPayload>(),
-                |payload| {
-                    (payload as *mut crate::text::TextPayload)
-                        .write(crate::text::TextPayload::owned(rendered.into_boxed_str()));
-                },
-            )
-        }
+        unsafe { text_ref(ctx, rendered) }
     })
 }
 
@@ -4032,8 +4056,8 @@ use crate::collections::DequePayload;
 /// # Safety
 /// `r` must be a valid `Deque` `GcRef`.
 unsafe fn deque_payload(r: GcRef) -> &'static DequePayload {
-    // SAFETY: caller guarantees `r` is a Deque; non-moving GC keeps it stable.
-    unsafe { &*r.payload::<DequePayload>() }
+    // SAFETY: caller guarantees `r` is a Deque; see `payload_ref`.
+    unsafe { payload_ref::<DequePayload>(r) }
 }
 
 /// Read the `DequePayload` out of a `GcRef` as a mutable ref, asserting Deque.
@@ -4041,8 +4065,8 @@ unsafe fn deque_payload(r: GcRef) -> &'static DequePayload {
 /// # Safety
 /// `r` must be a valid `Deque` `GcRef`, rooted for `'s`.
 unsafe fn deque_payload_mut<'s>(r: Rooted<'s>) -> &'s mut DequePayload {
-    // SAFETY: caller guarantees `r` is a Deque; non-moving GC keeps it stable.
-    unsafe { &mut *r.get().payload::<DequePayload>() }
+    // SAFETY: caller guarantees `r` is a Deque; see `payload_mut`.
+    unsafe { payload_mut::<DequePayload>(r) }
 }
 
 /// Allocate a new empty `Deque[T]` with the given element descriptor (§11.2).
@@ -4057,20 +4081,12 @@ pub unsafe extern "C" fn praxis_deque_new(
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
     abi_guard!("praxis_deque_new", ctx, {
-        // SAFETY: DequePayload matches DEQUE's size/align and is fully initialized.
+        // SAFETY: DequePayload is DEQUE's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::collections::DEQUE,
-                std::mem::size_of::<DequePayload>(),
-                std::mem::align_of::<DequePayload>(),
-                |payload| {
-                    (payload as *mut DequePayload).write(DequePayload {
-                        element_descriptor,
-                        items: std::collections::VecDeque::new(),
-                    });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::collections::DEQUE, || DequePayload {
+                element_descriptor,
+                items: std::collections::VecDeque::new(),
+            })
         }
     })
 }
@@ -4192,11 +4208,10 @@ pub unsafe extern "C" fn praxis_deque_get(
     abi_guard!("praxis_deque_get", ctx, {
         let p = unsafe { deque_payload(deque) };
         let idx = unsafe { int_payload(index) };
-        if idx < 0 || idx as usize >= p.items.len() {
-            unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
+        let Some(idx) = (unsafe { checked_index(ctx, idx, p.items.len()) }) else {
             return unsafe { unit_sentinel(ctx) };
-        }
-        p.items[idx as usize]
+        };
+        p.items[idx]
     })
 }
 
@@ -4220,14 +4235,13 @@ pub unsafe extern "C" fn praxis_deque_set(
         let scope = unsafe { NativeScope::new(ctx) };
         let p = unsafe { deque_payload_mut(scope.root(deque)) };
         let idx = unsafe { int_payload(index) };
-        if idx < 0 || idx as usize >= p.items.len() {
-            unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
+        let Some(idx) = (unsafe { checked_index(ctx, idx, p.items.len()) }) else {
             return unsafe { unit_sentinel(ctx) };
-        }
+        };
         if !unsafe { adopt_or_reject(ctx, &mut p.element_descriptor, value) } {
             return unsafe { unit_sentinel(ctx) };
         }
-        p.items[idx as usize] = value;
+        p.items[idx] = value;
         unsafe { unit_sentinel(ctx) }
     })
 }
@@ -4257,29 +4271,29 @@ pub unsafe extern "C" fn praxis_deque_is_empty(ctx: *mut RuntimeContext, deque: 
 
 use crate::maps::{CounterPayload, MapPayload, SetPayload};
 
-/// Read a `MapPayload` as a shared ref. See `vec_payload` for the safety model.
+/// Read a `MapPayload` as a shared ref. See `payload_ref` for the safety model.
 unsafe fn map_payload(r: GcRef) -> &'static MapPayload {
-    unsafe { &*r.payload::<MapPayload>() }
+    unsafe { payload_ref::<MapPayload>(r) }
 }
 
 unsafe fn map_payload_mut<'s>(r: Rooted<'s>) -> &'s mut MapPayload {
-    unsafe { &mut *r.get().payload::<MapPayload>() }
+    unsafe { payload_mut::<MapPayload>(r) }
 }
 
 unsafe fn set_payload(r: GcRef) -> &'static SetPayload {
-    unsafe { &*r.payload::<SetPayload>() }
+    unsafe { payload_ref::<SetPayload>(r) }
 }
 
 unsafe fn set_payload_mut<'s>(r: Rooted<'s>) -> &'s mut SetPayload {
-    unsafe { &mut *r.get().payload::<SetPayload>() }
+    unsafe { payload_mut::<SetPayload>(r) }
 }
 
 unsafe fn counter_payload(r: GcRef) -> &'static CounterPayload {
-    unsafe { &*r.payload::<CounterPayload>() }
+    unsafe { payload_ref::<CounterPayload>(r) }
 }
 
 unsafe fn counter_payload_mut<'s>(r: Rooted<'s>) -> &'s mut CounterPayload {
-    unsafe { &mut *r.get().payload::<CounterPayload>() }
+    unsafe { payload_mut::<CounterPayload>(r) }
 }
 
 /// Allocate an empty `Map[K, V]`. `key_descriptor` is the key type the
@@ -4301,20 +4315,13 @@ pub unsafe extern "C" fn praxis_map_new(
         // (REP-42). `praxis_map_insert` adopts the first inserted value's own
         // descriptor, which is how a `Vec` learns its element type.
         let value_descriptor: *const TypeDescriptor = std::ptr::null();
+        // SAFETY: MapPayload is MAP's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::maps::MAP,
-                std::mem::size_of::<MapPayload>(),
-                std::mem::align_of::<MapPayload>(),
-                |payload| {
-                    (payload as *mut MapPayload).write(MapPayload {
-                        key_descriptor,
-                        value_descriptor,
-                        entries: std::collections::HashMap::new(),
-                    });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::maps::MAP, || MapPayload {
+                key_descriptor,
+                value_descriptor,
+                entries: std::collections::HashMap::new(),
+            })
         }
     })
 }
@@ -4595,19 +4602,12 @@ pub unsafe extern "C" fn praxis_set_new(
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
     abi_guard!("praxis_set_new", ctx, {
+        // SAFETY: SetPayload is SET's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::maps::SET,
-                std::mem::size_of::<SetPayload>(),
-                std::mem::align_of::<SetPayload>(),
-                |payload| {
-                    (payload as *mut SetPayload).write(SetPayload {
-                        element_descriptor,
-                        entries: std::collections::HashSet::new(),
-                    });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::maps::SET, || SetPayload {
+                element_descriptor,
+                entries: std::collections::HashSet::new(),
+            })
         }
     })
 }
@@ -4726,19 +4726,12 @@ pub unsafe extern "C" fn praxis_counter_new(
     key_descriptor: *const TypeDescriptor,
 ) -> GcRef {
     abi_guard!("praxis_counter_new", ctx, {
+        // SAFETY: CounterPayload is COUNTER's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::maps::COUNTER,
-                std::mem::size_of::<CounterPayload>(),
-                std::mem::align_of::<CounterPayload>(),
-                |payload| {
-                    (payload as *mut CounterPayload).write(CounterPayload {
-                        key_descriptor,
-                        entries: std::collections::HashMap::new(),
-                    });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::maps::COUNTER, || CounterPayload {
+                key_descriptor,
+                entries: std::collections::HashMap::new(),
+            })
         }
     })
 }
@@ -4905,19 +4898,19 @@ use crate::heaps::{HeapEntry, MaxHeapPayload, MinHeapPayload};
 use std::collections::BinaryHeap;
 
 unsafe fn max_heap_payload_mut<'s>(r: Rooted<'s>) -> &'s mut MaxHeapPayload {
-    unsafe { &mut *r.get().payload::<MaxHeapPayload>() }
+    unsafe { payload_mut::<MaxHeapPayload>(r) }
 }
 
 unsafe fn max_heap_payload(r: GcRef) -> &'static MaxHeapPayload {
-    unsafe { &*r.payload::<MaxHeapPayload>() }
+    unsafe { payload_ref::<MaxHeapPayload>(r) }
 }
 
 unsafe fn min_heap_payload_mut<'s>(r: Rooted<'s>) -> &'s mut MinHeapPayload {
-    unsafe { &mut *r.get().payload::<MinHeapPayload>() }
+    unsafe { payload_mut::<MinHeapPayload>(r) }
 }
 
 unsafe fn min_heap_payload(r: GcRef) -> &'static MinHeapPayload {
-    unsafe { &*r.payload::<MinHeapPayload>() }
+    unsafe { payload_ref::<MinHeapPayload>(r) }
 }
 
 /// Allocate an empty `MaxHeap[T]`. A null `element_descriptor` — the codegen's
@@ -4932,19 +4925,12 @@ pub unsafe extern "C" fn praxis_max_heap_new(
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
     abi_guard!("praxis_max_heap_new", ctx, {
+        // SAFETY: MaxHeapPayload is MAX_HEAP's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::heaps::MAX_HEAP,
-                std::mem::size_of::<MaxHeapPayload>(),
-                std::mem::align_of::<MaxHeapPayload>(),
-                |payload| {
-                    (payload as *mut MaxHeapPayload).write(MaxHeapPayload {
-                        element_descriptor,
-                        items: BinaryHeap::new(),
-                    });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::heaps::MAX_HEAP, || MaxHeapPayload {
+                element_descriptor,
+                items: BinaryHeap::new(),
+            })
         }
     })
 }
@@ -5070,19 +5056,12 @@ pub unsafe extern "C" fn praxis_min_heap_new(
     element_descriptor: *const TypeDescriptor,
 ) -> GcRef {
     abi_guard!("praxis_min_heap_new", ctx, {
+        // SAFETY: MinHeapPayload is MIN_HEAP's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::heaps::MIN_HEAP,
-                std::mem::size_of::<MinHeapPayload>(),
-                std::mem::align_of::<MinHeapPayload>(),
-                |payload| {
-                    (payload as *mut MinHeapPayload).write(MinHeapPayload {
-                        element_descriptor,
-                        items: BinaryHeap::new(),
-                    });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::heaps::MIN_HEAP, || MinHeapPayload {
+                element_descriptor,
+                items: BinaryHeap::new(),
+            })
         }
     })
 }
@@ -5197,11 +5176,11 @@ pub unsafe extern "C" fn praxis_min_heap_is_empty(
 use crate::bitset::{BitIndex, BitSetPayload};
 
 unsafe fn bitset_payload(r: GcRef) -> &'static BitSetPayload {
-    unsafe { &*r.payload::<BitSetPayload>() }
+    unsafe { payload_ref::<BitSetPayload>(r) }
 }
 
 unsafe fn bitset_payload_mut<'s>(r: Rooted<'s>) -> &'s mut BitSetPayload {
-    unsafe { &mut *r.get().payload::<BitSetPayload>() }
+    unsafe { payload_mut::<BitSetPayload>(r) }
 }
 
 /// Allocate an empty `BitSet` (§6.1). Nullary — no element descriptor.
@@ -5211,18 +5190,11 @@ unsafe fn bitset_payload_mut<'s>(r: Rooted<'s>) -> &'s mut BitSetPayload {
 #[no_mangle]
 pub unsafe extern "C" fn praxis_bitset_new(ctx: *mut RuntimeContext) -> GcRef {
     abi_guard!("praxis_bitset_new", ctx, {
+        // SAFETY: BitSetPayload is BITSET's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::bitset::BITSET,
-                std::mem::size_of::<BitSetPayload>(),
-                std::mem::align_of::<BitSetPayload>(),
-                |payload| {
-                    (payload as *mut BitSetPayload).write(BitSetPayload {
-                        words: ReprCVec::new(),
-                    });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::bitset::BITSET, || BitSetPayload {
+                words: ReprCVec::new(),
+            })
         }
     })
 }
@@ -5374,11 +5346,11 @@ pub unsafe extern "C" fn praxis_bitset_is_empty(ctx: *mut RuntimeContext, bs: Gc
 use crate::collections::{GridExtent, GridPayload};
 
 unsafe fn grid_payload(r: GcRef) -> &'static GridPayload {
-    unsafe { &*r.payload::<GridPayload>() }
+    unsafe { payload_ref::<GridPayload>(r) }
 }
 
 unsafe fn grid_payload_mut<'s>(r: Rooted<'s>) -> &'s mut GridPayload {
-    unsafe { &mut *r.get().payload::<GridPayload>() }
+    unsafe { payload_mut::<GridPayload>(r) }
 }
 
 /// Allocate a `(x, y)` point tuple from two `i64` coordinates. The schema is
@@ -5532,20 +5504,13 @@ pub unsafe extern "C" fn praxis_grid_new(
             };
             vec![fill; extent.cells()]
         };
+        // SAFETY: GridPayload is GRID's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::collections::GRID,
-                std::mem::size_of::<GridPayload>(),
-                std::mem::align_of::<GridPayload>(),
-                |payload| {
-                    (payload as *mut GridPayload).write(GridPayload {
-                        element_descriptor,
-                        items: cells,
-                        width: extent.width(),
-                    });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::collections::GRID, || GridPayload {
+                element_descriptor,
+                items: cells,
+                width: extent.width(),
+            })
         }
     })
 }
@@ -5596,21 +5561,16 @@ pub unsafe extern "C" fn praxis_grid_filled(
         }
         let scope = unsafe { NativeScope::new(ctx) };
         let fill = scope.root(fill).get();
-        // SAFETY: GridPayload matches GRID's size/align and is fully initialized.
+        // The cells are built inside the initializer, which `gc_alloc_owned` runs
+        // *after* the safepoint — `praxis_vec_filled`'s rule, for the same
+        // untraced `Vec<GcRef>`.
+        // SAFETY: GridPayload is GRID's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::collections::GRID,
-                std::mem::size_of::<GridPayload>(),
-                std::mem::align_of::<GridPayload>(),
-                |payload| {
-                    (payload as *mut GridPayload).write(GridPayload {
-                        element_descriptor: descriptor,
-                        items: vec![fill; extent.cells()],
-                        width: extent.width(),
-                    });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::collections::GRID, || GridPayload {
+                element_descriptor: descriptor,
+                items: vec![fill; extent.cells()],
+                width: extent.width(),
+            })
         }
     })
 }
@@ -5657,11 +5617,10 @@ pub unsafe extern "C" fn praxis_grid_get(
         let p = unsafe { grid_payload(grid) };
         let (xi, yi) = (unsafe { int_payload(x) }, unsafe { int_payload(y) });
         let height = grid_height(p.items.len(), p.width);
-        if xi < 0 || yi < 0 || xi as usize >= p.width || yi as usize >= height {
-            unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
+        let Some(idx) = (unsafe { checked_cell(ctx, xi, yi, p.width, height) }) else {
             return unsafe { unit_sentinel(ctx) };
-        }
-        p.items[(yi as usize) * p.width + (xi as usize)]
+        };
+        p.items[idx]
     })
 }
 
@@ -5683,14 +5642,13 @@ pub unsafe extern "C" fn praxis_grid_set(
         let p = unsafe { grid_payload_mut(scope.root(grid)) };
         let (xi, yi) = (unsafe { int_payload(x) }, unsafe { int_payload(y) });
         let height = grid_height(p.items.len(), p.width);
-        if xi < 0 || yi < 0 || xi as usize >= p.width || yi as usize >= height {
-            unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
+        let Some(idx) = (unsafe { checked_cell(ctx, xi, yi, p.width, height) }) else {
             return unsafe { unit_sentinel(ctx) };
-        }
+        };
         if !unsafe { adopt_or_reject(ctx, &mut p.element_descriptor, value) } {
             return unsafe { unit_sentinel(ctx) };
         }
-        p.items[(yi as usize) * p.width + (xi as usize)] = value;
+        p.items[idx] = value;
         unsafe { unit_sentinel(ctx) }
     })
 }
@@ -5711,7 +5669,11 @@ pub unsafe extern "C" fn praxis_grid_contains(
         let p = unsafe { grid_payload(grid) };
         let (xi, yi) = (unsafe { int_payload(x) }, unsafe { int_payload(y) });
         let height = grid_height(p.items.len(), p.width);
-        let inside = xi >= 0 && yi >= 0 && (xi as usize) < p.width && (yi as usize) < height;
+        // The **pure** [`cell_index`], never `checked_cell`: this wrapper's
+        // manifest row is `Pure`, so generated code emits no `CheckFault` after
+        // it and a fault raised on every legitimate `false` would sit pending
+        // until an unrelated check picked it up.
+        let inside = cell_index(xi, yi, p.width, height).is_some();
         unsafe { bool_ref(ctx, inside) }
     })
 }
@@ -5831,11 +5793,12 @@ pub unsafe extern "C" fn praxis_grid_row(ctx: *mut RuntimeContext, grid: GcRef, 
         let p = unsafe { grid_payload(grid) };
         let yi = unsafe { int_payload(y) };
         let height = grid_height(p.items.len(), p.width);
-        if yi < 0 || yi as usize >= height {
-            unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
+        // One axis of [`cell_index`]'s rule: a row is bounded by the height
+        // alone, and every `x` in it is in range by construction.
+        let Some(row) = (unsafe { checked_index(ctx, yi, height) }) else {
             return unsafe { unit_sentinel(ctx) };
-        }
-        let start = (yi as usize) * p.width;
+        };
+        let start = row * p.width;
         let result = unsafe { praxis_vec_new(ctx, p.element_descriptor) };
         let scope = unsafe { NativeScope::new(ctx) };
         let rp = unsafe { vec_payload_mut(scope.root(result)) };
@@ -5860,14 +5823,15 @@ pub unsafe extern "C" fn praxis_grid_column(
     abi_guard!("praxis_grid_column", ctx, {
         let p = unsafe { grid_payload(grid) };
         let xi = unsafe { int_payload(x) };
-        if xi < 0 || xi as usize >= p.width {
-            unsafe { set_fault(ctx, RaisedFault::INDEX_OUT_OF_BOUNDS) };
+        // The other axis: a column is bounded by the width alone, and the
+        // stride below walks only the rows that exist.
+        let Some(col) = (unsafe { checked_index(ctx, xi, p.width) }) else {
             return unsafe { unit_sentinel(ctx) };
-        }
+        };
         let result = unsafe { praxis_vec_new(ctx, p.element_descriptor) };
         let scope = unsafe { NativeScope::new(ctx) };
         let rp = unsafe { vec_payload_mut(scope.root(result)) };
-        let mut idx = xi as usize;
+        let mut idx = col;
         while idx < p.items.len() {
             rp.items.push(p.items[idx]);
             idx += p.width;
@@ -5969,20 +5933,13 @@ pub unsafe extern "C" fn praxis_grid_transpose(ctx: *mut RuntimeContext, grid: G
             }
         }
         let _ = ctx;
+        // SAFETY: GridPayload is GRID's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::collections::GRID,
-                std::mem::size_of::<GridPayload>(),
-                std::mem::align_of::<GridPayload>(),
-                |payload| {
-                    (payload as *mut GridPayload).write(GridPayload {
-                        element_descriptor: p.element_descriptor,
-                        items: cells,
-                        width: new_width,
-                    });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::collections::GRID, || GridPayload {
+                element_descriptor: p.element_descriptor,
+                items: cells,
+                width: new_width,
+            })
         }
     })
 }
@@ -6010,20 +5967,13 @@ pub unsafe extern "C" fn praxis_grid_rotate_left(ctx: *mut RuntimeContext, grid:
                 cells.push(p.items[oy * p.width + ox]);
             }
         }
+        // SAFETY: GridPayload is GRID's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::collections::GRID,
-                std::mem::size_of::<GridPayload>(),
-                std::mem::align_of::<GridPayload>(),
-                |payload| {
-                    (payload as *mut GridPayload).write(GridPayload {
-                        element_descriptor: p.element_descriptor,
-                        items: cells,
-                        width: new_width,
-                    });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::collections::GRID, || GridPayload {
+                element_descriptor: p.element_descriptor,
+                items: cells,
+                width: new_width,
+            })
         }
     })
 }
@@ -6051,20 +6001,13 @@ pub unsafe extern "C" fn praxis_grid_rotate_right(ctx: *mut RuntimeContext, grid
                 cells.push(p.items[oy * p.width + ox]);
             }
         }
+        // SAFETY: GridPayload is GRID's payload type.
         unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::collections::GRID,
-                std::mem::size_of::<GridPayload>(),
-                std::mem::align_of::<GridPayload>(),
-                |payload| {
-                    (payload as *mut GridPayload).write(GridPayload {
-                        element_descriptor: p.element_descriptor,
-                        items: cells,
-                        width: new_width,
-                    });
-                },
-            )
+            gc_alloc_owned(ctx, &crate::collections::GRID, || GridPayload {
+                element_descriptor: p.element_descriptor,
+                items: cells,
+                width: new_width,
+            })
         }
     })
 }
@@ -6262,19 +6205,7 @@ pub unsafe extern "C" fn praxis_text_concat(ctx: *mut RuntimeContext, a: GcRef, 
         joined.push_str(left);
         joined.push_str(right);
         // SAFETY: TextPayload matches TEXT's size/align and is fully initialized.
-        unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::text::TEXT,
-                std::mem::size_of::<crate::text::TextPayload>(),
-                std::mem::align_of::<crate::text::TextPayload>(),
-                |payload| {
-                    let owned: Box<str> = joined.clone().into_boxed_str();
-                    (payload as *mut crate::text::TextPayload)
-                        .write(crate::text::TextPayload::owned(owned));
-                },
-            )
-        }
+        unsafe { text_ref(ctx, joined) }
     })
 }
 
@@ -6307,18 +6238,7 @@ pub unsafe extern "C" fn praxis_value_to_text(ctx: *mut RuntimeContext, value: G
         let mut s = String::new();
         value.format(&mut s);
         // SAFETY: `s` is valid UTF-8; ctx/heap valid.
-        unsafe {
-            gc_alloc_with(
-                ctx,
-                &crate::text::TEXT,
-                std::mem::size_of::<crate::text::TextPayload>(),
-                std::mem::align_of::<crate::text::TextPayload>(),
-                |payload| {
-                    (payload as *mut crate::text::TextPayload)
-                        .write(crate::text::TextPayload::owned(s.clone().into_boxed_str()));
-                },
-            )
-        }
+        unsafe { text_ref(ctx, s) }
     })
 }
 

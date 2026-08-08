@@ -10,6 +10,7 @@
 
 use lsp_types::{Position, PositionEncodingKind, Range};
 use praxis_source::{BytePos, LineCol, LineMap, Span};
+use praxis_syntax::span_bridge::range_to_span;
 use rowan::TextRange;
 
 /// Which unit an LSP `character` counts.
@@ -95,8 +96,10 @@ impl<'a> PositionMap<'a> {
             // Past the last line: the end of the document.
             return u32::try_from(self.text.len()).unwrap_or(u32::MAX);
         };
-        let content_end = trim_terminator(self.text, start.to_u32(), end.to_u32());
-        let line = &self.text[start.to_u32() as usize..content_end as usize];
+        // `line_range` hands back the extent *including* the terminator, so the
+        // line a `character` indexes is what is left after trimming it.
+        let content_end = LineMap::trim_line_terminator(self.text.as_bytes(), start, end);
+        let line = &self.text[start.to_usize()..content_end.to_usize()];
         start.to_u32() + column_to_byte(line, pos.character, enc)
     }
 
@@ -152,10 +155,7 @@ impl<'a> PositionMap<'a> {
     /// The LSP range covering a rowan node/token range.
     #[must_use]
     pub fn text_range(&self, range: TextRange, enc: Encoding) -> Range {
-        self.range(
-            Span::new(u32::from(range.start()), u32::from(range.end())),
-            enc,
-        )
+        self.range(range_to_span(range), enc)
     }
 
     /// The byte span an LSP range names.
@@ -189,28 +189,6 @@ fn column_to_byte(line: &str, character: u32, enc: Encoding) -> u32 {
         };
     }
     u32::try_from(line.len()).unwrap_or(u32::MAX)
-}
-
-/// The content end of `[start, end)` — the line's extent minus the single line
-/// terminator that separates it from the next.
-///
-/// The same rule `LineMap` applies internally; stated here because
-/// `LineMap::line_range` deliberately hands back the extent *including* the
-/// terminator and tells the caller to trim it.
-fn trim_terminator(text: &str, start: u32, end: u32) -> u32 {
-    let bytes = text.as_bytes();
-    let (s, e) = (start as usize, (end as usize).min(bytes.len()));
-    if e <= s {
-        return start;
-    }
-    let gap = &bytes[s..e];
-    if gap.ends_with(b"\r\n") {
-        end - 2
-    } else if gap.ends_with(b"\n") || gap.ends_with(b"\r") {
-        end - 1
-    } else {
-        end
-    }
 }
 
 #[cfg(test)]

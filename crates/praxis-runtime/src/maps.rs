@@ -18,6 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write as _};
 
+use crate::collections::nullable;
 use crate::descriptor::{BuiltinTypeId, FormatSink, Tracer, TypeDescriptor};
 use crate::dynamic_key::DynamicKey;
 use crate::DynamicHasher;
@@ -116,6 +117,58 @@ pub(crate) unsafe fn ordered_members(entries: &HashSet<DynamicKey>) -> Vec<GcRef
     rows
 }
 
+/// Render already-ordered `items` between `{` and `}`, each through `render`
+/// into its own scratch buffer.
+///
+/// The shared body of `map_format`, `set_format` and `counter_format`: the
+/// three differ only in what one entry renders as — `key: value` through the
+/// value's own descriptor, a bare member, `key: value` through `INT` — so that
+/// is the closure and everything around it is written once here.
+///
+/// The style is read off `out` **before** the first buffer is built, and held
+/// across them, because [`write_ordered`] borrows `out` for as long as the
+/// iterator it drains — so the entries cannot read the style off the sink they
+/// are ultimately written to. Every scratch buffer is a place the style could
+/// be dropped, and dropping it is silent: the value still renders, just in the
+/// other rendering.
+///
+/// It does not sort. `items` is already in the one order that printing and
+/// iterating share, from [`ordered_entries`] or [`ordered_members`] (ADR-138
+/// decision 4).
+fn write_braced<T>(
+    out: &mut FormatSink<'_>,
+    items: Vec<T>,
+    render: impl Fn(&mut FormatSink<'_>, T),
+) {
+    let style = out.style();
+    let entries = items.into_iter().map(|item| {
+        let mut buf = String::new();
+        {
+            let mut s = FormatSink::styled(&mut buf, style);
+            render(&mut s, item);
+        }
+        buf
+    });
+    write_ordered(out, "{", entries, "}");
+}
+
+// ---------------------------------------------------------------------------
+// Hashing
+// ---------------------------------------------------------------------------
+
+/// The odd 64-bit golden-ratio multiplier that `map_hash` and `counter_hash`
+/// mix a key's hash through before adding the value's, so that `{k1: v2}` and
+/// `{k2: v1}` do not cancel under the commutative (XOR) accumulator.
+///
+/// Named because the literal was written twice, **not** because the two have to
+/// agree. `MAP` and `COUNTER` are distinct descriptors that are never
+/// dispatched against each other, and they already hash the same logical
+/// contents differently on purpose: `map_hash` puts the value through its own
+/// descriptor's `hash` callback, `counter_hash` reads the raw `i64`. Nothing
+/// compares the two hashes, so changing this for one of them alone would be
+/// legal — it is one constant because it is one idea.
+const KEY_HASH_MIX: u64 = 0x9e3779b97f4a7c15;
+
 // ===========================================================================
 // Map[K, V]
 // ===========================================================================
@@ -148,16 +201,13 @@ impl MapPayload {
     /// The key label, or `None` when this map was never told its key type.
     #[must_use]
     pub fn key(&self) -> Option<&'static TypeDescriptor> {
-        // SAFETY: a non-null label is always a `&'static` written by the
-        // constructor.
-        (!self.key_descriptor.is_null()).then(|| unsafe { &*self.key_descriptor })
+        nullable(self.key_descriptor)
     }
 
     /// The value label, or `None` when this map was never told its value type.
     #[must_use]
     pub fn value(&self) -> Option<&'static TypeDescriptor> {
-        // SAFETY: as `key`.
-        (!self.value_descriptor.is_null()).then(|| unsafe { &*self.value_descriptor })
+        nullable(self.value_descriptor)
     }
 }
 
@@ -184,27 +234,17 @@ unsafe fn map_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // in an order `m.keys()` disagreed with.
     // SAFETY: every key's payload matches the descriptor its `DynamicKey` carries.
     let rows = unsafe { ordered_entries(&p.entries) };
-    // Held across the scratch buffer below, because `write_ordered` borrows
-    // `out` for as long as the iterator it drains — so the entries cannot read
-    // the style off the sink they are ultimately written to.
-    let style = out.style();
-    let entries = rows.into_iter().map(|(k, v)| {
-        let mut buf = String::new();
-        {
-            let mut s = FormatSink::styled(&mut buf, style);
-            // SAFETY: the key's payload matches its own header's descriptor, and
-            // so does the value's. Rendering through the *map's* value label is
-            // what printed a `Map[Text, Text]` as integers, because that label
-            // was `INT` unconditionally (REP-42).
-            unsafe {
-                render_into(&mut s, k.descriptor(), k);
-                let _ = s.write_str(": ");
-                render_into(&mut s, v.descriptor(), v);
-            }
+    write_braced(out, rows, |s, (k, v)| {
+        // SAFETY: the key's payload matches its own header's descriptor, and
+        // so does the value's. Rendering through the *map's* value label is
+        // what printed a `Map[Text, Text]` as integers, because that label
+        // was `INT` unconditionally (REP-42).
+        unsafe {
+            render_into(s, k.descriptor(), k);
+            let _ = s.write_str(": ");
+            render_into(s, v.descriptor(), v);
         }
-        buf
     });
-    write_ordered(out, "{", entries, "}");
 }
 
 unsafe fn map_equals(a: *const u8, b: *const u8) -> bool {
@@ -266,7 +306,7 @@ unsafe fn map_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
         // Pair the key and value hashes together before XOR, so (k1:v2) ≠ (k2:v1).
         let pair = kh
             .finish()
-            .wrapping_mul(0x9e3779b97f4a7c15)
+            .wrapping_mul(KEY_HASH_MIX)
             .wrapping_add(vh.finish());
         acc ^= pair;
     }
@@ -290,23 +330,13 @@ pub static MAP: TypeDescriptor = TypeDescriptor::builtin::<MapPayload>(
 )
 .with_owned_bytes(map_owned_bytes);
 
-/// The heap bytes `Map[K,V]` owns beyond its payload, for GC pacing (RT-04).
-/// `capacity`, not `len`: the buffer's real footprint is what the collector is
-/// paced against.
-///
-/// # Safety
-/// `payload` must point at an initialized `MapPayload`.
 impl MapPayload {
-    /// The bytes this payload owns outside its GC block — the buffer, not the
-    /// spine's three words.
+    /// The hash table this payload owns beyond its GC block, for GC pacing
+    /// (RT-04) — `capacity` slots of key *and* value, not `len`.
     ///
-    /// **One statement of the size, with two readers** (ADR-121). The
-    /// descriptor's `owned_bytes` callback charges it once at construction;
-    /// the ABI wrapper that can *grow* this collection reads it either side of
-    /// the mutation and charges the delta, so the pacer sees a buffer that
-    /// doubled. Writing the capacity arithmetic at the growth site instead
-    /// would be a second spelling of this line, and the two would drift the
-    /// first time an element type changed width.
+    /// One statement of the size, with two readers (ADR-121):
+    /// [`VecPayload::owned_bytes`](crate::collections::VecPayload::owned_bytes)
+    /// is that statement.
     #[must_use]
     pub(crate) fn owned_bytes(&self) -> usize {
         self.entries.capacity() * (std::mem::size_of::<DynamicKey>() + std::mem::size_of::<GcRef>())
@@ -341,9 +371,7 @@ impl SetPayload {
     /// type.
     #[must_use]
     pub fn element(&self) -> Option<&'static TypeDescriptor> {
-        // SAFETY: a non-null label is always a `&'static` written by the
-        // constructor.
-        (!self.element_descriptor.is_null()).then(|| unsafe { &*self.element_descriptor })
+        nullable(self.element_descriptor)
     }
 }
 
@@ -366,18 +394,10 @@ unsafe fn set_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // The order a `for` over this set walks (ADR-138 decision 4).
     // SAFETY: every member's payload matches the descriptor it carries.
     let members = unsafe { ordered_members(&p.entries) };
-    // As `map_format`: the style outlives the sink it came from.
-    let style = out.style();
-    let entries = members.into_iter().map(|m| {
-        let mut buf = String::new();
-        {
-            let mut s = FormatSink::styled(&mut buf, style);
-            // SAFETY: the member's payload matches its own header's descriptor.
-            unsafe { render_into(&mut s, m.descriptor(), m) };
-        }
-        buf
+    write_braced(out, members, |s, m| {
+        // SAFETY: the member's payload matches its own header's descriptor.
+        unsafe { render_into(s, m.descriptor(), m) };
     });
-    write_ordered(out, "{", entries, "}");
 }
 
 unsafe fn set_equals(a: *const u8, b: *const u8) -> bool {
@@ -424,23 +444,13 @@ pub static SET: TypeDescriptor = TypeDescriptor::builtin::<SetPayload>(
 )
 .with_owned_bytes(set_owned_bytes);
 
-/// The heap bytes `Set[T]` owns beyond its payload, for GC pacing (RT-04).
-/// `capacity`, not `len`: the buffer's real footprint is what the collector is
-/// paced against.
-///
-/// # Safety
-/// `payload` must point at an initialized `SetPayload`.
 impl SetPayload {
-    /// The bytes this payload owns outside its GC block — the buffer, not the
-    /// spine's three words.
+    /// The hash table this payload owns beyond its GC block, for GC pacing
+    /// (RT-04) — `capacity`, not `len`.
     ///
-    /// **One statement of the size, with two readers** (ADR-121). The
-    /// descriptor's `owned_bytes` callback charges it once at construction;
-    /// the ABI wrapper that can *grow* this collection reads it either side of
-    /// the mutation and charges the delta, so the pacer sees a buffer that
-    /// doubled. Writing the capacity arithmetic at the growth site instead
-    /// would be a second spelling of this line, and the two would drift the
-    /// first time an element type changed width.
+    /// One statement of the size, with two readers (ADR-121):
+    /// [`VecPayload::owned_bytes`](crate::collections::VecPayload::owned_bytes)
+    /// is that statement.
     #[must_use]
     pub(crate) fn owned_bytes(&self) -> usize {
         self.entries.capacity() * std::mem::size_of::<DynamicKey>()
@@ -474,9 +484,7 @@ impl CounterPayload {
     /// The key label, or `None` when this counter was never told its key type.
     #[must_use]
     pub fn key(&self) -> Option<&'static TypeDescriptor> {
-        // SAFETY: a non-null label is always a `&'static` written by the
-        // constructor.
-        (!self.key_descriptor.is_null()).then(|| unsafe { &*self.key_descriptor })
+        nullable(self.key_descriptor)
     }
 }
 
@@ -500,23 +508,15 @@ unsafe fn counter_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // As `map_format`: the order is decided over the keys, then rendered.
     // SAFETY: every key's payload matches the descriptor it carries.
     let rows = unsafe { ordered_entries(&p.entries) };
-    // As `map_format`: the style outlives the sink it came from.
-    let style = out.style();
-    let entries = rows.into_iter().map(|(k, v)| {
-        let mut buf = String::new();
-        {
-            let mut s = FormatSink::styled(&mut buf, style);
-            // SAFETY: the key's payload matches its descriptor; a Counter's
-            // values are always `Int` (§6.2).
-            unsafe {
-                render_into(&mut s, k.descriptor(), k);
-                let _ = s.write_str(": ");
-                render_into(&mut s, &crate::scalars::INT, v);
-            }
+    write_braced(out, rows, |s, (k, v)| {
+        // SAFETY: the key's payload matches its descriptor; a Counter's
+        // values are always `Int` (§6.2).
+        unsafe {
+            render_into(s, k.descriptor(), k);
+            let _ = s.write_str(": ");
+            render_into(s, &crate::scalars::INT, v);
         }
-        buf
     });
-    write_ordered(out, "{", entries, "}");
 }
 
 unsafe fn counter_equals(a: *const u8, b: *const u8) -> bool {
@@ -557,7 +557,7 @@ unsafe fn counter_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
         let v_i = unsafe { *(v.payload::<i64>()) };
         let pair = kh
             .finish()
-            .wrapping_mul(0x9e3779b97f4a7c15)
+            .wrapping_mul(KEY_HASH_MIX)
             .wrapping_add(v_i as u64);
         acc ^= pair;
     }
@@ -580,23 +580,13 @@ pub static COUNTER: TypeDescriptor = TypeDescriptor::builtin::<CounterPayload>(
 )
 .with_owned_bytes(counter_owned_bytes);
 
-/// The heap bytes `Counter[K]` owns beyond its payload, for GC pacing (RT-04).
-/// `capacity`, not `len`: the buffer's real footprint is what the collector is
-/// paced against.
-///
-/// # Safety
-/// `payload` must point at an initialized `CounterPayload`.
 impl CounterPayload {
-    /// The bytes this payload owns outside its GC block — the buffer, not the
-    /// spine's three words.
+    /// The hash table this payload owns beyond its GC block, for GC pacing
+    /// (RT-04) — `capacity` slots of key *and* boxed-`Int` value, not `len`.
     ///
-    /// **One statement of the size, with two readers** (ADR-121). The
-    /// descriptor's `owned_bytes` callback charges it once at construction;
-    /// the ABI wrapper that can *grow* this collection reads it either side of
-    /// the mutation and charges the delta, so the pacer sees a buffer that
-    /// doubled. Writing the capacity arithmetic at the growth site instead
-    /// would be a second spelling of this line, and the two would drift the
-    /// first time an element type changed width.
+    /// One statement of the size, with two readers (ADR-121):
+    /// [`VecPayload::owned_bytes`](crate::collections::VecPayload::owned_bytes)
+    /// is that statement.
     #[must_use]
     pub(crate) fn owned_bytes(&self) -> usize {
         self.entries.capacity() * (std::mem::size_of::<DynamicKey>() + std::mem::size_of::<GcRef>())

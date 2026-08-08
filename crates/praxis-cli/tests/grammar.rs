@@ -17,13 +17,13 @@
 
 use std::path::PathBuf;
 
+mod common;
+
+use common::bin_path;
+
+/// The VS Code extension's directory.
 fn editor_dir() -> PathBuf {
-    // `crates/praxis-cli` → the workspace root → `editors/vscode`.
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.pop();
-    path.pop();
-    path.push("editors/vscode");
-    path
+    common::workspace_root().join("editors/vscode")
 }
 
 fn read(relative: &str) -> String {
@@ -248,7 +248,7 @@ fn the_custom_token_types_are_the_four_parser_classes() {
 fn the_extensions_argv_names_only_subcommands_the_cli_has() {
     let argv_ts = read("src/argv.ts");
     let cli_help = String::from_utf8(
-        std::process::Command::new(env!("CARGO_BIN_EXE_praxis"))
+        std::process::Command::new(bin_path())
             .arg("--help")
             .output()
             .expect("the binary runs")
@@ -274,7 +274,7 @@ fn the_extensions_argv_names_only_subcommands_the_cli_has() {
         "`argv.ts` passes `--input`"
     );
     let run_help = String::from_utf8(
-        std::process::Command::new(env!("CARGO_BIN_EXE_praxis"))
+        std::process::Command::new(bin_path())
             .args(["run", "--help"])
             .output()
             .expect("the binary runs")

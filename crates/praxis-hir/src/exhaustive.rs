@@ -55,7 +55,7 @@
 
 use praxis_ast::AstNode;
 use praxis_source::{Diagnostic, FileId, FileSpan, Span};
-use praxis_syntax::SyntaxKind;
+use praxis_syntax::{span_bridge::range_to_span, SyntaxKind};
 use praxis_types::{data::TypeData, EnumDefId, RecordDefId, ScalarType, Type, TypeDb};
 use rowan::NodeOrToken;
 
@@ -241,10 +241,7 @@ fn arm_indent(
 }
 
 fn file_span(file: FileId, range: rowan::TextRange) -> FileSpan {
-    FileSpan::new(
-        file,
-        Span::new(u32::from(range.start()), u32::from(range.end())),
-    )
+    FileSpan::new(file, range_to_span(range))
 }
 
 /// Where a missing arm would be written, and how far in.

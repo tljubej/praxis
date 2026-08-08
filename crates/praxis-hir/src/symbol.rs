@@ -11,11 +11,33 @@ use praxis_source::{FileSpan, Span};
 use praxis_types::Scheme;
 
 /// An opaque, interned identifier for one declaration. Every shadowing
-/// declaration mints a new, distinct id.
+/// declaration mints a new, distinct id. One value is reserved and names no
+/// declaration: [`SymbolId::UNRESOLVED`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct SymbolId(pub u32);
 
 impl SymbolId {
+    /// The id that stands for *no declaration*. Two different situations reach
+    /// it, and they are deliberately one value because a consumer holding an id
+    /// can act on neither:
+    ///
+    /// - name resolution found nothing for a reference, so lowering has no
+    ///   symbol to record (`lower_path`, `lower_call`);
+    /// - the name is a *method*, which resolves to a catalog entry rather than
+    ///   a declaration and so has no id by construction (HIR-02, `hover`).
+    ///
+    /// It is reserved rather than merely unused:
+    /// [`NameTable::insert`](crate::NameTable::insert) mints ids from the
+    /// table's length, so a real symbol reaches it only after `u32::MAX`
+    /// declarations in one file.
+    ///
+    /// Naming it is the point. `names.get(UNRESOLVED)` returns `None`, exactly
+    /// like a genuine miss does, so nothing downstream is forced to notice —
+    /// and a callee that quietly carried it once lowered to a direct call
+    /// through no function at all and took the host down (`fs.get(0)(100)`,
+    /// M8 adversarial audit).
+    pub const UNRESOLVED: SymbolId = SymbolId(u32::MAX);
+
     #[inline]
     #[must_use]
     pub const fn to_u32(self) -> u32 {

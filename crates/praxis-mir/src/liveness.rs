@@ -443,6 +443,13 @@ pub(crate) fn term_uses(term: &Terminator) -> Vec<LocalId> {
 /// Both slot sets of a **GC safepoint** — an instruction whose lowering may
 /// trigger a collection, so the collector must see the frame.
 ///
+/// **The `&mut` twin of [`crate::annot::slot_sets`]**, and the only reason a
+/// second copy of the variant list exists: that one is the crate's single
+/// statement for every *reading* caller — the verifier, the backend, and
+/// [`is_gc_safepoint`] below — and this one exists only because it hands out
+/// mutable borrows, which an accessor returning shared references cannot. The
+/// two lists must be edited together.
+///
 /// [`Inst::CheckFault`] is deliberately absent: it allocates nothing, roots
 /// nothing, and carries only a [`DebugSlots`]. See [`debug_only_slots`].
 ///
@@ -479,15 +486,16 @@ fn gc_safepoint_slots(inst: &mut Inst) -> Option<(&mut RootSlots, &mut DebugSlot
 
 /// Whether `inst` is a GC safepoint (the read-only half of
 /// [`gc_safepoint_slots`], for the dirty-slot dataflow).
+///
+/// **It asks [`crate::annot::slot_sets`] rather than restating the list.**
+/// Carrying a [`RootSlots`] is what being a GC safepoint *means*, so this is
+/// definitionally `roots_of(inst).is_some()`. The hand-written `matches!` it
+/// used to be was a third copy of the variant list, which is how the debugger
+/// silently stops seeing a local (ADR-044, ADR-128). [`gc_safepoint_slots`] is
+/// the one copy that must stay: it hands out `&mut` borrows of the sets, which
+/// an accessor returning shared references cannot supply.
 fn is_gc_safepoint(inst: &Inst) -> bool {
-    matches!(
-        inst,
-        Inst::Alloc { .. }
-            | Inst::Materialize { .. }
-            | Inst::Call { .. }
-            | Inst::CallIndirect { .. }
-            | Inst::StructEq { .. }
-    )
+    crate::annot::roots_of(inst).is_some()
 }
 
 /// The [`DebugSlots`] of a debugger-only point.
@@ -506,55 +514,21 @@ fn debug_only_slots(inst: &mut Inst) -> Option<&mut DebugSlots> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{
-        Block, Function, Inst, IntBinOp, LocalDebugKind, LocalId, LocalKind, ScalarKind, Terminator,
-    };
-    use praxis_types::TypeDb;
-
-    fn gc_local(func: &mut Function, name: &str) -> LocalId {
-        func.new_local(
-            LocalKind::Gc,
-            crate::ir::MirType::Opaque,
-            Some(name.into()),
-            LocalDebugKind::User,
-            None,
-        )
-    }
-    fn int_local(func: &mut Function) -> LocalId {
-        func.new_local(
-            LocalKind::Scalar(ScalarKind::Int),
-            crate::ir::MirType::Opaque,
-            None,
-            LocalDebugKind::Temp,
-            None,
-        )
-    }
+    use crate::ir::fixtures::{int_local, user_gc_local};
+    use crate::ir::{Block, Function, Inst, IntBinOp, LocalId, Terminator};
 
     #[test]
     fn dead_local_is_not_in_safepoint_roots() {
         // fn f() { var a = 1; var b = 2; a }   — `b` is dead; a live.
         // Build: int0=1, int1=2, alloc0(a)=Int(int0), alloc1(b)=Int(int1),
         //        return a. At alloc1's safepoint, `a` is live, `b` is not yet born.
-        let mut db = TypeDb::new();
-        let int = db.int();
-        let mut f = Function {
-            name: "f".into(),
-            params: Vec::new(),
-            return_local: LocalId(0),
-            locals: Vec::new(),
-            blocks: Vec::new(),
-            debug_names: Vec::new(),
-            debug_kinds: Vec::new(),
-            debug_spans: Vec::new(),
-            debug_scalar_sources: Vec::new(),
-            span: (0, 0),
-        };
-        let ret = gc_local(&mut f, "ret");
+        let mut f = Function::empty("f");
+        let ret = user_gc_local(&mut f, "ret");
         f.return_local = ret;
         let i0 = int_local(&mut f);
         let i1 = int_local(&mut f);
-        let a = gc_local(&mut f, "a");
-        let b = gc_local(&mut f, "b");
+        let a = user_gc_local(&mut f, "a");
+        let b = user_gc_local(&mut f, "b");
         let blk = f.new_block();
         f.blocks[blk.0 as usize].insts.push(Inst::IntBinOp {
             op: IntBinOp::Add,
@@ -584,7 +558,6 @@ mod tests {
             debug: DebugSlots::unannotated(),
         });
         f.blocks[blk.0 as usize].term = Terminator::Return { value: a };
-        let _ = int;
 
         let count = annotate(&mut f);
         assert!(count >= 2, "should have annotated both safepoints");
@@ -606,18 +579,7 @@ mod tests {
 
     #[test]
     fn annotate_runs_on_empty_function() {
-        let mut f = Function {
-            name: "f".into(),
-            params: Vec::new(),
-            return_local: LocalId(0),
-            locals: Vec::new(),
-            blocks: Vec::new(),
-            debug_names: Vec::new(),
-            debug_kinds: Vec::new(),
-            debug_spans: Vec::new(),
-            debug_scalar_sources: Vec::new(),
-            span: (0, 0),
-        };
+        let mut f = Function::empty("f");
         let _blk: Block = Block {
             id: crate::ir::BlockId(0),
             insts: Vec::new(),
@@ -638,27 +600,14 @@ mod tests {
         // This is deliberately stronger than `dead_local_is_not_in_safepoint_roots`:
         // that test only checks that an allocation does not root its own
         // destination, which does not exercise removal after a last use.
-        let mut db = TypeDb::new();
-        let int = db.int();
-        let mut f = Function {
-            name: "last_use".into(),
-            params: Vec::new(),
-            return_local: LocalId(0),
-            locals: Vec::new(),
-            blocks: Vec::new(),
-            debug_names: Vec::new(),
-            debug_kinds: Vec::new(),
-            debug_spans: Vec::new(),
-            debug_scalar_sources: Vec::new(),
-            span: (0, 0),
-        };
-        let ret = gc_local(&mut f, "ret");
+        let mut f = Function::empty("last_use");
+        let ret = user_gc_local(&mut f, "ret");
         f.return_local = ret;
         let one = int_local(&mut f);
         let two = int_local(&mut f);
-        let a = gc_local(&mut f, "a");
-        let consumed = gc_local(&mut f, "consumed");
-        let b = gc_local(&mut f, "b");
+        let a = user_gc_local(&mut f, "a");
+        let consumed = user_gc_local(&mut f, "consumed");
+        let b = user_gc_local(&mut f, "b");
         let blk = f.new_block();
         f.blocks[blk.0 as usize].insts.extend([
             Inst::ConstInt { dst: one, value: 1 },
@@ -681,7 +630,6 @@ mod tests {
             },
         ]);
         f.blocks[blk.0 as usize].term = Terminator::Return { value: b };
-        let _ = int;
 
         annotate(&mut f);
 
@@ -708,29 +656,62 @@ mod tests {
         // A value can be live at one safepoint and dead at the next. This
         // catches a forward annotation walk that only ever adds definitions
         // and therefore turns the root set into a monotonically growing set.
-        let mut db = TypeDb::new();
-        let int = db.int();
-        let mut f = Function {
-            name: "shrinking_roots".into(),
-            params: Vec::new(),
-            return_local: LocalId(0),
-            locals: Vec::new(),
-            blocks: Vec::new(),
-            debug_names: Vec::new(),
-            debug_kinds: Vec::new(),
-            debug_spans: Vec::new(),
-            debug_scalar_sources: Vec::new(),
-            span: (0, 0),
-        };
-        let ret = gc_local(&mut f, "ret");
+        let ShrinkingRoots {
+            mut func,
+            seed,
+            first,
+            consumed,
+            second,
+        } = shrinking_roots_function();
+        annotate(&mut func);
+
+        let (first_roots, ..) = slots_for(&func, first);
+        let (second_roots, ..) = slots_for(&func, second);
+        assert!(
+            first_roots.contains(&seed),
+            "seed is read after the first allocation and must be rooted there"
+        );
+        assert!(
+            !second_roots.contains(&seed),
+            "seed's lifetime ended before the second allocation"
+        );
+        assert!(
+            !second_roots.contains(&consumed),
+            "the unused copy must not make the later root set grow"
+        );
+    }
+
+    /// The `exact_roots_shrink…` shape, and the ids the four gates around it
+    /// interrogate.
+    ///
+    ///     seed   = alloc(10)
+    ///     first  = alloc(20)     // `seed` is live across this — it is spilled
+    ///     consumed = seed        // `seed`'s last use
+    ///     second = alloc(30)     // `seed` is dead here — its slot is stale
+    ///     return second
+    struct ShrinkingRoots {
+        func: Function,
+        seed: LocalId,
+        first: LocalId,
+        /// The unused copy of `seed`, which is a gate of its own: a root set
+        /// that grew monotonically would still be *sound*, so what catches one
+        /// is a slot nothing ever reads back turning up in a later set.
+        consumed: LocalId,
+        second: LocalId,
+    }
+
+    /// Build [`ShrinkingRoots`].
+    fn shrinking_roots_function() -> ShrinkingRoots {
+        let mut f = Function::empty("shrinking_roots");
+        let ret = user_gc_local(&mut f, "ret");
         f.return_local = ret;
         let seed_scalar = int_local(&mut f);
         let first_scalar = int_local(&mut f);
         let second_scalar = int_local(&mut f);
-        let seed = gc_local(&mut f, "seed");
-        let first = gc_local(&mut f, "first");
-        let consumed = gc_local(&mut f, "consumed");
-        let second = gc_local(&mut f, "second");
+        let seed = user_gc_local(&mut f, "seed");
+        let first = user_gc_local(&mut f, "first");
+        let consumed = user_gc_local(&mut f, "consumed");
+        let second = user_gc_local(&mut f, "second");
         let blk = f.new_block();
         f.blocks[blk.0 as usize].insts.extend([
             Inst::ConstInt {
@@ -774,109 +755,13 @@ mod tests {
             },
         ]);
         f.blocks[blk.0 as usize].term = Terminator::Return { value: second };
-        let _ = int;
-
-        annotate(&mut f);
-
-        let roots_for = |needle: LocalId| {
-            f.blocks[blk.0 as usize]
-                .insts
-                .iter()
-                .find_map(|inst| match inst {
-                    Inst::Alloc { dst, roots, .. } if *dst == needle => Some(roots.live().to_vec()),
-                    _ => None,
-                })
-                .expect("allocation roots")
-        };
-        let first_roots = roots_for(first);
-        let second_roots = roots_for(second);
-        assert!(
-            first_roots.contains(&seed),
-            "seed is read after the first allocation and must be rooted there"
-        );
-        assert!(
-            !second_roots.contains(&seed),
-            "seed's lifetime ended before the second allocation"
-        );
-        assert!(
-            !second_roots.contains(&consumed),
-            "the unused copy must not make the later root set grow"
-        );
-    }
-
-    /// Build the `exact_roots_shrink…` shape and hand back the function plus
-    /// the ids the two MIR-01/MIR-16 gates below interrogate.
-    ///
-    ///     seed   = alloc(10)
-    ///     first  = alloc(20)     // `seed` is live across this — it is spilled
-    ///     consumed = seed        // `seed`'s last use
-    ///     second = alloc(30)     // `seed` is dead here — its slot is stale
-    ///     return second
-    fn shrinking_roots_function() -> (Function, LocalId, LocalId, LocalId) {
-        let mut f = Function {
-            name: "shrinking_roots".into(),
-            params: Vec::new(),
-            return_local: LocalId(0),
-            locals: Vec::new(),
-            blocks: Vec::new(),
-            debug_names: Vec::new(),
-            debug_kinds: Vec::new(),
-            debug_spans: Vec::new(),
-            debug_scalar_sources: Vec::new(),
-            span: (0, 0),
-        };
-        let ret = gc_local(&mut f, "ret");
-        f.return_local = ret;
-        let seed_scalar = int_local(&mut f);
-        let first_scalar = int_local(&mut f);
-        let second_scalar = int_local(&mut f);
-        let seed = gc_local(&mut f, "seed");
-        let first = gc_local(&mut f, "first");
-        let consumed = gc_local(&mut f, "consumed");
-        let second = gc_local(&mut f, "second");
-        let blk = f.new_block();
-        f.blocks[blk.0 as usize].insts.extend([
-            Inst::ConstInt {
-                dst: seed_scalar,
-                value: 10,
-            },
-            Inst::Alloc {
-                dst: seed,
-                alloc: crate::ir::AllocKind::Int { value: seed_scalar },
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            },
-            Inst::ConstInt {
-                dst: first_scalar,
-                value: 20,
-            },
-            Inst::Alloc {
-                dst: first,
-                alloc: crate::ir::AllocKind::Int {
-                    value: first_scalar,
-                },
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            },
-            Inst::MoveGc {
-                dst: consumed,
-                src: seed,
-            },
-            Inst::ConstInt {
-                dst: second_scalar,
-                value: 30,
-            },
-            Inst::Alloc {
-                dst: second,
-                alloc: crate::ir::AllocKind::Int {
-                    value: second_scalar,
-                },
-                roots: RootSlots::unannotated(),
-                debug: DebugSlots::unannotated(),
-            },
-        ]);
-        f.blocks[blk.0 as usize].term = Terminator::Return { value: second };
-        (f, seed, first, second)
+        ShrinkingRoots {
+            func: f,
+            seed,
+            first,
+            consumed,
+            second,
+        }
     }
 
     /// The slot sets of the `Alloc` whose destination is `needle`.
@@ -906,10 +791,16 @@ mod tests {
     /// a different type.
     #[test]
     fn a_slot_spilled_at_one_safepoint_is_nulled_once_its_local_dies() {
-        let (mut f, seed, first, second) = shrinking_roots_function();
-        annotate(&mut f);
+        let ShrinkingRoots {
+            mut func,
+            seed,
+            first,
+            second,
+            ..
+        } = shrinking_roots_function();
+        annotate(&mut func);
 
-        let (first_live, first_dead, _) = slots_for(&f, first);
+        let (first_live, first_dead, _) = slots_for(&func, first);
         assert!(
             first_live.contains(&seed),
             "seed is spilled here — that is what makes its slot stale later"
@@ -919,7 +810,7 @@ mod tests {
             "seed is live at its own spill point and must not be nulled there"
         );
 
-        let (second_live, second_dead, _) = slots_for(&f, second);
+        let (second_live, second_dead, _) = slots_for(&func, second);
         assert!(!second_live.contains(&seed), "seed is dead by the second");
         assert!(
             second_dead.contains(&seed),
@@ -932,9 +823,9 @@ mod tests {
     /// with a value or nulled, never both.
     #[test]
     fn the_live_and_dead_sets_of_a_safepoint_are_disjoint() {
-        let (mut f, ..) = shrinking_roots_function();
-        annotate(&mut f);
-        for inst in &f.blocks[0].insts {
+        let ShrinkingRoots { mut func, .. } = shrinking_roots_function();
+        annotate(&mut func);
+        for inst in &func.blocks[0].insts {
             if let Inst::Alloc { dst, roots, .. } = inst {
                 for d in roots.dead() {
                     assert!(
@@ -952,10 +843,15 @@ mod tests {
     /// there, yet `locals` must still render it. Two frames, two sets.
     #[test]
     fn the_debug_set_still_shows_what_the_root_set_dropped() {
-        let (mut f, seed, _, second) = shrinking_roots_function();
-        annotate(&mut f);
+        let ShrinkingRoots {
+            mut func,
+            seed,
+            second,
+            ..
+        } = shrinking_roots_function();
+        annotate(&mut func);
 
-        let (live, dead, visible) = slots_for(&f, second);
+        let (live, dead, visible) = slots_for(&func, second);
         assert!(!live.contains(&seed), "the collector no longer roots seed");
         assert!(dead.contains(&seed), "and its shadow slot is cleared");
         assert!(
@@ -970,17 +866,17 @@ mod tests {
     /// [`RootSlots`] field at all to carry.
     #[test]
     fn check_fault_carries_an_annotated_debug_set() {
-        let (mut f, seed, _, _) = shrinking_roots_function();
+        let ShrinkingRoots { mut func, seed, .. } = shrinking_roots_function();
         let blk = crate::ir::BlockId(0);
-        let fault_blk = f.new_block();
-        f.blocks[fault_blk.0 as usize].term = Terminator::Fault;
-        f.blocks[blk.0 as usize].insts.push(Inst::CheckFault {
+        let fault_blk = func.new_block();
+        func.blocks[fault_blk.0 as usize].term = Terminator::Fault;
+        func.blocks[blk.0 as usize].insts.push(Inst::CheckFault {
             on_fault: fault_blk,
             debug: DebugSlots::unannotated(),
         });
-        annotate(&mut f);
+        annotate(&mut func);
 
-        let debug = f.blocks[blk.0 as usize]
+        let debug = func.blocks[blk.0 as usize]
             .insts
             .iter()
             .find_map(|inst| match inst {

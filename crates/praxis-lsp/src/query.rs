@@ -20,7 +20,7 @@ use std::rc::Rc;
 
 use praxis_hir::{Analysis, ParserIndex, ResolvedRef};
 use praxis_parser::ParseOutput;
-use praxis_source::{Diagnostic, FileId, LineMap, SourceMap};
+use praxis_source::{diagnostic::sort_by_position, Diagnostic, FileId, LineMap, SourceMap};
 use praxis_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 use praxis_types::Type;
 use rowan::{NodeOrToken, TextRange, TextSize};
@@ -139,7 +139,9 @@ impl Snapshot {
     /// **The one place the set and the order are decided** (ADR-097). Lex and
     /// parse diagnostics first by construction, then name and type diagnostics,
     /// all sorted by span — which is what `praxis check` printed from its own
-    /// private copy of this sequence until M11 deleted it.
+    /// private copy of this sequence until M11 deleted it. The comparator itself
+    /// is [`Diagnostic::sort_key`], shared with every other stage that merges two
+    /// diagnostic lists; what is decided *here* is the set and the sequence.
     ///
     /// Analysis runs even when parsing reported: recovery keeps the tree usable,
     /// and a file with one stray token still deserves its type errors. That
@@ -148,10 +150,7 @@ impl Snapshot {
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
         let mut all = self.parse().diagnostics.clone();
         all.extend(self.analyze().diagnostics.iter().cloned());
-        all.sort_by_key(|d| {
-            let s = d.primary().span;
-            (s.start(), s.end())
-        });
+        sort_by_position(&mut all);
         all
     }
 

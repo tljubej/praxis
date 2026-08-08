@@ -13,6 +13,7 @@
 //! that makes the *forward* map total, and the two are inverses only because
 //! both are exhaustive.
 
+use crate::collections::nullable;
 use crate::descriptor::{BuiltinTypeId, TypeDescriptor};
 use crate::GcRef;
 
@@ -169,13 +170,4 @@ pub unsafe fn instance_repr(value: GcRef) -> InstanceRepr {
             }
         }
     }
-}
-
-/// A payload's element-descriptor slot, as an `Option`. Null means "this
-/// collection was never told its element type".
-#[inline]
-fn nullable(d: *const TypeDescriptor) -> Option<&'static TypeDescriptor> {
-    // SAFETY: a non-null element descriptor is always a `&'static` written by
-    // the constructor that built the payload.
-    (!d.is_null()).then(|| unsafe { &*d })
 }

@@ -364,48 +364,8 @@ impl ProvableDescriptors {
 mod tests {
     use super::*;
     use crate::annot::{DebugSlots, RootSlots};
-    use crate::ir::{
-        BlockId, Function, Inst, LocalDebugKind, LocalKind, MirType, ScalarKind, Terminator,
-    };
-
-    fn empty_fn(name: &str) -> Function {
-        Function {
-            name: name.into(),
-            params: Vec::new(),
-            return_local: LocalId(0),
-            locals: Vec::new(),
-            blocks: Vec::new(),
-            debug_names: Vec::new(),
-            debug_kinds: Vec::new(),
-            debug_spans: Vec::new(),
-            // The fourth debug table, added by ADR-120 part 2 after this test
-            // module was written. Empty is the honest value here: nothing in
-            // this module forwards a box, so no `Gc` local has a scalar that
-            // holds its word.
-            debug_scalar_sources: Vec::new(),
-            span: (0, 0),
-        }
-    }
-
-    fn gc_local(f: &mut Function) -> LocalId {
-        f.new_local(
-            LocalKind::Gc,
-            MirType::Opaque,
-            None,
-            LocalDebugKind::Temp,
-            None,
-        )
-    }
-
-    fn scalar_local(f: &mut Function, kind: ScalarKind) -> LocalId {
-        f.new_local(
-            LocalKind::Scalar(kind),
-            MirType::Opaque,
-            None,
-            LocalDebugKind::Temp,
-            None,
-        )
-    }
+    use crate::ir::fixtures::{gc_local, scalar_local};
+    use crate::ir::{BlockId, Function, Inst, ScalarKind, Terminator};
 
     fn push(f: &mut Function, blk: BlockId, inst: Inst) {
         f.blocks[blk.0 as usize].insts.push(inst);
@@ -415,7 +375,7 @@ mod tests {
     /// descriptor, so the local holding it is proved.
     #[test]
     fn a_const_gc_proves_the_class_of_the_immortal_it_names() {
-        let mut f = empty_fn("f");
+        let mut f = Function::empty("f");
         let (i, u, b) = (gc_local(&mut f), gc_local(&mut f), gc_local(&mut f));
         f.return_local = i;
         let blk = f.new_block();
@@ -455,7 +415,7 @@ mod tests {
     /// [`ScalarKind`] is — the other two producers, in one function.
     #[test]
     fn an_alloc_and_a_materialize_each_prove_their_own_class() {
-        let mut f = empty_fn("f");
+        let mut f = Function::empty("f");
         let payload = scalar_local(&mut f, ScalarKind::Float);
         let allocated = gc_local(&mut f);
         let materialized = gc_local(&mut f);
@@ -512,7 +472,7 @@ mod tests {
     /// what a naive universal quantifier does.
     #[test]
     fn a_parameter_has_no_definition_and_is_therefore_not_provable() {
-        let mut f = empty_fn("f");
+        let mut f = Function::empty("f");
         let param = gc_local(&mut f);
         let out = gc_local(&mut f);
         f.params = vec![param];
@@ -549,7 +509,7 @@ mod tests {
     /// lowers to.
     #[test]
     fn a_pair_of_loop_variables_that_define_each_other_is_still_provable() {
-        let mut f = empty_fn("f");
+        let mut f = Function::empty("f");
         let a = gc_local(&mut f);
         let b = gc_local(&mut f);
         let t = gc_local(&mut f);
@@ -625,7 +585,7 @@ mod tests {
     /// `Int` on one arm and a `Unit` on the other has no single class.
     #[test]
     fn two_producers_that_disagree_meet_to_no_proof() {
-        let mut f = empty_fn("f");
+        let mut f = Function::empty("f");
         let slot = gc_local(&mut f);
         f.return_local = slot;
         let blk = f.new_block();
@@ -656,7 +616,7 @@ mod tests {
     /// MIR sees only an [`Inst::Call`] with a `Gc` destination.
     #[test]
     fn a_call_result_is_not_provable_because_the_runtime_chose_its_descriptor() {
-        let mut f = empty_fn("f");
+        let mut f = Function::empty("f");
         let out = gc_local(&mut f);
         f.return_local = out;
         let blk = f.new_block();
@@ -691,7 +651,7 @@ mod tests {
     #[test]
     fn a_move_gc_chain_resolves_to_the_class_at_its_root() {
         for (root, expected) in [(true, Some(DescriptorClass::Bool)), (false, None)] {
-            let mut f = empty_fn("f");
+            let mut f = Function::empty("f");
             let head = gc_local(&mut f);
             let mid = gc_local(&mut f);
             let tail = gc_local(&mut f);
@@ -768,7 +728,7 @@ mod census {
     // measurement — "the post-W8-S0 inner-loop census, to the site" — so it must
     // read the MIR that description names.
     use crate::test_support::lower_src_to_mir_forwarded as lower_src_to_mir;
-    use crate::test_support::Lowered;
+    use crate::test_support::{benchmark_source, Lowered, BENCHMARK_SUITE};
 
     /// How many `ExtractScalar` sites in a region are provable, in both columns.
     #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -859,25 +819,6 @@ mod census {
         total
     }
 
-    fn benchmark(name: &str) -> String {
-        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.pop(); // crates/praxis-mir -> crates
-        path.pop(); // crates -> the workspace root
-        path.push(format!("benchmarks/praxis/{name}.px"));
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-    }
-
-    const SUITE: [&str; 8] = [
-        "bfs",
-        "collatz",
-        "hashwork",
-        "mandelbrot",
-        "pipeline",
-        "primes",
-        "tree",
-        "vm",
-    ];
-
     /// **The suite-wide census, both columns.** Run with `--nocapture` to read
     /// the table.
     ///
@@ -920,8 +861,8 @@ mod census {
     fn the_census_over_the_whole_suite_is_a_different_answer_in_each_column() {
         let mut suite = Sites::default();
         println!("\nExtractScalar sites, whole module, per benchmark:");
-        for name in SUITE {
-            let lowered = lower_src_to_mir(&benchmark(name));
+        for name in BENCHMARK_SUITE {
+            let lowered = lower_src_to_mir(&benchmark_source(name));
             let sites = sites_in_module(&lowered);
             println!("  {}", sites.row(name));
             suite.add(sites);
@@ -976,7 +917,7 @@ mod census {
         let mut total = Sites::default();
         println!("\nExtractScalar sites, innermost loop, per benchmark:");
         for (name, func_name, needle) in cases {
-            let lowered = lower_src_to_mir(&benchmark(name));
+            let lowered = lower_src_to_mir(&benchmark_source(name));
             let func = match func_name {
                 Some(n) => lowered.function(n),
                 None => lowered.entry(),

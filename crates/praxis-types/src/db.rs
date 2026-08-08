@@ -155,18 +155,12 @@ impl TypeDb {
         self.level = prev;
     }
 
-    /// Convenience: run `f` with the level raised one step, then restore. Use this
-    /// around every `var`/`fn` binding so their variables are created at the inner
-    /// level (and so generalization quantifies exactly the right set).
-    pub fn scoped(&mut self, f: impl FnOnce(&mut Self)) {
-        let prev = self.enter_level();
-        f(self);
-        self.exit_level(prev);
-    }
-
-    /// Like [`scoped`](Self::scoped) but for a computation that produces a value
-    /// (the common inference shape: open a scope, build a type, return it). The
-    /// level is restored even though a value is returned.
+    /// Convenience: run `f` with the level raised one step, then restore, handing
+    /// back what `f` produced (the common inference shape: open a scope, build a
+    /// type, return it). The level is restored even though a value is returned.
+    ///
+    /// Use this around every `var`/`fn` binding so their variables are created at
+    /// the inner level (and so generalization quantifies exactly the right set).
     #[must_use]
     pub fn scoped_return<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
         let prev = self.enter_level();
@@ -298,17 +292,9 @@ impl TypeDb {
     /// diagnostic sink, neither of which this crate has.
     #[must_use]
     pub fn take_dischargeable(&mut self) -> Vec<Constraint> {
-        let mut ready = Vec::new();
-        let mut i = 0;
-        while i < self.pending_constraints.len() {
-            let var_ty = self.pending_constraints[i].var_type();
-            if self.var_id_of(self.follow(var_ty)).is_none() {
-                ready.push(self.pending_constraints.remove(i));
-            } else {
-                i += 1;
-            }
-        }
-        ready
+        // No representative *is* the answer: `var_id_of` returns `None` exactly
+        // when what the variable now follows to is a concrete type.
+        self.drain_pending(|_, representative| representative.is_none())
     }
 
     /// Mark the constraints an instantiation just re-emitted as coming *via*
@@ -378,13 +364,6 @@ impl TypeDb {
         &self.pending_constraints
     }
 
-    /// Forget every pending constraint. For a caller that abandons an inference
-    /// attempt — the debugger's `p EXPR` evaluator re-checks a fragment against
-    /// a live db and must not leave its requirements behind.
-    pub fn clear_pending_constraints(&mut self) {
-        self.pending_constraints.clear();
-    }
-
     /// Take the pending constraints that are about one of `binders`, leaving
     /// the rest. Generalization's half of the channel: a scheme owns the
     /// requirements on the variables it quantifies, and only those.
@@ -392,28 +371,54 @@ impl TypeDb {
         if binders.is_empty() {
             return Vec::new();
         }
-        let mut claimed = Vec::new();
-        let mut i = 0;
-        while i < self.pending_constraints.len() {
-            // Through `follow`, and it matters: the constraint was made about
+        self.drain_pending(|c, representative| {
+            // The representative, and it matters: the constraint was made about
             // the variable that existed *then*, and unification may since have
             // linked it to another. `var m = Map(); m.insert(k, 1)` requires the
             // map's own key variable, which `insert` then links to `k`'s — and
             // `k`'s is what generalization quantifies. Comparing the unfollowed
             // ids would leave the constraint pending forever.
-            let var_ty = self.pending_constraints[i].var_type();
-            let representative = self.var_id_of(self.follow(var_ty));
-            if representative.is_some_and(|v| binders.contains(&v)) {
-                let mut c = self.pending_constraints.remove(i);
-                // Re-point it at the representative so `reemit_constraints` can
-                // find it among the scheme's binders.
-                c.var = representative.expect("checked just above");
-                claimed.push(c);
+            let Some(representative) = representative else {
+                return false;
+            };
+            if !binders.contains(&representative) {
+                return false;
+            }
+            // Re-point it at the representative so `reemit_constraints` can
+            // find it among the scheme's binders.
+            c.var = representative;
+            true
+        })
+    }
+
+    /// Take the pending constraints `take` claims — each seen with the variable
+    /// it now follows to, and free to be rewritten before it is handed over —
+    /// and leave the rest pending in their original order.
+    ///
+    /// Resolving the representative needs `&self`, so a caller cannot do it
+    /// inside its own predicate: the walk holds `&mut self` to drain from. Both
+    /// drains want the same resolution, so it happens here, with the pending
+    /// list moved out for the duration. `None` means the variable resolved to a
+    /// concrete type — exactly what [`take_dischargeable`](Self::take_dischargeable)
+    /// is asking about, and what [`claim_constraints`](Self::claim_constraints)
+    /// has nothing to match against a binder.
+    fn drain_pending(
+        &mut self,
+        mut take: impl FnMut(&mut Constraint, Option<VarId>) -> bool,
+    ) -> Vec<Constraint> {
+        let pending = std::mem::take(&mut self.pending_constraints);
+        let mut taken = Vec::new();
+        let mut kept = Vec::with_capacity(pending.len());
+        for mut c in pending {
+            let representative = self.var_id_of(self.follow(c.var_type()));
+            if take(&mut c, representative) {
+                taken.push(c);
             } else {
-                i += 1;
+                kept.push(c);
             }
         }
-        claimed
+        self.pending_constraints = kept;
+        taken
     }
 
     /// Re-emit `scheme`'s constraints against the fresh variables an

@@ -94,6 +94,76 @@ use crate::Tracer;
 #[must_use = "a Safepoint is the permission to allocate; dropping it wasted a pacing check"]
 pub struct Safepoint<'a>(PhantomData<&'a Heap>);
 
+/// The pacing predicate's operands, as displacements: where the `Heap` hangs off
+/// a [`RuntimeContext`](crate::RuntimeContext), and where its two pacing words
+/// sit inside it.
+///
+/// # Not a constructor argument, anywhere
+///
+/// [`Self::new`] takes nothing and reads all three off `Heap`'s own
+/// [`Heap::BYTES_SINCE_COLLECT_OFFSET`] and [`Heap::COLLECT_THRESHOLD_OFFSET`],
+/// so a site that described a table to probe — or a block to claim — *without*
+/// carrying the pacing predicate's operands has no spelling. That is the one
+/// thing [`InlineInternSite`] exists to withhold, and skipping the predicate is
+/// the one thing ADR-040's [`Safepoint`] exists to make unwritable.
+///
+/// # One value, because the compare has one authority
+///
+/// [`Heap::collection_is_due`] is the one statement of the predicate and
+/// generated code is the one reader that cannot call it: it loads these two
+/// words and compares them. The direction (`>=`, so that a zero threshold is
+/// *always* due) and the operand order are therefore transcribed from a rule the
+/// compiler cannot check, and every transcription is a fresh chance to write it
+/// backwards. Both [`InlineInternSite`] and [`InlineClaimSite`] carry *this*
+/// value rather than three fields each, so the backend's `emit_pacing_test` —
+/// the one place the transcription lives — cannot pair one site's `since` with
+/// another's `threshold`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PacingOffsets {
+    heap_offset: usize,
+    bytes_since_collect_offset: usize,
+    collect_threshold_offset: usize,
+}
+
+impl PacingOffsets {
+    /// No parameters, and that is the point — see the type's doc.
+    const fn new() -> PacingOffsets {
+        PacingOffsets {
+            heap_offset: core::mem::offset_of!(crate::RuntimeContext, heap),
+            bytes_since_collect_offset: Heap::BYTES_SINCE_COLLECT_OFFSET,
+            collect_threshold_offset: Heap::COLLECT_THRESHOLD_OFFSET,
+        }
+    }
+
+    /// Where the `Heap` pointer sits in a `RuntimeContext`. The first load of
+    /// the sequence, and the base the two pacing loads are relative to.
+    #[must_use]
+    pub const fn heap_offset(self) -> usize {
+        self.heap_offset
+    }
+
+    /// Where [`Heap::bytes_since_collect`] sits within a `Heap`.
+    ///
+    /// The predicate's left operand — and, for the claim sequence, the word it
+    /// loads a second time and stores back, once, at the end: the pacing charge,
+    /// which is not the predicate.
+    #[must_use]
+    pub const fn bytes_since_collect_offset(self) -> usize {
+        self.bytes_since_collect_offset
+    }
+
+    /// Where [`Heap::collect_threshold`] sits within a `Heap`.
+    ///
+    /// Generated code loads this word and the one above and takes the branch
+    /// `since >= threshold` to its cold path. That is
+    /// [`Heap::collection_is_due`] transcribed, and that function's doc is where
+    /// the obligation is written down.
+    #[must_use]
+    pub const fn collect_threshold_offset(self) -> usize {
+        self.collect_threshold_offset
+    }
+}
+
 /// Everything generated code may bake in to answer an interned scalar inline,
 /// and nothing else (ADR-113).
 ///
@@ -121,7 +191,8 @@ pub struct Safepoint<'a>(PhantomData<&'a Heap>);
 /// # And the half it cannot make unrepresentable
 ///
 /// The pacing offsets are **not** arguments to `new`: it fills them from
-/// `Heap`'s own [`Heap::BYTES_SINCE_COLLECT_OFFSET`] and
+/// [`PacingOffsets::new`], which reads `Heap`'s own
+/// [`Heap::BYTES_SINCE_COLLECT_OFFSET`] and
 /// [`Heap::COLLECT_THRESHOLD_OFFSET`], so a site cannot exist that describes an
 /// intern table without also carrying the pacing predicate's operands. That is
 /// as far as a type can go. A type cannot force the backend to *emit* the
@@ -131,9 +202,7 @@ pub struct Safepoint<'a>(PhantomData<&'a Heap>);
 /// implying the type proved more than it did.
 #[derive(Clone, Copy, Debug)]
 pub struct InlineInternSite {
-    heap_offset: usize,
-    bytes_since_collect_offset: usize,
-    collect_threshold_offset: usize,
+    pacing: PacingOffsets,
     table_offset: usize,
     min: i64,
     span: u64,
@@ -164,12 +233,11 @@ impl InlineInternSite {
         assert!(min <= max, "an intern table's range runs upwards");
         assert!(stride.is_power_of_two(), "the index scale must be a shift");
         InlineInternSite {
-            heap_offset: core::mem::offset_of!(crate::RuntimeContext, heap),
-            // Not parameters: a site that described a table but not the pacing
+            // Not a parameter: a site that described a table but not the pacing
             // predicate would be permission to skip the predicate, which is the
-            // one thing this type exists to withhold.
-            bytes_since_collect_offset: Heap::BYTES_SINCE_COLLECT_OFFSET,
-            collect_threshold_offset: Heap::COLLECT_THRESHOLD_OFFSET,
+            // one thing this type exists to withhold. `PacingOffsets::new`
+            // takes nothing, so there is nothing here to get wrong.
+            pacing: PacingOffsets::new(),
             table_offset,
             min,
             // `max - min` as an unsigned width, which is the immediate the
@@ -179,28 +247,15 @@ impl InlineInternSite {
         }
     }
 
-    /// Where the `Heap` pointer sits in a `RuntimeContext`. The first load of
-    /// the sequence, and the base the two pacing loads are relative to.
-    #[must_use]
-    pub const fn heap_offset(self) -> usize {
-        self.heap_offset
-    }
-
-    /// Where [`Heap::bytes_since_collect`] sits within a `Heap`.
-    #[must_use]
-    pub const fn bytes_since_collect_offset(self) -> usize {
-        self.bytes_since_collect_offset
-    }
-
-    /// Where [`Heap::collect_threshold`] sits within a `Heap`.
+    /// The pacing predicate's operands — the three displacements generated code
+    /// emits the compare from, before it looks at the value at all.
     ///
-    /// Generated code loads this word and the one above and takes the branch
-    /// `since >= threshold` to its cold path. That is
-    /// [`Heap::collection_is_due`] transcribed, and that function's doc is where
-    /// the obligation is written down.
+    /// The *same* value [`InlineClaimSite::pacing`] answers, which is what lets
+    /// the backend transcribe [`Heap::collection_is_due`] in one place. See
+    /// [`PacingOffsets`].
     #[must_use]
-    pub const fn collect_threshold_offset(self) -> usize {
-        self.collect_threshold_offset
+    pub const fn pacing(self) -> PacingOffsets {
+        self.pacing
     }
 
     /// Where the table's base pointer sits in a `RuntimeContext`.
@@ -287,9 +342,7 @@ impl InlineInternSite {
 /// checking a shape rather than checking arithmetic.
 #[derive(Clone, Copy, Debug)]
 pub struct InlineClaimSite {
-    heap_offset: usize,
-    bytes_since_collect_offset: usize,
-    collect_threshold_offset: usize,
+    pacing: PacingOffsets,
     heap_id_offset: usize,
     heap_live_count_offset: usize,
     partial_head_offset: usize,
@@ -327,13 +380,11 @@ impl InlineClaimSite {
         };
         let stride = class.block_size();
         Some(InlineClaimSite {
-            heap_offset: core::mem::offset_of!(crate::RuntimeContext, heap),
-            // Not parameters, for `InlineInternSite::new`'s reason: a site that
+            // Not a parameter, for `InlineInternSite::new`'s reason: a site that
             // described a block to claim but not the pacing predicate would be
             // permission to skip the predicate, and skipping it is the one thing
             // ADR-040's token exists to make unwritable.
-            bytes_since_collect_offset: Heap::BYTES_SINCE_COLLECT_OFFSET,
-            collect_threshold_offset: Heap::COLLECT_THRESHOLD_OFFSET,
+            pacing: PacingOffsets::new(),
             heap_id_offset: core::mem::offset_of!(Heap, id),
             heap_live_count_offset: core::mem::offset_of!(Heap, live_count),
             // The class's availability-list head, folded: `partial` is an array
@@ -355,25 +406,18 @@ impl InlineClaimSite {
         })
     }
 
-    /// Where the `Heap` pointer sits in a `RuntimeContext`.
-    #[must_use]
-    pub const fn heap_offset(self) -> usize {
-        self.heap_offset
-    }
-
-    /// Where [`Heap::bytes_since_collect`] sits within a `Heap`. The sequence
-    /// loads it for the pacing compare and stores it back, once, at the end.
-    #[must_use]
-    pub const fn bytes_since_collect_offset(self) -> usize {
-        self.bytes_since_collect_offset
-    }
-
-    /// Where [`Heap::collect_threshold`] sits within a `Heap`. See
+    /// The pacing predicate's operands — the three displacements the guard in
+    /// front of this sequence is emitted from, and the one whose
+    /// `bytes_since_collect` the sequence loads a second time and stores back,
+    /// once, at the end.
+    ///
+    /// The *same* value [`InlineInternSite::pacing`] answers: see
     /// [`Heap::collection_is_due`], which is the one statement of the predicate
-    /// these two words are the operands of.
+    /// those two words are the operands of, and [`PacingOffsets`], which is the
+    /// one value the backend transcribes it from.
     #[must_use]
-    pub const fn collect_threshold_offset(self) -> usize {
-        self.collect_threshold_offset
+    pub const fn pacing(self) -> PacingOffsets {
+        self.pacing
     }
 
     /// Where the owning [`HeapId`] sits within a `Heap` — the `u32` the sequence
@@ -1370,6 +1414,10 @@ impl Heap {
     /// non-`Copy` payload — a `Box<str>`, a `VecPayload` — and passes that type's
     /// own `size_of`/`align_of`, which is why the assertions have never fired.
     ///
+    /// Reach for [`Heap::alloc_payload`] instead unless `init` genuinely needs
+    /// the raw pointer: it derives both numbers *and* the write from the payload
+    /// type, leaving nothing for a caller to keep in agreement.
+    ///
     /// # Safety
     /// `init` must initialize the payload in place and must not panic after
     /// partial initialization (if it does, the payload's `Drop` will not run,
@@ -1385,6 +1433,42 @@ impl Heap {
     ) -> GcRef {
         // SAFETY: forwarded from the caller's contract above.
         unsafe { self.alloc_with_unpaced(descriptor, size, align, init) }
+    }
+
+    /// [`Heap::alloc_with`] for a payload the caller can hand over **by value**:
+    /// the size, the alignment and the write are all derived from `P`.
+    ///
+    /// This is the shape a non-`Copy` allocation wants. `alloc_with` takes the
+    /// layout as two loose numbers and the write as a closure over a `*mut u8`,
+    /// so every caller names its payload type three times and nothing but the
+    /// assertions in [`Heap::alloc_with_unpaced`] holds the three together. Here
+    /// it is named once and the compiler derives the rest — what [`Payload<T>`]
+    /// does for the `Copy` path (REP-02), carried as far as a payload that owns
+    /// Rust resources can carry it.
+    ///
+    /// # Safety
+    /// `descriptor` must be `P`'s own descriptor. A mismatched *layout* is
+    /// caught by [`Heap::alloc_with_unpaced`]'s assertions; a same-layout
+    /// mismatch is not, and the descriptor's `drop_value`, `trace` and `format`
+    /// callbacks are dispatched against these bytes.
+    pub unsafe fn alloc_payload<P>(
+        &self,
+        safepoint: Safepoint<'_>,
+        descriptor: &'static TypeDescriptor,
+        payload: P,
+    ) -> GcRef {
+        // SAFETY: writing an owned `P` initializes the payload completely and
+        // cannot panic partway, so `alloc_with`'s contract holds by
+        // construction, and the layout passed is `P`'s own.
+        unsafe {
+            self.alloc_with(
+                safepoint,
+                descriptor,
+                std::mem::size_of::<P>(),
+                std::mem::align_of::<P>(),
+                |p| (p as *mut P).write(payload),
+            )
+        }
     }
 
     /// [`Heap::alloc`] **without** pacing the collector.
@@ -1441,6 +1525,28 @@ impl Heap {
         );
         // SAFETY: forwarded from the caller's contract above.
         unsafe { self.alloc_raw(descriptor, init) }
+    }
+
+    /// [`Heap::alloc_payload`] **without** pacing the collector. See
+    /// [`Heap::alloc_unpaced`] for who may call this and why.
+    ///
+    /// # Safety
+    /// As [`Heap::alloc_payload`].
+    pub(crate) unsafe fn alloc_payload_unpaced<P>(
+        &self,
+        descriptor: &'static TypeDescriptor,
+        payload: P,
+    ) -> GcRef {
+        // SAFETY: as `alloc_payload` — an owned `P` written by value initializes
+        // the payload completely, and the layout passed is `P`'s own.
+        unsafe {
+            self.alloc_with_unpaced(
+                descriptor,
+                std::mem::size_of::<P>(),
+                std::mem::align_of::<P>(),
+                |p| (p as *mut P).write(payload),
+            )
+        }
     }
 
     /// The shared low-level allocator: take a block from a page, lay out
@@ -1686,13 +1792,15 @@ impl Heap {
     /// this branch and the last store there is no call, so *not due here* is
     /// *not due throughout*. See [`Safepoint`], which states all three parts.
     ///
-    /// So: **a term added here must be added to `emit_inline_intern` and
-    /// `emit_inline_claim_box` in
+    /// So: **a term added here must be added to `emit_pacing_test` in
     /// `crates/praxis-codegen-cranelift/src/lower.rs`, or generated code
-    /// allocates on a branch where the collector was due.** The failure mode is
-    /// not a wrong answer — it is a collection that silently does not happen,
-    /// which looks like a memory leak in a program the reader will not connect
-    /// to a pacer change. Two things fire when it is forgotten:
+    /// allocates on a branch where the collector was due.** That is the one
+    /// place the backend transcribes this expression — `emit_inline_intern` and
+    /// `emit_inline_claim_box` both call it — and [`PacingOffsets`] is the one
+    /// value it reads the displacements off. The failure mode is not a wrong
+    /// answer — it is a collection that silently does not happen, which looks
+    /// like a memory leak in a program the reader will not connect to a pacer
+    /// change. Two things fire when it is forgotten:
     /// `the_pacing_predicate_is_one_unsigned_compare_of_the_two_exported_words`
     /// below, which compares this function's answer against the two words the
     /// backend loads, and the deliberately narrow export surface — a third term
@@ -1845,25 +1953,12 @@ impl Heap {
                 let mut dead = alive & !marked;
                 if dead != 0 {
                     while dead != 0 {
-                        let index = word * 64 + dead.trailing_zeros() as usize;
+                        let index = page.block_index_in(word, dead.trailing_zeros());
                         dead &= dead - 1;
-                        // SAFETY: the block's `allocated` bit is set, so
-                        // `alloc_raw` initialized a header and a payload of its
-                        // descriptor there and nothing has finalized it since.
-                        let header = unsafe { &*(page.block_ptr(index) as *const GcHeader) };
-                        let desc = header.descriptor();
-                        // SAFETY: payload matches `desc` and is about to become
-                        // invalid.
-                        unsafe { (desc.drop_value)(header.payload::<u8>()) };
-                        // Poison before the bit is cleared, so a stale `GcRef`
-                        // that still names this storage is rejected by the mark
-                        // phase's provenance check instead of being traced
-                        // through a finalized payload. This is also RT-01's
-                        // precondition: between releasing the block and handing
-                        // it out again, it must not claim to be a typed object,
-                        // or a stale reference would be traced through whatever
-                        // the allocator put there next (hazard H7).
-                        header.poison();
+                        // SAFETY: the block's `allocated` bit is set and nothing
+                        // has finalized it since it was, and the
+                        // `set_allocated_word` below is what clears it.
+                        unsafe { Self::finalize_block(page, index) };
                         freed += 1;
                     }
                     page.set_allocated_word(word, alive & marked);
@@ -1891,6 +1986,34 @@ impl Heap {
         self.live_count.set(self.live_count.get() - reclaimed);
         self.live_bytes.set(live_bytes);
         self.relink_pages();
+    }
+
+    /// Finalize the object in block `index` of `page`, then poison its header.
+    ///
+    /// The whole of what happens to a dead block, and the two callers differ
+    /// only in which bits they walk — [`Heap::sweep`] takes what it proved
+    /// unreachable, [`Heap::finalize_all`] takes everything still allocated.
+    ///
+    /// # Safety
+    /// The block's `allocated` bit must be set, so that `alloc_raw` initialized
+    /// a header and a payload of its descriptor there, and nothing may have
+    /// finalized it since. The caller must clear that bit before anything can
+    /// reach the block again — the poison below is only half of that protocol.
+    unsafe fn finalize_block(page: &PageHeader, index: usize) {
+        // SAFETY: the caller's contract is that this block holds an initialized
+        // `[GcHeader | payload]`.
+        let header = unsafe { &*(page.block_ptr(index) as *const GcHeader) };
+        let desc = header.descriptor();
+        // SAFETY: the payload matches `desc` and is about to become invalid.
+        unsafe { (desc.drop_value)(header.payload::<u8>()) };
+        // Poison before the caller clears the `allocated` bit, so a stale
+        // `GcRef` that still names this storage is rejected by the mark phase's
+        // provenance check instead of being traced through a finalized payload.
+        // This is also RT-01's precondition: between releasing the block and
+        // handing it out again, it must not claim to be a typed object, or a
+        // stale reference would be traced through whatever the allocator put
+        // there next (hazard H7).
+        header.poison();
     }
 
     /// Finalize **every** still-live allocation, reachable or not, and empty
@@ -1921,15 +2044,12 @@ impl Heap {
             for word in 0..page.words() {
                 let mut alive = page.allocated_word(word);
                 while alive != 0 {
-                    let index = word * 64 + alive.trailing_zeros() as usize;
+                    let index = page.block_index_in(word, alive.trailing_zeros());
                     alive &= alive - 1;
                     // SAFETY: as in `sweep` — an allocated bit means an
-                    // initialized header and payload.
-                    let header = unsafe { &*(page.block_ptr(index) as *const GcHeader) };
-                    let desc = header.descriptor();
-                    // SAFETY: payload matches `desc`, becomes invalid after this.
-                    unsafe { (desc.drop_value)(header.payload::<u8>()) };
-                    header.poison();
+                    // initialized header and payload, and the `clear_bitmaps`
+                    // below is what clears it.
+                    unsafe { Self::finalize_block(page, index) };
                 }
             }
             page.clear_bitmaps();
@@ -2157,17 +2277,13 @@ mod tests {
 
         // Wrap in a Vec[T] payload. Element type is recorded in the payload
         // (ADR-013).
+        // SAFETY: VecPayload is VEC's payload type.
         let vec_ref = unsafe {
-            heap.alloc_with_unpaced(
+            heap.alloc_payload_unpaced(
                 &VEC,
-                std::mem::size_of::<VecPayload>(),
-                std::mem::align_of::<VecPayload>(),
-                |payload| {
-                    let vp = VecPayload {
-                        element_descriptor: &INT,
-                        items: elems.clone().into(),
-                    };
-                    (payload as *mut VecPayload).write(vp);
+                VecPayload {
+                    element_descriptor: &INT,
+                    items: elems.into(),
                 },
             )
         };
@@ -2210,16 +2326,13 @@ mod tests {
                 .iter()
                 .map(|&v| heap.alloc_unpaced(INT_PAYLOAD, v))
                 .collect();
+            // SAFETY: VecPayload is VEC's payload type.
             unsafe {
-                heap.alloc_with_unpaced(
+                heap.alloc_payload_unpaced(
                     &VEC,
-                    std::mem::size_of::<VecPayload>(),
-                    std::mem::align_of::<VecPayload>(),
-                    |payload| {
-                        (payload as *mut VecPayload).write(VecPayload {
-                            element_descriptor: &INT,
-                            items: elems.into(),
-                        });
+                    VecPayload {
+                        element_descriptor: &INT,
+                        items: elems.into(),
                     },
                 )
             }
@@ -2227,17 +2340,14 @@ mod tests {
 
         let inner0 = inner_alloc(&[1, 2]);
         let inner1 = inner_alloc(&[3]);
+        // SAFETY: VecPayload is VEC's payload type.
         let outer = unsafe {
-            heap.alloc_with_unpaced(
+            heap.alloc_payload_unpaced(
                 &VEC,
-                std::mem::size_of::<VecPayload>(),
-                std::mem::align_of::<VecPayload>(),
-                |payload| {
-                    (payload as *mut VecPayload).write(VecPayload {
-                        // The element descriptor of a Vec-of-X is VEC itself.
-                        element_descriptor: &VEC,
-                        items: vec![inner0, inner1].into(),
-                    });
+                VecPayload {
+                    // The element descriptor of a Vec-of-X is VEC itself.
+                    element_descriptor: &VEC,
+                    items: vec![inner0, inner1].into(),
                 },
             )
         };
@@ -2265,13 +2375,9 @@ mod tests {
     fn collect_finalizes_unreachable_owned_payload_exactly_once() {
         let drops = Arc::new(AtomicUsize::new(0));
         let heap = Heap::new();
+        // SAFETY: DropProbe is DROP_PROBE's payload type.
         unsafe {
-            heap.alloc_with_unpaced(
-                &DROP_PROBE,
-                std::mem::size_of::<DropProbe>(),
-                std::mem::align_of::<DropProbe>(),
-                |payload| (payload as *mut DropProbe).write(DropProbe(Arc::clone(&drops))),
-            );
+            heap.alloc_payload_unpaced(&DROP_PROBE, DropProbe(Arc::clone(&drops)));
         }
 
         let roots = RootScope::new();
@@ -2291,13 +2397,9 @@ mod tests {
         let drops = Arc::new(AtomicUsize::new(0));
         {
             let heap = Heap::new();
+            // SAFETY: DropProbe is DROP_PROBE's payload type.
             unsafe {
-                heap.alloc_with_unpaced(
-                    &DROP_PROBE,
-                    std::mem::size_of::<DropProbe>(),
-                    std::mem::align_of::<DropProbe>(),
-                    |payload| (payload as *mut DropProbe).write(DropProbe(Arc::clone(&drops))),
-                );
+                heap.alloc_payload_unpaced(&DROP_PROBE, DropProbe(Arc::clone(&drops)));
             }
             assert_eq!(drops.load(Ordering::SeqCst), 0);
         }
@@ -2318,14 +2420,9 @@ mod tests {
         {
             let heap = Heap::new();
             let mut scope = RootScope::new();
-            let probe = unsafe {
-                heap.alloc_with_unpaced(
-                    &DROP_PROBE,
-                    std::mem::size_of::<DropProbe>(),
-                    std::mem::align_of::<DropProbe>(),
-                    |payload| (payload as *mut DropProbe).write(DropProbe(Arc::clone(&drops))),
-                )
-            };
+            // SAFETY: DropProbe is DROP_PROBE's payload type.
+            let probe =
+                unsafe { heap.alloc_payload_unpaced(&DROP_PROBE, DropProbe(Arc::clone(&drops))) };
             scope.root(probe);
             heap.collect_with(&scope);
             assert_eq!(drops.load(Ordering::SeqCst), 0, "a rooted probe survives");
@@ -2341,13 +2438,9 @@ mod tests {
         let drops = Arc::new(AtomicUsize::new(0));
         {
             let mut heap = Heap::new();
+            // SAFETY: DropProbe is DROP_PROBE's payload type.
             unsafe {
-                heap.alloc_with_unpaced(
-                    &DROP_PROBE,
-                    std::mem::size_of::<DropProbe>(),
-                    std::mem::align_of::<DropProbe>(),
-                    |payload| (payload as *mut DropProbe).write(DropProbe(Arc::clone(&drops))),
-                );
+                heap.alloc_payload_unpaced(&DROP_PROBE, DropProbe(Arc::clone(&drops)));
             }
             heap.reset();
             assert_eq!(drops.load(Ordering::SeqCst), 1, "reset finalizes");
@@ -2363,6 +2456,9 @@ mod tests {
     fn overaligned_payload_accessor_matches_initialized_address() {
         let initialized_at = Cell::new(std::ptr::null_mut());
         let heap = Heap::new();
+        // The one allocation here that cannot go through `alloc_payload_unpaced`:
+        // the property under test *is* the address `init` was handed, so this
+        // needs the raw-pointer closure rather than a payload by value.
         let value = unsafe {
             heap.alloc_with_unpaced(
                 &OVERALIGNED,
@@ -2483,26 +2579,36 @@ mod tests {
     /// permission to probe the table and the obligation to pace cannot come
     /// apart. `InlineInternSite::new` fills them itself rather than taking them,
     /// and this is the assertion that it filled them from here.
+    ///
+    /// And that the claim site's are not a second set: both carry one
+    /// [`PacingOffsets`], which is what lets the backend emit the compare in one
+    /// place rather than transcribing `collection_is_due` twice.
     #[test]
     fn an_inline_intern_site_carries_the_heaps_own_pacing_offsets() {
-        let site = crate::small_int::INLINE_INTERN_SITE;
+        let pacing = crate::small_int::INLINE_INTERN_SITE.pacing();
         assert_eq!(
-            site.bytes_since_collect_offset(),
+            pacing.bytes_since_collect_offset(),
             Heap::BYTES_SINCE_COLLECT_OFFSET
         );
         assert_eq!(
-            site.collect_threshold_offset(),
+            pacing.collect_threshold_offset(),
             Heap::COLLECT_THRESHOLD_OFFSET
         );
         assert_ne!(
-            site.bytes_since_collect_offset(),
-            site.collect_threshold_offset(),
+            pacing.bytes_since_collect_offset(),
+            pacing.collect_threshold_offset(),
             "two distinct fields, or the compare is `x >= x`"
         );
         assert_eq!(
-            site.heap_offset(),
+            pacing.heap_offset(),
             core::mem::offset_of!(crate::RuntimeContext, heap),
             "and the base those two are relative to is the context's `heap`"
+        );
+        assert_eq!(
+            crate::scalars::INT_CLAIM_SITE.pacing(),
+            pacing,
+            "and the claim site's are the same three, because they are the same \
+             value — one predicate, one authority"
         );
     }
 
@@ -3060,15 +3166,8 @@ mod tests {
 
         let alloc_text = |heap: &Heap, len: usize| {
             let owned: Box<str> = "x".repeat(len).into_boxed_str();
-            // SAFETY: TextPayload matches TEXT's size/align and is initialized.
-            unsafe {
-                heap.alloc_with_unpaced(
-                    &TEXT,
-                    std::mem::size_of::<TextPayload>(),
-                    std::mem::align_of::<TextPayload>(),
-                    |p| (p as *mut TextPayload).write(TextPayload::owned(owned)),
-                )
-            }
+            // SAFETY: TextPayload is TEXT's payload type.
+            unsafe { heap.alloc_payload_unpaced(&TEXT, TextPayload::owned(owned)) }
         };
 
         let small = Heap::new();
@@ -3141,30 +3240,17 @@ mod tests {
         let heap = Heap::new();
 
         let owner: Box<str> = "x".repeat(4096).into_boxed_str();
-        // SAFETY: TextPayload matches TEXT's size/align and is initialized.
-        let owner_ref = unsafe {
-            heap.alloc_with_unpaced(
-                &TEXT,
-                std::mem::size_of::<TextPayload>(),
-                std::mem::align_of::<TextPayload>(),
-                |p| (p as *mut TextPayload).write(TextPayload::owned(owner)),
-            )
-        };
+        // SAFETY: TextPayload is TEXT's payload type.
+        let owner_ref = unsafe { heap.alloc_payload_unpaced(&TEXT, TextPayload::owned(owner)) };
         let after_owner = heap.bytes_since_collect.get();
 
-        // SAFETY: as above; the range lands inside the owner.
+        // SAFETY: `owner_ref` is the live Text allocated just above, and the
+        // range lands inside it.
+        let slice = unsafe { crate::text::SourceSlice::new(owner_ref, 0, 4096) }
+            .expect("the whole owner is a valid slice of itself");
+        // SAFETY: TextPayload is TEXT's payload type.
         unsafe {
-            heap.alloc_with_unpaced(
-                &TEXT,
-                std::mem::size_of::<TextPayload>(),
-                std::mem::align_of::<TextPayload>(),
-                |p| {
-                    // SAFETY: `owner_ref` is the live Text allocated just above.
-                    let slice = crate::text::SourceSlice::new(owner_ref, 0, 4096)
-                        .expect("the whole owner is a valid slice of itself");
-                    (p as *mut TextPayload).write(TextPayload::Slice(slice))
-                },
-            );
+            heap.alloc_payload_unpaced(&TEXT, TextPayload::Slice(slice));
         }
 
         let (_, block) = BlockLayout::of(&TEXT);
@@ -3214,14 +3300,9 @@ mod tests {
         let heap = Heap::new();
         // Enough `Text`s to need many pages of their own class.
         for _ in 0..8_000 {
-            // SAFETY: TextPayload matches TEXT's size/align and is initialized.
+            // SAFETY: TextPayload is TEXT's payload type.
             unsafe {
-                heap.alloc_with_unpaced(
-                    &TEXT,
-                    std::mem::size_of::<TextPayload>(),
-                    std::mem::align_of::<TextPayload>(),
-                    |p| (p as *mut TextPayload).write(TextPayload::owned("x")),
-                );
+                heap.alloc_payload_unpaced(&TEXT, TextPayload::owned("x"));
             }
         }
         heap.collect_with(&RootScope::new());
@@ -3258,13 +3339,9 @@ mod tests {
             let address = immortal.as_ptr();
             // A collectable object of the same class, to prove sweep is running
             // and that the immortal's page is not simply unreachable.
+            // SAFETY: DropProbe is DROP_PROBE's payload type.
             unsafe {
-                heap.alloc_with_unpaced(
-                    &DROP_PROBE,
-                    std::mem::size_of::<DropProbe>(),
-                    std::mem::align_of::<DropProbe>(),
-                    |payload| (payload as *mut DropProbe).write(DropProbe(Arc::clone(&drops))),
-                );
+                heap.alloc_payload_unpaced(&DROP_PROBE, DropProbe(Arc::clone(&drops)));
             }
 
             heap.collect_with(&RootScope::new());
@@ -3322,14 +3399,8 @@ mod tests {
             GcHeader::payload_offset_for(INT.align())
         );
 
-        let over = unsafe {
-            heap.alloc_with_unpaced(
-                &OVERALIGNED,
-                std::mem::size_of::<Overaligned>(),
-                std::mem::align_of::<Overaligned>(),
-                |payload| (payload as *mut Overaligned).write(Overaligned(1)),
-            )
-        };
+        // SAFETY: Overaligned is OVERALIGNED's payload type.
+        let over = unsafe { heap.alloc_payload_unpaced(&OVERALIGNED, Overaligned(1)) };
         assert_eq!(
             over.payload::<Overaligned>() as usize - over.as_ptr() as usize,
             GcHeader::payload_offset_for(OVERALIGNED.align())
@@ -3568,27 +3639,15 @@ mod tests {
     #[test]
     fn an_overaligned_block_round_trips_through_its_own_page() {
         let heap = Heap::new();
-        let doomed = unsafe {
-            heap.alloc_with_unpaced(
-                &OVERALIGNED,
-                std::mem::size_of::<Overaligned>(),
-                std::mem::align_of::<Overaligned>(),
-                |payload| (payload as *mut Overaligned).write(Overaligned(1)),
-            )
-        };
+        // SAFETY: Overaligned is OVERALIGNED's payload type.
+        let doomed = unsafe { heap.alloc_payload_unpaced(&OVERALIGNED, Overaligned(1)) };
         let address = doomed.as_ptr();
 
         heap.collect_with(&RootScope::new());
         let pages = heap.page_count();
 
-        let reused = unsafe {
-            heap.alloc_with_unpaced(
-                &OVERALIGNED,
-                std::mem::size_of::<Overaligned>(),
-                std::mem::align_of::<Overaligned>(),
-                |payload| (payload as *mut Overaligned).write(Overaligned(2)),
-            )
-        };
+        // SAFETY: as above.
+        let reused = unsafe { heap.alloc_payload_unpaced(&OVERALIGNED, Overaligned(2)) };
         assert_eq!(
             reused.as_ptr(),
             address,
@@ -3670,25 +3729,13 @@ mod tests {
         assert_ne!(eight.align, sixteen.align);
 
         let heap = Heap::new();
-        let doomed = unsafe {
-            heap.alloc_with_unpaced(
-                &ALIGNED_8,
-                std::mem::size_of::<Aligned8>(),
-                std::mem::align_of::<Aligned8>(),
-                |payload| (payload as *mut Aligned8).write(Aligned8([1, 2, 3, 4])),
-            )
-        };
+        // SAFETY: Aligned8 is ALIGNED_8's payload type.
+        let doomed = unsafe { heap.alloc_payload_unpaced(&ALIGNED_8, Aligned8([1, 2, 3, 4])) };
         let address = doomed.as_ptr();
         heap.collect_with(&RootScope::new());
 
-        let other = unsafe {
-            heap.alloc_with_unpaced(
-                &ALIGNED_16,
-                std::mem::size_of::<Aligned16>(),
-                std::mem::align_of::<Aligned16>(),
-                |payload| (payload as *mut Aligned16).write(Aligned16([5, 6, 7, 8])),
-            )
-        };
+        // SAFETY: Aligned16 is ALIGNED_16's payload type.
+        let other = unsafe { heap.alloc_payload_unpaced(&ALIGNED_16, Aligned16([5, 6, 7, 8])) };
         assert_ne!(
             other.as_ptr(),
             address,

@@ -293,26 +293,8 @@ fn line_text<'a>(text: &'a str, line_map: &LineMap, line: u32) -> (&'a str, Byte
     let line_text = std::str::from_utf8(&bytes[s..e])
         .unwrap_or("<invalid utf-8>")
         .trim_end_matches(['\n', '\r']);
-    let content_end = trim_one_terminator(bytes, line_start, line_end);
+    let content_end = LineMap::trim_line_terminator(bytes, line_start, line_end);
     (line_text, line_start, content_end)
-}
-
-/// The content end byte offset of a line: `line_end` minus any single line
-/// terminator. Mirrors `line_map`'s internal `trim_one_terminator`.
-fn trim_one_terminator(text: &[u8], line_start: BytePos, line_end: BytePos) -> BytePos {
-    if line_end <= line_start {
-        return line_start;
-    }
-    let s = line_start.to_usize();
-    let e = (line_end.to_u32() as usize).min(text.len());
-    let gap = &text[s..e];
-    if gap.ends_with(b"\r\n") {
-        BytePos(line_end.to_u32() - 2)
-    } else if gap.ends_with(b"\n") || gap.ends_with(b"\r") {
-        BytePos(line_end.to_u32() - 1)
-    } else {
-        line_end
-    }
 }
 
 #[cfg(test)]

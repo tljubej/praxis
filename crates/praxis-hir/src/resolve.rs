@@ -29,8 +29,8 @@ use praxis_ast::{
     ParamList, PlaceAssignStmt, RecordLitExpr, ReturnExpr, SourceFile, StructItem, VarStmt,
     WhileExpr,
 };
-use praxis_source::{BytePos, Diagnostic, FileId, FileSpan, Span};
-use praxis_syntax::SyntaxKind;
+use praxis_source::{Diagnostic, FileId, FileSpan, Span};
+use praxis_syntax::{span_bridge::range_to_span, SyntaxKind};
 use rowan::{NodeOrToken, TextRange};
 
 use crate::diagnostics::{
@@ -276,12 +276,7 @@ impl Resolver {
         let mut diag = unresolved_name(self.file_span(span), name);
         let visible = self.out.scopes.visible_names(scope);
         if let Some(near) = praxis_source::nearest(name, visible.iter().copied()) {
-            let near = near.to_string();
-            diag = diag.with_suggestion(
-                self.file_span(span),
-                near.clone(),
-                format!("did you mean `{near}`?"),
-            );
+            diag = diag.with_did_you_mean(self.file_span(span), near);
         }
         self.out.diagnostics.push(diag);
     }
@@ -1248,15 +1243,6 @@ impl Resolver {
             }
         }
     }
-}
-
-/// Bridge a rowan `TextRange` back into a Praxis [`Span`] (the only place the
-/// resolver crosses the rowan/praxis boundary).
-fn range_to_span(range: TextRange) -> Span {
-    Span::new(
-        BytePos::from(u32::from(range.start())),
-        BytePos::from(u32::from(range.end())),
-    )
 }
 
 /// Whether `start` reaches **itself** over `calls`, and if so which of its own

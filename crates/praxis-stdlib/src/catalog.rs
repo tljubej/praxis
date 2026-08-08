@@ -90,14 +90,6 @@ pub enum MethodLowering {
     ScalarPrimitive(crate::abi::RuntimeSymbol),
 }
 
-/// Stability marker for an entry. Most built-ins are `Stable`; experimental
-/// helpers carry `Experimental` so the LSP can flag them.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Stability {
-    Stable,
-    Experimental,
-}
-
 /// One row of the method catalog (§16.2 fields).
 #[derive(Clone, Debug)]
 pub struct MethodEntry {
@@ -115,8 +107,6 @@ pub struct MethodEntry {
     pub lowering: MethodLowering,
     /// One-line documentation, surfaced in hover.
     pub doc: &'static str,
-    /// Stability marker.
-    pub stability: Stability,
 }
 
 impl MethodEntry {
@@ -461,10 +451,7 @@ fn mentions_iterable(pat: &TypePattern) -> bool {
         TypePattern::Function { params, result } => {
             params.iter().any(mentions_iterable) || mentions_iterable(result)
         }
-        TypePattern::Scalar(_)
-        | TypePattern::Var { .. }
-        | TypePattern::Unit
-        | TypePattern::Opaque => false,
+        TypePattern::Scalar(_) | TypePattern::Var { .. } | TypePattern::Unit => false,
     }
 }
 
@@ -509,7 +496,6 @@ mod tests {
             purity: Purity::Impure,
             lowering: MethodLowering::RuntimeSymbol(crate::abi::RuntimeSymbol::VecPush),
             doc: "Append a value to the end of the vector.",
-            stability: Stability::Stable,
         }
     }
 
@@ -522,7 +508,6 @@ mod tests {
             purity: Purity::Pure,
             lowering: MethodLowering::RuntimeSymbol(crate::abi::RuntimeSymbol::VecLen),
             doc: "Number of elements in the vector.",
-            stability: Stability::Stable,
         }
     }
 
@@ -692,7 +677,6 @@ mod tests {
             purity: Purity::Pure,
             lowering: MethodLowering::Intrinsic("seq_map"),
             doc: "Apply a function to each element.",
-            stability: Stability::Stable,
         };
         // A `Set` is one of the ten, so `Set[T].map/1` and `Iterable.map/1` both
         // answer `set.map(f)`.
@@ -786,7 +770,6 @@ mod tests {
             purity: Purity::Pure,
             lowering: MethodLowering::Intrinsic("seq_join"),
             doc: "These Text items concatenated.",
-            stability: Stability::Stable,
         };
         let of_char = MethodEntry {
             receiver: TypePattern::iterable(TypePattern::is_scalar("T", ScalarType::Char)),
@@ -841,7 +824,6 @@ mod tests {
             purity: Purity::Pure,
             lowering: MethodLowering::Intrinsic("seq_zip"),
             doc: "Pair elements with another sequence.",
-            stability: Stability::Stable,
         };
         // Bare in a parameter, nested inside one, in the result, and nested
         // inside the receiver's own item.

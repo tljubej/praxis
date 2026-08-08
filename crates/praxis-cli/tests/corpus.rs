@@ -21,17 +21,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn bin_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_praxis"))
-}
+mod common;
 
-/// The workspace `tests/` tree, from this crate's manifest directory.
+use common::bin_path;
+
+/// The workspace `tests/` tree.
 fn corpus_root() -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop(); // crates/praxis-cli -> crates
-    p.pop(); // crates -> workspace root
-    p.push("tests");
-    p
+    common::workspace_root().join("tests")
 }
 
 /// Every `.px` under `dir`, recursively, in a stable order.

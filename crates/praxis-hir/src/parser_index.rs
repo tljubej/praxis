@@ -96,17 +96,6 @@ impl ParserIndex {
         best.map(|(_, t)| t)
     }
 
-    /// The type of the parser node whose span is exactly `span`, if the index
-    /// has one. Used where the caller already has a node's extent (a semantic
-    /// token, say) and wants that node's type and no other's.
-    #[must_use]
-    pub fn type_of_span(&self, span: Span) -> Option<Type> {
-        self.node_types
-            .iter()
-            .find(|(s, _)| *s == span)
-            .map(|(_, t)| *t)
-    }
-
     /// §15.3's five-way question, answered against the spans the compiler
     /// computed.
     #[must_use]
@@ -117,21 +106,6 @@ impl ParserIndex {
         let mut mode = ParserMode::Expression;
         walk_mode(&self.ast, offset, &mut mode);
         mode
-    }
-
-    /// The capture containing `offset`, if any: its name span (when named) and
-    /// its parser's span.
-    #[must_use]
-    pub fn capture_at(&self, offset: u32) -> Option<CaptureAt> {
-        let mut found = None;
-        walk_captures(&self.ast, &mut |cap: CaptureAt| {
-            if span_contains(cap.span, offset) {
-                // Innermost wins: a nested template's capture is visited after
-                // the capture that encloses it.
-                found = Some(cap);
-            }
-        });
-        found
     }
 
     /// Every capture in this parser expression, outermost first, each with the

@@ -58,6 +58,16 @@ pub enum Bound {
 }
 
 /// A pattern describing a type shape in a catalog entry.
+///
+/// # There is no placeholder arm
+///
+/// There used to be an `Opaque` one, for rows added before their shape was
+/// worked out, and its doc promised the type checker would reject it if it was
+/// still present at use time. Nothing rejected it: `pattern_to_type`
+/// instantiated it as a fresh inference variable, which unifies with
+/// *anything* — the opposite of the promise. No row ever wrote one; every row
+/// writes a concrete pattern. If a placeholder is wanted again it has to arrive
+/// together with the rejection, not ahead of it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TypePattern {
     /// A specific scalar type, e.g. `Int`.
@@ -127,10 +137,6 @@ pub enum TypePattern {
     /// ordinary unification failure at the method name, not a row that resolves
     /// and then faults.
     Iterable { item: Box<TypePattern> },
-    /// Opaque / unknown during early scaffolding. Catalog entries added before
-    /// a full type pattern is worked out can use this placeholder; the type
-    /// checker will reject it if it is still present at use time.
-    Opaque,
 }
 
 /// The collection constructors a [`TypePattern::Iterable`] receiver accepts
@@ -295,7 +301,7 @@ impl TypePattern {
                 }
                 result.collect_bounds(into);
             }
-            TypePattern::Scalar(_) | TypePattern::Unit | TypePattern::Opaque => {}
+            TypePattern::Scalar(_) | TypePattern::Unit => {}
         }
     }
 }
@@ -430,7 +436,6 @@ impl fmt::Display for TypePattern {
             // completion table renders every receiver, and "the thing a `for`
             // walks" is what this says.
             TypePattern::Iterable { item } => write!(f, "Iterable[{item}]"),
-            TypePattern::Opaque => f.write_str("_"),
             // The bound is not part of the type's spelling: it is a rule the
             // compiler enforces, and §5.4 forbids surfacing capability names to
             // the user. Completion and signature help show `T`.

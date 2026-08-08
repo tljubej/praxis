@@ -578,7 +578,7 @@ mod tests {
     // output while claiming to measure ADR-120's, and reverting promotion would
     // present as a failure here. The alias keeps the call sites unedited.
     use crate::test_support::lower_src_to_mir_forwarded as lower_src_to_mir;
-    use crate::test_support::{Census, InstKind, Lowered};
+    use crate::test_support::{benchmark_source, Census, InstKind, Lowered, BENCHMARK_SUITE};
     use crate::verify::verify;
 
     const INT_BOX: InstKind = InstKind::Materialize(ScalarKind::Int);
@@ -587,16 +587,6 @@ mod tests {
     const INT_LOAD: InstKind = InstKind::ExtractScalar(ScalarKind::Int);
     const BOOL_LOAD: InstKind = InstKind::ExtractScalar(ScalarKind::Bool);
     const FLOAT_LOAD: InstKind = InstKind::ExtractScalar(ScalarKind::Float);
-
-    /// A benchmark's source, read from the tree rather than copied — a copy
-    /// would go on asserting about a program the suite no longer runs.
-    fn benchmark(name: &str) -> String {
-        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.pop(); // crates/praxis-mir -> crates
-        path.pop(); // crates -> the workspace root
-        path.push(format!("benchmarks/praxis/{name}.px"));
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-    }
 
     /// Annotate and verify every function of a lowered module.
     ///
@@ -750,38 +740,12 @@ mod tests {
     /// [`a_const_gc_char_reload_becomes_an_immediate`]: self::a_const_gc_char_reload_becomes_an_immediate
     #[test]
     fn a_char_box_is_not_forwarded_because_its_check_fault_would_be_orphaned() {
-        use crate::ir::{LocalDebugKind, LocalKind, MirType};
+        use crate::ir::fixtures::{gc_local, scalar_local};
 
-        let mut f = Function {
-            name: "f".into(),
-            params: Vec::new(),
-            return_local: LocalId(0),
-            locals: Vec::new(),
-            blocks: Vec::new(),
-            debug_names: Vec::new(),
-            debug_kinds: Vec::new(),
-            debug_spans: Vec::new(),
-            debug_scalar_sources: Vec::new(),
-            span: (0, 0),
-        };
-        let scalar = |f: &mut Function| {
-            f.new_local(
-                LocalKind::Scalar(ScalarKind::Char),
-                MirType::Opaque,
-                None,
-                LocalDebugKind::Temp,
-                None,
-            )
-        };
-        let code = scalar(&mut f);
-        let reloaded = scalar(&mut f);
-        let boxed = f.new_local(
-            LocalKind::Gc,
-            MirType::Opaque,
-            None,
-            LocalDebugKind::Temp,
-            None,
-        );
+        let mut f = Function::empty("f");
+        let code = scalar_local(&mut f, ScalarKind::Char);
+        let reloaded = scalar_local(&mut f, ScalarKind::Char);
+        let boxed = gc_local(&mut f);
         let blk = f.new_block();
         let fault = f.new_block();
         f.blocks[blk.0 as usize].insts = vec![
@@ -953,7 +917,7 @@ mod tests {
     /// existing slot is what W8-S1 addresses.
     #[test]
     fn mandelbrots_inner_loop_boxes_two_floats_where_it_boxed_ten() {
-        let mut lowered = lower_src_to_mir(&benchmark("mandelbrot"));
+        let mut lowered = lower_src_to_mir(&benchmark_source("mandelbrot"));
         verified(&mut lowered);
         let func = lowered.entry();
         let census = lowered
@@ -975,7 +939,7 @@ mod tests {
     /// four boxes and eleven reloads.
     #[test]
     fn collatzs_inner_loop_is_an_int_and_bool_win_with_no_float_in_it() {
-        let mut lowered = lower_src_to_mir(&benchmark("collatz"));
+        let mut lowered = lower_src_to_mir(&benchmark_source("collatz"));
         verified(&mut lowered);
         let func = lowered.entry();
         let census = lowered.innermost_loop_over(func, "3 * c").census(func);
@@ -993,17 +957,8 @@ mod tests {
     /// every terminator shape.
     #[test]
     fn every_benchmark_still_verifies_after_the_pass() {
-        for name in [
-            "bfs",
-            "collatz",
-            "hashwork",
-            "mandelbrot",
-            "pipeline",
-            "primes",
-            "tree",
-            "vm",
-        ] {
-            let mut lowered = lower_src_to_mir(&benchmark(name));
+        for name in BENCHMARK_SUITE {
+            let mut lowered = lower_src_to_mir(&benchmark_source(name));
             verified(&mut lowered);
         }
     }
@@ -1015,7 +970,7 @@ mod tests {
     /// which is the trade this asserts is still the right way round.
     #[test]
     fn an_elided_box_keeps_its_slot_and_the_count_is_a_fifth_of_them() {
-        let lowered = lower_src_to_mir(&benchmark("mandelbrot"));
+        let lowered = lower_src_to_mir(&benchmark_source("mandelbrot"));
         let func = lowered.entry();
         let defined: BTreeSet<LocalId> = func
             .blocks

@@ -25,17 +25,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-fn bin_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_praxis"))
-}
+mod common;
 
-/// The workspace root, from this crate's manifest directory.
-fn workspace_root() -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop(); // crates/praxis-cli -> crates
-    p.pop(); // crates -> workspace root
-    p
-}
+use common::{bin_path, workspace_root};
 
 /// The first ```praxis fence after the line whose text is `heading`, verbatim.
 ///

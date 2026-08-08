@@ -15,7 +15,7 @@
 use crate::abi;
 use crate::catalog::MethodCatalog;
 use crate::type_pattern::{CollectionCtor, ScalarType};
-use crate::{MethodEntry, MethodLowering, Purity, Stability, TypePattern};
+use crate::{MethodEntry, MethodLowering, Purity, TypePattern};
 
 /// The `Vec[T]` receiver pattern, used by every Vec method entry.
 fn vec_of_t() -> TypePattern {
@@ -240,7 +240,6 @@ fn counter_keys() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CounterKeys),
         doc: "Every key, as a `Vec[T]`, ordered with `values()`.",
-        stability: Stability::Stable,
     }
 }
 
@@ -256,7 +255,6 @@ fn counter_values() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CounterValues),
         doc: "Every count, as a `Vec[Int]`, ordered with `keys()`.",
-        stability: Stability::Stable,
     }
 }
 
@@ -272,7 +270,6 @@ fn map_keys() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapKeys),
         doc: "Every key, as a `Vec[K]`, ordered with `values()`.",
-        stability: Stability::Stable,
     }
 }
 
@@ -288,7 +285,6 @@ fn map_values() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapValues),
         doc: "Every value, as a `Vec[V]`, ordered with `keys()`.",
-        stability: Stability::Stable,
     }
 }
 
@@ -323,7 +319,6 @@ fn vec_index() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecGet),
         doc: "`v[i]` — the element at `i`; faults if out of range.",
-        stability: Stability::Stable,
     }
 }
 
@@ -337,7 +332,6 @@ fn vec_index_set() -> MethodEntry {
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecSet),
         doc: "`v[i] = value` — replace the element at `i`; faults if out of range \
               (it never appends — `push` is the spelling that grows a vector).",
-        stability: Stability::Stable,
     }
 }
 
@@ -350,7 +344,6 @@ fn deque_index() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequeGet),
         doc: "`d[i]` — the element at `i` (0-based from the front); faults if out of range.",
-        stability: Stability::Stable,
     }
 }
 
@@ -364,7 +357,6 @@ fn deque_index_set() -> MethodEntry {
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequeSet),
         doc: "`d[i] = value` — replace the element at `i` (0-based from the front); \
               faults if out of range (it never inserts).",
-        stability: Stability::Stable,
     }
 }
 
@@ -378,7 +370,6 @@ fn text_index() -> MethodEntry {
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::TextGet),
         doc: "`t[i]` — the `Char` at `i`, indexing by Unicode scalar value and not \
               by byte; faults if out of range (ADR-086).",
-        stability: Stability::Stable,
     }
 }
 
@@ -392,7 +383,6 @@ fn map_index() -> MethodEntry {
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapIndex),
         doc: "`m[key]` — the value for `key`; **faults** if absent (§4.7; `.get` is the \
               spelling that answers with absence).",
-        stability: Stability::Stable,
     }
 }
 
@@ -405,7 +395,6 @@ fn map_index_set() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapInsert),
         doc: "`m[key] = value` — set `key`, replacing any prior value.",
-        stability: Stability::Stable,
     }
 }
 
@@ -437,7 +426,6 @@ fn map_index_min() -> MethodEntry {
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapUpdateMin),
         doc: "`d[key] min= candidate` — keep the smaller value; an absent entry \
               accepts the first value (§6.2).",
-        stability: Stability::Stable,
     }
 }
 
@@ -451,7 +439,6 @@ fn map_index_max() -> MethodEntry {
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapUpdateMax),
         doc: "`b[key] max= score` — keep the larger value; an absent entry accepts \
               the first value (§6.2).",
-        stability: Stability::Stable,
     }
 }
 
@@ -464,7 +451,6 @@ fn counter_index() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CounterGet),
         doc: "`c[key]` — the count for `key`, or zero if absent (§6.2); never faults.",
-        stability: Stability::Stable,
     }
 }
 
@@ -477,7 +463,6 @@ fn counter_index_set() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CounterSet),
         doc: "`c[key] = n` — set the count for `key`.",
-        stability: Stability::Stable,
     }
 }
 
@@ -493,7 +478,6 @@ fn grid_index() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridGet),
         doc: "`grid[x, y]` — the cell at (x, y) (§6.4); faults if out of range.",
-        stability: Stability::Stable,
     }
 }
 
@@ -510,7 +494,6 @@ fn grid_index_set() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridSet),
         doc: "`grid[x, y] = value` — set the cell at (x, y); faults if out of range.",
-        stability: Stability::Stable,
     }
 }
 
@@ -529,7 +512,6 @@ fn text_len() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::TextLen),
         doc: "Number of Unicode scalar values (chars) in the text.",
-        stability: Stability::Stable,
     }
 }
 
@@ -554,7 +536,6 @@ fn text_int() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::TextInt),
         doc: "The Int this text spells as `Some(n)`, or `None` if it spells none.",
-        stability: Stability::Stable,
     }
 }
 
@@ -574,7 +555,6 @@ fn text_float() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::TextFloat),
         doc: "The Float this text spells as `Some(x)`, or `None` if it spells none.",
-        stability: Stability::Stable,
     }
 }
 
@@ -587,7 +567,6 @@ fn text_is_empty() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::TextIsEmpty),
         doc: "True iff the text has no chars.",
-        stability: Stability::Stable,
     }
 }
 
@@ -601,7 +580,6 @@ fn text_get() -> MethodEntry {
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::TextGet),
         doc: "The `Char` at `index`; faults if out of range. `t[index]` is the \
               same row and the same answer (ADR-086).",
-        stability: Stability::Stable,
     }
 }
 
@@ -625,7 +603,6 @@ fn float_abs() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::FloatAbs),
         doc: "Absolute value.",
-        stability: Stability::Stable,
     }
 }
 
@@ -638,7 +615,6 @@ fn float_sqrt() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::FloatSqrt),
         doc: "Square root. Negative inputs yield NaN (IEEE-754).",
-        stability: Stability::Stable,
     }
 }
 
@@ -651,7 +627,6 @@ fn float_floor() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::FloatFloor),
         doc: "Round toward negative infinity.",
-        stability: Stability::Stable,
     }
 }
 
@@ -664,7 +639,6 @@ fn float_ceil() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::FloatCeil),
         doc: "Round toward positive infinity.",
-        stability: Stability::Stable,
     }
 }
 
@@ -677,7 +651,6 @@ fn float_round() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::FloatRound),
         doc: "Round half away from zero.",
-        stability: Stability::Stable,
     }
 }
 
@@ -690,7 +663,6 @@ fn float_sign() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::FloatSign),
         doc: "Sign as -1.0 / 0.0 / 1.0. NaN yields NaN.",
-        stability: Stability::Stable,
     }
 }
 
@@ -703,7 +675,6 @@ fn float_to_int() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::FloatToInt),
         doc: "Truncate toward zero to an Int. Faults on NaN, ±inf, or out of i64 range.",
-        stability: Stability::Stable,
     }
 }
 
@@ -716,7 +687,6 @@ fn float_to_text() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::FloatToText),
         doc: "Format as Text (shortest round-trip form; inf/-inf/NaN as literals).",
-        stability: Stability::Stable,
     }
 }
 
@@ -729,7 +699,6 @@ fn float_is_nan() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::FloatIsNan),
         doc: "True iff NaN.",
-        stability: Stability::Stable,
     }
 }
 
@@ -742,7 +711,6 @@ fn float_is_infinite() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::FloatIsInfinite),
         doc: "True iff ±infinity.",
-        stability: Stability::Stable,
     }
 }
 
@@ -755,7 +723,6 @@ fn float_min() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::FloatMin),
         doc: "The smaller of two floats. If either is NaN, returns the other.",
-        stability: Stability::Stable,
     }
 }
 
@@ -768,7 +735,6 @@ fn float_max() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::FloatMax),
         doc: "The larger of two floats. If either is NaN, returns the other.",
-        stability: Stability::Stable,
     }
 }
 
@@ -781,7 +747,6 @@ fn int_to_float() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntToFloat),
         doc: "Widen to Float (explicit Int→Float conversion, §4.12).",
-        stability: Stability::Stable,
     }
 }
 
@@ -822,7 +787,6 @@ fn int_to_text() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntToText),
         doc: "Format as Text — the same digits `out` writes (ADR-143).",
-        stability: Stability::Stable,
     }
 }
 
@@ -873,7 +837,6 @@ fn char_to_int() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CharToInt),
         doc: "The Unicode scalar value, as an `Int`. Never faults (ADR-086).",
-        stability: Stability::Stable,
     }
 }
 
@@ -887,7 +850,6 @@ fn char_to_text() -> MethodEntry {
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CharToText),
         doc: "The one-character Text holding this scalar — the same character \
               `out` writes. Never faults (ADR-143).",
-        stability: Stability::Stable,
     }
 }
 
@@ -903,7 +865,6 @@ fn int_to_char() -> MethodEntry {
               (`InvalidChar`) if it is negative, above `0x10FFFF`, or a \
               surrogate. The narrowing half of the pair, as `Float.to_int` is \
               (ADR-086).",
-        stability: Stability::Stable,
     }
 }
 
@@ -939,7 +900,6 @@ fn int_wrapping_add() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntWrappingAdd),
         doc: "Add with two's-complement wraparound instead of a fault (§4.12).",
-        stability: Stability::Stable,
     }
 }
 
@@ -952,7 +912,6 @@ fn int_saturating_add() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntSaturatingAdd),
         doc: "Add, clamping to Int's ends instead of faulting (§4.12).",
-        stability: Stability::Stable,
     }
 }
 
@@ -965,7 +924,6 @@ fn int_checked_add() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntCheckedAdd),
         doc: "Add, answering None where the checked `+` would fault (§4.12).",
-        stability: Stability::Stable,
     }
 }
 
@@ -978,7 +936,6 @@ fn int_wrapping_sub() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntWrappingSub),
         doc: "Subtract with two's-complement wraparound instead of a fault (§4.12).",
-        stability: Stability::Stable,
     }
 }
 
@@ -991,7 +948,6 @@ fn int_saturating_sub() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntSaturatingSub),
         doc: "Subtract, clamping to Int's ends instead of faulting (§4.12).",
-        stability: Stability::Stable,
     }
 }
 
@@ -1004,7 +960,6 @@ fn int_checked_sub() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntCheckedSub),
         doc: "Subtract, answering None where the checked `-` would fault (§4.12).",
-        stability: Stability::Stable,
     }
 }
 
@@ -1020,7 +975,6 @@ fn int_wrapping_mul() -> MethodEntry {
               one row here a program could not write for itself: every arithmetic \
               operator is checked and the language has no bitwise operators \
               (§4.12).",
-        stability: Stability::Stable,
     }
 }
 
@@ -1033,7 +987,6 @@ fn int_saturating_mul() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntSaturatingMul),
         doc: "Multiply, clamping to Int's ends instead of faulting (§4.12).",
-        stability: Stability::Stable,
     }
 }
 
@@ -1046,7 +999,6 @@ fn int_checked_mul() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntCheckedMul),
         doc: "Multiply, answering None where the checked `*` would fault (§4.12).",
-        stability: Stability::Stable,
     }
 }
 
@@ -1059,7 +1011,6 @@ fn vec_push() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecPush),
         doc: "Append a value to the end; returns Unit.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1072,7 +1023,6 @@ fn vec_len() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecLen),
         doc: "Number of elements in the vector.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1085,7 +1035,6 @@ fn vec_get() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecGet),
         doc: "The element at `index`; faults `IndexOutOfBounds` if out of range.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1098,7 +1047,20 @@ fn vec_is_empty() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecIsEmpty),
         doc: "True iff the vector has no elements.",
-        stability: Stability::Stable,
+    }
+}
+
+/// The `Vec[Char]` receiver pattern of `to_text` (ADR-144).
+///
+/// The element is a **bounded variable** rather than a literal `Char`, for
+/// `map_of_k_int_value`'s reason: the bound pins an unresolved element type
+/// instead of merely permitting it, so `var v = Vec()` followed by `v.to_text()`
+/// gives `v` a `Char` element type, and `[1, 2].to_text()` reports `expected
+/// Char, found Int` at the method name rather than "no method `to_text`".
+fn vec_of_char() -> TypePattern {
+    TypePattern::Collection {
+        ctor: CollectionCtor::Vec,
+        args: vec![TypePattern::is_scalar("T", ScalarType::Char)],
     }
 }
 
@@ -1114,25 +1076,15 @@ fn vec_is_empty() -> MethodEntry {
 /// against all of them, and a `Set[Char]` or a `Grid[Char]` row would be
 /// answering a different question anyway: a sequence of characters becomes a
 /// line because it has an *order*.
-///
-/// The element is a **bounded variable** rather than a literal `Char`, for
-/// `map_of_k_int_value`'s reason: the bound pins an unresolved element type
-/// instead of merely permitting it, so `var v = Vec()` followed by `v.to_text()`
-/// gives `v` a `Char` element type, and `[1, 2].to_text()` reports `expected
-/// Char, found Int` at the method name rather than "no method `to_text`".
 fn vec_to_text() -> MethodEntry {
     MethodEntry {
-        receiver: TypePattern::Collection {
-            ctor: CollectionCtor::Vec,
-            args: vec![TypePattern::is_scalar("T", ScalarType::Char)],
-        },
+        receiver: vec_of_char(),
         name: "to_text",
         params: vec![],
         result: TypePattern::Scalar(ScalarType::Text),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecToText),
         doc: "These Chars as one Text, with nothing between them (ADR-144).",
-        stability: Stability::Stable,
     }
 }
 
@@ -1155,7 +1107,6 @@ fn deque_push_front() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequePushFront),
         doc: "Prepend a value to the front; returns Unit.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1168,7 +1119,6 @@ fn deque_push_back() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequePushBack),
         doc: "Append a value to the back; returns Unit.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1181,7 +1131,6 @@ fn deque_pop_front() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequePopFront),
         doc: "Remove and return the front element; faults if empty.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1194,7 +1143,6 @@ fn deque_pop_back() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequePopBack),
         doc: "Remove and return the back element; faults if empty.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1207,7 +1155,6 @@ fn deque_len() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequeLen),
         doc: "Number of elements in the deque.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1220,7 +1167,6 @@ fn deque_get() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequeGet),
         doc: "The element at `index` (0-based from the front); faults if out of range.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1233,7 +1179,6 @@ fn deque_is_empty() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::DequeIsEmpty),
         doc: "True iff the deque has no elements.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1272,7 +1217,6 @@ fn map_insert() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapInsert),
         doc: "Set `key` to `value`, replacing any prior value; returns Unit.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1290,7 +1234,6 @@ fn map_get() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapGet),
         doc: "The value for `key` as `Some(value)`, or `None` if absent.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1303,7 +1246,6 @@ fn map_contains() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapContains),
         doc: "True iff `key` is present in the map.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1316,7 +1258,6 @@ fn map_remove() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapRemove),
         doc: "Remove `key` if present; returns Unit.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1329,7 +1270,6 @@ fn map_len() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapLen),
         doc: "Number of entries in the map.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1342,7 +1282,6 @@ fn map_is_empty() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapIsEmpty),
         doc: "True iff the map has no entries.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1355,7 +1294,6 @@ fn set_insert() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::SetInsert),
         doc: "Add `value` to the set; returns Unit.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1368,7 +1306,6 @@ fn set_remove() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::SetRemove),
         doc: "Remove `value` if present; returns Unit.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1381,7 +1318,6 @@ fn set_contains() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::SetContains),
         doc: "True iff `value` is in the set.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1394,7 +1330,6 @@ fn set_len() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::SetLen),
         doc: "Number of elements in the set.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1407,7 +1342,6 @@ fn set_is_empty() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::SetIsEmpty),
         doc: "True iff the set has no elements.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1420,7 +1354,6 @@ fn counter_get() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CounterGet),
         doc: "The count for `key`, or zero if absent (never faults).",
-        stability: Stability::Stable,
     }
 }
 
@@ -1433,7 +1366,6 @@ fn counter_inc() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CounterInc),
         doc: "Increment the count for `key` by one; returns Unit.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1446,7 +1378,6 @@ fn counter_len() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CounterLen),
         doc: "Number of distinct keys in the counter.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1459,7 +1390,6 @@ fn counter_is_empty() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CounterIsEmpty),
         doc: "True iff the counter has no keys.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1488,7 +1418,6 @@ fn max_heap_push() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MaxHeapPush),
         doc: "Push a value onto the max-heap; returns Unit.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1501,7 +1430,6 @@ fn max_heap_pop() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MaxHeapPop),
         doc: "Remove and return the largest element; faults if empty.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1514,7 +1442,6 @@ fn max_heap_peek() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MaxHeapPeek),
         doc: "The largest element without removing it; faults if empty.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1527,7 +1454,6 @@ fn max_heap_len() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MaxHeapLen),
         doc: "Number of elements in the max-heap.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1540,7 +1466,6 @@ fn max_heap_is_empty() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MaxHeapIsEmpty),
         doc: "True iff the max-heap has no elements.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1553,7 +1478,6 @@ fn min_heap_push() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MinHeapPush),
         doc: "Push a value onto the min-heap; returns Unit.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1566,7 +1490,6 @@ fn min_heap_pop() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MinHeapPop),
         doc: "Remove and return the smallest element; faults if empty.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1579,7 +1502,6 @@ fn min_heap_peek() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MinHeapPeek),
         doc: "The smallest element without removing it; faults if empty.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1592,7 +1514,6 @@ fn min_heap_len() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MinHeapLen),
         doc: "Number of elements in the min-heap.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1605,7 +1526,6 @@ fn min_heap_is_empty() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MinHeapIsEmpty),
         doc: "True iff the min-heap has no elements.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1628,7 +1548,6 @@ fn bitset_insert() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::BitsetInsert),
         doc: "Set the bit for a non-negative integer; returns Unit.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1641,7 +1560,6 @@ fn bitset_remove() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::BitsetRemove),
         doc: "Clear the bit for an integer; returns Unit.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1657,7 +1575,6 @@ fn bitset_contains() -> MethodEntry {
         // `Scalar(Bool)` and whose out-of-line form is this wrapper.
         lowering: MethodLowering::ScalarPrimitive(abi::RuntimeSymbol::BitsetContains),
         doc: "True iff the bit for the integer is set.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1670,7 +1587,6 @@ fn bitset_len() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::BitsetLen),
         doc: "Number of set bits (popcount).",
-        stability: Stability::Stable,
     }
 }
 
@@ -1683,7 +1599,6 @@ fn bitset_is_empty() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::BitsetIsEmpty),
         doc: "True iff no bits are set.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1714,7 +1629,6 @@ fn grid_width() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridWidth),
         doc: "The number of columns.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1727,7 +1641,6 @@ fn grid_height() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridHeight),
         doc: "The number of rows.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1743,7 +1656,6 @@ fn grid_get() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridGet),
         doc: "The cell at (x, y); faults if out of range.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1760,7 +1672,6 @@ fn grid_set() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridSet),
         doc: "Set the cell at (x, y); faults if out of range.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1776,7 +1687,6 @@ fn grid_contains() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridContains),
         doc: "True iff (x, y) is within the grid.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1792,7 +1702,6 @@ fn grid_neighbors4() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridNeighbors4),
         doc: "The 4 orthogonal in-bounds neighbors of a point, as a Vec of (x, y).",
-        stability: Stability::Stable,
     }
 }
 
@@ -1808,7 +1717,6 @@ fn grid_neighbors8() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridNeighbors8),
         doc: "The 8 in-bounds neighbors of a point, as a Vec of (x, y).",
-        stability: Stability::Stable,
     }
 }
 
@@ -1824,7 +1732,6 @@ fn grid_positions() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridPositions),
         doc: "All (x, y) positions in row-major order, as a Vec.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1840,7 +1747,6 @@ fn grid_cells() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridCells),
         doc: "All cells in row-major order, as a Vec.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1856,7 +1762,6 @@ fn grid_row() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridRow),
         doc: "Row `y` as a Vec; faults if out of range.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1872,7 +1777,6 @@ fn grid_column() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridColumn),
         doc: "Column `x` as a Vec; faults if out of range.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1888,7 +1792,6 @@ fn grid_find() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridFind),
         doc: "The first (x, y) whose cell equals `value` as `Some((x, y))`, or `None`.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1904,7 +1807,6 @@ fn grid_find_all() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridFindAll),
         doc: "All (x, y) positions whose cell equals `value`, as a Vec.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1917,7 +1819,6 @@ fn grid_transpose() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridTranspose),
         doc: "A transposed copy (rows ↔ columns).",
-        stability: Stability::Stable,
     }
 }
 
@@ -1930,7 +1831,6 @@ fn grid_rotate_left() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridRotateLeft),
         doc: "A copy rotated 90° counter-clockwise.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1943,7 +1843,6 @@ fn grid_rotate_right() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridRotateRight),
         doc: "A copy rotated 90° clockwise.",
-        stability: Stability::Stable,
     }
 }
 
@@ -1994,9 +1893,9 @@ fn t_to_bool() -> TypePattern {
 /// `map`: with an unconstrained `U` there is nothing at runtime that says "this
 /// element mapped to nothing", so no filtering was possible and the row's own
 /// doc admitted it ("modeled as map-keep"). §6.3 lists `filter_map` with no
-/// deferral note, and the row was `Stability::Stable`. S18's `Option` (ADR-076)
-/// is what makes the distinction representable: absence is a variant, so the
-/// drop test is a tag compare.
+/// deferral note, and nothing marked the row provisional. S18's `Option`
+/// (ADR-076) is what makes the distinction representable: absence is a variant,
+/// so the drop test is a tag compare.
 fn t_to_option_u() -> TypePattern {
     TypePattern::Function {
         params: vec![TypePattern::var("T")],
@@ -2039,7 +1938,6 @@ fn seq_map() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_map"),
         doc: "Apply a function to each element, collecting into a Vec.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2062,7 +1960,6 @@ fn seq_filter() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_filter"),
         doc: "Keep elements satisfying a predicate, collecting into a Vec.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2075,7 +1972,6 @@ fn seq_fold() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_fold"),
         doc: "Reduce elements left-to-right with an accumulator and combining closure.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2088,7 +1984,6 @@ fn seq_sum() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_sum"),
         doc: "Sum the (Int) elements.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2101,7 +1996,6 @@ fn seq_count() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_count"),
         doc: "Number of elements.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2118,7 +2012,6 @@ fn seq_count_if() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_count"),
         doc: "Number of elements satisfying the predicate.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2210,7 +2103,6 @@ fn seq_sorted() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecSorted),
         doc: "A new Vec holding these elements in ascending order.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2229,7 +2121,6 @@ fn seq_unique() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecUnique),
         doc: "A new Vec with duplicate elements removed, keeping first occurrences.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2253,7 +2144,6 @@ fn seq_reversed() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecReversed),
         doc: "A new Vec holding these elements in reverse order.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2299,7 +2189,6 @@ fn seq_chunks() -> MethodEntry {
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecChunks),
         doc: "Consecutive non-overlapping runs of n; the last may be shorter. \
               Faults if n is not positive.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2326,7 +2215,6 @@ fn seq_windows() -> MethodEntry {
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecWindows),
         doc: "Every consecutive run of exactly n, sliding by one. Empty if n \
               exceeds the length; faults if n is not positive.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2359,7 +2247,6 @@ fn seq_join() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecJoin),
         doc: "These Text items concatenated with `sep` between them.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2380,7 +2267,6 @@ fn seq_frequencies() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecFrequencies),
         doc: "A Counter holding how many times each element occurs.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2416,7 +2302,6 @@ fn seq_take() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_take"),
         doc: "Keep at most the first n elements.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2429,7 +2314,6 @@ fn seq_skip() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_skip"),
         doc: "Drop the first n elements.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2442,7 +2326,6 @@ fn seq_take_while() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_take_while"),
         doc: "Keep elements until the predicate is false.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2489,7 +2372,6 @@ fn seq_enumerate() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_enumerate"),
         doc: "Pair each element with its index.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2502,7 +2384,6 @@ fn seq_zip() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_zip"),
         doc: "Pair elements with another sequence, stopping at the shorter length.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2515,7 +2396,6 @@ fn seq_flat_map() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_flat_map"),
         doc: "Map each element to a Vec and concatenate the results.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2528,7 +2408,6 @@ fn seq_filter_map() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_filter_map"),
         doc: "Map each element to an Option and keep the Some payloads.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2565,7 +2444,6 @@ fn seq_product() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_product"),
         doc: "Multiply the (Int) elements.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2578,7 +2456,6 @@ fn seq_min() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_min"),
         doc: "Smallest (Int) element. Faults on an empty sequence (D1).",
-        stability: Stability::Stable,
     }
 }
 
@@ -2591,7 +2468,6 @@ fn seq_max() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_max"),
         doc: "Largest (Int) element. Faults on an empty sequence (D1).",
-        stability: Stability::Stable,
     }
 }
 
@@ -2604,7 +2480,6 @@ fn seq_min_by() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_min_by"),
         doc: "Smallest element per a (T,T)->Bool \"less-than\" comparator.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2617,7 +2492,6 @@ fn seq_max_by() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_max_by"),
         doc: "Largest element per a (T,T)->Bool \"less-than\" comparator.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2630,7 +2504,6 @@ fn seq_any() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_any"),
         doc: "True if any element satisfies the predicate (short-circuits).",
-        stability: Stability::Stable,
     }
 }
 
@@ -2643,7 +2516,6 @@ fn seq_all() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_all"),
         doc: "True if all elements satisfy the predicate (short-circuits).",
-        stability: Stability::Stable,
     }
 }
 
@@ -2656,7 +2528,6 @@ fn seq_find() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_find"),
         doc: "The first matching element, or None.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2669,7 +2540,6 @@ fn seq_position() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_position"),
         doc: "The index of the first matching element, or None.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2682,7 +2552,6 @@ fn seq_reduce() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_reduce"),
         doc: "Reduce left-to-right, seeded with the first element.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2713,7 +2582,6 @@ fn seq_sorted_by_key() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::VecSortedByKey),
         doc: "A new Vec ordered by the key the closure extracts.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2762,7 +2630,6 @@ fn seq_to_vec() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_to_vec"),
         doc: "The items as a Vec. On a Vec receiver this is the receiver itself.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2786,7 +2653,6 @@ fn seq_to_set() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_to_set"),
         doc: "A Set holding these items, duplicates dropped.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2810,7 +2676,6 @@ fn seq_to_map() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_to_map"),
         doc: "A Map built from (key, value) pairs. Duplicate keys: last wins.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2833,7 +2698,6 @@ fn seq_to_counter() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_to_counter"),
         doc: "A Counter built from (key, count) pairs. Duplicate keys: last wins.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2846,7 +2710,6 @@ fn seq_to_deque() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_to_deque"),
         doc: "A Deque holding these items, in order.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2863,7 +2726,6 @@ fn seq_to_min_heap() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_to_min_heap"),
         doc: "A MinHeap holding these items.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2876,7 +2738,6 @@ fn seq_to_max_heap() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_to_max_heap"),
         doc: "A MaxHeap holding these items.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2894,7 +2755,6 @@ fn seq_to_bitset() -> MethodEntry {
         purity: Purity::Pure,
         lowering: MethodLowering::Intrinsic("seq_to_bitset"),
         doc: "A BitSet holding these (Int) items. Faults on a negative or oversized member.",
-        stability: Stability::Stable,
     }
 }
 
@@ -2979,10 +2839,7 @@ mod tests {
     #[test]
     fn a_keyed_collection_enumerates_and_count_has_two_arities() {
         let cat = builtin_catalog();
-        let map_pat = TypePattern::Collection {
-            ctor: CollectionCtor::Map,
-            args: vec![TypePattern::var("K"), TypePattern::var("V")],
-        };
+        let map_pat = map_of_k_v();
         let counter_pat = counter_of_t();
 
         // Both collections enumerate both ways, and each answers a `Vec`.
@@ -3242,10 +3099,7 @@ mod tests {
             ctor,
             args: (0..args).map(|_| TypePattern::var("T")).collect(),
         };
-        let map_pat = TypePattern::Collection {
-            ctor: CollectionCtor::Map,
-            args: vec![TypePattern::var("K"), TypePattern::var("V")],
-        };
+        let map_pat = map_of_k_v();
 
         // Six read. `Text` is a scalar receiver, so it is spelled differently.
         for (pat, indices, what) in [
@@ -3353,13 +3207,7 @@ mod tests {
         // The two **updating** stores (REP-21): `Map` only, at the same arity as
         // its plain store, and pointing at wrappers of their own — a row that
         // reused `MapInsert` would spell `min=` and mean `=`.
-        let map_int_value = TypePattern::Collection {
-            ctor: CollectionCtor::Map,
-            args: vec![
-                TypePattern::var("K"),
-                TypePattern::is_scalar("V", ScalarType::Int),
-            ],
-        };
+        let map_int_value = map_of_k_int_value();
         let plain_store = cat
             .by_receiver_and_name(&map_pat, crate::catalog::INDEX_STORE)
             .next()
@@ -3450,18 +3298,13 @@ mod tests {
             assert!(len >= 1, "{name} missing len method");
             assert!(is_empty >= 1, "{name} missing is_empty method");
         }
-        // Map has two type args with distinct var names (K, V).
-        let map_pat = TypePattern::Collection {
-            ctor: CollectionCtor::Map,
-            args: vec![TypePattern::var("K"), TypePattern::var("V")],
-        };
+        // Map has two type args with distinct var names (K, V), so the loop's
+        // `T`-repeated shape above does not describe it.
+        let map_pat = map_of_k_v();
         assert!(cat.by_receiver_and_name(&map_pat, "len").count() >= 1);
         assert!(cat.by_receiver_and_name(&map_pat, "is_empty").count() >= 1);
         // Grid has width/height (its dimension methods).
-        let grid_pat = TypePattern::Collection {
-            ctor: CollectionCtor::Grid,
-            args: vec![TypePattern::var("T")],
-        };
+        let grid_pat = grid_of_t();
         assert!(cat.by_receiver_and_name(&grid_pat, "width").count() >= 1);
         assert!(cat.by_receiver_and_name(&grid_pat, "neighbors4").count() >= 1);
     }
@@ -3598,10 +3441,7 @@ mod tests {
     #[test]
     fn map_get_and_grid_find_answer_an_option() {
         let cat = builtin_catalog();
-        let map_pat = TypePattern::Collection {
-            ctor: CollectionCtor::Map,
-            args: vec![TypePattern::var("K"), TypePattern::var("V")],
-        };
+        let map_pat = map_of_k_v();
         let get = cat
             .by_receiver_and_name(&map_pat, "get")
             .next()
@@ -3612,10 +3452,7 @@ mod tests {
             "§5.7 writes `Map[K,V].get(K) -> Option[V]`"
         );
 
-        let grid_pat = TypePattern::Collection {
-            ctor: CollectionCtor::Grid,
-            args: vec![TypePattern::var("T")],
-        };
+        let grid_pat = grid_of_t();
         let find = cat
             .by_receiver_and_name(&grid_pat, "find")
             .next()
@@ -3801,12 +3638,9 @@ mod tests {
                 .any(|e| e.name == "to_text" && matches!(e.receiver, TypePattern::Iterable { .. })),
             "an `Iterable.to_text` would collide with the scalar `to_text` rows"
         );
-        let vec_of_char = TypePattern::Collection {
-            ctor: CollectionCtor::Vec,
-            args: vec![TypePattern::is_scalar("T", ScalarType::Char)],
-        };
+        let chars_pat = vec_of_char();
         let chars = cat
-            .by_receiver_and_name(&vec_of_char, "to_text")
+            .by_receiver_and_name(&chars_pat, "to_text")
             .next()
             .expect("Vec[Char].to_text exists");
         assert_eq!(chars.result, TypePattern::Scalar(ScalarType::Text));

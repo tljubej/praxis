@@ -420,18 +420,7 @@ pub fn fold_enum_default<F: TypeFolder + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A nominal record from `(name, type)` pairs.
-    fn record(db: &mut TypeDb, name: &str, fields: Vec<(String, Type)>) -> Type {
-        let fields = FieldSet::from_pairs(fields).expect("distinct field names");
-        db.record(Some(name.to_string()), fields)
-    }
-
-    /// A nominal enum from `(name, payload)` pairs.
-    fn enum_ty(db: &mut TypeDb, name: &str, variants: Vec<(String, Vec<Type>)>) -> Type {
-        let variants = VariantSet::from_pairs(variants).expect("distinct variant names");
-        db.enum_(Some(name.to_string()), variants)
-    }
+    use crate::types_tests::test_util::{enum_ty, record};
 
     /// The identity fold: overrides nothing.
     struct Identity<'a> {

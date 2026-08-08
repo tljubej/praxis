@@ -194,41 +194,98 @@ pub fn bfs_distance(oracle: &mut dyn GraphOracle, start: GcRef) -> Result<Option
     Ok(None)
 }
 
-/// `dijkstra(start, neighbours, weight)` — the least cost from `start` to every
-/// reachable state, as `(state, cost)` pairs.
+/// How a search turns the cost of reaching a state into the priority its
+/// frontier entry is filed under: the cost itself for Dijkstra
+/// ([`cost_itself`]), `g + h` for A\* ([`estimate`]).
 ///
-/// The start is present at cost 0. An unreachable state is simply absent, which
-/// is why this answers with a table rather than with an `Option` per state.
+/// It takes the oracle because A\*'s half of the answer comes from the
+/// program's heuristic closure, and returns a `Result` because that closure can
+/// fault like any other.
+type PriorityOf = fn(&mut dyn GraphOracle, GcRef, i64) -> Result<i64, Aborted>;
+
+/// The priority queue Dijkstra and A\* share, with the three tables that make a
+/// pop mean something: the least cost known per state, the states already
+/// settled, and the insertion counter that breaks ties.
 ///
-/// A **negative edge weight faults**. Dijkstra settles a state the first time it
-/// pops it and never reconsiders, so a negative edge makes the answer quietly
-/// too large — and a cost nobody paid is worse than a stop (the rule ADR-058
-/// applied to `abs(Int::MIN)`).
-pub fn dijkstra_costs(
-    oracle: &mut dyn GraphOracle,
-    start: GcRef,
-) -> Result<Vec<(GcRef, i64)>, Aborted> {
-    // The heap is ordered by `(cost, sequence)` and carries the state
-    // alongside: a state is not orderable — nothing requires it to be — so the
-    // tie-break is insertion order, which also makes the walk deterministic.
-    let mut frontier: BinaryHeap<Reverse<(i64, usize, StateEntry)>> = BinaryHeap::new();
-    let mut best: HashMap<DynamicKey, i64> = HashMap::new();
-    let mut settled: Vec<(GcRef, i64)> = Vec::new();
-    let mut done: HashSet<DynamicKey> = HashSet::new();
-    let mut seq = 0_usize;
+/// The two searches differ in one expression — the priority an entry is filed
+/// under — and in what they do with a state once it settles. Everything else is
+/// here, both refusals included, because written twice they would eventually
+/// disagree and two searches that fault differently on the same graph is the
+/// bug this shape prevents. It is the argument [`Seen`] was factored out for,
+/// and the one [`reachable`] delegates to [`bfs_order`] for.
+struct Frontier {
+    /// Ordered by `(priority, sequence)`, carrying the state alongside: a state
+    /// is not orderable — nothing requires it to be — so the tie-break is
+    /// insertion order, which also makes the walk deterministic.
+    heap: BinaryHeap<Reverse<(i64, usize, StateEntry)>>,
+    /// The least cost known to reach each state so far.
+    best: HashMap<DynamicKey, i64>,
+    /// The states already settled; nothing relaxes into one again.
+    done: HashSet<DynamicKey>,
+    /// Pushes so far — the heap's tie-break.
+    seq: usize,
+}
 
-    oracle.retain(start);
-    best.insert(DynamicKey::new(start), 0);
-    frontier.push(Reverse((0, seq, StateEntry(start))));
-    seq += 1;
-
-    while let Some(Reverse((cost, _, StateEntry(state)))) = frontier.pop() {
-        let key = DynamicKey::new(state);
-        if !done.insert(key) {
-            // Already settled by a cheaper entry; this one is stale.
-            continue;
+impl Frontier {
+    fn new() -> Frontier {
+        Frontier {
+            heap: BinaryHeap::new(),
+            best: HashMap::new(),
+            done: HashSet::new(),
+            seq: 0,
         }
-        settled.push((state, cost));
+    }
+
+    /// Record that `state` is reachable at `cost` and queue it under
+    /// `priority`. For Dijkstra those are one number; for A\* the priority is
+    /// `g + h` and the cost is `g`.
+    fn push(&mut self, state: GcRef, cost: i64, priority: i64) {
+        self.best.insert(DynamicKey::new(state), cost);
+        self.heap
+            .push(Reverse((priority, self.seq, StateEntry(state))));
+        self.seq += 1;
+    }
+
+    /// The next state to settle and the cost it settled at, or `None` when the
+    /// frontier is spent.
+    ///
+    /// A state queued again at a lower cost leaves its old entry behind, so a
+    /// pop is a loop: the later entries for a settled state are stale.
+    fn settle(&mut self) -> Option<(GcRef, i64)> {
+        while let Some(Reverse((_, _, StateEntry(state)))) = self.heap.pop() {
+            let key = DynamicKey::new(state);
+            if !self.done.insert(key) {
+                // Already settled by a cheaper entry; this one is stale.
+                continue;
+            }
+            // `best` is the settled cost: the entry that popped is the cheapest
+            // one for this state, and nothing lowers it after it is settled.
+            // The number in the entry is not it — for A\* that is `g + h`.
+            let cost = *self
+                .best
+                .get(&key)
+                .expect("a popped state has a known cost");
+            return Some((state, cost));
+        }
+        None
+    }
+
+    /// Relax every edge out of `state`, which settled at `cost`, queueing each
+    /// neighbour the edge improves under `priority_of`.
+    ///
+    /// Both refusals [`dijkstra_costs`] and [`a_star_cost`] document are made
+    /// here, once: a negative edge weight is a [`FaultKind::NoAnswer`], because
+    /// a settled state is never reconsidered and a cost nobody paid is worse
+    /// than a stop; a cost that leaves the `Int` range is a
+    /// [`FaultKind::IntOverflow`] rather than a wrap, which is the same rule
+    /// ADR-058 applied to `abs(Int::MIN)`.
+    fn relax(
+        &mut self,
+        oracle: &mut dyn GraphOracle,
+        state: GcRef,
+        cost: i64,
+        priority_of: PriorityOf,
+    ) -> Result<(), Aborted> {
         for next in oracle.neighbours(state)? {
             oracle.retain(next);
             let step = oracle.weight(state, next)?;
@@ -239,21 +296,54 @@ pub fn dijkstra_costs(
                 return Err(oracle.abort(FaultKind::IntOverflow));
             };
             let next_key = DynamicKey::new(next);
-            if done.contains(&next_key) {
+            if self.done.contains(&next_key) {
                 continue;
             }
-            let improved = match best.get(&next_key) {
+            let improved = match self.best.get(&next_key) {
                 Some(known) => through < *known,
                 None => true,
             };
             if improved {
-                best.insert(next_key, through);
-                frontier.push(Reverse((through, seq, StateEntry(next))));
-                seq += 1;
+                let priority = priority_of(oracle, next, through)?;
+                self.push(next, through, priority);
             }
         }
+        Ok(())
+    }
+}
+
+/// `dijkstra(start, neighbours, weight)` — the least cost from `start` to every
+/// reachable state, as `(state, cost)` pairs.
+///
+/// The start is present at cost 0. An unreachable state is simply absent, which
+/// is why this answers with a table rather than with an `Option` per state.
+///
+/// A **negative edge weight faults**. Dijkstra settles a state the first time it
+/// pops it and never reconsiders, so a negative edge makes the answer quietly
+/// too large — and a cost nobody paid is worse than a stop (the rule ADR-058
+/// applied to `abs(Int::MIN)`). The refusal itself lives in `Frontier::relax`,
+/// which is why A\* makes it identically.
+pub fn dijkstra_costs(
+    oracle: &mut dyn GraphOracle,
+    start: GcRef,
+) -> Result<Vec<(GcRef, i64)>, Aborted> {
+    let mut frontier = Frontier::new();
+    let mut settled: Vec<(GcRef, i64)> = Vec::new();
+
+    oracle.retain(start);
+    frontier.push(start, 0, 0);
+
+    while let Some((state, cost)) = frontier.settle() {
+        settled.push((state, cost));
+        frontier.relax(oracle, state, cost, cost_itself)?;
     }
     Ok(settled)
+}
+
+/// The priority Dijkstra files an entry under: the cost, with nothing added. It
+/// takes the oracle it never asks so that it and [`estimate`] are one shape.
+fn cost_itself(_oracle: &mut dyn GraphOracle, _state: GcRef, cost: i64) -> Result<i64, Aborted> {
+    Ok(cost)
 }
 
 /// `a_star(start, neighbours, weight, heuristic, is_goal)` — the cost of the
@@ -266,52 +356,17 @@ pub fn dijkstra_costs(
 /// reason a negative weight is: it makes `f` decrease along a path, which is the
 /// condition the ordering relies on.
 pub fn a_star_cost(oracle: &mut dyn GraphOracle, start: GcRef) -> Result<Option<i64>, Aborted> {
-    let mut frontier: BinaryHeap<Reverse<(i64, usize, StateEntry)>> = BinaryHeap::new();
-    let mut best: HashMap<DynamicKey, i64> = HashMap::new();
-    let mut done: HashSet<DynamicKey> = HashSet::new();
-    let mut seq = 0_usize;
+    let mut frontier = Frontier::new();
 
     oracle.retain(start);
     let start_estimate = estimate(oracle, start, 0)?;
-    best.insert(DynamicKey::new(start), 0);
-    frontier.push(Reverse((start_estimate, seq, StateEntry(start))));
-    seq += 1;
+    frontier.push(start, 0, start_estimate);
 
-    while let Some(Reverse((_, _, StateEntry(state)))) = frontier.pop() {
-        let key = DynamicKey::new(state);
-        if !done.insert(key) {
-            continue;
-        }
-        // `best` is the settled cost: the entry that popped is the cheapest one
-        // for this state, and nothing lowers it after it is settled.
-        let cost = *best.get(&key).expect("a popped state has a known cost");
+    while let Some((state, cost)) = frontier.settle() {
         if oracle.is_goal(state)? {
             return Ok(Some(cost));
         }
-        for next in oracle.neighbours(state)? {
-            oracle.retain(next);
-            let step = oracle.weight(state, next)?;
-            if step < 0 {
-                return Err(oracle.abort(FaultKind::NoAnswer));
-            }
-            let Some(through) = cost.checked_add(step) else {
-                return Err(oracle.abort(FaultKind::IntOverflow));
-            };
-            let next_key = DynamicKey::new(next);
-            if done.contains(&next_key) {
-                continue;
-            }
-            let improved = match best.get(&next_key) {
-                Some(known) => through < *known,
-                None => true,
-            };
-            if improved {
-                best.insert(next_key, through);
-                let priority = estimate(oracle, next, through)?;
-                frontier.push(Reverse((priority, seq, StateEntry(next))));
-                seq += 1;
-            }
-        }
+        frontier.relax(oracle, state, cost, estimate)?;
     }
     Ok(None)
 }

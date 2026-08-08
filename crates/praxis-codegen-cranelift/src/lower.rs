@@ -2023,19 +2023,16 @@ fn lower_inst<M: Module>(
                     // Fill in each field in declaration order. The field locals
                     // are already spilled into the shadow frame by
                     // `emit_spill` above; here we pass them as call args.
-                    let set_field = filler();
-                    for (idx, field_local) in fields.iter().enumerate() {
-                        let field_val = builder.use_var(vars[field_local.0 as usize]);
-                        let idx_val = builder.ins().iconst(GC, idx as i64);
-                        call_symbol(
-                            builder,
-                            ctx_val,
-                            &[record_ref, idx_val, field_val],
-                            set_field,
-                            module,
-                            imports,
-                        )?;
-                    }
+                    emit_fill_slots(
+                        builder,
+                        ctx_val,
+                        record_ref,
+                        fields,
+                        filler(),
+                        vars,
+                        module,
+                        imports,
+                    )?;
                     builder.def_var(vars[dst.0 as usize], record_ref);
                 }
                 AllocKind::Enum {
@@ -2062,19 +2059,16 @@ fn lower_inst<M: Module>(
                         module,
                         imports,
                     )?;
-                    let set_payload = filler();
-                    for (idx, arg_local) in args.iter().enumerate() {
-                        let arg_val = builder.use_var(vars[arg_local.0 as usize]);
-                        let idx_val = builder.ins().iconst(GC, idx as i64);
-                        call_symbol(
-                            builder,
-                            ctx_val,
-                            &[enum_ref, idx_val, arg_val],
-                            set_payload,
-                            module,
-                            imports,
-                        )?;
-                    }
+                    emit_fill_slots(
+                        builder,
+                        ctx_val,
+                        enum_ref,
+                        args,
+                        filler(),
+                        vars,
+                        module,
+                        imports,
+                    )?;
                     builder.def_var(vars[dst.0 as usize], enum_ref);
                 }
                 AllocKind::Tuple { ty, elements } => {
@@ -2094,19 +2088,16 @@ fn lower_inst<M: Module>(
                     let tuple_ref =
                         call_symbol(builder, ctx_val, &[schema_imm], ctor_sym, module, imports)?;
                     // Fill in each element in positional order.
-                    let set_elem = filler();
-                    for (idx, el_local) in elements.iter().enumerate() {
-                        let el_val = builder.use_var(vars[el_local.0 as usize]);
-                        let idx_val = builder.ins().iconst(GC, idx as i64);
-                        call_symbol(
-                            builder,
-                            ctx_val,
-                            &[tuple_ref, idx_val, el_val],
-                            set_elem,
-                            module,
-                            imports,
-                        )?;
-                    }
+                    emit_fill_slots(
+                        builder,
+                        ctx_val,
+                        tuple_ref,
+                        elements,
+                        filler(),
+                        vars,
+                        module,
+                        imports,
+                    )?;
                     builder.def_var(vars[dst.0 as usize], tuple_ref);
                 }
                 AllocKind::Closure { fn_name, captures } => {
@@ -2127,19 +2118,16 @@ fn lower_inst<M: Module>(
                         module,
                         imports,
                     )?;
-                    let set_capture = filler();
-                    for (idx, cap_local) in captures.iter().enumerate() {
-                        let cap_val = builder.use_var(vars[cap_local.0 as usize]);
-                        let idx_val = builder.ins().iconst(GC, idx as i64);
-                        call_symbol(
-                            builder,
-                            ctx_val,
-                            &[closure_ref, idx_val, cap_val],
-                            set_capture,
-                            module,
-                            imports,
-                        )?;
-                    }
+                    emit_fill_slots(
+                        builder,
+                        ctx_val,
+                        closure_ref,
+                        captures,
+                        filler(),
+                        vars,
+                        module,
+                        imports,
+                    )?;
                     builder.def_var(vars[dst.0 as usize], closure_ref);
                 }
                 AllocKind::Collection { ctor, args, init } => {
@@ -3078,6 +3066,66 @@ fn prove_descriptor(
     builder.ins().icmp(IntCC::Equal, have, want)
 }
 
+/// Prove that `obj` is an `Int` and read its payload word — the prologue
+/// [`emit_bitset_contains`] and the `VecGet` arm of
+/// [`emit_inline_collection_read`] both open with.
+///
+/// The caller creates `on_ok` and `on_fail`, branches into the block this emits
+/// the proof in, and switches to it; this leaves the builder switched to `on_ok`
+/// with the payload in hand.
+///
+/// The payload is read **after** its descriptor is proved and never before: an
+/// eight-byte load off an object that is not an `Int` is REP-56 exactly — a
+/// zero-width `Unit` read as a word.
+fn emit_prove_int_payload(
+    builder: &mut FunctionBuilder,
+    ctx_val: Value,
+    obj: Value,
+    on_ok: Block,
+    on_fail: Block,
+) -> Value {
+    let (int_id, int_align, _) = inline_scalar_load_of(praxis_mir::ScalarKind::Int)
+        .expect("`Int` has an inline payload form; `emit_scalar_load` reads the same row");
+
+    let is_int = prove_descriptor(builder, ctx_val, obj, int_id);
+    builder.ins().brif(is_int, on_ok, &[], on_fail, &[]);
+
+    builder.switch_to_block(on_ok);
+    builder.ins().load(
+        GC,
+        MemFlags::trusted(),
+        obj,
+        praxis_runtime::GcHeader::payload_offset_for(int_align) as i32,
+    )
+}
+
+/// Element `index` of the pinned
+/// [`ReprCVec`](praxis_runtime::repr_c_vec::ReprCVec) `recv` carries: base,
+/// shift, add, load. Both displacements and the scale come off `site` and
+/// nowhere else, which is
+/// [`InlineSliceSite`](praxis_runtime::repr_c_vec::InlineSliceSite)'s whole
+/// reason for being one value with private fields.
+///
+/// The caller owes the two proofs this emits neither of: that `recv` carries
+/// `site.type_id()`'s descriptor, and that `index` is below the length at
+/// `site.len_offset()`.
+fn emit_slice_element(
+    builder: &mut FunctionBuilder,
+    recv: Value,
+    index: Value,
+    site: praxis_runtime::repr_c_vec::InlineSliceSite,
+) -> Value {
+    let flags = MemFlags::trusted();
+    let base = builder
+        .ins()
+        .load(GC, flags, recv, site.elements_offset() as i32);
+    let offset = builder
+        .ins()
+        .ishl_imm_u(index, i64::from(site.element_shift()));
+    let slot = builder.ins().iadd(base, offset);
+    builder.ins().load(GC, flags, slot, 0)
+}
+
 /// Whether the collection primitives get their inline form.
 ///
 /// **This pair of lines is ADR-118 part 2's whole toggle**; see the
@@ -3161,8 +3209,6 @@ fn emit_bitset_contains<M: Module>(
     }
 
     let site = praxis_runtime::bitset::INLINE_BITSET_SITE;
-    let (int_id, int_align, _) = inline_scalar_load_of(praxis_mir::ScalarKind::Int)
-        .expect("`Int` has an inline payload form; `emit_scalar_load` reads the same row");
     let flags = MemFlags::trusted();
 
     let prove_int = builder.create_block();
@@ -3176,20 +3222,10 @@ fn emit_bitset_contains<M: Module>(
     let is_bitset = prove_descriptor(builder, ctx_val, set, site.type_id());
     builder.ins().brif(is_bitset, prove_int, &[], slow, &[]);
 
-    // The member's payload is read **after** its descriptor is proved and never
-    // before: an eight-byte load off an object that is not an `Int` is REP-56
-    // exactly — a zero-width `Unit` read as a word.
+    // The member's payload is proved and read by `emit_prove_int_payload`, which
+    // leaves the builder in `probe`.
     builder.switch_to_block(prove_int);
-    let is_int = prove_descriptor(builder, ctx_val, member, int_id);
-    builder.ins().brif(is_int, probe, &[], slow, &[]);
-
-    builder.switch_to_block(probe);
-    let i = builder.ins().load(
-        GC,
-        flags,
-        member,
-        praxis_runtime::GcHeader::payload_offset_for(int_align) as i32,
-    );
+    let i = emit_prove_int_payload(builder, ctx_val, member, probe, slow);
     let word = builder.ins().ushr_imm_u(i, 6);
     let len = builder.ins().load(GC, flags, set, site.len_offset() as i32);
     let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, word, len);
@@ -3197,14 +3233,7 @@ fn emit_bitset_contains<M: Module>(
 
     builder.switch_to_block(read);
     {
-        let base = builder
-            .ins()
-            .load(GC, flags, set, site.elements_offset() as i32);
-        let offset = builder
-            .ins()
-            .ishl_imm_u(word, i64::from(site.element_shift()));
-        let slot = builder.ins().iadd(base, offset);
-        let w = builder.ins().load(GC, flags, slot, 0);
+        let w = emit_slice_element(builder, set, word, site);
         let shift = builder.ins().band_imm_u(i, 63);
         let bit = builder.ins().ushr(w, shift);
         let present = builder.ins().band_imm_u(bit, 1);
@@ -3337,9 +3366,6 @@ fn emit_inline_collection_read<M: Module>(
         // `emit_inline_intern`'s reason: a negative index reinterpreted as a
         // `u64` is above every length, so the sign test is the same branch.
         (RuntimeSymbol::VecGet, &[vec, index]) => {
-            let (int_id, int_align, _) = inline_scalar_load_of(praxis_mir::ScalarKind::Int)
-                .expect("`Int` has an inline payload form");
-
             let prove_int = builder.create_block();
             let probe = builder.create_block();
             let fast = builder.create_block();
@@ -3350,32 +3376,17 @@ fn emit_inline_collection_read<M: Module>(
             let is_vec = prove_descriptor(builder, ctx_val, vec, site.type_id());
             builder.ins().brif(is_vec, prove_int, &[], slow, &[]);
 
-            // The index's payload is read **after** its descriptor is proved
-            // and never before: an eight-byte load off an object that is not an
-            // `Int` is REP-56 exactly — a zero-width `Unit` read as a word.
+            // The index's payload is proved and read by `emit_prove_int_payload`,
+            // which leaves the builder in `probe`.
             builder.switch_to_block(prove_int);
-            let is_int = prove_descriptor(builder, ctx_val, index, int_id);
-            builder.ins().brif(is_int, probe, &[], slow, &[]);
-
-            builder.switch_to_block(probe);
-            let i = builder.ins().load(
-                GC,
-                flags,
-                index,
-                praxis_runtime::GcHeader::payload_offset_for(int_align) as i32,
-            );
+            let i = emit_prove_int_payload(builder, ctx_val, index, probe, slow);
             let len = builder.ins().load(GC, flags, vec, site.len_offset() as i32);
             let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, i, len);
             builder.ins().brif(in_bounds, fast, &[], slow, &[]);
 
             builder.switch_to_block(fast);
             {
-                let base = builder
-                    .ins()
-                    .load(GC, flags, vec, site.elements_offset() as i32);
-                let offset = builder.ins().ishl_imm_u(i, i64::from(site.element_shift()));
-                let slot = builder.ins().iadd(base, offset);
-                let element = builder.ins().load(GC, flags, slot, 0);
+                let element = emit_slice_element(builder, vec, i, site);
                 builder.def_var(dst, element);
                 builder.ins().jump(merge, &[]);
             }
@@ -3408,6 +3419,70 @@ const INLINE_SCALAR_CLAIM: bool = true;
 #[cfg(feature = "adr119-arm-a")]
 const INLINE_SCALAR_CLAIM: bool = false;
 
+/// The pacing predicate, inline: load the two words `Heap::collection_is_due`
+/// compares, compare them, and branch to `due` when it holds (ADR-113, ADR-119).
+///
+/// ```text
+///        heap  = load.i64 [ctx  + offsets.heap_offset()]
+///        since = load.i64 [heap + offsets.bytes_since_collect_offset()]
+///        thr   = load.i64 [heap + offsets.collect_threshold_offset()]
+///        due   = icmp uge since, thr
+///                brif due, due_block, not_due_block
+/// ```
+///
+/// Emitted into the block the builder is already in, whose terminator the `brif`
+/// becomes; the caller switches to whichever successor it fills next. The
+/// returned value is the loaded `Heap` pointer, which both callers hand on to
+/// [`emit_inline_claim`] rather than loading a second time.
+///
+/// # This is where the predicate is transcribed, and the only place
+///
+/// `Heap::collection_is_due` is the one *statement* of the predicate, and
+/// generated code is the one reader that cannot call it. So the compare
+/// direction — `>=`, which is what makes a zero threshold *always* due where `>`
+/// would not — and the operand order are copied out of a runtime rule nothing in
+/// the compiler can check against. They are copied here, once:
+/// [`emit_inline_intern`] and [`emit_inline_claim_box`] both call this, and a
+/// pacer that grows a third term changes `collection_is_due`, this function, and
+/// nothing else in the backend. The displacements come off a single
+/// [`praxis_runtime::heap::PacingOffsets`] that both site types carry — the same
+/// value, not two sets under the same names — so no caller can pair one site's
+/// `since` with another's `threshold`.
+///
+/// # Flags
+///
+/// `MemFlags::trusted()` — `notrap + aligned`, and deliberately **not**
+/// `readonly`, for `emit_scalar_load`'s reason: `bytes_since_collect` is written
+/// by every allocating wrapper, so Cranelift's alias analysis must go on treating
+/// a call as clobbering it. Hoisting the pacing load out of a loop would turn a
+/// collection into one that never happens. (Two of these sites with no call
+/// between them may share the load, and that is sound in the other direction —
+/// neither of them wrote it.)
+fn emit_pacing_test(
+    builder: &mut FunctionBuilder,
+    ctx_val: Value,
+    offsets: praxis_runtime::heap::PacingOffsets,
+    due_block: Block,
+    not_due_block: Block,
+) -> Value {
+    let flags = MemFlags::trusted();
+
+    let heap = builder
+        .ins()
+        .load(GC, flags, ctx_val, offsets.heap_offset() as i32);
+    let since = builder
+        .ins()
+        .load(GC, flags, heap, offsets.bytes_since_collect_offset() as i32);
+    let threshold = builder
+        .ins()
+        .load(GC, flags, heap, offsets.collect_threshold_offset() as i32);
+    let due = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, since, threshold);
+    builder.ins().brif(due, due_block, &[], not_due_block, &[]);
+    heap
+}
+
 /// Claim a block from the heap's page bitmap and lay an object out in it —
 /// inline, in generated code, with no call at all (ADR-119).
 ///
@@ -3439,7 +3514,7 @@ const INLINE_SCALAR_CLAIM: bool = false;
 ///         ; (4) both live counters and the pacing charge
 ///         istore32  [page + site.page_live_count_offset()] += 1
 ///         store.i64 [heap + site.heap_live_count_offset()] += 1
-///         store.i64 [heap + site.bytes_since_collect_offset()] += site.stride()
+///         store.i64 [heap + site.pacing().bytes_since_collect_offset()] += site.stride()
 /// slow:   (cold) r = call praxis_alloc_int / praxis_alloc_float
 /// ```
 ///
@@ -3612,15 +3687,18 @@ fn emit_inline_claim(
     // `InlineClaimSite::of` refuses every descriptor whose `owned_bytes` is
     // `Some`, so the second term is zero here by construction rather than by
     // this arm's choice — which is why the refusal is in the runtime and const.
-    let since = builder
-        .ins()
-        .load(GC, flags, heap, site.bytes_since_collect_offset() as i32);
+    let since = builder.ins().load(
+        GC,
+        flags,
+        heap,
+        site.pacing().bytes_since_collect_offset() as i32,
+    );
     let since_next = builder.ins().iadd_imm_u(since, site.stride() as i64);
     builder.ins().store(
         flags,
         since_next,
         heap,
-        site.bytes_since_collect_offset() as i32,
+        site.pacing().bytes_since_collect_offset() as i32,
     );
 
     builder.def_var(dst, obj);
@@ -3632,10 +3710,7 @@ fn emit_inline_claim(
 /// bitmap claim on the out-of-range edge.
 ///
 /// ```text
-/// hot:   heap  = load.i64  [ctx  + site.heap_offset()]
-///        since = load.i64  [heap + site.bytes_since_collect_offset()]
-///        thr   = load.i64  [heap + site.collect_threshold_offset()]
-///        due   = icmp uge  since, thr
+/// hot:   heap  = emit_pacing_test(site.pacing())        ; three loads, icmp uge
 ///                brif due, slow, probe                 ; ADR-040's obligation
 /// probe: index = iadd_imm  value, -site.min()
 ///        ok    = icmp_imm  ule index, site.span()      ; one compare, not two
@@ -3683,7 +3758,7 @@ fn emit_inline_claim(
 /// offsets as well as the table's — deliberately not as two arguments, so that a
 /// caller cannot hold the permission without the obligation. Its doc, and
 /// `Heap::collection_is_due`'s, are where a pacer with a third term is told that
-/// this function owes the same change.
+/// [`emit_pacing_test`] owes the same change.
 ///
 /// # The range test is one unsigned compare
 ///
@@ -3698,13 +3773,9 @@ fn emit_inline_claim(
 ///
 /// # Flags
 ///
-/// `MemFlags::trusted()` — `notrap + aligned`, and deliberately **not**
-/// `readonly`, for `emit_scalar_load`'s reason: `bytes_since_collect` is written
-/// by every allocating wrapper, so Cranelift's alias analysis must go on treating
-/// a call as clobbering it. Hoisting the pacing load out of a loop would turn a
-/// collection into one that never happens. (Two of these sites with no call
-/// between them may share the load, and that is sound in the other direction —
-/// neither of them wrote it.)
+/// `MemFlags::trusted()` for every load here, the table's included. Why the
+/// pacing loads are deliberately **not** `readonly` — and what a hoist out of a
+/// loop would cost — is [`emit_pacing_test`]'s doc.
 #[allow(clippy::too_many_arguments)] // The lowering context, as `lower_inst` carries it.
 fn emit_inline_intern<M: Module>(
     builder: &mut FunctionBuilder,
@@ -3733,21 +3804,10 @@ fn emit_inline_intern<M: Module>(
     builder.set_cold_block(slow);
 
     // (1) The pacing predicate, ahead of everything. `Heap::collection_is_due`
-    // is the one statement of it; this is its second reader and the only one
-    // that cannot call it.
-    let heap = builder
-        .ins()
-        .load(GC, flags, ctx_val, site.heap_offset() as i32);
-    let since = builder
-        .ins()
-        .load(GC, flags, heap, site.bytes_since_collect_offset() as i32);
-    let threshold = builder
-        .ins()
-        .load(GC, flags, heap, site.collect_threshold_offset() as i32);
-    let due = builder
-        .ins()
-        .icmp(IntCC::UnsignedGreaterThanOrEqual, since, threshold);
-    builder.ins().brif(due, slow, &[], probe, &[]);
+    // is the one statement of it, and `emit_pacing_test` is the one place the
+    // backend transcribes it — this and `emit_inline_claim_box` are its callers,
+    // and neither writes the compare itself.
+    let heap = emit_pacing_test(builder, ctx_val, site.pacing(), slow, probe);
 
     // (2) Membership: one subtract, one unsigned compare.
     builder.switch_to_block(probe);
@@ -3833,10 +3893,8 @@ fn emit_inline_intern<M: Module>(
 /// claim, with the allocating wrapper cold behind both (ADR-119).
 ///
 /// ```text
-/// hot:   heap  = load.i64 [ctx  + site.heap_offset()]
-///        since = load.i64 [heap + site.bytes_since_collect_offset()]
-///        thr   = load.i64 [heap + site.collect_threshold_offset()]
-///                brif icmp uge since, thr, slow, claim
+/// hot:   heap  = emit_pacing_test(claim.pacing())   ; three loads, icmp uge
+///                brif due, slow, claim
 /// claim: (the sequence in `emit_inline_claim`, bailing to slow)
 /// slow:  (cold) r = call praxis_alloc_float(ctx, value)
 /// ```
@@ -3864,26 +3922,15 @@ fn emit_inline_claim_box<M: Module>(
     module: &mut M,
     imports: &mut HashMap<RuntimeSymbol, FuncRef>,
 ) -> Result<()> {
-    let flags = MemFlags::trusted();
-
     let start = builder.create_block();
     let slow = builder.create_block();
     let merge = builder.create_block();
     builder.set_cold_block(slow);
 
-    let heap = builder
-        .ins()
-        .load(GC, flags, ctx_val, claim.heap_offset() as i32);
-    let since = builder
-        .ins()
-        .load(GC, flags, heap, claim.bytes_since_collect_offset() as i32);
-    let threshold = builder
-        .ins()
-        .load(GC, flags, heap, claim.collect_threshold_offset() as i32);
-    let due = builder
-        .ins()
-        .icmp(IntCC::UnsignedGreaterThanOrEqual, since, threshold);
-    builder.ins().brif(due, slow, &[], start, &[]);
+    // The compare is `emit_inline_intern`'s, emitted from the same
+    // `PacingOffsets` — `Heap::collection_is_due` has one transcription in this
+    // backend and this is a caller of it, not a second copy.
+    let heap = emit_pacing_test(builder, ctx_val, claim.pacing(), slow, start);
 
     builder.switch_to_block(start);
     emit_inline_claim(
@@ -4539,6 +4586,46 @@ fn call_symbol<M: Module>(
     })
 }
 
+/// Fill an already-allocated composite's slots in order, calling `filler` once
+/// per slot as `praxis_*_set*(ctx, obj, idx, value)`.
+///
+/// **One statement of the slot-fill convention.** The four composites the
+/// backend builds in two phases (allocate, then set each slot) — record, enum,
+/// tuple, closure — differ only in which wrapper [`AllocKind::filler`] names,
+/// and that convention's arity and argument order is the same for all of them.
+/// `call_symbol` takes a `&[Value]`, so there is no compile-time arity check;
+/// written out per arm, a change to the convention drifts silently across the
+/// arms nobody edited.
+///
+/// The slot locals are already spilled into the shadow frame by
+/// `spill.spill_roots` at the top of the `Inst::Alloc` arm; here they are only
+/// read back as call arguments.
+#[allow(clippy::too_many_arguments)] // The lowering context, as `lower_inst` carries it.
+fn emit_fill_slots<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx_val: Value,
+    obj: Value,
+    slots: &[LocalId],
+    filler: RuntimeSymbol,
+    vars: &[Variable],
+    module: &mut M,
+    imports: &mut HashMap<RuntimeSymbol, FuncRef>,
+) -> Result<()> {
+    for (idx, slot) in slots.iter().enumerate() {
+        let slot_val = builder.use_var(vars[slot.0 as usize]);
+        let idx_val = builder.ins().iconst(GC, idx as i64);
+        call_symbol(
+            builder,
+            ctx_val,
+            &[obj, idx_val, slot_val],
+            filler,
+            module,
+            imports,
+        )?;
+    }
+    Ok(())
+}
+
 /// Resolve a user-function call target to a FuncRef declared in the current func.
 fn user_funcref<M: Module>(
     name: &str,
@@ -4633,10 +4720,11 @@ fn record_schema_for(
 ///
 /// A payload slot whose type is still an inference *variable* — or a whole
 /// instantiation the lowering had no type for — resolves to a **null**
-/// descriptor rather than failing the compile, the same exception
-/// `tuple_schema_for` makes for the same reason (HIR-01/MONO-01). The value's
-/// own descriptor answers for it, and it is read off the object's header, so it
-/// is never the wrong one.
+/// descriptor rather than failing the compile. That is
+/// [`nullable_descriptor_for_type`]'s policy (HIR-01/MONO-01), which the tuple
+/// and collection sites resolve their slots through too. The value's own
+/// descriptor answers for it, and it is read off the object's header, so it is
+/// never the wrong one.
 fn enum_schema_for(
     db: &mut praxis_types::TypeDb,
     id: u32,
@@ -4675,15 +4763,12 @@ fn enum_schema_for(
         let descriptors = payload_types
             .iter()
             .enumerate()
-            .map(|(slot, t)| match praxis_repr::descriptor_for_type(db, *t) {
-                Ok(d) => Ok(d as *const _),
-                Err(e) if e.is_unresolved() => Ok(std::ptr::null()),
-                Err(e) => Err(anyhow!(
-                    "enum variant `{}` payload {slot}: cannot emit a runtime descriptor for `{}`: {}",
-                    variant.name,
-                    db.render(*t),
-                    e.reason
-                )),
+            .map(|(slot, t)| {
+                nullable_descriptor_for_type(
+                    db,
+                    *t,
+                    format_args!("enum variant `{}` payload {slot}", variant.name),
+                )
             })
             .collect::<Result<Vec<_>>>()?;
         variants.push((generation.alloc_str(&variant.name), descriptors));
@@ -4733,12 +4818,13 @@ fn tuple_schema_for(
     // (P0-11).
     //
     // A slot that is still an inference *variable* is the one exception, and it
-    // is the same one `collection_arg_descriptor` makes for the same reason
-    // (HIR-01/MONO-01, hazard H10): `var m = Map()` generalizes at the `var`, so
-    // a `for kv in m` whose body never looks inside the pair leaves K and V
-    // unresolved, and failing the compile there rejects a working program. The
-    // null slot says "no static type" and the runtime reads the value's own
-    // descriptor off its header — which is never the wrong one.
+    // is `nullable_descriptor_for_type`'s — the same one the enum-payload and
+    // collection-element sites make, for the same reason (HIR-01/MONO-01,
+    // hazard H10): `var m = Map()` generalizes at the `var`, so a `for kv in m`
+    // whose body never looks inside the pair leaves K and V unresolved, and
+    // failing the compile there rejects a working program. The null slot says
+    // "no static type" and the runtime reads the value's own descriptor off its
+    // header — which is never the wrong one.
     let descriptors: Vec<*const praxis_runtime::descriptor::TypeDescriptor> = element_types
         .iter()
         .enumerate()
@@ -4746,15 +4832,7 @@ fn tuple_schema_for(
             let Some(t) = t else {
                 return Ok(std::ptr::null());
             };
-            match praxis_repr::descriptor_for_type(db, *t) {
-                Ok(d) => Ok(d as *const _),
-                Err(e) if e.is_unresolved() => Ok(std::ptr::null()),
-                Err(e) => Err(anyhow!(
-                    "tuple element {i}: cannot emit a runtime descriptor for `{}`: {}",
-                    db.render(*t),
-                    e.reason
-                )),
-            }
+            nullable_descriptor_for_type(db, *t, format_args!("tuple element {i}"))
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(generation.tuple_schema(&descriptors))
@@ -4947,14 +5025,55 @@ fn debug_descriptor_for_type(
     praxis_repr::descriptor_for_type(db, ty).map_or(std::ptr::null(), |d| d as *const _)
 }
 
+/// The runtime descriptor for `ty`, a **null** descriptor when `ty` is still an
+/// unresolved inference variable, and a compile error for anything else.
+///
+/// The lenient member of the family: [`descriptor_for_type`] refuses both,
+/// [`debug_descriptor_for_type`] nulls both, and this one splits them. `at`
+/// names the slot being resolved and leads the diagnostic — pass a
+/// `format_args!` describing it, e.g. `format_args!("tuple element {i}")`.
+///
+/// **The unresolved-variable exception is one policy, and this is where it is
+/// written** (HIR-01/MONO-01, hazard H10). Its three readers — enum payload
+/// slots, tuple element slots, collection element arguments — each spelled this
+/// match out themselves, so `is_unresolved` ceasing to be the right
+/// discriminator meant three edits and nothing forced the third. The reason is
+/// the same at all three: `var xs = Vec()` and `var m = Map()` generalize at the
+/// `var`, so the construction site's own element type is never resolved and a
+/// `for kv in m` whose body never looks inside the pair leaves K and V
+/// unresolved. Failing the compile there rejects a working program. The null
+/// says "no static type", and the runtime reads the value's own descriptor off
+/// the object's header — which is never the wrong one.
+///
+/// A `Known` type that *cannot* have a runtime object — `Vec[Seq[Int]]`,
+/// `Vec[Never]` — is still a compile error, for the reason
+/// [`descriptor_for_type`] gives (P0-11, D9). That distinction is exactly what
+/// [`praxis_repr::NoReprCause`] records.
+fn nullable_descriptor_for_type(
+    db: &praxis_types::TypeDb,
+    ty: praxis_types::Type,
+    at: impl std::fmt::Display,
+) -> Result<*const praxis_runtime::descriptor::TypeDescriptor> {
+    match praxis_repr::descriptor_for_type(db, ty) {
+        Ok(d) => Ok(d as *const _),
+        Err(e) if e.is_unresolved() => Ok(std::ptr::null()),
+        Err(e) => Err(anyhow!(
+            "{at}: cannot emit a runtime descriptor for `{}`: {}",
+            db.render(ty),
+            e.reason
+        )),
+    }
+}
+
 /// Resolve the element descriptor(s) for a collection's payload, for use at
 /// construction (`praxis_<kind>_new`). Most collections carry one element
 /// descriptor (Vec/Deque/Set/Heap/Grid); `Map[K,V]` and `Counter[T]` carry a
 /// key descriptor (and Map also a value descriptor, passed as a second slot).
 ///
-/// The descriptor is resolved recursively via [`descriptor_for_type`] so nested
-/// collections (e.g. `Map[Vec[Int], Int]`) resolve the key descriptor to `VEC`,
-/// making structural equality/hashing dispatch correctly on map keys (§11.3).
+/// The descriptor is resolved recursively via
+/// [`nullable_descriptor_for_type`] so nested collections (e.g.
+/// `Map[Vec[Int], Int]`) resolve the key descriptor to `VEC`, making structural
+/// equality/hashing dispatch correctly on map keys (§11.3).
 ///
 /// A *null* descriptor is the honest encoding of "this lowering has no static
 /// element type", and every `praxis_*_new` wrapper reads it that way. Two
@@ -4979,15 +5098,11 @@ fn collection_element_descriptor_for(
     let Some(MirType::Known(element_type)) = args.get(index).copied() else {
         return Ok(std::ptr::null());
     };
-    match praxis_repr::descriptor_for_type(db, element_type) {
-        Ok(d) => Ok(d as *const _),
-        Err(e) if e.is_unresolved() => Ok(std::ptr::null()),
-        Err(e) => Err(anyhow!(
-            "collection type argument {index}: cannot emit a runtime descriptor for `{}`: {}",
-            db.render(element_type),
-            e.reason
-        )),
-    }
+    nullable_descriptor_for_type(
+        db,
+        element_type,
+        format_args!("collection type argument {index}"),
+    )
 }
 
 /// Embed a string literal in the generation arena and produce (ptr, len)
@@ -5707,11 +5822,12 @@ mod tests {
     fn an_inline_int_box_tests_the_pacing_counter_before_it_reads_the_table() {
         let (all, entry) = inline_intern_ir();
         let site = praxis_runtime::small_int::INLINE_INTERN_SITE;
+        let pacing = site.pacing();
 
         for (what, offset) in [
-            ("the heap pointer", site.heap_offset()),
-            ("bytes_since_collect", site.bytes_since_collect_offset()),
-            ("collect_threshold", site.collect_threshold_offset()),
+            ("the heap pointer", pacing.heap_offset()),
+            ("bytes_since_collect", pacing.bytes_since_collect_offset()),
+            ("collect_threshold", pacing.collect_threshold_offset()),
         ] {
             assert!(
                 entry.contains(&format!("+{offset}")) || offset == 0,
@@ -6000,12 +6116,12 @@ mod tests {
         }
         // And it is genuinely the *pacing* compare that dominates: both
         // exported displacements are loaded in the guard block.
-        let site = praxis_runtime::scalars::FLOAT_CLAIM_SITE;
+        let pacing = praxis_runtime::scalars::FLOAT_CLAIM_SITE.pacing();
         for guard in &paced {
             let text = block_text(&all, *guard);
             for offset in [
-                site.bytes_since_collect_offset(),
-                site.collect_threshold_offset(),
+                pacing.bytes_since_collect_offset(),
+                pacing.collect_threshold_offset(),
             ] {
                 assert!(
                     text.contains(&format!("+{offset}")),
@@ -6123,7 +6239,7 @@ mod tests {
             // page holding live blocks on the empty pool.
             ("istore32", site.page_live_count_offset()),
             ("store", site.heap_live_count_offset()),
-            ("store", site.bytes_since_collect_offset()),
+            ("store", site.pacing().bytes_since_collect_offset()),
         ];
         let found = stores_in_order(&text);
         assert_eq!(
@@ -6469,10 +6585,11 @@ mod tests {
         });
         let all = func.display().to_string();
         let site = praxis_runtime::small_int::INLINE_INTERN_SITE;
+        let pacing = site.pacing();
 
         for (what, disp) in [
-            ("bytes_since_collect", site.bytes_since_collect_offset()),
-            ("collect_threshold", site.collect_threshold_offset()),
+            ("bytes_since_collect", pacing.bytes_since_collect_offset()),
+            ("collect_threshold", pacing.collect_threshold_offset()),
             ("the intern table's base", site.table_offset()),
         ] {
             // Cranelift prints a zero displacement as nothing at all, so a

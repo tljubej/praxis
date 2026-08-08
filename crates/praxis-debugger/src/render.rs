@@ -9,11 +9,14 @@
 //!
 //! The interactive REPL (WS5) reuses [`render_backtrace`] and
 //! [`render_locals`] for its `bt` and `locals` commands, so the formatting lives
-//! here once.
+//! here once. The TUI (M10b-WS4) lays its locals out as pane rows rather than
+//! text lines, but the *decisions* behind a row are this module's:
+//! [`split_locals`], [`type_str`] and [`provenance`] are shared, so the `locals`
+//! command and the locals pane cannot disagree about the same frame.
 
 use std::io::Write;
 
-use praxis_runtime::{CrashSnapshot, DebugLocal, FaultKind, ParseDetail};
+use praxis_runtime::{CrashSnapshot, DebugLocal, FaultKind, ParseDetail, SnapshotFrame};
 
 /// The maximum number of locals the noninteractive fallback prints per frame
 /// (§9.6 "up to configured limits"). Keeps the output a useful glance, not a
@@ -130,14 +133,14 @@ pub fn render_backtrace<W: Write>(out: &mut W, snap: &CrashSnapshot) -> std::io:
 }
 
 /// Render the locals of frame `index` (0 = innermost), up to `limit` total,
-/// split into two labeled sections: bindings first, then compiler temporaries.
-/// "Binding" is ADR-125's sense of the word — a `var`, a parameter, a `for`
-/// variable and a name a pattern introduces — so a `match` arm's payload and a
-/// destructuring `for`'s elements belong in the first section and the slot
-/// holding the whole item belongs in the second (ADR-139). Each line shows the
-/// local's name (or `<tmp#N: Type>` for a
-/// temp), its type when the [`RenderCtx`] carries a `TypeDb`, and the temp's
-/// materializing expression as `@ "expr"` when the ctx carries source text.
+/// split by [`split_locals`] into two labeled sections: bindings first, then
+/// compiler temporaries. "Binding" is ADR-125's sense of the word — a `var`, a
+/// parameter, a `for` variable and a name a pattern introduces — so a `match`
+/// arm's payload and a destructuring `for`'s elements belong in the first
+/// section and the slot holding the whole item belongs in the second (ADR-139).
+/// Each line shows the local's name (or `<tmp#N: Type>` for a temp), its type
+/// when the [`RenderCtx`] carries a `TypeDb`, and the temp's materializing
+/// expression as `@ "expr"` when the ctx carries source text.
 /// Values are formatted through their descriptors; not-yet-written slots show
 /// `<uninit>`. Used by the noninteractive fallback and the REPL `locals`.
 ///
@@ -163,26 +166,7 @@ pub fn render_frame_locals<W: Write>(
         return Ok(());
     }
 
-    // Partition into user bindings (first) and compiler temps (second),
-    // preserving declaration order within each. This replaces the old flat list
-    // where temps (`<tmp>`) buried the variables the programmer wrote.
-    //
-    // Dead scratch temps — ones with neither a current value nor any source
-    // provenance — are dropped: they hold nothing and explain nothing (e.g. a
-    // closure's hidden `self` arg after the capture prologue, or the function's
-    // pre-allocated return slot when the body faulted before returning). A slot
-    // that is uninit *but* carries a span is kept: that's a temp for an
-    // expression whose value genuinely never computed (the faulting expression
-    // itself, e.g. `x / 0`), which is exactly what the user needs to see.
-    let mut users: Vec<&DebugLocal> = Vec::new();
-    let mut temps: Vec<&DebugLocal> = Vec::new();
-    for local in &frame.locals {
-        if local.is_user() {
-            users.push(local);
-        } else if local.value.is_some() || local.span().is_some() {
-            temps.push(local);
-        }
-    }
+    let (users, temps) = split_locals(frame);
 
     // `limit` caps the total shown; give users priority (they are what the
     // programmer is debugging for), then fill remaining slots with temps.
@@ -209,6 +193,33 @@ pub fn render_frame_locals<W: Write>(
     Ok(())
 }
 
+/// Partition a frame's locals into user bindings (first) and compiler temps
+/// (second), preserving declaration order within each. This replaces the old
+/// flat list where temps (`<tmp>`) buried the variables the programmer wrote.
+///
+/// Dead scratch temps — ones with neither a current value nor any source
+/// provenance — are dropped: they hold nothing and explain nothing (e.g. a
+/// closure's hidden `self` arg after the capture prologue, or the function's
+/// pre-allocated return slot when the body faulted before returning). A slot
+/// that is uninit *but* carries a span is kept: that's a temp for an expression
+/// whose value genuinely never computed (the faulting expression itself, e.g.
+/// `x / 0`), which is exactly what the user needs to see.
+///
+/// Shared with the TUI's locals pane so the two surfaces show the same frame
+/// the same way.
+pub fn split_locals(frame: &SnapshotFrame) -> (Vec<&DebugLocal>, Vec<&DebugLocal>) {
+    let mut users: Vec<&DebugLocal> = Vec::new();
+    let mut temps: Vec<&DebugLocal> = Vec::new();
+    for local in &frame.locals {
+        if local.is_user() {
+            users.push(local);
+        } else if local.value.is_some() || local.span().is_some() {
+            temps.push(local);
+        }
+    }
+    (users, temps)
+}
+
 /// Render one local as a single indented line: the label (name or temp tag) +
 /// optional `@ "expr"` provenance + `= value`. The label shape depends on the
 /// local's kind:
@@ -220,12 +231,10 @@ fn render_local_line<W: Write>(
     local: &DebugLocal,
     ctx: &RenderCtx<'_>,
 ) -> std::io::Result<()> {
-    let ty_str = type_str(local, ctx);
+    let ty_str = type_str(local, ctx.db);
     let value_display = match local.value {
         Some(v) => format_value(v),
-        // The absence is the type's, not a sentinel pointer's (F18): a slot
-        // nothing was ever spilled into reads back as `None`.
-        None => "<uninit>".to_string(),
+        None => crate::value::UNINIT.to_string(),
     };
     if local.is_user() {
         let name = local.name();
@@ -254,7 +263,7 @@ fn render_local_line<W: Write>(
         } else {
             format!("<tmp#{}: {}>", local.symbol_id, ty_str)
         };
-        match provenance(local, ctx) {
+        match provenance(local, ctx.source_text) {
             Some(expr) => writeln!(out, "    {tag} @ \"{expr}\" = {value_display}")?,
             None => writeln!(out, "    {tag} = {value_display}")?,
         }
@@ -262,16 +271,19 @@ fn render_local_line<W: Write>(
     Ok(())
 }
 
-/// The local's type as a string, when the ctx carries the live `TypeDb` and the
-/// local's `type_id` resolves within it. Returns an empty string (caller omits
-/// the type) when the db is absent, the local has no threaded type (a null
+/// The local's type as a string, when `db` is the live `TypeDb` and the local's
+/// `type_id` resolves within it. Returns an empty string (caller omits the
+/// type) when the db is absent, the local has no threaded type (a null
 /// descriptor marks a frame constructed before type threading), or the id is
 /// out of range. The `type_id` is positional in the program's own `TypeDb`, so
 /// it must pair with that same db — never a fresh one (evaluate.rs:184). We do
 /// *not* treat `type_id == 0` as "unknown": slot 0 is a legitimate type, and
 /// the codegen always threads a valid id for real frames.
-fn type_str(local: &DebugLocal, ctx: &RenderCtx<'_>) -> String {
-    let Some(db) = ctx.db else {
+///
+/// Takes the `Option` rather than a [`RenderCtx`] so the TUI, which holds the
+/// db and source text as loose values, resolves types through this same route.
+pub fn type_str(local: &DebugLocal, db: Option<&praxis_types::TypeDb>) -> String {
+    let Some(db) = db else {
         return String::new();
     };
     // A null descriptor marks a frame from before type threading (the M5 unit
@@ -288,12 +300,15 @@ fn type_str(local: &DebugLocal, ctx: &RenderCtx<'_>) -> String {
     }
 }
 
-/// The temp's materializing source expression, when the ctx carries source text
-/// and the local's span resolves to a valid slice of it. Returns `None`
+/// The temp's materializing source expression, when `source` is the program
+/// text and the local's span resolves to a valid slice of it. Returns `None`
 /// otherwise (the line degrades to no `@ "..."` annotation). Single-line,
 /// whitespace-collapsed for a tidy one-line provenance.
-fn provenance(local: &DebugLocal, ctx: &RenderCtx<'_>) -> Option<String> {
-    let source = ctx.source_text?;
+///
+/// Uncut: the text line has room for the whole expression. A caller with a
+/// fixed column (the TUI's locals pane) elides the result itself.
+pub fn provenance(local: &DebugLocal, source: Option<&str>) -> Option<String> {
+    let source = source?;
     let (start, end) = local.span()?;
     let s = usize::try_from(start).ok()?;
     let e = usize::try_from(end).ok()?;
@@ -459,7 +474,6 @@ pub fn render_parser_context<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use praxis_runtime::crash_snapshot::SnapshotFrame;
 
     /// Build a minimal snapshot with one frame named `fn_name` and no locals.
     fn snap_with_frame(fn_name: &str) -> CrashSnapshot {

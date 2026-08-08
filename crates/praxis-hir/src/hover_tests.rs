@@ -6,18 +6,10 @@
 
 #![cfg(test)]
 
-use praxis_parser::parse;
-use praxis_source::SourceMap;
 use rowan::TextRange;
 
+use crate::hir_tests::test_util::{analyze, parse_file};
 use crate::{analyze_root, hover::HoverInfo};
-
-fn analyze(text: &str) -> crate::Analysis {
-    let map = SourceMap::new();
-    let id = map.intern("hover_test.px", text);
-    let parsed = parse(id, text);
-    analyze_root(id, &parsed.tree)
-}
 
 #[test]
 fn hover_over_shadowed_occurrences_returns_distinct_symbols() {
@@ -119,9 +111,7 @@ fn hover_at_empty_range_returns_none() {
 #[test]
 fn hover_over_a_method_name_reports_its_result_type() {
     let src = "fn main(v: Vec[Int]) -> Int { v.len() }\n";
-    let map = SourceMap::new();
-    let id = map.intern("hover_method.px", src);
-    let parsed = praxis_parser::parse(id, src);
+    let (id, parsed) = parse_file(src);
     let analysis = analyze_root(id, &parsed.tree);
     let len_tok = parsed
         .tree
@@ -141,9 +131,7 @@ fn hover_over_a_method_name_reports_its_result_type() {
 #[test]
 fn hover_over_a_receiver_still_reports_the_binding() {
     let src = "fn main(v: Vec[Int]) -> Int { v.len() }\n";
-    let map = SourceMap::new();
-    let id = map.intern("hover_receiver.px", src);
-    let parsed = praxis_parser::parse(id, src);
+    let (id, parsed) = parse_file(src);
     let analysis = analyze_root(id, &parsed.tree);
     let v_use = analysis
         .refs

@@ -23,11 +23,11 @@
 use std::path::{Path, PathBuf};
 
 use praxis_mir::ir::{Function, Inst, Overflow};
-use praxis_mir::test_support::lower_src_to_mir;
+use praxis_mir::test_support::{benchmark_dir, lower_src_to_mir};
 
 /// The eight benchmark programs, by path, sorted.
 fn corpus() -> Vec<PathBuf> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/praxis");
+    let dir = benchmark_dir();
     let mut out: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
         .map(|e| e.expect("a directory entry").path())

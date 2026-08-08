@@ -22,9 +22,10 @@
 use lsp_types::{SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensLegend};
 use praxis_hir::SymbolKind;
 use praxis_source::Span;
-use praxis_syntax::{SyntaxKind, SyntaxToken};
+use praxis_syntax::{span_bridge::range_to_span, SyntaxKind, SyntaxToken};
 use rowan::NodeOrToken;
 
+use crate::navigation::symbol_for_range;
 use crate::position::Encoding;
 use crate::query::Snapshot;
 
@@ -261,9 +262,8 @@ fn tree_class(snapshot: &Snapshot) -> Vec<ClassifiedToken> {
         let Some(name) = classify_token(&token, analysis) else {
             continue;
         };
-        let range = token.text_range();
         out.push(ClassifiedToken {
-            span: Span::new(u32::from(range.start()), u32::from(range.end())),
+            span: range_to_span(token.text_range()),
             ty: ty(name),
         });
     }
@@ -303,12 +303,7 @@ fn classify_token(token: &SyntaxToken, analysis: &praxis_hir::Analysis) -> Optio
         return Some("method");
     }
 
-    let symbol = analysis
-        .refs
-        .get(&range)
-        .map(|r| r.symbol)
-        .or_else(|| analysis.decls.get(&range).copied())
-        .and_then(|id| analysis.names.get(id));
+    let symbol = symbol_for_range(analysis, range).and_then(|id| analysis.names.get(id));
 
     if let Some(symbol) = symbol {
         return Some(match symbol.kind {

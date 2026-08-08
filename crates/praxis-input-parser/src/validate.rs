@@ -38,14 +38,24 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
         ParserAst::Template { parts, span } => {
             validate_template(parts, *span, errs);
         }
+        // Every constructor whose only structure is its one child. The extra
+        // payload some of them carry is not this pass's to check, and is
+        // already answered where the node is *built*: `sep`'s separator by
+        // `Separator::new`, the type's only constructor, which refuses the `""`
+        // that never advances a cursor (IP-10); `chars`'s skip policy and
+        // ragged `grid`'s fill by `build_call`. A check `validate` performs is
+        // one the next construction site can forget.
         ParserAst::Lines { child, .. }
         | ParserAst::Sections { child, .. }
         | ParserAst::Csv { child, .. }
         | ParserAst::Ws { child, .. }
-        | ParserAst::Grid { child, .. } => {
-            validate_node(child, errs);
-        }
-        ParserAst::Sep { child, .. } => {
+        | ParserAst::Grid { child, .. }
+        | ParserAst::Sep { child, .. }
+        | ParserAst::Optional { child, .. }
+        | ParserAst::Scan { child, .. }
+        | ParserAst::Characters { child, .. }
+        | ParserAst::Matrix { child, .. }
+        | ParserAst::GridRagged { child, .. } => {
             validate_node(child, errs);
         }
         ParserAst::SectionsNamed {
@@ -172,11 +182,6 @@ fn validate_node(ast: &ParserAst, errs: &mut Vec<ValidationError>) {
                 validate_node(parser, errs);
             }
         }
-        ParserAst::Optional { child, .. } => validate_node(child, errs),
-        ParserAst::Scan { child, .. } => validate_node(child, errs),
-        ParserAst::Characters { child, .. } => validate_node(child, errs),
-        ParserAst::Matrix { child, .. } => validate_node(child, errs),
-        ParserAst::GridRagged { child, .. } => validate_node(child, errs),
         ParserAst::OneOf { .. } => {}
     }
 }
@@ -369,7 +374,9 @@ pub fn check_call(ctor: Constructor, args: &[ArgKind], span: Span) -> Vec<Valida
             }
             for (i, a) in args.iter().enumerate().skip(1) {
                 match a {
-                    ArgKind::Keyword(n) if n == "skip" && i == 1 => {}
+                    // The keyword is the constructor's (`keyword_arg`), not a
+                    // name this table repeats: one table entry, one spelling.
+                    ArgKind::Keyword(n) if Some(n.as_str()) == ctor.keyword_arg() && i == 1 => {}
                     other => bad_arg(&mut errs, i, other, "only `skip:` may follow the parser"),
                 }
             }
@@ -421,8 +428,16 @@ pub fn check_call(ctor: Constructor, args: &[ArgKind], span: Span) -> Vec<Valida
             let mut fill = false;
             for (i, a) in args.iter().enumerate().skip(1) {
                 match a {
-                    ArgKind::Flag(f) if f == "ragged" && !ragged => ragged = true,
-                    ArgKind::Keyword(n) if n == "fill" && !fill => fill = true,
+                    // Both names come from the constructor — `flag_arg` for
+                    // `ragged`, `keyword_arg` for `fill:` — so this table and
+                    // the two front ends that mint the arguments read one
+                    // spelling between them.
+                    ArgKind::Flag(f) if Some(f.as_str()) == ctor.flag_arg() && !ragged => {
+                        ragged = true
+                    }
+                    ArgKind::Keyword(n) if Some(n.as_str()) == ctor.keyword_arg() && !fill => {
+                        fill = true
+                    }
                     other => bad_arg(
                         &mut errs,
                         i,

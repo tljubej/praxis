@@ -38,8 +38,8 @@
 use std::collections::HashMap;
 
 use praxis_ast::AstNode;
-use praxis_source::{DiagCode, Diagnostic, FileId, FileSpan, Severity, Span};
-use praxis_syntax::SyntaxKind;
+use praxis_source::{DiagCode, Diagnostic, FileId, FileSpan, Severity};
+use praxis_syntax::{span_bridge::range_to_span, SyntaxKind};
 use praxis_types::Type;
 use rowan::TextRange;
 
@@ -417,13 +417,7 @@ impl PatternBuilder<'_> {
     }
 
     fn file_span(&self, at: TextRange) -> FileSpan {
-        FileSpan::new(
-            self.file,
-            Span::new(
-                praxis_source::BytePos::from(u32::from(at.start())),
-                praxis_source::BytePos::from(u32::from(at.end())),
-            ),
-        )
+        FileSpan::new(self.file, range_to_span(at))
     }
 }
 
@@ -562,13 +556,7 @@ fn check_binding(
             Severity::Error,
             DiagCode::RefutableBinding,
             format!("{must}, and {reason} does not"),
-            FileSpan::new(
-                file,
-                Span::new(
-                    praxis_source::BytePos::from(u32::from(at.start())),
-                    praxis_source::BytePos::from(u32::from(at.end())),
-                ),
-            ),
+            FileSpan::new(file, range_to_span(at)),
         ));
     }
     merge_pattern_diagnostics(built, out);

@@ -6,8 +6,13 @@
 //!
 //! The `Y0xx` constructors are used by type inference (Slice 5); they are kept
 //! here alongside the `N0xx` ones so all diagnostic wording lives in one place.
-
-#![allow(dead_code)] // Y0xx constructors are exercised in Slice 5.
+//!
+//! There is deliberately no blanket `allow(dead_code)` here. The one it used to
+//! cover was a `Y0xx` constructor nothing had ever called, while every other
+//! constructor in the file is either called directly or handed to
+//! [`crate::infer`]'s catalog dispatch as a function pointer — which the lint
+//! already counts as a use. A constructor with no emitter is a diagnostic the
+//! compiler cannot report; let the lint say so.
 
 use praxis_source::{DiagCode, Diagnostic, FileSpan, Severity};
 
@@ -395,16 +400,6 @@ pub(crate) fn arity_mismatch(at: FileSpan, expected: usize, found: usize) -> Dia
         Severity::Error,
         DiagCode::CallArityMismatch,
         format!("this function takes {expected} argument(s), but {found} were given"),
-        at,
-    )
-}
-
-/// `Y003` — an explicit annotation conflicts with what inference derived.
-pub(crate) fn annotation_conflict(at: FileSpan, annotated: &str, derived: &str) -> Diagnostic {
-    Diagnostic::new(
-        Severity::Error,
-        DiagCode::AnnotationConflict,
-        format!("annotation says {annotated}, but use implies {derived}"),
         at,
     )
 }

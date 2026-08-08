@@ -5,18 +5,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-fn bin_path() -> PathBuf {
-    // `CARGO_BIN_EXE_praxis` is set by cargo when running integration tests and
-    // points at the compiled `praxis` binary.
-    PathBuf::from(env!("CARGO_BIN_EXE_praxis"))
-}
+mod common;
 
-fn fixture(name: &str) -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("tests/fixtures");
-    p.push(name);
-    p
-}
+use common::{bin_path, fixture};
 
 #[test]
 fn clean_file_exits_zero() {

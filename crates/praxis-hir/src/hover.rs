@@ -5,7 +5,7 @@
 //! a test, satisfying "hover returns the inferred type and symbol identity for
 //! each shadowed occurrence."
 
-use praxis_types::Scheme;
+use praxis_syntax::span_bridge::range_to_span;
 use rowan::TextRange;
 
 use crate::{Analysis, SymbolId};
@@ -15,7 +15,15 @@ use crate::{Analysis, SymbolId};
 pub struct HoverInfo {
     /// The symbol the name resolves to. Two shadowed bindings with the same
     /// source name have *different* ids — this is how hover distinguishes them.
-    pub symbol: SymbolId,
+    ///
+    /// `None` where the hovered thing is not a name binding at all: a method
+    /// name resolves to a catalog entry rather than a `SymbolId` (HIR-02). That
+    /// case used to be carried as [`SymbolId::UNRESOLVED`], which is a *different*
+    /// question — `lower.rs` still uses that constant to mean "resolution ran and
+    /// found no declaration". One sentinel answering both left every reader to
+    /// guess which it had, so the absence that hover can produce is spelled in
+    /// the type instead.
+    pub symbol: Option<SymbolId>,
     /// The name as written in source.
     pub name: String,
     /// The inferred type scheme, rendered for display.
@@ -36,7 +44,7 @@ impl Analysis {
         // `refs` lookup above meant nothing could ever read it.
         if let Some(m) = self.method_refs.get(&range) {
             return Some(HoverInfo {
-                symbol: SymbolId(u32::MAX),
+                symbol: None,
                 name: format!(
                     "{}.{}",
                     self.db.render(self.db.follow(m.receiver)),
@@ -56,7 +64,7 @@ impl Analysis {
             (None, None) => "?".to_string(),
         };
         Some(HoverInfo {
-            symbol: resolved.symbol,
+            symbol: Some(resolved.symbol),
             name: symbol.name.clone(),
             scheme,
         })
@@ -69,10 +77,7 @@ impl Analysis {
     #[must_use]
     pub fn hover_decl(&self, range: TextRange) -> Option<HoverInfo> {
         // Find the symbol declared at this range by matching its decl span.
-        let span = praxis_source::Span::new(
-            praxis_source::BytePos::from(u32::from(range.start())),
-            praxis_source::BytePos::from(u32::from(range.end())),
-        );
+        let span = range_to_span(range);
         let sym = self
             .names
             .all()
@@ -84,16 +89,10 @@ impl Analysis {
             .map(|sc| self.db.render_scheme(sc))
             .unwrap_or_else(|| "?".to_string());
         Some(HoverInfo {
-            symbol: sym.id,
+            symbol: Some(sym.id),
             name: sym.name.clone(),
             scheme,
         })
-    }
-
-    /// The rendered scheme of a symbol by id (used by tests and, later, the LSP).
-    #[must_use]
-    pub fn scheme_of(&self, id: SymbolId) -> Option<&Scheme> {
-        self.names.get(id).and_then(|s| s.scheme.as_ref())
     }
 
     /// Hover over a **parser expression** (§15.3, §19.11 criterion 3).

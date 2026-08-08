@@ -927,46 +927,12 @@ fn operands(inst: &Inst) -> Vec<LocalId> {
 mod tests {
     use super::*;
     use crate::annot::{DebugSlots, RootSlots};
+    use crate::ir::fixtures::{gc_local, int_local, scalar_local};
     use crate::ir::{LocalDebugKind, MirType, ScalarKind};
-
-    fn empty_fn(name: &str) -> Function {
-        Function {
-            name: name.into(),
-            params: Vec::new(),
-            return_local: LocalId(0),
-            locals: Vec::new(),
-            blocks: Vec::new(),
-            debug_names: Vec::new(),
-            debug_kinds: Vec::new(),
-            debug_spans: Vec::new(),
-            debug_scalar_sources: Vec::new(),
-            span: (0, 0),
-        }
-    }
-
-    fn gc_local(f: &mut Function) -> LocalId {
-        f.new_local(
-            LocalKind::Gc,
-            MirType::Opaque,
-            None,
-            LocalDebugKind::Temp,
-            None,
-        )
-    }
-
-    fn int_local(f: &mut Function) -> LocalId {
-        f.new_local(
-            LocalKind::Scalar(ScalarKind::Int),
-            MirType::Opaque,
-            None,
-            LocalDebugKind::Temp,
-            None,
-        )
-    }
 
     /// A one-block function that allocates an `Int` into `dst` and returns it.
     fn alloc_and_return() -> (Function, LocalId, LocalId) {
-        let mut f = empty_fn("f");
+        let mut f = Function::empty("f");
         let scalar = int_local(&mut f);
         let dst = gc_local(&mut f);
         f.return_local = dst;
@@ -994,7 +960,7 @@ mod tests {
 
     /// A one-block function whose whole body is an [`Inst::ConstGc`] returned.
     fn const_gc_and_return() -> (Function, LocalId) {
-        let mut f = empty_fn("f");
+        let mut f = Function::empty("f");
         let dst = gc_local(&mut f);
         f.return_local = dst;
         let blk = f.new_block();
@@ -1044,7 +1010,7 @@ mod tests {
     /// that it is true.
     #[test]
     fn an_alloc_hoisted_out_of_its_using_block_still_verifies() {
-        let mut f = empty_fn("f");
+        let mut f = Function::empty("f");
         let scalar = int_local(&mut f);
         let dst = gc_local(&mut f);
         f.return_local = dst;
@@ -1190,15 +1156,9 @@ mod tests {
     /// holding `konst`, and returns the constant. The two historical defects
     /// below are this shape with different arguments.
     fn extract_from_const_gc(konst: crate::ir::GcConst, scalar: ScalarKind) -> Function {
-        let mut f = empty_fn("f");
+        let mut f = Function::empty("f");
         let boxed = gc_local(&mut f);
-        let payload = f.new_local(
-            LocalKind::Scalar(scalar),
-            MirType::Opaque,
-            None,
-            LocalDebugKind::Temp,
-            None,
-        );
+        let payload = scalar_local(&mut f, scalar);
         f.return_local = boxed;
         let blk = f.new_block();
         f.blocks[blk.0 as usize]
@@ -1318,7 +1278,7 @@ mod tests {
     /// analysis answers `None`, and `None` is not an error.
     #[test]
     fn extracting_a_payload_from_a_parameter_is_not_an_error_because_nothing_is_proved() {
-        let mut f = empty_fn("is_prime");
+        let mut f = Function::empty("is_prime");
         let param = gc_local(&mut f);
         let payload = int_local(&mut f);
         f.params = vec![param];
@@ -1346,7 +1306,7 @@ mod tests {
     /// built inside a wrapper.
     #[test]
     fn extracting_a_payload_from_a_call_result_is_not_an_error() {
-        let mut f = empty_fn("f");
+        let mut f = Function::empty("f");
         let boxed = gc_local(&mut f);
         let payload = int_local(&mut f);
         f.return_local = boxed;
@@ -1379,7 +1339,7 @@ mod tests {
     /// `ExtractScalar` whose `src` is `MoveGc`-defined (handover 27 §5).
     #[test]
     fn the_proof_reaches_a_user_variable_through_the_move_gc_a_let_lowers_to() {
-        let mut f = empty_fn("f");
+        let mut f = Function::empty("f");
         let literal = gc_local(&mut f);
         let binding = gc_local(&mut f);
         let payload = int_local(&mut f);

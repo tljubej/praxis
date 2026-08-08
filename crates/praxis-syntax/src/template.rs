@@ -39,6 +39,15 @@
 //! bound because there is one function — the two copies of this rule disagreed
 //! about it by one level.
 //!
+//! # The quoted-run and scalar primitives
+//!
+//! A `"…"` inside a capture and a `'…'` inside an interpolation hole are the
+//! same scan with a different closing byte, and both scanners have to step over
+//! a multi-byte scalar the same way. [`quoted_run`] and [`skip_scalar`]
+//! therefore live in this module — the lower of the two — and [`crate::interp`]
+//! calls them instead of keeping a second copy, for the same reason this module
+//! exists at all.
+//!
 //! [`praxis-parser`'s lexer]: https://docs.rs/praxis-parser
 
 use crate::MAX_TEMPLATE_NESTING;
@@ -93,7 +102,7 @@ pub fn template_end(src: &str, open: usize) -> TemplateEnd {
 #[must_use]
 pub fn string_end(src: &str, open: usize) -> Option<usize> {
     debug_assert_eq!(src.as_bytes().get(open), Some(&b'"'));
-    string_run(src.as_bytes(), open).ok()
+    quoted_run(src.as_bytes(), open, b'"').ok()
 }
 
 /// One `` `…` `` run. `level` is 1 for the outermost template.
@@ -128,7 +137,7 @@ fn run(bytes: &[u8], open: usize, level: usize) -> Result<usize, usize> {
             }
             // A quote is structure only inside a capture; in literal text it is
             // just a quote.
-            b'"' if braces > 0 => pos = string_run(bytes, pos)?,
+            b'"' if braces > 0 => pos = quoted_run(bytes, pos, b'"')?,
             b'{' => {
                 braces += 1;
                 pos += 1;
@@ -151,25 +160,39 @@ fn run(bytes: &[u8], open: usize, level: usize) -> Result<usize, usize> {
     Err(bytes.len())
 }
 
-/// One `"…"` run, honouring `\`. `bytes[open]` is the opening quote.
+/// One `'…'` or `"…"` run, honouring `\`. `bytes[open]` is the opening quote and
+/// `terminator` is the byte that closes it; `Ok` is the index just past that
+/// byte.
 ///
-/// A string literal inside a capture is bounded by the same line rule as the
-/// template holding it — the lexer already refuses a raw newline inside a `"…"`
-/// literal, and there is no reason for one nested in a capture to be different.
-/// `Err(stopped)` therefore propagates straight out of [`run`].
-fn string_run(bytes: &[u8], open: usize) -> Result<usize, usize> {
+/// The two quotes are one rule with one byte different, so they are one
+/// function: the `"…"` inside a template capture and the `'…'` inside an
+/// interpolation hole (ADR-141) are measured by the same code.
+///
+/// Such a run is bounded by the same line rule as whatever holds it — the lexer
+/// already refuses a raw newline inside a `"…"` literal, and there is no reason
+/// for one nested in a capture or a hole to be different. `Err(stopped)`
+/// therefore propagates straight out of [`run`], and out of `interp`'s `hole`.
+///
+/// A dangling `\` before a CRLF stops *at* the `\r`, exactly as [`run`] and
+/// `interp`'s `fragment` do, so no token ever ends between a `\r` and the `\n`
+/// it precedes. The two copies this replaced tested only for a bare `\n` there
+/// and so stopped one byte later, mid-sequence — the single way they differed
+/// from their own callers, and an oversight rather than a decision.
+pub(crate) fn quoted_run(bytes: &[u8], open: usize, terminator: u8) -> Result<usize, usize> {
     let mut pos = open + 1;
     while pos < bytes.len() {
         match bytes[pos] {
             b'\n' => return Err(pos),
             b'\r' if bytes.get(pos + 1) == Some(&b'\n') => return Err(pos),
             b'\\' => {
-                if matches!(bytes.get(pos + 1), Some(b'\n') | None) {
+                if matches!(bytes.get(pos + 1), Some(b'\n') | None)
+                    || (bytes.get(pos + 1) == Some(&b'\r') && bytes.get(pos + 2) == Some(&b'\n'))
+                {
                     return Err(pos + 1);
                 }
                 pos = skip_scalar(bytes, pos + 1);
             }
-            b'"' => return Ok(pos + 1),
+            b if b == terminator => return Ok(pos + 1),
             _ => pos = skip_scalar(bytes, pos),
         }
     }
@@ -177,7 +200,11 @@ fn string_run(bytes: &[u8], open: usize) -> Result<usize, usize> {
 }
 
 /// The index just past the whole UTF-8 scalar beginning at `pos`.
-fn skip_scalar(bytes: &[u8], pos: usize) -> usize {
+///
+/// Every scanner in this crate that steps over a byte it does not care about
+/// steps over a whole scalar instead, which is what keeps every index any of
+/// them return a character boundary.
+pub(crate) fn skip_scalar(bytes: &[u8], pos: usize) -> usize {
     if pos >= bytes.len() {
         return bytes.len();
     }
@@ -323,6 +350,18 @@ mod tests {
         assert_eq!(
             template_end("`{c:one_of(\"ab\n)}`", 0),
             TemplateEnd::Unterminated(14)
+        );
+        // A dangling `\` inside that string is not a continuation either, and it
+        // stops at the line terminator's *first* byte — so a CRLF is not split.
+        // That byte is the one place the separate string scanner disagreed with
+        // `run` before the two became one `quoted_run`.
+        assert_eq!(
+            template_end("`{c:one_of(\"ab\\\ncd\")}`", 0),
+            TemplateEnd::Unterminated(15)
+        );
+        assert_eq!(
+            template_end("`{c:one_of(\"ab\\\r\ncd\")}`", 0),
+            TemplateEnd::Unterminated(15)
         );
     }
 

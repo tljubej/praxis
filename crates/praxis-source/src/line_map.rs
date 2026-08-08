@@ -99,8 +99,9 @@ impl LineMap {
             .get(line_idx + 1)
             .copied()
             .unwrap_or(self.len);
-        let content_end = trim_one_terminator(&self.text, line_start, next_start);
-        let col = lc.col.min(content_end.saturating_sub(line_start));
+        let content_end =
+            Self::trim_line_terminator(&self.text, BytePos(line_start), BytePos(next_start));
+        let col = lc.col.min(content_end.saturating_sub(BytePos(line_start)));
         Some(BytePos(line_start + col))
     }
 
@@ -124,7 +125,7 @@ impl LineMap {
     ///
     /// `end` is the byte offset where the next line begins (or the file end for
     /// the final line), so it includes any line terminator. Callers that render
-    /// the line text should trim trailing `\n` / `\r` / `\r\n` themselves.
+    /// the line text should trim it with [`LineMap::trim_line_terminator`].
     pub fn line_range(&self, line: u32) -> Option<(BytePos, BytePos)> {
         if line == 0 {
             return None;
@@ -134,6 +135,43 @@ impl LineMap {
         let next_start = self.line_starts.get(idx + 1).copied().unwrap_or(self.len);
         Some((BytePos(start), BytePos(next_start)))
     }
+
+    /// The content end of a line extent `[start, end)`: `end` minus the bytes of
+    /// the single line terminator (`\n`, `\r`, or `\r\n`) that separates this
+    /// line from the next. Reads the actual bytes, so a CRLF is trimmed as one
+    /// terminator and not as two.
+    ///
+    /// [`LineMap::line_range`] deliberately hands back the extent *including*
+    /// the terminator and tells the caller to trim it — this is that trim, and
+    /// the only copy of it. The terminator set has to stay in step with the
+    /// scanner in [`LineMap::new`], so the rule lives beside the scanner: a
+    /// future change there is one edit, not three that can silently desync.
+    ///
+    /// Takes the bytes rather than reading `self.text` so that a caller which
+    /// already holds the source trims against the very bytes it is about to
+    /// slice. An extent with nothing in it, and a final line with no terminator
+    /// at all, are both returned unchanged.
+    pub fn trim_line_terminator(text: &[u8], start: BytePos, end: BytePos) -> BytePos {
+        // `end` may run past `text` for a synthetic extent, so clamp before
+        // slicing; the guard then covers the empty and the out-of-range case at
+        // once. Only trim when there is something to trim — the final line may
+        // have no terminator.
+        let s = start.to_usize();
+        let e = end.to_usize().min(text.len());
+        if e <= s {
+            return start;
+        }
+        let gap = &text[s..e];
+        if gap.ends_with(b"\r\n") {
+            BytePos(end.to_u32() - 2)
+        } else if gap.ends_with(b"\n") || gap.ends_with(b"\r") {
+            BytePos(end.to_u32() - 1)
+        } else {
+            // No recognizable terminator (e.g. the final line without a trailing
+            // newline): content end is the whole extent.
+            end
+        }
+    }
 }
 
 /// Push a new line start, collapsing accidental duplicates (e.g. an empty line
@@ -142,29 +180,6 @@ fn push_start(line_starts: &mut Vec<u32>, offset: usize) {
     let offset = u32::try_from(offset).expect("source files must be < 4 GiB");
     if line_starts.last() != Some(&offset) {
         line_starts.push(offset);
-    }
-}
-
-/// Return the content end offset of a line: `next_start` minus the bytes of the
-/// single line terminator (`\n`, `\r`, or `\r\n`) that separates this line from
-/// the next. Reads the actual bytes so CRLF is handled correctly.
-fn trim_one_terminator(text: &[u8], line_start: u32, next_start: u32) -> u32 {
-    // Only trim when there actually is a next line (next_start > line_start and
-    // there's a gap). The final line may have no terminator.
-    if next_start <= line_start {
-        return line_start;
-    }
-    let s = line_start as usize;
-    let e = next_start as usize;
-    let gap = &text[s..e.min(text.len())];
-    if gap.ends_with(b"\r\n") {
-        next_start - 2
-    } else if gap.ends_with(b"\n") || gap.ends_with(b"\r") {
-        next_start - 1
-    } else {
-        // No recognizable terminator (e.g. the final line without a trailing
-        // newline): content end is the whole extent.
-        next_start
     }
 }
 
@@ -315,6 +330,30 @@ mod tests {
         let map = LineMap::new("ab\ncd");
         let off = map.linecol_to_offset(LineCol { line: 1, col: 50 }).unwrap();
         assert_eq!(off, BytePos(2), "column past line end clamps");
+    }
+
+    /// The rule used to be written out three times — here, in `snippet`, and in
+    /// the LSP's position mapping. Pinned at the one surviving copy, because a
+    /// change to `LineMap::new`'s scanner has to move in step with it.
+    #[test]
+    fn trimming_takes_exactly_one_terminator() {
+        for (text, start, end, want) in [
+            // CRLF is two bytes but a single terminator.
+            ("a\r\nb", 0u32, 3u32, 1u32),
+            ("a\nb", 0, 2, 1),
+            // A bare `\r` terminates a line too.
+            ("a\rb", 0, 2, 1),
+            // A final line without a terminator keeps its whole extent.
+            ("ab", 0, 2, 2),
+            // An empty extent — the line after a trailing newline.
+            ("a\n", 2, 2, 2),
+        ] {
+            assert_eq!(
+                LineMap::trim_line_terminator(text.as_bytes(), BytePos(start), BytePos(end)),
+                BytePos(want),
+                "trimming {text:?}[{start}..{end}]"
+            );
+        }
     }
 
     #[test]

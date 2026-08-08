@@ -175,11 +175,19 @@ impl TypeDb {
         da: TypeData,
         db: TypeData,
     ) -> Result<(), UnifyError> {
+        // Every structural failure below reports the same pair: the
+        // representatives at this failure point, context first and program
+        // second (`unify`'s doc, REP-61). Bound once so the orientation is
+        // stated once rather than restated at each `return`.
+        let mismatch = || UnifyError::Mismatch {
+            expected: a,
+            found: b,
+        };
         match (da, db) {
             (TypeData::Scalar(x), TypeData::Scalar(y)) if x == y => Ok(()),
             (TypeData::Unit, TypeData::Unit) => Ok(()),
             (TypeData::Never, TypeData::Never) => Ok(()),
-            (TypeData::Tuple(xs), TypeData::Tuple(ys)) => self.unify_seqs(a, b, xs, ys, "tuple"),
+            (TypeData::Tuple(xs), TypeData::Tuple(ys)) => self.unify_seqs(a, b, xs, ys),
             (
                 TypeData::Func {
                     params: ps_a,
@@ -198,15 +206,9 @@ impl TypeDb {
                     });
                 }
                 for (p, q) in ps_a.into_iter().zip(ps_b) {
-                    self.unify(p, q).map_err(|_| UnifyError::Mismatch {
-                        expected: a,
-                        found: b,
-                    })?;
+                    self.unify(p, q).map_err(|_| mismatch())?;
                 }
-                self.unify(r_a, r_b).map_err(|_| UnifyError::Mismatch {
-                    expected: a,
-                    found: b,
-                })
+                self.unify(r_a, r_b).map_err(|_| mismatch())
             }
             (
                 TypeData::Collection {
@@ -217,7 +219,7 @@ impl TypeDb {
                     ctor: c_b,
                     args: args_b,
                 },
-            ) if c_a == c_b => self.unify_seqs(a, b, args_a, args_b, "collection"),
+            ) if c_a == c_b => self.unify_seqs(a, b, args_a, args_b),
             // Records unify iff same def-id (and then pairwise on their type
             // arguments), OR both anonymous with matching field-name sets (in
             // which case we unify field types pairwise by name). Nominal records
@@ -234,7 +236,7 @@ impl TypeDb {
                 },
             ) => {
                 if d_a == d_b {
-                    return self.unify_seqs(a, b, args_a, args_b, "record");
+                    return self.unify_seqs(a, b, args_a, args_b);
                 }
                 let ra = self.record_def(d_a).clone();
                 let rb = self.record_def(d_b).clone();
@@ -248,30 +250,18 @@ impl TypeDb {
                     || !ra.params.is_empty()
                     || !rb.params.is_empty()
                 {
-                    return Err(UnifyError::Mismatch {
-                        expected: a,
-                        found: b,
-                    });
+                    return Err(mismatch());
                 }
                 if ra.arity() != rb.arity() {
-                    return Err(UnifyError::Mismatch {
-                        expected: a,
-                        found: b,
-                    });
+                    return Err(mismatch());
                 }
                 // Match fields by name, unify pairwise. §5.6: order-independent
                 // identity, so align by name rather than position.
                 for fa in &ra.fields {
                     let Some((_, ty_b)) = rb.field(&fa.name) else {
-                        return Err(UnifyError::Mismatch {
-                            expected: a,
-                            found: b,
-                        });
+                        return Err(mismatch());
                     };
-                    self.unify(fa.ty, ty_b).map_err(|_| UnifyError::Mismatch {
-                        expected: a,
-                        found: b,
-                    })?;
+                    self.unify(fa.ty, ty_b).map_err(|_| mismatch())?;
                 }
                 // Link the two defs so subsequent uses resolve to one. We adopt
                 // the earlier def-id (d_a) as the canonical one by rewriting b's
@@ -316,7 +306,7 @@ impl TypeDb {
                 },
             ) => {
                 if d_a == d_b {
-                    return self.unify_seqs(a, b, args_a, args_b, "enum");
+                    return self.unify_seqs(a, b, args_a, args_b);
                 }
                 let ea = self.enum_def(d_a).clone();
                 let eb = self.enum_def(d_b).clone();
@@ -332,10 +322,7 @@ impl TypeDb {
                         .zip(&eb.variants)
                         .all(|(va, vb)| va.name == vb.name);
                 if !same_shape {
-                    return Err(UnifyError::Mismatch {
-                        expected: a,
-                        found: b,
-                    });
+                    return Err(mismatch());
                 }
                 // Unify each variant's payload pairwise (zip by declaration
                 // order, which the name check above already aligned).
@@ -346,16 +333,10 @@ impl TypeDb {
                 // comment called equivalent.
                 for (va, vb) in ea.variants.iter().zip(&eb.variants) {
                     if va.payload.len() != vb.payload.len() {
-                        return Err(UnifyError::Mismatch {
-                            expected: a,
-                            found: b,
-                        });
+                        return Err(mismatch());
                     }
                     for (pa, pb) in va.payload.iter().zip(&vb.payload) {
-                        self.unify(*pa, *pb).map_err(|_| UnifyError::Mismatch {
-                            expected: a,
-                            found: b,
-                        })?;
+                        self.unify(*pa, *pb).map_err(|_| mismatch())?;
                     }
                 }
                 // Adopt the earlier def-id (d_a) as canonical: rewrite b's slot
@@ -370,32 +351,29 @@ impl TypeDb {
                 );
                 Ok(())
             }
-            _ => Err(UnifyError::Mismatch {
-                expected: a,
-                found: b,
-            }),
+            _ => Err(mismatch()),
         }
     }
 
+    /// Unify two argument lists pairwise. `a`/`b` are the enclosing types, and
+    /// they — not the elements that disagreed — are what a failure reports: the
+    /// caller wants to be told the tuple/collection/record/enum pair it wrote.
     fn unify_seqs(
         &mut self,
         a: Type,
         b: Type,
         xs: Vec<Type>,
         ys: Vec<Type>,
-        _kind: &str,
     ) -> Result<(), UnifyError> {
+        let mismatch = || UnifyError::Mismatch {
+            expected: a,
+            found: b,
+        };
         if xs.len() != ys.len() {
-            return Err(UnifyError::Mismatch {
-                expected: a,
-                found: b,
-            });
+            return Err(mismatch());
         }
         for (x, y) in xs.into_iter().zip(ys) {
-            self.unify(x, y).map_err(|_| UnifyError::Mismatch {
-                expected: a,
-                found: b,
-            })?;
+            self.unify(x, y).map_err(|_| mismatch())?;
         }
         Ok(())
     }

@@ -557,16 +557,31 @@ pub unsafe fn retire_all_plans() {
 
 /// Lower one node, returning its index in the plan arena.
 fn lower_node(b: &mut PlanBuilder<'_>, ast: &ParserAst) -> u32 {
+    /// Lower the one child and wrap it — the entire body of every constructor
+    /// whose plan node is `{ child }` and nothing else, and whose plan variant
+    /// shares its name with the AST variant.
+    ///
+    /// The arms written out below are the ones that need more. `Atomic` and
+    /// `OneOf` have no child; `Template` has its own function; the rest carry
+    /// payload beside the child that has to be allocated or interned *here*, in
+    /// the plan's arena — a literal (`Sep`, `OneOf`, `GridRagged`), a skip
+    /// policy (`Characters`), or a slice of entries (`SectionsNamed`, `Block`,
+    /// `Choice`).
+    ///
+    /// A macro rather than a helper `fn` because what varies is a *variant
+    /// name*, not a value; and invoked in body position rather than expanded
+    /// into the arms themselves because macros cannot expand to match arms.
+    macro_rules! unary {
+        ($node:ident, $child:expr) => {{
+            let c = lower_node(b, $child);
+            b.push_node(PlanNode::$node { child: c })
+        }};
+    }
+
     match ast {
         ParserAst::Atomic { kind, .. } => b.push_node(PlanNode::Atomic { kind: *kind }),
-        ParserAst::Lines { child, .. } => {
-            let c = lower_node(b, child);
-            b.push_node(PlanNode::Lines { child: c })
-        }
-        ParserAst::Sections { child, .. } => {
-            let c = lower_node(b, child);
-            b.push_node(PlanNode::Sections { child: c })
-        }
+        ParserAst::Lines { child, .. } => unary!(Lines, child),
+        ParserAst::Sections { child, .. } => unary!(Sections, child),
         ParserAst::SectionsNamed {
             fields,
             repeated_tail,
@@ -603,14 +618,8 @@ fn lower_node(b: &mut PlanBuilder<'_>, ast: &ParserAst) -> u32 {
                 repeated_tail: tail_entry,
             })
         }
-        ParserAst::Csv { child, .. } => {
-            let c = lower_node(b, child);
-            b.push_node(PlanNode::Csv { child: c })
-        }
-        ParserAst::Ws { child, .. } => {
-            let c = lower_node(b, child);
-            b.push_node(PlanNode::Ws { child: c })
-        }
+        ParserAst::Csv { child, .. } => unary!(Csv, child),
+        ParserAst::Ws { child, .. } => unary!(Ws, child),
         ParserAst::Sep {
             separator, child, ..
         } => {
@@ -622,10 +631,7 @@ fn lower_node(b: &mut PlanBuilder<'_>, ast: &ParserAst) -> u32 {
                 child: c,
             })
         }
-        ParserAst::Grid { child, .. } => {
-            let c = lower_node(b, child);
-            b.push_node(PlanNode::Grid { child: c })
-        }
+        ParserAst::Grid { child, .. } => unary!(Grid, child),
         ParserAst::Block { items, .. } => {
             let item_nodes: Vec<BlockItemNode> = items
                 .iter()
@@ -654,14 +660,8 @@ fn lower_node(b: &mut PlanBuilder<'_>, ast: &ParserAst) -> u32 {
             let cases_slice = b.alloc_slice(case_entries);
             b.push_node(PlanNode::Choice { cases: cases_slice })
         }
-        ParserAst::Optional { child, .. } => {
-            let c = lower_node(b, child);
-            b.push_node(PlanNode::Optional { child: c })
-        }
-        ParserAst::Scan { child, .. } => {
-            let c = lower_node(b, child);
-            b.push_node(PlanNode::Scan { child: c })
-        }
+        ParserAst::Optional { child, .. } => unary!(Optional, child),
+        ParserAst::Scan { child, .. } => unary!(Scan, child),
         ParserAst::OneOf { chars, .. } => {
             let chars_static = b.alloc_str(chars);
             let idx = b.intern_literal(chars_static);
@@ -674,10 +674,7 @@ fn lower_node(b: &mut PlanBuilder<'_>, ast: &ParserAst) -> u32 {
                 skip: *skip,
             })
         }
-        ParserAst::Matrix { child, .. } => {
-            let c = lower_node(b, child);
-            b.push_node(PlanNode::Matrix { child: c })
-        }
+        ParserAst::Matrix { child, .. } => unary!(Matrix, child),
         ParserAst::GridRagged { child, fill, .. } => {
             let c = lower_node(b, child);
             let fill_static = b.alloc_str(fill);

@@ -61,6 +61,12 @@ pub enum AtomicKind {
 
 impl AtomicKind {
     /// The source keyword for this atomic.
+    ///
+    /// The **only** place these ten strings are spelled. Completion labels,
+    /// hover, and the runtime's `expected …` parse-fault names all read them
+    /// from here; `praxis_runtime::parser::walk_atomic` used to re-spell them
+    /// per-arm, and the copy shared by `text` and `rest` had already drifted to
+    /// naming `text` for both.
     pub fn keyword(self) -> &'static str {
         match self {
             AtomicKind::Int => "int",
@@ -846,7 +852,11 @@ impl Constructor {
         }
     }
 
-    /// Every constructor, so a test can sweep the table.
+    /// Every constructor, so a test can sweep the table — and so the editor can
+    /// offer them: completion, signature help and the parser keyword list read
+    /// this, so a name missing here is a name the editor never offers.
+    /// `constructor_round_trips_keywords_and_states_its_shape` is what keeps it
+    /// complete.
     pub const ALL: &'static [Constructor] = &[
         Constructor::Lines,
         Constructor::Sections,
@@ -949,6 +959,26 @@ impl Constructor {
         }
     }
 
+    /// The one **bare keyword flag** this constructor takes — the `ragged` of
+    /// `grid(P, ragged, fill: value)` (§7.5). `None` for every other
+    /// constructor.
+    ///
+    /// The companion to [`Constructor::keyword_arg`], and here for the same
+    /// reason: `ragged` had no row at all, so both front ends minted a
+    /// `CallArg::Flag` from the bare *name* with no reference to the
+    /// constructor being called. A bare `ragged` was therefore a flag in
+    /// **every** constructor's argument list — `lines(ragged)` was told it had
+    /// written a flag where a parser belongs rather than that `ragged` is not a
+    /// parser, and the word was reserved everywhere instead of in `grid`. A
+    /// flag belongs to a constructor, so the constructor is what answers the
+    /// question.
+    pub fn flag_arg(self) -> Option<&'static str> {
+        match self {
+            Constructor::Grid => Some("ragged"),
+            _ => None,
+        }
+    }
+
     /// The shape of this constructor's argument list (§7.5).
     pub fn arg_shape(self) -> ArgShape {
         match self {
@@ -982,6 +1012,24 @@ mod tests {
     fn atomic_round_trips_keywords() {
         for kind in AtomicKind::ALL {
             assert_eq!(AtomicKind::from_keyword(kind.keyword()), Some(*kind));
+            // Every §7.4 name is spelled here, exhaustively, for the reason
+            // `Constructor`'s sweep below gives: the `names` assertion under
+            // this loop looks like it pins the set, but it collects *from
+            // `ALL`*, so an eleventh atomic left out of `ALL` leaves that list
+            // ten long and green — the same blind spot `ALL.len() == 14` had.
+            // Adding a variant fails to compile here instead.
+            match kind {
+                AtomicKind::Int
+                | AtomicKind::UInt
+                | AtomicKind::Float
+                | AtomicKind::Byte
+                | AtomicKind::Char
+                | AtomicKind::Digit
+                | AtomicKind::Word
+                | AtomicKind::Identifier
+                | AtomicKind::Text
+                | AtomicKind::Rest => {}
+            }
         }
         assert_eq!(AtomicKind::from_keyword("nope"), None);
 
@@ -1026,12 +1074,34 @@ mod tests {
                 "`{}` must round-trip through the table",
                 ctor.keyword()
             );
+            // Every §7.5 name is spelled here, exhaustively: adding a
+            // constructor fails to compile at this match rather than passing
+            // quietly out of `ALL`. That is what `ALL.len() == 14` could not
+            // do — a count is green while the list is short and only fires
+            // when the list *was* updated and the number was not. `ALL` feeds
+            // completion, signature help and the keyword list as well as this
+            // sweep, so a name missing from it is one the editor never offers.
+            match ctor {
+                Constructor::Lines
+                | Constructor::Sections
+                | Constructor::Csv
+                | Constructor::Ws
+                | Constructor::Sep
+                | Constructor::Grid
+                | Constructor::Matrix
+                | Constructor::Chars
+                | Constructor::OneOf
+                | Constructor::Block
+                | Constructor::Choice
+                | Constructor::Optional
+                | Constructor::Scan
+                | Constructor::Repeated => {}
+            }
         }
         assert_eq!(Constructor::from_keyword("frobnicate"), None);
 
-        // Every §7.5 name is spelled here, so a new constructor cannot be added
-        // without deciding what its arguments look like.
-        assert_eq!(Constructor::ALL.len(), 14);
+        // And a constructor cannot be added without deciding what its arguments
+        // look like.
         assert_eq!(Constructor::Lines.arg_shape(), ArgShape::Positional(1));
         assert_eq!(Constructor::Optional.arg_shape(), ArgShape::Positional(1));
         assert_eq!(Constructor::Sep.arg_shape(), ArgShape::StringThenParser);
@@ -1051,6 +1121,14 @@ mod tests {
             Constructor::Repeated.arg_shape(),
             ArgShape::ParserWithOptionalCount
         );
+
+        // And which constructor owns `ragged` — one, and not "whichever call
+        // happens to have a bare `ragged` in it", which is what both front ends
+        // used to answer.
+        for ctor in Constructor::ALL {
+            let expected = (*ctor == Constructor::Grid).then_some("ragged");
+            assert_eq!(ctor.flag_arg(), expected, "`{}`", ctor.keyword());
+        }
     }
 
     /// **The count that names no sections is not constructible.**

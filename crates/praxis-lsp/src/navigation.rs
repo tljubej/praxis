@@ -10,7 +10,7 @@
 //! References is the same map read the other way, and it is what rename edits.
 
 use lsp_types::{DocumentSymbol, Location, SymbolKind as LspSymbolKind, Uri};
-use praxis_hir::SymbolId;
+use praxis_hir::{Analysis, SymbolId};
 use praxis_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 use rowan::{NodeOrToken, TextRange};
 
@@ -25,20 +25,8 @@ pub fn goto_definition(
     uri: &Uri,
     enc: Encoding,
 ) -> Option<Location> {
-    let analysis = snapshot.analyze();
-    let token = snapshot.token_at(offset)?;
-    let range = token.text_range();
-
-    // A reference resolves through the symbol table, which distinguishes two
-    // shadowed bindings of the same name.
-    let symbol_id = analysis
-        .refs
-        .get(&range)
-        .map(|r| r.symbol)
-        // Already on the declaration: answering it keeps "go to definition" from
-        // being a dead key at the one place the user knows the answer.
-        .or_else(|| analysis.decls.get(&range).copied())?;
-    let decl = analysis.names.get(symbol_id)?.decl?;
+    let symbol_id = symbol_at(snapshot, offset)?;
+    let decl = snapshot.analyze().names.get(symbol_id)?.decl?;
     Some(Location {
         uri: uri.clone(),
         range: snapshot.positions().range(decl.span, enc),
@@ -47,16 +35,28 @@ pub fn goto_definition(
 
 /// The symbol the name at `offset` denotes — a use or its declaration.
 ///
-/// The one lookup every symbol-shaped query starts from: references, rename,
-/// and definition all ask it, so "which binding is this word" is decided once.
+/// `symbol_for_range` over the token `offset` lands in.
 #[must_use]
 pub fn symbol_at(snapshot: &Snapshot, offset: u32) -> Option<SymbolId> {
-    let analysis = snapshot.analyze();
-    let range = snapshot.token_at(offset)?.text_range();
+    symbol_for_range(snapshot.analyze(), snapshot.token_at(offset)?.text_range())
+}
+
+/// The symbol the name spanning `range` denotes — a use or its declaration.
+///
+/// The one lookup every symbol-shaped query starts from: references, rename,
+/// definition, and semantic highlighting all ask it, so "which binding is this
+/// word" is decided once, and highlighting cannot paint a word as one binding
+/// while go-to-definition jumps to another's.
+#[must_use]
+pub(crate) fn symbol_for_range(analysis: &Analysis, range: TextRange) -> Option<SymbolId> {
+    // A reference resolves through the symbol table, which distinguishes two
+    // shadowed bindings of the same name.
     analysis
         .refs
         .get(&range)
         .map(|r| r.symbol)
+        // Already on the declaration: answering it keeps "go to definition" from
+        // being a dead key at the one place the user knows the answer.
         .or_else(|| analysis.decls.get(&range).copied())
 }
 

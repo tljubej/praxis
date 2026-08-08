@@ -582,7 +582,7 @@ fn rewrite(func: &mut Function, set: &BTreeMap<LocalId, ScalarKind>) {
         // returned here is boxed at the exit — once per call, never in a loop.
         if let Terminator::Return { value } = func.blocks[bi].term {
             if let Some(&kind) = set.get(&value) {
-                let boxed = rebox_slot(func, &mut reboxed, value, &twin);
+                let boxed = rebox_slot(func, &mut reboxed, value);
                 out.push(Inst::Materialize {
                     dst: boxed,
                     src: twin[&value],
@@ -603,7 +603,6 @@ fn rebox_slot(
     func: &mut Function,
     reboxed: &mut BTreeMap<LocalId, LocalId>,
     promoted: LocalId,
-    _twin: &BTreeMap<LocalId, LocalId>,
 ) -> LocalId {
     if let Some(&slot) = reboxed.get(&promoted) {
         return slot;
@@ -734,7 +733,7 @@ fn rewrite_inst(
     if !needed.is_empty() {
         let mut boxes: BTreeMap<LocalId, LocalId> = BTreeMap::new();
         for local in needed {
-            let slot = rebox_slot(func, reboxed, local, twin);
+            let slot = rebox_slot(func, reboxed, local);
             out.push(Inst::Materialize {
                 dst: slot,
                 src: twin[&local],

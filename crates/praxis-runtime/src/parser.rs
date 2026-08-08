@@ -21,6 +21,7 @@ use crate::scalars;
 use crate::text::TextPayload;
 use crate::GcRef;
 use cursor::{split_lines, split_sections, trailing_blank_run, ByteRegion, Cursor, Input, Walked};
+use praxis_input_parser::synthesize::AtomicClass;
 use praxis_input_parser::{AtomicKind, ParserPlan, PlanNode, SectionItemNode, TemplateShape};
 
 /// Run the parser plan named by `raw_id` against `input`, returning the parsed
@@ -283,18 +284,9 @@ impl Rt {
         // SAFETY: `owner` is the context's input buffer, a live Text.
         let slice = unsafe { crate::text::SourceSlice::new(owner, start, len) }?;
         let payload = TextPayload::Slice(slice);
-        // SAFETY: ctx is valid; payload matches TEXT's layout.
         let (heap, safepoint) = self.safepoint();
-        // SAFETY: payload matches TEXT's layout.
-        Some(unsafe {
-            heap.alloc_with(
-                safepoint,
-                &crate::text::TEXT,
-                std::mem::size_of::<TextPayload>(),
-                std::mem::align_of::<TextPayload>(),
-                |ptr| (ptr as *mut TextPayload).write(payload),
-            )
-        })
+        // SAFETY: TextPayload is TEXT's payload type.
+        Some(unsafe { heap.alloc_payload(safepoint, &crate::text::TEXT, payload) })
     }
 
     /// Allocate an **owned** `Text` holding a copy of `s`.
@@ -306,18 +298,9 @@ impl Rt {
     /// input bytes chosen by the fill's length (IPR-03).
     fn alloc_text_owned(&self, s: &str) -> GcRef {
         let payload = TextPayload::owned(s);
-        // SAFETY: ctx is valid; payload matches TEXT's layout.
         let (heap, safepoint) = self.safepoint();
-        // SAFETY: payload matches TEXT's layout.
-        unsafe {
-            heap.alloc_with(
-                safepoint,
-                &crate::text::TEXT,
-                std::mem::size_of::<TextPayload>(),
-                std::mem::align_of::<TextPayload>(),
-                |ptr| (ptr as *mut TextPayload).write(payload),
-            )
-        }
+        // SAFETY: TextPayload is TEXT's payload type.
+        unsafe { heap.alloc_payload(safepoint, &crate::text::TEXT, payload) }
     }
 
     /// Allocate a `Vec` from element refs.
@@ -330,18 +313,9 @@ impl Rt {
             element_descriptor,
             items: items.into(),
         };
-        // SAFETY: ctx is valid.
         let (heap, safepoint) = self.safepoint();
-        // SAFETY: payload matches VEC's layout.
-        unsafe {
-            heap.alloc_with(
-                safepoint,
-                &crate::collections::VEC,
-                std::mem::size_of::<crate::collections::VecPayload>(),
-                std::mem::align_of::<crate::collections::VecPayload>(),
-                |ptr| (ptr as *mut crate::collections::VecPayload).write(payload),
-            )
-        }
+        // SAFETY: VecPayload is VEC's payload type.
+        unsafe { heap.alloc_payload(safepoint, &crate::collections::VEC, payload) }
     }
 
     /// Allocate an enum value (M9): `schema` says which enum type it is, `tag`
@@ -355,18 +329,9 @@ impl Rt {
         items: Vec<GcRef>,
     ) -> GcRef {
         let payload = crate::enums::EnumPayload { schema, tag, items };
-        // SAFETY: ctx is valid; payload matches ENUM's layout.
         let (heap, safepoint) = self.safepoint();
-        // SAFETY: payload matches ENUM's layout.
-        unsafe {
-            heap.alloc_with(
-                safepoint,
-                &crate::enums::ENUM,
-                std::mem::size_of::<crate::enums::EnumPayload>(),
-                std::mem::align_of::<crate::enums::EnumPayload>(),
-                |ptr| (ptr as *mut crate::enums::EnumPayload).write(payload),
-            )
-        }
+        // SAFETY: EnumPayload is ENUM's payload type.
+        unsafe { heap.alloc_payload(safepoint, &crate::enums::ENUM, payload) }
     }
 }
 
@@ -437,16 +402,22 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
     // value itself begins, in the input's own coordinates.
     let s = trim_leading_ws(rest);
     let at = region.start().advance(rest.len() - s.len());
+    // The name a failure reports is the atomic's own keyword, taken from the one
+    // place that owns those ten strings ([`AtomicKind::keyword`]). Spelling them
+    // per-arm is what let `rest` drift: it shares the `Text` arm, whose literal
+    // was `"text"`, so a failing `rest` reported a parser the program did not
+    // write.
+    let what = kind.keyword();
     match kind {
         AtomicKind::Int => {
             // Parse a signed decimal integer.
             let (digits, len) = take_int_run(s);
             if digits.is_empty() {
-                return Err(ParseFail::at(at.offset(), 0, "int"));
+                return Err(ParseFail::at(at.offset(), 0, what));
             }
             let value: i64 = digits
                 .parse()
-                .map_err(|_| ParseFail::at(at.offset(), len, "int"))?;
+                .map_err(|_| ParseFail::at(at.offset(), len, what))?;
             Ok(Walked {
                 value: rt.alloc_int(value),
                 next: at.advance(len),
@@ -454,10 +425,10 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
         }
         AtomicKind::Digit => {
             let Some(&b) = s.first() else {
-                return Err(ParseFail::at(at.offset(), 0, "digit"));
+                return Err(ParseFail::at(at.offset(), 0, what));
             };
             if !b.is_ascii_digit() {
-                return Err(ParseFail::at(at.offset(), 1, "digit"));
+                return Err(ParseFail::at(at.offset(), 1, what));
             }
             let value = (b - b'0') as i64;
             Ok(Walked {
@@ -480,16 +451,16 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
             // where the byte-width predecessor at least gave a wrong shape.
             let at = region.start();
             let Some(next) = region.next_scalar(i, at) else {
-                return Err(ParseFail::at(at.offset(), 0, "char"));
+                return Err(ParseFail::at(at.offset(), 0, what));
             };
             let text = region
                 .subregion(at, next)
                 .str(i)
-                .ok_or_else(|| ParseFail::at(at.offset(), 0, "char"))?;
+                .ok_or_else(|| ParseFail::at(at.offset(), 0, what))?;
             let ch = text
                 .chars()
                 .next()
-                .ok_or_else(|| ParseFail::at(at.offset(), 0, "char"))?;
+                .ok_or_else(|| ParseFail::at(at.offset(), 0, what))?;
             Ok(Walked {
                 value: rt.alloc_char(ch as u32),
                 next,
@@ -498,11 +469,11 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
         AtomicKind::Word => {
             let (word, len) = take_word_run(s);
             if word.is_empty() {
-                return Err(ParseFail::at(at.offset(), 0, "word"));
+                return Err(ParseFail::at(at.offset(), 0, what));
             }
             let slice = rt
                 .alloc_text_slice(i.owner(), i.owner_offset(at.offset()), len)
-                .ok_or_else(|| ParseFail::at(at.offset(), len, "word"))?;
+                .ok_or_else(|| ParseFail::at(at.offset(), len, what))?;
             Ok(Walked {
                 value: slice,
                 next: at.advance(len),
@@ -513,15 +484,15 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
             // reserved and has no runtime object); the non-negativity is this
             // rule: a leading `-` is not a `uint`, it is a parse failure.
             if s.first() == Some(&b'-') {
-                return Err(ParseFail::at(at.offset(), 1, "uint"));
+                return Err(ParseFail::at(at.offset(), 1, what));
             }
             let (digits, len) = take_int_run(s);
             if digits.is_empty() {
-                return Err(ParseFail::at(at.offset(), 0, "uint"));
+                return Err(ParseFail::at(at.offset(), 0, what));
             }
             let value: i64 = digits
                 .parse()
-                .map_err(|_| ParseFail::at(at.offset(), len, "uint"))?;
+                .map_err(|_| ParseFail::at(at.offset(), len, what))?;
             Ok(Walked {
                 value: rt.alloc_int(value),
                 next: at.advance(len),
@@ -530,11 +501,11 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
         AtomicKind::Float => {
             let (text, len) = take_float_run(s);
             if text.is_empty() {
-                return Err(ParseFail::at(at.offset(), 0, "float"));
+                return Err(ParseFail::at(at.offset(), 0, what));
             }
             let value: f64 = text
                 .parse()
-                .map_err(|_| ParseFail::at(at.offset(), len, "float"))?;
+                .map_err(|_| ParseFail::at(at.offset(), len, what))?;
             Ok(Walked {
                 value: rt.alloc_float(value),
                 next: at.advance(len),
@@ -546,11 +517,11 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
             // invariant every source-slice `Text` relies on.
             let (digits, len) = take_int_run(s);
             if digits.is_empty() {
-                return Err(ParseFail::at(at.offset(), 0, "byte"));
+                return Err(ParseFail::at(at.offset(), 0, what));
             }
             let value: u8 = digits
                 .parse()
-                .map_err(|_| ParseFail::at(at.offset(), len, "byte"))?;
+                .map_err(|_| ParseFail::at(at.offset(), len, what))?;
             Ok(Walked {
                 value: rt.alloc_byte(value),
                 next: at.advance(len),
@@ -562,11 +533,11 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
             // language itself declares would be the narrower mistake.
             let len = take_ident_run(s);
             if len == 0 {
-                return Err(ParseFail::at(at.offset(), 0, "identifier"));
+                return Err(ParseFail::at(at.offset(), 0, what));
             }
             let slice = rt
                 .alloc_text_slice(i.owner(), i.owner_offset(at.offset()), len)
-                .ok_or_else(|| ParseFail::at(at.offset(), len, "identifier"))?;
+                .ok_or_else(|| ParseFail::at(at.offset(), len, what))?;
             Ok(Walked {
                 value: slice,
                 next: at.advance(len),
@@ -578,11 +549,15 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
             // `bytes.len()`, so a `text` capture swallowed the literal that
             // followed it and every `pre{body:text}post` template was
             // unmatchable (IPR-10). Leading whitespace is part of the text.
+            //
+            // The two kinds share a rule but not a name: `what` is the one the
+            // program wrote, where the literal `"text"` here reported `text` for
+            // a failing `rest`.
             let start = region.start();
             let len = region.end().delta_from(start);
             let slice = rt
                 .alloc_text_slice(i.owner(), i.owner_offset(start.offset()), len)
-                .ok_or_else(|| ParseFail::at(start.offset(), len, "text"))?;
+                .ok_or_else(|| ParseFail::at(start.offset(), len, what))?;
             Ok(Walked {
                 value: slice,
                 next: region.end(),
@@ -592,6 +567,40 @@ fn walk_atomic(rt: &Rt, i: &Input<'_>, kind: AtomicKind, region: ByteRegion) -> 
 }
 
 // ---- constructors (§7.5) --------------------------------------------------
+
+/// The kind of bound a [`walk_exact`] caller computed, for the mismatch it
+/// names.
+///
+/// A closed set rather than a free-form `&'static str`: twelve call sites typed
+/// the description out by hand, and `"the rest of the section"` and `"the rest
+/// of the token"` were spelled four times each. Nothing outside this file reads
+/// the wording — `praxis-cli/tests/design_doc.rs` and
+/// `praxis-codegen-cranelift/tests/adversarial_audit.rs` quote it only in doc
+/// comments narrating historical output, and both assert on the exit code and
+/// the parsed values instead.
+#[derive(Clone, Copy)]
+enum ExactBound {
+    Line,
+    Section,
+    Token,
+    Field,
+    Capture,
+    Fill,
+}
+
+impl ExactBound {
+    /// The description [`ParseFail`] reports after `expected `.
+    const fn describe(self) -> &'static str {
+        match self {
+            ExactBound::Line => "the rest of the line",
+            ExactBound::Section => "the rest of the section",
+            ExactBound::Token => "the rest of the token",
+            ExactBound::Field => "the rest of the field",
+            ExactBound::Capture => "the rest of the capture",
+            ExactBound::Fill => "the rest of the fill",
+        }
+    }
+}
 
 /// Walk `node` against `region` and require it to consume the region **exactly**.
 ///
@@ -637,7 +646,7 @@ unsafe fn walk_exact(
     plan: &ParserPlan,
     node: u32,
     region: ByteRegion,
-    what: &'static str,
+    what: ExactBound,
 ) -> Result<GcRef, ParseFail> {
     // SAFETY: forwarded from this function's contract.
     let walked = unsafe { walk(rt.ctx, i, plan, node, region)? };
@@ -645,7 +654,7 @@ unsafe fn walk_exact(
         return Err(ParseFail::at(
             walked.next.offset(),
             region.end().delta_from(walked.next),
-            what,
+            what.describe(),
         ));
     }
     Ok(walked.value)
@@ -855,7 +864,7 @@ fn walk_lines(
         // the cursor away, so `lines(int)` accepted `12junk` and `lines(rest)`
         // handed every element the whole remaining input (IPR-02).
         // SAFETY: ctx is valid (upheld by `walk`'s caller).
-        match unsafe { walk_exact(rt, i, plan, child, *line, "the rest of the line") } {
+        match unsafe { walk_exact(rt, i, plan, child, *line, ExactBound::Line) } {
             Ok(value) => {
                 scope.root(value);
                 items.push(value);
@@ -901,7 +910,7 @@ fn walk_sections(
         // input, so a `word` in section 2 named bytes at the start of the file
         // (IPR-03, the stage's P0).
         // SAFETY: ctx is valid.
-        let value = unsafe { walk_exact(rt, i, plan, child, section, "the rest of the section")? };
+        let value = unsafe { walk_exact(rt, i, plan, child, section, ExactBound::Section)? };
         scope.root(value);
         items.push(value);
     }
@@ -960,9 +969,8 @@ fn walk_sections_named(
         match item {
             SectionItemNode::One { name, child } => {
                 // SAFETY: ctx is valid.
-                let value = unsafe {
-                    walk_exact(rt, i, plan, *child, sections[at], "the rest of the section")?
-                };
+                let value =
+                    unsafe { walk_exact(rt, i, plan, *child, sections[at], ExactBound::Section)? };
                 scope.root(value);
                 captures.push((Some(*name), *child, value));
             }
@@ -970,9 +978,8 @@ fn walk_sections_named(
                 let mut group = Vec::with_capacity(*count as usize);
                 for section in &sections[at..at + *count as usize] {
                     // SAFETY: ctx is valid.
-                    let value = unsafe {
-                        walk_exact(rt, i, plan, *child, *section, "the rest of the section")?
-                    };
+                    let value =
+                        unsafe { walk_exact(rt, i, plan, *child, *section, ExactBound::Section)? };
                     scope.root(value);
                     group.push(value);
                 }
@@ -992,9 +999,8 @@ fn walk_sections_named(
         let mut tail_items = Vec::new();
         for section in &sections[at..] {
             // SAFETY: ctx is valid.
-            let value = unsafe {
-                walk_exact(rt, i, plan, tail_child, *section, "the rest of the section")?
-            };
+            let value =
+                unsafe { walk_exact(rt, i, plan, tail_child, *section, ExactBound::Section)? };
             scope.root(value);
             tail_items.push(value);
         }
@@ -1197,10 +1203,7 @@ fn block_item_window(
 fn skip_line_boundary(i: &Input<'_>, region: ByteRegion, cursor: Cursor) -> Cursor {
     let tail = region.from(cursor);
     let bytes = tail.bytes(i);
-    let mut n = 0usize;
-    while n < bytes.len() && (bytes[n] == b' ' || bytes[n] == b'\t') {
-        n += 1;
-    }
+    let mut n = horizontal_ws_run(bytes);
     if bytes.get(n) == Some(&b'\r') {
         n += 1;
     }
@@ -1524,20 +1527,11 @@ fn skip_chars(
 ) -> Cursor {
     use praxis_input_parser::SkipPolicy;
     let bytes = region.from(cursor).bytes(i);
-    let mut n = 0usize;
-    match skip {
-        SkipPolicy::None => {}
-        SkipPolicy::Whitespace => {
-            while n < bytes.len() && (bytes[n] == b' ' || bytes[n] == b'\t') {
-                n += 1;
-            }
-        }
-        SkipPolicy::Newlines => {
-            while n < bytes.len() && bytes[n].is_ascii_whitespace() {
-                n += 1;
-            }
-        }
-    }
+    let n = match skip {
+        SkipPolicy::None => 0,
+        SkipPolicy::Whitespace => horizontal_ws_run(bytes),
+        SkipPolicy::Newlines => ascii_ws_run(bytes),
+    };
     cursor.advance(n)
 }
 
@@ -1597,7 +1591,7 @@ fn walk_matrix(
             // The token's own region, not its bytes copied into a fresh buffer
             // walked at offset zero (IPR-03/IPR-05), and consumed exactly.
             // SAFETY: ctx is valid.
-            let value = unsafe { walk_exact(rt, i, plan, child, *token, "the rest of the token")? };
+            let value = unsafe { walk_exact(rt, i, plan, child, *token, ExactBound::Token)? };
             scope.root(value);
             items.push(value);
         }
@@ -1639,16 +1633,8 @@ fn walk_grid_ragged(
         .ok_or_else(|| ParseFail::at(region.start().offset(), 0, "grid fill"))?;
     let fill_region = fill_input.whole();
     // SAFETY: ctx is valid.
-    let fill_value = unsafe {
-        walk_exact(
-            rt,
-            &fill_input,
-            plan,
-            child,
-            fill_region,
-            "the rest of the fill",
-        )?
-    };
+    let fill_value =
+        unsafe { walk_exact(rt, &fill_input, plan, child, fill_region, ExactBound::Fill)? };
     scope.root(fill_value);
     // Rows are parsed first and padded second: a ragged grid's width is the
     // widest row's **cell count**, which is not known until the cell parser has
@@ -1697,16 +1683,8 @@ fn alloc_grid(
         width,
     };
     let (heap, safepoint) = rt.safepoint();
-    // SAFETY: payload matches GRID's layout.
-    let grid_ref = unsafe {
-        heap.alloc_with(
-            safepoint,
-            &crate::collections::GRID,
-            std::mem::size_of::<crate::collections::GridPayload>(),
-            std::mem::align_of::<crate::collections::GridPayload>(),
-            |ptr| (ptr as *mut crate::collections::GridPayload).write(payload),
-        )
-    };
+    // SAFETY: GridPayload is GRID's payload type.
+    let grid_ref = unsafe { heap.alloc_payload(safepoint, &crate::collections::GRID, payload) };
     Ok(Walked {
         value: grid_ref,
         next,
@@ -1732,7 +1710,7 @@ fn walk_csv(
         // the field's start to the end of the input and discard the cursor —
         // the discard was even written out, `var _ = token_end;` (IPR-04).
         // SAFETY: ctx is valid.
-        let value = unsafe { walk_exact(rt, i, plan, child, token, "the rest of the field")? };
+        let value = unsafe { walk_exact(rt, i, plan, child, token, ExactBound::Field)? };
         scope.root(value);
         items.push(value);
     }
@@ -1771,7 +1749,7 @@ fn walk_ws(
     let mut items = Vec::new();
     for token in whitespace_tokens(region, text) {
         // SAFETY: ctx is valid.
-        let value = unsafe { walk_exact(rt, i, plan, child, token, "the rest of the token")? };
+        let value = unsafe { walk_exact(rt, i, plan, child, token, ExactBound::Token)? };
         scope.root(value);
         items.push(value);
     }
@@ -1817,7 +1795,7 @@ fn walk_sep(
         if bytes[pos..].starts_with(sep_bytes) {
             let token = region.subregion(base.advance(token_start), base.advance(pos));
             // SAFETY: ctx is valid.
-            let value = unsafe { walk_exact(rt, i, plan, child, token, "the rest of the token")? };
+            let value = unsafe { walk_exact(rt, i, plan, child, token, ExactBound::Token)? };
             scope.root(value);
             items.push(value);
             pos += sep_bytes.len();
@@ -1830,7 +1808,7 @@ fn walk_sep(
     if token_start < bytes.len() {
         let token = region.subregion(base.advance(token_start), region.end());
         // SAFETY: ctx is valid.
-        let value = unsafe { walk_exact(rt, i, plan, child, token, "the rest of the token")? };
+        let value = unsafe { walk_exact(rt, i, plan, child, token, ExactBound::Token)? };
         scope.root(value);
         items.push(value);
     }
@@ -2106,7 +2084,7 @@ fn walk_template(
                                         plan,
                                         *child,
                                         region.subregion(cursor, bound),
-                                        "the rest of the capture",
+                                        ExactBound::Capture,
                                     )?
                                 };
                                 scope.root(value);
@@ -2193,11 +2171,7 @@ fn skip_capture_ws(bytes: &[u8], cursor: usize) -> usize {
     let Some(rest) = bytes.get(cursor..) else {
         return cursor;
     };
-    let mut i = 0;
-    while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
-        i += 1;
-    }
-    cursor + i
+    cursor + horizontal_ws_run(rest)
 }
 
 /// Consume bytes at `cursor` per `ws`, returning the new cursor or `None` if the
@@ -2219,22 +2193,18 @@ fn consume_ws(bytes: &[u8], cursor: usize, ws: praxis_input_parser::WsPolicy) ->
             // scanner tagged every literal `SpaceRun` and requiring one would
             // have made a template starting with a literal unmatchable. The
             // scanner distinguishes them now (IPR-12).
-            while i < rest.len() && (rest[i] == b' ' || rest[i] == b'\t') {
-                i += 1;
-            }
+            i = horizontal_ws_run(rest);
             if i == 0 {
                 return None;
             }
         }
         WsPolicy::ZeroOrMore => {
-            while i < rest.len() && (rest[i].is_ascii_whitespace()) {
-                i += 1;
-            }
+            i = ascii_ws_run(rest);
         }
         WsPolicy::OneOrMore => {
-            while i < rest.len() && rest[i].is_ascii_whitespace() {
-                i += 1;
-            }
+            // Literally `ZeroOrMore` plus a non-empty check, and it shares the
+            // run so the two cannot drift apart. They were the same loop twice.
+            i = ascii_ws_run(rest);
             if i == 0 {
                 return None;
             }
@@ -2299,16 +2269,8 @@ fn alloc_record(rt: &Rt, captures: &[(Option<&'static str>, u32, GcRef)]) -> GcR
     let items: Vec<GcRef> = captures.iter().map(|(_, _, v)| *v).collect();
     let payload = crate::records::RecordPayload { schema, items };
     let (heap, safepoint) = rt.safepoint();
-    // SAFETY: payload matches RECORD's layout.
-    unsafe {
-        heap.alloc_with(
-            safepoint,
-            &crate::records::RECORD,
-            std::mem::size_of::<crate::records::RecordPayload>(),
-            std::mem::align_of::<crate::records::RecordPayload>(),
-            |ptr| (ptr as *mut crate::records::RecordPayload).write(payload),
-        )
-    }
+    // SAFETY: RecordPayload is RECORD's payload type.
+    unsafe { heap.alloc_payload(safepoint, &crate::records::RECORD, payload) }
 }
 
 /// Allocate a tuple from positional capture values (§7.3). Builds (and caches)
@@ -2325,16 +2287,8 @@ fn alloc_tuple(rt: &Rt, elements: &[u32], plan: &ParserPlan, values: Vec<GcRef>)
         items: values,
     };
     let (heap, safepoint) = rt.safepoint();
-    // SAFETY: payload matches TUPLE's layout.
-    unsafe {
-        heap.alloc_with(
-            safepoint,
-            &crate::tuples::TUPLE,
-            std::mem::size_of::<crate::tuples::TuplePayload>(),
-            std::mem::align_of::<crate::tuples::TuplePayload>(),
-            |ptr| (ptr as *mut crate::tuples::TuplePayload).write(payload),
-        )
-    }
+    // SAFETY: TuplePayload is TUPLE's payload type.
+    unsafe { heap.alloc_payload(safepoint, &crate::tuples::TUPLE, payload) }
 }
 
 // ---- parser-built schemas --------------------------------------------------
@@ -2413,6 +2367,30 @@ pub(crate) unsafe fn retire_schemas() {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
+/// Run `f` against the schema cache, created on first use.
+///
+/// The three `*_schema_for` builders below all start here, and it is the only
+/// thing that locks: "every access goes through the mutex" is the sentence
+/// [`ParserSchemas`]' `unsafe impl Send` rests on.
+fn with_schemas<R>(f: impl FnOnce(&mut ParserSchemas) -> R) -> R {
+    let mut guard = SCHEMAS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    f(guard.get_or_insert_with(ParserSchemas::default))
+}
+
+/// Re-borrow cache-owned data as `'static`, which is what the schema structs
+/// below declare their borrows to be.
+///
+/// # Safety
+/// The slice must live in a box the cache entry being built owns, so that it
+/// outlives every schema pointer handed out from that entry. [`retire_schemas`]
+/// is what discharges the obligation.
+unsafe fn erase_lifetime<T: 'static>(slice: &[T]) -> &'static [T] {
+    // SAFETY: per the contract above, the owning entry outlives the borrow.
+    unsafe { &*(slice as *const [T]) }
+}
+
 /// The `RecordSchema` for a template shape, built once and shared afterwards.
 ///
 /// Cached by the `(field-name, descriptor)` sequence. The descriptor half is
@@ -2426,37 +2404,33 @@ pub(crate) unsafe fn retire_schemas() {
 fn record_schema_for(
     fields: Vec<crate::records::RecordField>,
 ) -> *const crate::records::RecordSchema {
-    let mut guard = SCHEMAS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let cache = guard.get_or_insert_with(ParserSchemas::default);
-    let key: Vec<(&'static str, usize)> = fields
-        .iter()
-        .map(|f| (f.name, f.descriptor as usize))
-        .collect();
-    if let Some(entry) = cache.records.iter().find(|e| e.key == key) {
-        return &*entry.schema as *const _;
-    }
-    let fields: Box<[crate::records::RecordField]> = fields.into_boxed_slice();
-    // SAFETY (lifetime erasure): `RecordSchema::fields` declares `&'static`, and
-    // the slice lives in the boxed `fields` this entry owns. `retire_schemas`
-    // is what discharges the obligation.
-    let borrowed: &'static [crate::records::RecordField] =
-        unsafe { &*(&*fields as *const [crate::records::RecordField]) };
-    // A named-capture template produces an *anonymous* structural record
-    // (§5.6): its identity is its shape, so two templates with the same fields
-    // yield records that compare equal (RT-12).
-    let schema = Box::new(crate::records::RecordSchema {
-        identity: crate::records::SchemaIdentity::Anonymous,
-        fields: borrowed,
-    });
-    let raw: *const crate::records::RecordSchema = &*schema;
-    cache.records.push(RecordSchemaEntry {
-        key,
-        fields,
-        schema,
-    });
-    raw
+    with_schemas(|cache| {
+        let key: Vec<(&'static str, usize)> = fields
+            .iter()
+            .map(|f| (f.name, f.descriptor as usize))
+            .collect();
+        if let Some(entry) = cache.records.iter().find(|e| e.key == key) {
+            return &*entry.schema as *const _;
+        }
+        let fields: Box<[crate::records::RecordField]> = fields.into_boxed_slice();
+        // SAFETY: `RecordSchema::fields` declares `&'static`, and the slice
+        // lives in the boxed `fields` this entry owns.
+        let borrowed = unsafe { erase_lifetime(&fields) };
+        // A named-capture template produces an *anonymous* structural record
+        // (§5.6): its identity is its shape, so two templates with the same
+        // fields yield records that compare equal (RT-12).
+        let schema = Box::new(crate::records::RecordSchema {
+            identity: crate::records::SchemaIdentity::Anonymous,
+            fields: borrowed,
+        });
+        let raw: *const crate::records::RecordSchema = &*schema;
+        cache.records.push(RecordSchemaEntry {
+            key,
+            fields,
+            schema,
+        });
+        raw
+    })
 }
 
 /// The `EnumSchema` for a `choice`'s case list, built once and shared
@@ -2472,48 +2446,44 @@ fn record_schema_for(
 /// it is read off the object's header, so it is never wrong. The arity is still
 /// exact (one payload per case), which is what sizes the payload.
 fn enum_schema_for(cases: &'static [(&'static str, u32)]) -> *const crate::enums::EnumSchema {
-    let mut guard = SCHEMAS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let cache = guard.get_or_insert_with(ParserSchemas::default);
-    let key: Vec<&'static str> = cases.iter().map(|(name, _)| *name).collect();
-    if let Some(entry) = cache.enums.iter().find(|e| e.key == key) {
-        return &*entry.schema as *const _;
-    }
-    // One unknown slot per case, in one owned array the variant shapes borrow
-    // disjoint single-element windows of.
-    let payloads: Box<[*const crate::TypeDescriptor]> =
-        vec![std::ptr::null(); cases.len()].into_boxed_slice();
-    let variants: Box<[crate::enums::EnumVariantShape]> = key
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            // SAFETY (lifetime erasure): the window lives in the boxed
-            // `payloads` this entry owns; `retire_schemas` discharges it.
-            let slot: &'static [*const crate::TypeDescriptor] =
-                unsafe { &*(&payloads[i..=i] as *const [*const crate::TypeDescriptor]) };
-            crate::enums::EnumVariantShape {
-                name,
-                payload: slot,
-            }
-        })
-        .collect::<Vec<_>>()
-        .into_boxed_slice();
-    // SAFETY (lifetime erasure): as `record_schema_for`.
-    let borrowed: &'static [crate::enums::EnumVariantShape] =
-        unsafe { &*(&*variants as *const [crate::enums::EnumVariantShape]) };
-    let schema = Box::new(crate::enums::EnumSchema {
-        identity: crate::records::SchemaIdentity::Anonymous,
-        variants: borrowed,
-    });
-    let raw: *const crate::enums::EnumSchema = &*schema;
-    cache.enums.push(EnumSchemaEntry {
-        key,
-        variants,
-        payloads,
-        schema,
-    });
-    raw
+    with_schemas(|cache| {
+        let key: Vec<&'static str> = cases.iter().map(|(name, _)| *name).collect();
+        if let Some(entry) = cache.enums.iter().find(|e| e.key == key) {
+            return &*entry.schema as *const _;
+        }
+        // One unknown slot per case, in one owned array the variant shapes
+        // borrow disjoint single-element windows of.
+        let payloads: Box<[*const crate::TypeDescriptor]> =
+            vec![std::ptr::null(); cases.len()].into_boxed_slice();
+        let variants: Box<[crate::enums::EnumVariantShape]> = key
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                // SAFETY: the window lives in the boxed `payloads` this
+                // entry owns.
+                let slot = unsafe { erase_lifetime(&payloads[i..=i]) };
+                crate::enums::EnumVariantShape {
+                    name,
+                    payload: slot,
+                }
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        // SAFETY: as the slot above, for the boxed `variants`.
+        let borrowed = unsafe { erase_lifetime(&variants) };
+        let schema = Box::new(crate::enums::EnumSchema {
+            identity: crate::records::SchemaIdentity::Anonymous,
+            variants: borrowed,
+        });
+        let raw: *const crate::enums::EnumSchema = &*schema;
+        cache.enums.push(EnumSchemaEntry {
+            key,
+            variants,
+            payloads,
+            schema,
+        });
+        raw
+    })
 }
 
 /// The `TupleSchema` for a descriptor sequence, built once and shared
@@ -2521,28 +2491,25 @@ fn enum_schema_for(cases: &'static [(&'static str, u32)]) -> *const crate::enums
 fn tuple_schema_for(
     descriptors: Vec<*const crate::TypeDescriptor>,
 ) -> *const crate::tuples::TupleSchema {
-    let mut guard = SCHEMAS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let cache = guard.get_or_insert_with(ParserSchemas::default);
-    let key: Vec<usize> = descriptors.iter().map(|p| *p as usize).collect();
-    if let Some(entry) = cache.tuples.iter().find(|e| e.key == key) {
-        return &*entry.schema as *const _;
-    }
-    let descriptors: Box<[*const crate::TypeDescriptor]> = descriptors.into_boxed_slice();
-    // SAFETY (lifetime erasure): as `record_schema_for`.
-    let borrowed: &'static [*const crate::TypeDescriptor] =
-        unsafe { &*(&*descriptors as *const [*const crate::TypeDescriptor]) };
-    let schema = Box::new(crate::tuples::TupleSchema {
-        descriptors: borrowed,
-    });
-    let raw: *const crate::tuples::TupleSchema = &*schema;
-    cache.tuples.push(TupleSchemaEntry {
-        key,
-        descriptors,
-        schema,
-    });
-    raw
+    with_schemas(|cache| {
+        let key: Vec<usize> = descriptors.iter().map(|p| *p as usize).collect();
+        if let Some(entry) = cache.tuples.iter().find(|e| e.key == key) {
+            return &*entry.schema as *const _;
+        }
+        let descriptors: Box<[*const crate::TypeDescriptor]> = descriptors.into_boxed_slice();
+        // SAFETY: the slice lives in the boxed `descriptors` this entry owns.
+        let borrowed = unsafe { erase_lifetime(&descriptors) };
+        let schema = Box::new(crate::tuples::TupleSchema {
+            descriptors: borrowed,
+        });
+        let raw: *const crate::tuples::TupleSchema = &*schema;
+        cache.tuples.push(TupleSchemaEntry {
+            key,
+            descriptors,
+            schema,
+        });
+        raw
+    })
 }
 
 // ---- byte-splitting helpers -----------------------------------------------
@@ -2558,11 +2525,7 @@ fn tuple_schema_for(
 
 /// Skip leading horizontal whitespace (spaces and tabs).
 fn trim_leading_ws(bytes: &[u8]) -> &[u8] {
-    let mut i = 0;
-    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
-        i += 1;
-    }
-    &bytes[i..]
+    &bytes[horizontal_ws_run(bytes)..]
 }
 
 /// Take a run of integer characters (optional `-` + digits), returning the text
@@ -2654,22 +2617,7 @@ fn take_ident_run(bytes: &[u8]) -> usize {
         Ok(s) => s,
         Err(e) => std::str::from_utf8(&bytes[..e.valid_up_to()]).unwrap_or_default(),
     };
-    let mut chars = s.char_indices();
-    let Some((_, first)) = chars.next() else {
-        return 0;
-    };
-    if !praxis_syntax::ident::is_ident_start(first) {
-        return 0;
-    }
-    let mut end = first.len_utf8();
-    for (i, c) in chars {
-        if praxis_syntax::ident::is_ident_continue(c) {
-            end = i + c.len_utf8();
-        } else {
-            break;
-        }
-    }
-    end
+    praxis_syntax::ident::ident_run_len(s)
 }
 
 /// Take a run of word characters (non-whitespace, non-delimiter).
@@ -2687,8 +2635,36 @@ fn take_word_run(bytes: &[u8]) -> (&str, usize) {
     (s, end)
 }
 
+/// Horizontal whitespace: space and tab, and nothing else.
 fn is_ws(b: u8) -> bool {
     b == b' ' || b == b'\t'
+}
+
+/// Length of the leading run of horizontal whitespace in `bytes`.
+///
+/// The one spelling of that run for the whole module — `skip_line_boundary`,
+/// `skip_chars`'s `Whitespace` arm, `skip_capture_ws`, `consume_ws`'s
+/// `SpaceRun` arm and `trim_leading_ws` all ask here. They are one lexical
+/// class, not five policies, and the policies differ only in what they *do*
+/// with the count (advance a cursor, require it non-empty, slice at it).
+///
+/// Byte-wise on purpose: space and tab are single-byte scalars and cannot occur
+/// inside a multi-byte one, so scanning bytes can never land mid-scalar. Every
+/// caller depends on that. (The cell and scan loops step by scalar because
+/// *they* can.)
+fn horizontal_ws_run(bytes: &[u8]) -> usize {
+    bytes.iter().take_while(|&&b| is_ws(b)).count()
+}
+
+/// Length of the leading run of ASCII whitespace in `bytes` — [`is_ws`]'s class
+/// *plus* line endings, and so always at least [`horizontal_ws_run`].
+///
+/// That inclusion is the point: `SkipPolicy::Newlines` is the broader policy and
+/// `WsPolicy::{ZeroOrMore, OneOrMore}` the broader runs, which is easy to get
+/// backwards from the names alone. See [`skip_chars`] for the full note and the
+/// test that pins the ordering.
+fn ascii_ws_run(bytes: &[u8]) -> usize {
+    bytes.iter().take_while(|b| b.is_ascii_whitespace()).count()
 }
 
 /// Determine the element descriptor for a child plan node's *result* type. A
@@ -2740,17 +2716,20 @@ fn child_descriptor(plan: &ParserPlan, child: u32) -> &'static crate::TypeDescri
 }
 
 /// The scalar descriptor for an atomic kind.
+///
+/// Which kinds share a descriptor is [`AtomicClass::of`]'s decision, not this
+/// function's, and it is the same decision `synthesize::atomic_type` reads for
+/// the *static* type — `uint` is an `Int` on both sides because
+/// `ScalarType::UInt` has no runtime object to describe (§7.4, IP-11). Two
+/// copies of that grouping are precisely how a descriptor comes to disagree
+/// with the type behind it, which is REP-54/P0-11.
 fn atomic_descriptor(kind: AtomicKind) -> &'static crate::TypeDescriptor {
-    match kind {
-        // `uint` is an `Int` at runtime as well as in the type (§7.4, IP-11):
-        // `ScalarType::UInt` has no runtime object to describe.
-        AtomicKind::Int | AtomicKind::UInt | AtomicKind::Digit => &scalars::INT,
-        AtomicKind::Float => &scalars::FLOAT,
-        AtomicKind::Byte => &scalars::BYTE,
-        AtomicKind::Char => &scalars::CHAR,
-        AtomicKind::Word | AtomicKind::Identifier | AtomicKind::Text | AtomicKind::Rest => {
-            &crate::text::TEXT
-        }
+    match AtomicClass::of(kind) {
+        AtomicClass::Int => &scalars::INT,
+        AtomicClass::Float => &scalars::FLOAT,
+        AtomicClass::Byte => &scalars::BYTE,
+        AtomicClass::Char => &scalars::CHAR,
+        AtomicClass::Text => &crate::text::TEXT,
     }
 }
 

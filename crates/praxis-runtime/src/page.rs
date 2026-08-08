@@ -88,8 +88,17 @@ pub(crate) const NUM_CLASSES: usize = (MAX_BLOCK - MIN_BLOCK) / BLOCK_GRANULE + 
 /// the same page), so the bitmaps always have slack.
 const MAX_BLOCKS: usize = PAGE_SIZE / MIN_BLOCK;
 
+/// Bits in one bitmap word, and so the stride from a bitmap word index to the
+/// index of the block its bit 0 names.
+///
+/// Derived from the word type rather than written down, for the reason
+/// [`MIN_BLOCK`] is derived from the header: this is the bitmaps' geometry,
+/// and the geometry is this module's to state once.
+/// [`PageHeader::block_index_in`] is the same fact for a caller outside it.
+const BITS_PER_WORD: usize = u64::BITS as usize;
+
 /// Words in each of the two bitmaps.
-const BITMAP_WORDS: usize = MAX_BLOCKS.div_ceil(64);
+const BITMAP_WORDS: usize = MAX_BLOCKS.div_ceil(BITS_PER_WORD);
 
 /// [`PageHeader::class`] for a page that holds one over-sized or over-aligned
 /// object. Not an index into the ladder.
@@ -251,7 +260,7 @@ const _: () = {
     // silently losing the tail of a page — is not one to discover at runtime.
     let first = round_up_to_multiple(std::mem::size_of::<PageHeader>(), MIN_BLOCK);
     assert!(first < PAGE_SIZE);
-    assert!((PAGE_SIZE - first) / MIN_BLOCK <= BITMAP_WORDS * 64);
+    assert!((PAGE_SIZE - first) / MIN_BLOCK <= BITMAP_WORDS * BITS_PER_WORD);
 };
 
 /// The page an address inside a page belongs to.
@@ -387,7 +396,7 @@ impl PageHeader {
         block_count: usize,
         payload_offset: usize,
     ) -> *mut PageHeader {
-        debug_assert!(block_count <= BITMAP_WORDS * 64);
+        debug_assert!(block_count <= BITMAP_WORDS * BITS_PER_WORD);
         debug_assert!(first_block + block_count * block_size <= page_bytes);
         let page_bytes_u32 =
             u32::try_from(page_bytes).expect("a GC page larger than 4 GiB is not a page");
@@ -513,6 +522,20 @@ impl PageHeader {
         index
     }
 
+    /// The index of the block named by bit `bit` of bitmap word `word` — the
+    /// inverse of the split [`PageHeader::is_allocated`] does.
+    ///
+    /// Stated here because [`BITS_PER_WORD`] is: `Heap::sweep` and
+    /// `Heap::finalize_all` walk the bitmaps a word at a time and need the
+    /// index back, and reconstructing it there put this module's geometry in
+    /// theirs.
+    #[inline]
+    pub(crate) fn block_index_in(&self, word: usize, bit: u32) -> usize {
+        let index = word * BITS_PER_WORD + bit as usize;
+        debug_assert!(index < self.block_count.get() as usize);
+        index
+    }
+
     /// Claim the lowest free block, or `None` if the page is full.
     ///
     /// This is the whole allocation fast path: one bitmap word load, an
@@ -532,11 +555,11 @@ impl PageHeader {
                 !taken
             };
             if free != 0 {
-                let bit = free.trailing_zeros() as usize;
+                let bit = free.trailing_zeros();
                 self.allocated[w].set(taken | (1u64 << bit));
                 self.cursor.set(w as u32);
                 self.live_count.set(self.live_count.get() + 1);
-                return Some(self.block_ptr(w * 64 + bit));
+                return Some(self.block_ptr(self.block_index_in(w, bit)));
             }
             w += 1;
         }
@@ -549,14 +572,14 @@ impl PageHeader {
     /// Whether block `index` holds an initialized object.
     #[inline]
     pub(crate) fn is_allocated(&self, index: usize) -> bool {
-        self.allocated[index / 64].get() & (1u64 << (index % 64)) != 0
+        self.allocated[index / BITS_PER_WORD].get() & (1u64 << (index % BITS_PER_WORD)) != 0
     }
 
     /// Set block `index`'s mark bit and report whether it was **already** set.
     #[inline]
     pub(crate) fn test_and_set_mark(&self, index: usize) -> bool {
-        let word = index / 64;
-        let bit = 1u64 << (index % 64);
+        let word = index / BITS_PER_WORD;
+        let bit = 1u64 << (index % BITS_PER_WORD);
         let current = self.mark[word].get();
         self.mark[word].set(current | bit);
         current & bit != 0
@@ -578,9 +601,9 @@ impl PageHeader {
     /// only ever needs "is this the last word", which is a select.
     #[cfg(test)]
     fn valid_mask(&self, word: usize) -> u64 {
-        let start = word * 64;
+        let start = word * BITS_PER_WORD;
         let count = self.block_count.get() as usize;
-        if start + 64 <= count {
+        if start + BITS_PER_WORD <= count {
             u64::MAX
         } else if start >= count {
             0
@@ -789,12 +812,12 @@ fn reciprocal(block_size: usize) -> u32 {
 /// page has at least one block.
 fn last_word_for(block_count: usize) -> u32 {
     debug_assert!(block_count > 0);
-    (block_count.div_ceil(64) - 1) as u32
+    (block_count.div_ceil(BITS_PER_WORD) - 1) as u32
 }
 
 /// The bits of that last word which name blocks the page really has.
 fn tail_mask_for(block_count: usize) -> u64 {
-    match block_count % 64 {
+    match block_count % BITS_PER_WORD {
         0 => u64::MAX,
         tail => (1u64 << tail) - 1,
     }

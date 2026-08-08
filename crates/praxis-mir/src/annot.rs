@@ -52,6 +52,12 @@ pub fn slot_sets(inst: &Inst) -> (Option<&RootSlots>, Option<&DebugSlots>) {
 ///
 /// The half of [`slot_sets`] the backend's slot colouring wants, named so the
 /// call site reads as the question it is asking.
+///
+/// It is also how [`crate::liveness`]'s dirty-slot dataflow asks *whether*
+/// `inst` is a safepoint — `roots_of(inst).is_some()` — because carrying a
+/// [`RootSlots`] is what being one means. That caller used to spell the
+/// question as its own `matches!` over the five variants: the third
+/// hand-written copy [`slot_sets`] exists to be the only copy of.
 #[must_use]
 pub fn roots_of(inst: &Inst) -> Option<&RootSlots> {
     slot_sets(inst).0
@@ -94,11 +100,6 @@ impl RootSlots {
     #[must_use]
     pub fn dead(&self) -> &[LocalId] {
         &self.dead
-    }
-
-    /// Iterate the live roots.
-    pub fn iter(&self) -> impl Iterator<Item = LocalId> + '_ {
-        self.live.iter().copied()
     }
 
     /// Whether the liveness pass has filled this set. An *empty but annotated*
@@ -153,11 +154,6 @@ impl DebugSlots {
     #[must_use]
     pub fn visible(&self) -> &[LocalId] {
         &self.visible
-    }
-
-    /// Iterate the debugger-visible locals.
-    pub fn iter(&self) -> impl Iterator<Item = LocalId> + '_ {
-        self.visible.iter().copied()
     }
 
     /// Whether the liveness pass has filled this set.

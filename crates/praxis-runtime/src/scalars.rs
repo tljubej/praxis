@@ -18,6 +18,7 @@
 
 use std::cmp::Ordering;
 use std::fmt::{self, Write as _};
+use std::hash::Hash;
 
 use crate::descriptor::{
     hash_value, BuiltinTypeId, DynamicHasher, FormatSink, Payload, Tracer, TypeDescriptor,
@@ -47,10 +48,68 @@ pub type CharPayload = u32;
 /// `Float` payload: IEEE 754 binary64 (§4.3).
 pub type FloatPayload = f64;
 
+// ---- shared callbacks ------------------------------------------------------
+//
+// One implementation per operation, instantiated at each descriptor with the
+// payload type that descriptor was built from — `TypeDescriptor::builtin::<P>`
+// and `scalar_compare::<P>` on lines you can read together, so a callback that
+// reads the wrong width is visible where the descriptor is written rather than
+// four functions away. That is P0-12's shape: `Char`'s ordering read eight
+// bytes off a four-byte payload, and nothing at `CHAR` said otherwise.
+//
+// `BoolPayload` and `BytePayload` are both `u8`, so `Bool` and `Byte` share
+// these instantiations outright — which is exactly why a `Payload` handle names
+// its descriptor rather than deriving it from the payload type (see
+// `BYTE_PAYLOAD`). The descriptor is the identity (ADR-038); the callback is
+// not.
+//
+// `Unit` and `Float` keep their own: `Unit`'s callbacks never read the pointer
+// they are handed, and `Float`'s equality, hash and order are each IEEE-754
+// decisions rather than the derived Rust ones (§4.12, ADR-045).
+//
+// Grepping for the old per-type names: `int_equals` and `char_equals` — named
+// in `small_int.rs`, `small_char.rs`, `dynamic_key.rs` and ADR-100/ADR-107 —
+// are `scalar_equals` instantiated at `IntPayload` / `CharPayload`, and the
+// claims those comments make about them (a reflexive `u32 ==`, and so on) are
+// unchanged.
+
+/// A scalar payload holds no `GcRef`s, so there is nothing to report (ADR-013).
+unsafe fn scalar_trace(_: *mut u8, _: &mut dyn Tracer) {}
+
+/// A scalar payload is `Copy`, so there is nothing to release at sweep.
+unsafe fn scalar_drop(_: *mut u8) {}
+
+/// Structural equality for a scalar: Rust `==` on the payload type.
+///
+/// # Safety
+/// Both pointers must point at `P`s.
+unsafe fn scalar_equals<P: Copy + PartialEq>(a: *const u8, b: *const u8) -> bool {
+    // SAFETY: caller guarantees both pointers point at `P`s.
+    unsafe { *(a as *const P) == *(b as *const P) }
+}
+
+/// Structural hash for a scalar: the payload type's own `Hash`.
+///
+/// # Safety
+/// `payload` must point at a `P`.
+unsafe fn scalar_hash<P: Copy + Hash>(payload: *const u8, hasher: &mut dyn DynamicHasher) {
+    // SAFETY: caller guarantees `payload` points at a `P`.
+    let v = unsafe { *(payload as *const P) };
+    hash_value(hasher, &v);
+}
+
+/// Container order for a scalar: the payload type's own `Ord` (ADR-045). *Which*
+/// order that is, is a per-type decision — recorded at each descriptor below.
+///
+/// # Safety
+/// Both pointers must point at `P`s.
+unsafe fn scalar_compare<P: Copy + Ord>(a: *const u8, b: *const u8) -> Ordering {
+    // SAFETY: caller guarantees both pointers point at `P`s.
+    unsafe { (*(a as *const P)).cmp(&*(b as *const P)) }
+}
+
 // ---- Unit ------------------------------------------------------------------
 
-unsafe fn unit_trace(_: *mut u8, _: &mut dyn Tracer) {}
-unsafe fn unit_drop(_: *mut u8) {}
 unsafe fn unit_format(_: *const u8, out: &mut FormatSink<'_>) {
     let _ = out.write_str("Unit");
 }
@@ -72,8 +131,8 @@ unsafe fn unit_compare(_: *const u8, _: *const u8) -> Ordering {
 pub static UNIT: TypeDescriptor = TypeDescriptor::builtin::<UnitPayload>(
     BuiltinTypeId::Unit,
     "Unit",
-    unit_trace,
-    unit_drop,
+    scalar_trace,
+    scalar_drop,
     unit_format,
     Some(unit_equals),
     Some(unit_hash),
@@ -89,42 +148,26 @@ pub static UNIT_PAYLOAD: Payload<UnitPayload> = Payload::new(&UNIT);
 
 // ---- Bool ------------------------------------------------------------------
 
-unsafe fn bool_trace(_: *mut u8, _: &mut dyn Tracer) {}
-unsafe fn bool_drop(_: *mut u8) {}
 unsafe fn bool_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at a `BoolPayload`.
     let v = unsafe { *(payload as *const BoolPayload) };
     let _ = out.write_str(if v != 0 { "true" } else { "false" });
-}
-unsafe fn bool_equals(a: *const u8, b: *const u8) -> bool {
-    // SAFETY: caller guarantees both pointers point at `BoolPayload`s.
-    unsafe { *(a as *const BoolPayload) == *(b as *const BoolPayload) }
-}
-unsafe fn bool_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
-    // SAFETY: caller guarantees `payload` points at a `BoolPayload`.
-    let v = unsafe { *(payload as *const BoolPayload) };
-    hash_value(hasher, &v);
-}
-unsafe fn bool_compare(a: *const u8, b: *const u8) -> Ordering {
-    // `false` before `true`, which is both the conventional order and the one
-    // the rendered forms already had — so no `Set[Bool]` prints differently for
-    // this (ADR-138).
-    // SAFETY: caller guarantees both pointers point at `BoolPayload`s.
-    unsafe { (*(a as *const BoolPayload)).cmp(&*(b as *const BoolPayload)) }
 }
 
 /// Descriptor for the `Bool` scalar (§4.3).
 pub static BOOL: TypeDescriptor = TypeDescriptor::builtin::<BoolPayload>(
     BuiltinTypeId::Bool,
     "Bool",
-    bool_trace,
-    bool_drop,
+    scalar_trace,
+    scalar_drop,
     bool_format,
-    Some(bool_equals),
-    Some(bool_hash),
+    Some(scalar_equals::<BoolPayload>),
+    Some(scalar_hash::<BoolPayload>),
     // A `Bool` can be a `Map` key, so a container has to be able to order one
-    // (ADR-138). `true < false` is still Y006 — see `unit_compare`.
-    Some(bool_compare),
+    // (ADR-138). `true < false` is still Y006 — see `unit_compare`. The order is
+    // `false` before `true`, which is both the conventional one and the one the
+    // rendered forms already had — so no `Set[Bool]` prints differently for it.
+    Some(scalar_compare::<BoolPayload>),
 );
 
 /// `Bool`'s payload handle (REP-02). Both values are immortals too (RT-03), so
@@ -132,9 +175,6 @@ pub static BOOL: TypeDescriptor = TypeDescriptor::builtin::<BoolPayload>(
 pub static BOOL_PAYLOAD: Payload<BoolPayload> = Payload::new(&BOOL);
 
 // ---- Int -------------------------------------------------------------------
-
-unsafe fn int_trace(_: *mut u8, _: &mut dyn Tracer) {}
-unsafe fn int_drop(_: *mut u8) {}
 
 /// Render an `Int`: the decimal digits, with a leading `-` when negative.
 ///
@@ -152,31 +192,18 @@ unsafe fn int_format(payload: *const u8, out: &mut FormatSink<'_>) {
     let v = unsafe { *(payload as *const IntPayload) };
     write_int(out, v);
 }
-unsafe fn int_equals(a: *const u8, b: *const u8) -> bool {
-    // SAFETY: caller guarantees both pointers point at `IntPayload`s.
-    unsafe { *(a as *const IntPayload) == *(b as *const IntPayload) }
-}
-unsafe fn int_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
-    // SAFETY: caller guarantees `payload` points at an `IntPayload`.
-    let v = unsafe { *(payload as *const IntPayload) };
-    hash_value(hasher, &v);
-}
-unsafe fn int_compare(a: *const u8, b: *const u8) -> Ordering {
-    // SAFETY: caller guarantees both pointers point at `IntPayload`s.
-    unsafe { (*(a as *const IntPayload)).cmp(&*(b as *const IntPayload)) }
-}
 
 /// Descriptor for the `Int` scalar (§4.3).
 pub static INT: TypeDescriptor = TypeDescriptor::builtin::<IntPayload>(
     BuiltinTypeId::Int,
     "Int",
-    int_trace,
-    int_drop,
+    scalar_trace,
+    scalar_drop,
     int_format,
-    Some(int_equals),
-    Some(int_hash),
+    Some(scalar_equals::<IntPayload>),
+    Some(scalar_hash::<IntPayload>),
     // Signed numeric order (ADR-045).
-    Some(int_compare),
+    Some(scalar_compare::<IntPayload>),
 );
 
 /// `Int`'s payload handle (REP-02). `IntPayload` is `i64` while a Rust integer
@@ -201,38 +228,23 @@ pub const INT_CLAIM_SITE: InlineClaimSite = match InlineClaimSite::of(&INT) {
 
 // ---- Byte ------------------------------------------------------------------
 
-unsafe fn byte_trace(_: *mut u8, _: &mut dyn Tracer) {}
-unsafe fn byte_drop(_: *mut u8) {}
 unsafe fn byte_format(payload: *const u8, out: &mut FormatSink<'_>) {
     // SAFETY: caller guarantees `payload` points at a `BytePayload`.
     let v = unsafe { *(payload as *const BytePayload) };
     let _ = write!(out, "{v}");
-}
-unsafe fn byte_equals(a: *const u8, b: *const u8) -> bool {
-    // SAFETY: caller guarantees both pointers point at `BytePayload`s.
-    unsafe { *(a as *const BytePayload) == *(b as *const BytePayload) }
-}
-unsafe fn byte_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
-    // SAFETY: caller guarantees `payload` points at a `BytePayload`.
-    let v = unsafe { *(payload as *const BytePayload) };
-    hash_value(hasher, &v);
-}
-unsafe fn byte_compare(a: *const u8, b: *const u8) -> Ordering {
-    // SAFETY: caller guarantees both pointers point at `BytePayload`s.
-    unsafe { (*(a as *const BytePayload)).cmp(&*(b as *const BytePayload)) }
 }
 
 /// Descriptor for the `Byte` scalar (§4.3).
 pub static BYTE: TypeDescriptor = TypeDescriptor::builtin::<BytePayload>(
     BuiltinTypeId::Byte,
     "Byte",
-    byte_trace,
-    byte_drop,
+    scalar_trace,
+    scalar_drop,
     byte_format,
-    Some(byte_equals),
-    Some(byte_hash),
+    Some(scalar_equals::<BytePayload>),
+    Some(scalar_hash::<BytePayload>),
     // Unsigned numeric order (ADR-045).
-    Some(byte_compare),
+    Some(scalar_compare::<BytePayload>),
 );
 
 /// `Byte`'s payload handle (REP-02). Its payload is the same Rust type as
@@ -241,9 +253,6 @@ pub static BYTE: TypeDescriptor = TypeDescriptor::builtin::<BytePayload>(
 pub static BYTE_PAYLOAD: Payload<BytePayload> = Payload::new(&BYTE);
 
 // ---- Char ------------------------------------------------------------------
-
-unsafe fn char_trace(_: *mut u8, _: &mut dyn Tracer) {}
-unsafe fn char_drop(_: *mut u8) {}
 
 /// Render a `Char`: the character itself, with no quotes and no escaping.
 ///
@@ -269,34 +278,21 @@ unsafe fn char_format(payload: *const u8, out: &mut FormatSink<'_>) {
     let raw = unsafe { *(payload as *const CharPayload) };
     write_char(out, raw);
 }
-unsafe fn char_equals(a: *const u8, b: *const u8) -> bool {
-    // SAFETY: caller guarantees both pointers point at `CharPayload`s.
-    unsafe { *(a as *const CharPayload) == *(b as *const CharPayload) }
-}
-unsafe fn char_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
-    // SAFETY: caller guarantees `payload` points at a `CharPayload`.
-    let v = unsafe { *(payload as *const CharPayload) };
-    hash_value(hasher, &v);
-}
-unsafe fn char_compare(a: *const u8, b: *const u8) -> Ordering {
-    // SAFETY: caller guarantees both pointers point at `CharPayload`s. The
-    // payload is the Unicode scalar value, so `u32` order *is* code-point
-    // order — and it is four bytes, which is why reading it as an `i64` was
-    // both wrong and out of bounds (P0-12).
-    unsafe { (*(a as *const CharPayload)).cmp(&*(b as *const CharPayload)) }
-}
 
 /// Descriptor for the `Char` scalar (§4.3).
 pub static CHAR: TypeDescriptor = TypeDescriptor::builtin::<CharPayload>(
     BuiltinTypeId::Char,
     "Char",
-    char_trace,
-    char_drop,
+    scalar_trace,
+    scalar_drop,
     char_format,
-    Some(char_equals),
-    Some(char_hash),
-    // Unicode scalar value order (ADR-045).
-    Some(char_compare),
+    Some(scalar_equals::<CharPayload>),
+    Some(scalar_hash::<CharPayload>),
+    // Unicode scalar value order (ADR-045). The payload is the Unicode scalar
+    // value, so `u32` order *is* code-point order — and it is four bytes, which
+    // is why reading it as an `i64` was both wrong and out of bounds (P0-12).
+    // `CharPayload` here is what says so.
+    Some(scalar_compare::<CharPayload>),
 );
 
 /// `Char`'s payload handle (REP-02). `CharPayload` is `u32`, not `char`: the two
@@ -306,8 +302,6 @@ pub static CHAR_PAYLOAD: Payload<CharPayload> = Payload::new(&CHAR);
 
 // ---- Float ------------------------------------------------------------------
 
-unsafe fn float_trace(_: *mut u8, _: &mut dyn Tracer) {}
-unsafe fn float_drop(_: *mut u8) {}
 /// Render a `Float` the way §4.12 asks: in the shortest form that reads back as
 /// **the same Praxis `Float`** (ADR-083, REP-44).
 ///
@@ -392,8 +386,8 @@ unsafe fn float_compare(a: *const u8, b: *const u8) -> Ordering {
 pub static FLOAT: TypeDescriptor = TypeDescriptor::builtin::<FloatPayload>(
     BuiltinTypeId::Float,
     "Float",
-    float_trace,
-    float_drop,
+    scalar_trace,
+    scalar_drop,
     float_format,
     Some(float_equals),
     Some(float_hash),
@@ -664,7 +658,9 @@ mod tests {
         use std::ptr;
         let (f, t): (BoolPayload, BoolPayload) = (0, 1);
         assert_eq!(
-            unsafe { bool_compare(ptr::addr_of!(f).cast(), ptr::addr_of!(t).cast()) },
+            unsafe {
+                scalar_compare::<BoolPayload>(ptr::addr_of!(f).cast(), ptr::addr_of!(t).cast())
+            },
             Ordering::Less,
             "false sorts before true"
         );
