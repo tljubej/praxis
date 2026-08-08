@@ -175,10 +175,26 @@ That sentence is not written in the language server. It is the catalog entry's
 `doc` field, taken from the entry method resolution actually selected, so the row
 that runs and the sentence you read are the same row.
 
+A [prelude](../language/prelude.md) name keeps its scheme and gains §16.1's own
+sentence under it, and a name in **type position** — the `Int` in `var n: Int`,
+the `Vec` in `Vec[Text]` — answers with what the type is. Neither sentence is
+written in the language server either; both come from the same
+`crates/praxis-stdlib/src/prelude.rs` table name resolution seeds the root scope
+from.
+
+````text
+```praxis
+abs: (Int) -> Int
+```
+
+Absolute value of an `Int`. Faults on `Int`'s minimum, which has no positive counterpart. `Float` has its own `x.abs()`.
+````
+
 The preference order is innermost-wins: a parser expression, then a method name,
-then a name reference, then a declaration site, then the innermost expression
-node with a recorded type. The last of those is why hover works on things that
-are not names at all — a list literal, a subexpression, a call.
+then a name reference, then a declaration site, then a name in type position,
+then the innermost expression node with a recorded type. The last of those is why
+hover works on things that are not names at all — a list literal, a
+subexpression, a call.
 
 ## Hover inside a `read`
 

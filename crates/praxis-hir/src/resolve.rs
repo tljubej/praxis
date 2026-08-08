@@ -41,17 +41,6 @@ use crate::name_table::NameTable;
 use crate::scope::{ScopeId, ScopeTree};
 use crate::symbol::{Symbol, SymbolId, SymbolKind};
 
-/// The built-in scalar type names that a type annotation may legitimately name
-/// (§4.3). Reserved-but-unimplemented scalars (`UInt`, `Byte`) are deliberately
-/// absent: using them yields `N002 unknown type`. `Char` is wired end-to-end in
-/// M6 (the input parser produces it); `Float` is wired end-to-end (§4.12).
-///
-/// M7: these are now seeded into the root scope as `Builtin` symbols (see
-/// [`Resolver::seed_type_names`]), so type-annotation validation consults the
-/// scope tree rather than this constant directly. The constant is retained as
-/// the seed source.
-const KNOWN_TYPE_NAMES: &[&str] = &["Int", "Text", "Bool", "Char", "Float", "Unit", "Never"];
-
 /// A name reference resolved at a source range. Inference later attaches the
 /// inferred type to each.
 #[derive(Clone, Debug)]
@@ -374,10 +363,22 @@ impl Resolver {
     /// Seed the built-in scalar type names as `Builtin` symbols. Retained as a
     /// separate method so WS3/WS4 can add user `struct`/`enum` registrations
     /// alongside without touching `seed_prelude`.
+    ///
+    /// The names come from `praxis_stdlib::BUILTIN_TYPES` rather than from a
+    /// constant here, for the reason `seed_prelude` reads `PRELUDE`: the editor
+    /// describes each of these names, and a second list would be free to bind a
+    /// type the stdlib table cannot describe. Reserved-but-unimplemented
+    /// scalars (`UInt`, `Byte`, §4.3) are absent from that table, so either one
+    /// in an annotation is still `N002 unknown type`.
+    ///
+    /// A row that is **not** `seeded` is skipped: `Range` is a compiler-owned
+    /// type constructor that `check_type_annotation` accepts without a lookup,
+    /// and binding it here would make the *value* `Range()` resolve to a name
+    /// rather than raise `N001`.
     fn seed_type_names(&mut self, root: ScopeId) {
-        for ty in KNOWN_TYPE_NAMES {
-            let id = self.mint(SymbolKind::BuiltinType, (*ty).to_string(), None);
-            self.out.scopes.bind(root, (*ty).to_string(), id);
+        for ty in praxis_stdlib::BUILTIN_TYPES.iter().filter(|t| t.seeded) {
+            let id = self.mint(SymbolKind::BuiltinType, ty.name.to_string(), None);
+            self.out.scopes.bind(root, ty.name.to_string(), id);
         }
     }
 

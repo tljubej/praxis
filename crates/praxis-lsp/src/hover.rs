@@ -15,16 +15,20 @@
 //! *entry*, not a lookup by name, so an overload-free catalog row and the
 //! sentence shown are the same row. A parser constructor's and an atomic's are
 //! `Constructor::doc`/`AtomicKind::doc`, the closed tables in
-//! `praxis-input-parser`. None of the three is written here: a language server
+//! `praxis-input-parser`. A prelude name's is `praxis_stdlib::prelude_doc` and a
+//! type name's is `praxis_stdlib::type_doc`, the §16.1 tables name resolution
+//! seeds the root scope from. None of them is written here: a language server
 //! that carried its own description of `lines` would be free to describe a
 //! constructor the compiler no longer has.
 
 use crate::position::Encoding;
 use crate::query::Snapshot;
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind};
-use praxis_hir::ParserMode;
+use praxis_hir::hover::HoverInfo;
+use praxis_hir::{Analysis, ParserMode};
 use praxis_input_parser::{AtomicKind, Constructor};
 use praxis_source::Span;
+use praxis_syntax::SyntaxKind;
 
 /// Hover at `offset`.
 ///
@@ -35,7 +39,10 @@ use praxis_source::Span;
 ///    for a cursor on an inner constructor;
 /// 2. a method name, which is not a name reference and so is not in `refs`;
 /// 3. a name reference, then a declaration site;
-/// 4. the innermost expression node with a recorded type.
+/// 4. a name in **type position**, which is neither — the resolver keeps a type
+///    reference apart from a value one, so nothing above answers for the `Int`
+///    in `var n: Int`;
+/// 5. the innermost expression node with a recorded type.
 #[must_use]
 pub fn hover(snapshot: &Snapshot, offset: u32, enc: Encoding) -> Option<Hover> {
     let analysis = snapshot.analyze();
@@ -86,6 +93,10 @@ pub fn hover(snapshot: &Snapshot, offset: u32, enc: Encoding) -> Option<Hover> {
                 db.render(db.follow(m.result)),
                 m.entry.doc
             );
+        } else if let Some(doc) = prelude_sentence(analysis, &info) {
+            // A prelude name keeps its scheme — that is what a reader is usually
+            // after — and gains §16.1's sentence under it.
+            body = format!("{body}\n\n{doc}");
         }
         return Some(markdown(body, Some(positions.text_range(range, enc))));
     }
@@ -94,6 +105,22 @@ pub fn hover(snapshot: &Snapshot, offset: u32, enc: Encoding) -> Option<Hover> {
     if let Some(info) = analysis.hover_decl(range) {
         return Some(markdown(
             format!("```praxis\n{}: {}\n```", info.name, info.scheme),
+            Some(positions.text_range(range, enc)),
+        ));
+    }
+
+    // A name written in **type position**. Nothing above answers for it: name
+    // resolution records a type reference in its own map precisely because it is
+    // not a value reference — nothing instantiates a scheme for it — and there
+    // is no expression node under a `TYPE_REF` either. So hover over the `Int`
+    // in `var n: Int` used to fall all the way through and return nothing.
+    if let Some(doc) = type_position_doc(snapshot, offset) {
+        return Some(markdown(
+            format!(
+                "```praxis\n{}\n```\n\n{}\n\n*built-in type*\n",
+                token.text(),
+                doc
+            ),
             Some(positions.text_range(range, enc)),
         ));
     }
@@ -112,6 +139,43 @@ pub fn hover(snapshot: &Snapshot, offset: u32, enc: Encoding) -> Option<Hover> {
         format!("```praxis\n{}\n```", db.render(db.follow(ty))),
         Some(positions.text_range(node_range, enc)),
     ))
+}
+
+/// §16.1's own sentence about `info`'s name, when the name really is the
+/// prelude's.
+///
+/// **The symbol decides, not the spelling.** `var out = 1` shadows the prelude's
+/// `out`, and a lookup by text would describe the shadowed builtin while hover's
+/// own scheme line described the local — two halves of one tooltip disagreeing
+/// about which binding the cursor is on. A prelude symbol is the one with no
+/// declaration site: nothing in the file declares it, which is what "seeded into
+/// the root scope" means.
+fn prelude_sentence(analysis: &Analysis, info: &HoverInfo) -> Option<&'static str> {
+    let symbol = analysis.names.get(info.symbol)?;
+    if symbol.decl.is_some() {
+        return None;
+    }
+    praxis_stdlib::prelude_doc(&symbol.name)
+}
+
+/// The built-in type description for the name the cursor is on, when the cursor
+/// is inside a type annotation.
+///
+/// The `TYPE_REF` ancestor is the whole of "is this type position", and it is
+/// the parser's answer rather than a guess from the text: the same `Vec` is a
+/// value in `Vec()` and a type in `var v: Vec[Int]`, and only one of the two
+/// wants to be told what a `Vec` *is*.
+///
+/// A user type is deliberately not answered here. `type_doc` holds the built-in
+/// names only, so a `struct Point` used in `var p: Point` falls through to the
+/// query below rather than being described as something it is not.
+fn type_position_doc(snapshot: &Snapshot, offset: u32) -> Option<&'static str> {
+    let token = snapshot.token_at(offset)?;
+    if token.kind() != SyntaxKind::Ident {
+        return None;
+    }
+    snapshot.ancestor_of_kind(offset, SyntaxKind::TYPE_REF)?;
+    praxis_stdlib::type_doc(token.text())
 }
 
 /// A parser name the cursor is on, with what to say about it.

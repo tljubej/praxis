@@ -575,7 +575,7 @@ fn assert_fix_makes_it_clean(src: &str, needle: &str, expect_title: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Documentation in hover
+// Documentation in hover, completion and signature help
 // ---------------------------------------------------------------------------
 
 /// A method's hover carries the catalog's own signature and documentation.
@@ -625,4 +625,257 @@ fn hovering_a_parser_constructor_shows_its_documentation() {
         atom.contains(praxis_input_parser::AtomicKind::Int.doc()),
         "{atom}"
     );
+}
+
+/// A **prelude** name's hover carries §16.1's own sentence beside the scheme.
+///
+/// The scheme alone was what hover answered for all thirty-one of these, and for
+/// the graph helpers it is the least useful thing that could be said: `bfs:
+/// forall T. (T, (T) -> Vec[T]) -> Vec[T]` names two type variables and does not
+/// say that the closure is the graph.
+#[test]
+fn hovering_a_prelude_name_shows_the_preludes_own_sentence() {
+    let src = "var v = Vec()\nv.push(1)\nout(bfs(1, |s| v).len())\nout(abs(-1))\n";
+    let s = snap(src);
+    for name in ["bfs", "abs", "out", "Vec"] {
+        let text = hover_text(
+            &praxis_lsp::hover::hover(&s, at(src, name), ENC)
+                .unwrap_or_else(|| panic!("`{name}` hovers")),
+        );
+        let doc = praxis_stdlib::prelude_doc(name).expect("a prelude name has a doc");
+        assert!(
+            text.contains(doc),
+            "`{name}`'s documentation is the prelude table's, not the server's: {text}"
+        );
+        // The scheme is still there — the sentence is added to hover, not
+        // substituted for the type a reader came for.
+        assert!(text.contains(&format!("{name}: ")), "{text}");
+    }
+}
+
+/// **A binding that shadows a prelude name is not the prelude name.**
+///
+/// This is the mistake a by-spelling lookup makes, and it is silent: hover's
+/// scheme line would say `out: Int` — the local — while the sentence under it
+/// described the builtin the local hides. The declaration site is what
+/// distinguishes them, because a seeded symbol has none.
+#[test]
+fn a_binding_that_shadows_a_prelude_name_is_described_as_itself() {
+    let src = "var out = 1\nvar doubled = out + 1\n";
+    let s = snap(src);
+    let text = hover_text(
+        &praxis_lsp::hover::hover(&s, at_after(src, "var out = 1", "out"), ENC)
+            .expect("the shadowing reference hovers"),
+    );
+    assert!(text.contains("out: Int"), "it is the local: {text}");
+    assert!(
+        !text.contains(praxis_stdlib::prelude_doc("out").expect("out is in the prelude")),
+        "a local named `out` is not the prelude's `out`: {text}"
+    );
+}
+
+/// A name in **type position** hovers, and says what the type is.
+///
+/// Type references are kept apart from value references by name resolution, so
+/// every one of these fell through hover's four lookups and returned nothing —
+/// `Int` in `var n: Int` had no answer at all, and neither did the `Vec` in
+/// `Vec[Int]`.
+#[test]
+fn hovering_a_built_in_type_says_what_it_is() {
+    let src = "var n: Int = 1\nvar v: Vec[Text] = Vec()\nvar r: Range = 0..3\n";
+    let s = snap(src);
+    for name in ["Int", "Vec[", "Text", "Range"] {
+        let bare = name.trim_end_matches('[');
+        let text = hover_text(
+            &praxis_lsp::hover::hover(&s, at(src, name), ENC)
+                .unwrap_or_else(|| panic!("`{bare}` hovers in type position")),
+        );
+        let doc = praxis_stdlib::type_doc(bare).expect("a built-in type has a doc");
+        assert!(text.contains(doc), "`{bare}`: {text}");
+        assert!(text.contains("built-in type"), "`{bare}`: {text}");
+    }
+
+    // A **user** type is not described as a built-in one: `type_doc` holds the
+    // stdlib's names only, so this falls through rather than inventing a
+    // sentence about a `Point` the stdlib never heard of.
+    let user = "struct Point { x: Int }\nvar p: Point = Point { x: 1 }\nout(p.x)\n";
+    let s = snap(user);
+    let text = praxis_lsp::hover::hover(&s, at_after(user, "var p: ", "Point"), ENC)
+        .map(|h| hover_text(&h))
+        .unwrap_or_default();
+    assert!(
+        !text.contains("built-in type"),
+        "`Point` is the file's, not the stdlib's: {text}"
+    );
+}
+
+/// **Every name the prelude declares is offered with its description**, and so
+/// is every built-in type name — a sweep over both tables rather than a
+/// spot-check, so a name added to either cannot ship undocumented in the editor.
+///
+/// The seven type names are the ones this catches: they had no `detail` and no
+/// `documentation`, so the completion list offered `Never` as a bare word.
+#[test]
+fn completion_offers_every_stdlib_name_with_its_documentation() {
+    let src = "var q = 1\nout(q)\n";
+    let s = snap(src);
+    let ctx = praxis_lsp::completion::context_at(&s, at_after(src, "out(", "q"));
+    let items = praxis_lsp::completion::items(&s, &ctx);
+    let doc_of = |label: &str| -> Option<String> {
+        items
+            .iter()
+            .find(|i| i.label == label)?
+            .documentation
+            .as_ref()
+            .map(|d| match d {
+                lsp_types::Documentation::String(s) => s.clone(),
+                lsp_types::Documentation::MarkupContent(m) => m.value.clone(),
+            })
+    };
+
+    for entry in praxis_stdlib::PRELUDE {
+        assert_eq!(
+            doc_of(entry.name).as_deref(),
+            Some(entry.doc),
+            "the prelude name `{}` is offered without the table's sentence",
+            entry.name
+        );
+    }
+    for entry in praxis_stdlib::BUILTIN_TYPES.iter().filter(|e| e.seeded) {
+        assert_eq!(
+            doc_of(entry.name).as_deref(),
+            Some(entry.doc),
+            "the type name `{}` is offered without the table's sentence",
+            entry.name
+        );
+    }
+
+    // A binding the file declares carries no stdlib sentence, for the reason
+    // hover's shadowing test gives.
+    assert_eq!(doc_of("q"), None);
+}
+
+/// Matching an `Option` offers `Some` and `None` with the prelude's own
+/// sentences — and a user enum that happens to spell a variant `Some` gets
+/// nothing, because the *enum* is what carries the description, not the word.
+#[test]
+fn matching_an_option_offers_its_variants_documentation() {
+    let src = "var m = Map()\nm.insert(1, 2)\nvar got = m.get(1)\nmatch got {\n  Some(n) => out(n)\n  None => out(0)\n}\n";
+    let s = snap(src);
+    let ctx = praxis_lsp::completion::context_at(&s, at(src, "Some(n)"));
+    let items = praxis_lsp::completion::items(&s, &ctx);
+    for name in ["Some", "None"] {
+        let item = items
+            .iter()
+            .find(|i| i.label == name)
+            .unwrap_or_else(|| panic!("`{name}` is offered: {items:?}"));
+        assert_eq!(
+            item.documentation,
+            Some(lsp_types::Documentation::String(
+                praxis_stdlib::prelude_doc(name)
+                    .expect("a prelude variant has a doc")
+                    .to_string()
+            )),
+            "`{name}` carries the prelude's sentence"
+        );
+    }
+
+    // A user enum whose variant is spelled `Some` is not `Option`.
+    let mine = "enum Signal { Some, Quiet }\nfn f(s: Signal) -> Int {\n  match s {\n    Some => 1\n    Quiet => 0\n  }\n}\nout(f(Some))\n";
+    let s = snap(mine);
+    let ctx = praxis_lsp::completion::context_at(&s, at_after(mine, "match s {", "Some"));
+    let items = praxis_lsp::completion::items(&s, &ctx);
+    let some = items
+        .iter()
+        .find(|i| i.label == "Some")
+        .expect("the user's own variant is offered");
+    assert_eq!(
+        some.documentation, None,
+        "`Signal::Some` is not `Option::Some`"
+    );
+}
+
+/// A parser atomic and a parser constructor are offered with §7.4's and §7.5's
+/// own descriptions — the same two tables hover reads, so a menu row and a
+/// tooltip cannot describe `lines` differently.
+#[test]
+fn parser_completion_offers_the_sublanguages_documentation() {
+    let src = "var v = read lines(int)\nout(v.len())\n";
+    let s = snap(src);
+    let ctx = praxis_lsp::completion::context_at(&s, at(src, "int)"));
+    let items = praxis_lsp::completion::items(&s, &ctx);
+    let doc_of = |label: &str| -> Option<String> {
+        items
+            .iter()
+            .find(|i| i.label == label)?
+            .documentation
+            .as_ref()
+            .map(|d| match d {
+                lsp_types::Documentation::String(s) => s.clone(),
+                lsp_types::Documentation::MarkupContent(m) => m.value.clone(),
+            })
+    };
+
+    for atom in praxis_input_parser::AtomicKind::ALL {
+        assert_eq!(
+            doc_of(atom.keyword()).as_deref(),
+            Some(atom.doc()),
+            "the atomic `{}` is offered without §7.4's sentence",
+            atom.keyword()
+        );
+    }
+    for ctor in praxis_input_parser::Constructor::ALL {
+        assert_eq!(
+            doc_of(ctor.keyword()).as_deref(),
+            Some(ctor.doc()),
+            "the constructor `{}` is offered without §7.5's sentence",
+            ctor.keyword()
+        );
+    }
+}
+
+/// Signature help carries the callee's documentation — for a prelude function
+/// and for a parser constructor, the two callees that had none.
+///
+/// The parameter list is where a description is worth the most: `clamp`'s three
+/// parameters render as `Int, Int, Int`, and which one is the low bound is
+/// precisely what the label cannot say.
+#[test]
+fn signature_help_carries_the_callees_documentation() {
+    let src = "var c = clamp(1, 0, 2)\nvar v = read lines(int)\nout(c + v.len())\n";
+    let s = snap(src);
+
+    let call = praxis_lsp::signature::signature_help(&s, at(src, "1, 0, 2"))
+        .expect("a prelude call has signature help");
+    assert_eq!(
+        doc_string(&call.signatures[0]),
+        praxis_stdlib::prelude_doc("clamp").map(ToString::to_string),
+        "the sentence is the prelude table's"
+    );
+
+    // Every form of a constructor carries it, not just the one the editor
+    // happens to preselect.
+    let parser = praxis_lsp::signature::signature_help(&s, at(src, "int)"))
+        .expect("a parser constructor has signature help");
+    for form in &parser.signatures {
+        assert_eq!(
+            doc_string(form),
+            Some(praxis_input_parser::Constructor::Lines.doc().to_string()),
+            "each form of `lines` says what `lines` does"
+        );
+    }
+
+    // A **user** function gets no stdlib sentence, whatever it is named.
+    let mine = "fn clamp_it(v: Int) -> Int { v }\nout(clamp_it(3))\n";
+    let s = snap(mine);
+    let ours = praxis_lsp::signature::signature_help(&s, at_after(mine, "out(clamp_it(", "3"))
+        .expect("a user call has signature help");
+    assert_eq!(doc_string(&ours.signatures[0]), None);
+}
+
+fn doc_string(sig: &lsp_types::SignatureInformation) -> Option<String> {
+    match sig.documentation.as_ref()? {
+        lsp_types::Documentation::String(s) => Some(s.clone()),
+        lsp_types::Documentation::MarkupContent(m) => Some(m.value.clone()),
+    }
 }

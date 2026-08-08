@@ -86,11 +86,19 @@ fn call_signature(snapshot: &Snapshot, list: &SyntaxNode, offset: u32) -> Option
             let scheme = symbol.scheme.as_ref()?;
             let rendered = db.render_scheme(scheme);
             let params = function_params(db, scheme);
-            (
-                format!("{}: {}", symbol.name, rendered),
-                params,
-                None::<String>,
-            )
+            // A prelude callee carries §16.1's sentence, and it is worth more
+            // here than anywhere: `a_star(start, neighbors, weight, heuristic,
+            // goal)`'s five parameters render as five bare closure types, and
+            // which one is the heuristic is exactly what the sentence says. The
+            // declaration-site test is hover's — a user's own `fn` gets no
+            // prelude description, however it is spelled.
+            let doc = symbol
+                .decl
+                .is_none()
+                .then(|| praxis_stdlib::prelude_doc(&symbol.name))
+                .flatten()
+                .map(ToString::to_string);
+            (format!("{}: {}", symbol.name, rendered), params, doc)
         }
         _ => return None,
     };
@@ -140,9 +148,13 @@ fn parser_signature(snapshot: &Snapshot, list: &SyntaxNode, offset: u32) -> Opti
     let ctor = Constructor::from_keyword(name.trim())?;
     let active = active_parameter(list, offset);
 
+    // §7.5's own description, on every form. `sections` and `repeated` each have
+    // two signatures and one meaning, so the documentation repeats rather than
+    // landing on whichever the editor happened to select.
+    let doc = ctor.doc().to_string();
     let signatures: Vec<SignatureInformation> = constructor_signatures(ctor)
         .into_iter()
-        .map(|(label, params)| signature_info(label, params, None, active))
+        .map(|(label, params)| signature_info(label, params, Some(doc.clone()), active))
         .collect();
     let _ = snapshot;
     Some(SignatureHelp {

@@ -318,8 +318,14 @@ fn variant_items(snapshot: &Snapshot, ty: Type) -> Vec<CompletionItem> {
     let TypeData::Enum { def, .. } = db.data(db.follow(ty)) else {
         return Vec::new();
     };
-    db.enum_def(*def)
-        .variants
+    let def = db.enum_def(*def);
+    // `Option` is the one enum the *prelude* declares (§16.1), so its two
+    // variants are the only ones with a description to offer. The def's own name
+    // is the test rather than the variant's: a user's `enum Signal { Some }` is
+    // its own enum and gets nothing, which a `prelude_doc("Some")` by spelling
+    // would get wrong.
+    let prelude_option = def.name.as_deref() == Some("Option");
+    def.variants
         .iter()
         .map(|v| {
             let detail = if v.payload.is_empty() {
@@ -333,6 +339,10 @@ fn variant_items(snapshot: &Snapshot, ty: Type) -> Vec<CompletionItem> {
                 label: v.name.clone(),
                 kind: Some(CompletionItemKind::ENUM_MEMBER),
                 detail: Some(detail),
+                documentation: prelude_option
+                    .then(|| praxis_stdlib::prelude_doc(&v.name))
+                    .flatten()
+                    .map(|d| Documentation::String(d.to_string())),
                 ..CompletionItem::default()
             }
         })
@@ -341,6 +351,11 @@ fn variant_items(snapshot: &Snapshot, ty: Type) -> Vec<CompletionItem> {
 
 /// §7.4's atomics, §7.5's constructors, and the enclosing constructor's own
 /// named argument and flag.
+///
+/// Each row carries the sublanguage's own description — `AtomicKind::doc` and
+/// `Constructor::doc`, the same two the hover query reads. The detail line says
+/// what the thing *is* and the documentation says what it *does*, and neither is
+/// a sentence written here.
 fn parser_items(enclosing: Option<Constructor>) -> Vec<CompletionItem> {
     let mut out: Vec<CompletionItem> = AtomicKind::ALL
         .iter()
@@ -348,6 +363,7 @@ fn parser_items(enclosing: Option<Constructor>) -> Vec<CompletionItem> {
             label: a.keyword().to_string(),
             kind: Some(CompletionItemKind::VALUE),
             detail: Some("input parser atomic (§7.4)".to_string()),
+            documentation: Some(Documentation::String(a.doc().to_string())),
             ..CompletionItem::default()
         })
         .collect();
@@ -356,6 +372,7 @@ fn parser_items(enclosing: Option<Constructor>) -> Vec<CompletionItem> {
         label: c.keyword().to_string(),
         kind: Some(CompletionItemKind::FUNCTION),
         detail: Some(crate::signature::constructor_signature(*c)),
+        documentation: Some(Documentation::String(c.doc().to_string())),
         insert_text: Some(format!("{}(", c.keyword())),
         ..CompletionItem::default()
     }));
@@ -396,6 +413,12 @@ pub(crate) const RAGGED_FLAG: &str = "ragged";
 /// `ScopeId`, not by span, so "which scope is this offset in" is not a question
 /// it can answer; the containing-block test is the tree's answer to the same
 /// question and it agrees with the resolver wherever a name resolves at all.
+///
+/// A **prelude** name carries §16.1's own sentence, and a built-in type name
+/// carries §4.2's. Those two are most of this list — thirty-one prelude names
+/// and seven type names against however many the file declares — and before this
+/// they were offered with a signature and nothing else, the seven type names
+/// with not even that.
 fn lexical_items(snapshot: &Snapshot) -> Vec<CompletionItem> {
     let analysis = snapshot.analyze();
     let db = &analysis.db;
@@ -420,9 +443,32 @@ fn lexical_items(snapshot: &Snapshot) -> Vec<CompletionItem> {
         out.push(CompletionItem {
             label: sym.name.clone(),
             kind: Some(kind),
-            detail: sym.scheme.as_ref().map(|s| db.render_scheme(s)),
+            // A type name has no scheme — nothing instantiates `Int` — so
+            // saying what it is is the only detail there is to give.
+            detail: sym
+                .scheme
+                .as_ref()
+                .map(|s| db.render_scheme(s))
+                .or_else(|| (sym.kind == SymbolKind::BuiltinType).then(|| "type".to_string())),
+            documentation: builtin_doc(sym).map(|d| Documentation::String(d.to_string())),
             ..CompletionItem::default()
         });
     }
     out
+}
+
+/// The stdlib's own sentence about `sym`, when `sym` is one of its names.
+///
+/// **A declaration site is the test**, the same one hover uses: a symbol the
+/// prelude seeded has none, and `var out = 1` — which shadows one — does. A
+/// lookup by spelling alone would attach "Write one value to stdout" to the
+/// user's local.
+fn builtin_doc(sym: &praxis_hir::Symbol) -> Option<&'static str> {
+    if sym.decl.is_some() {
+        return None;
+    }
+    match sym.kind {
+        SymbolKind::BuiltinType => praxis_stdlib::type_doc(&sym.name),
+        _ => praxis_stdlib::prelude_doc(&sym.name),
+    }
 }

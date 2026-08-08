@@ -13,21 +13,54 @@ use crate::abi::RuntimeSymbol;
 /// by the unit test.
 pub const PRELUDE: &[PreludeEntry] = &[
     // Output / control
-    PreludeEntry::new("out", "Write one value followed by a newline."),
-    PreludeEntry::new("dbg", "Print to stderr and return the value."),
+    PreludeEntry::new(
+        "out",
+        "Write one value to stdout, followed by a newline. Renders through the value's own formatter, so any type may be written.",
+    ),
+    PreludeEntry::new(
+        "dbg",
+        "Write one value to **stderr** and return it unchanged, so `dbg(e)` can wrap any subexpression without changing what the program computes.",
+    ),
     PreludeEntry::new(
         "panic",
-        "Stop with an explicit message and enter the crash debugger.",
+        "Stop with an explicit message. Raises an ordinary fault, so it enters the crash debugger on a terminal; its result is `Never`, so a function may end on one.",
     ),
-    PreludeEntry::new("assert", "Stop if a condition is false."),
-    // Numeric helpers
-    PreludeEntry::new("abs", "Absolute value of an integer."),
-    PreludeEntry::new("sign", "Sign of an integer: -1, 0, or 1."),
-    PreludeEntry::new("min", "Smaller of two orderable values."),
-    PreludeEntry::new("max", "Larger of two orderable values."),
-    PreludeEntry::new("clamp", "Clamp a value into an inclusive range."),
-    PreludeEntry::new("gcd", "Greatest common divisor of two integers."),
-    PreludeEntry::new("lcm", "Least common multiple of two integers."),
+    PreludeEntry::new(
+        "assert",
+        "Stop if a condition is false. Takes a `Bool` and nothing else — there is no message parameter.",
+    ),
+    // Numeric helpers. All seven are `Int` functions and none is generic
+    // (ADR-058), so each doc string says `Int` rather than "a number": `Float`
+    // carries its own `abs`/`sign`/`min`/`max` as *methods* and has no `clamp`,
+    // `gcd` or `lcm` at all, and a reader who hovers here has already asked.
+    PreludeEntry::new(
+        "abs",
+        "Absolute value of an `Int`. Faults on `Int`'s minimum, which has no positive counterpart. `Float` has its own `x.abs()`.",
+    ),
+    PreludeEntry::new(
+        "sign",
+        "`-1`, `0` or `1`, by the sign of an `Int`. Total. `Float` has its own `x.sign()`.",
+    ),
+    PreludeEntry::new(
+        "min",
+        "The smaller of two `Int`s. `Float` has its own `x.min(y)` method.",
+    ),
+    PreludeEntry::new(
+        "max",
+        "The larger of two `Int`s. `Float` has its own `x.max(y)` method.",
+    ),
+    PreludeEntry::new(
+        "clamp",
+        "`clamp(value, low, high)` — an `Int` held inside an inclusive range. Faults if `low > high`.",
+    ),
+    PreludeEntry::new(
+        "gcd",
+        "Non-negative greatest common divisor of two `Int`s. `gcd(0, 0)` is `0`.",
+    ),
+    PreludeEntry::new(
+        "lcm",
+        "Non-negative least common multiple of two `Int`s, or `0` if either operand is. Faults if the result leaves `Int`.",
+    ),
     // Nullary **functions**, not constants: `pi()` is the value and `pi` is
     // `() -> Float`. The doc string is what hover shows, so calling them
     // constants here put the wrong thing in front of the one reader who had
@@ -45,23 +78,38 @@ pub const PRELUDE: &[PreludeEntry] = &[
         "Vec",
         "Grow, iterate, and pipeline over an ordered list. `Vec()` is empty; `Vec(n, fill)` is n copies of fill.",
     ),
-    PreludeEntry::new("Deque", "Double-ended queue."),
-    PreludeEntry::new("Map", "Hash map."),
-    PreludeEntry::new("Set", "Hash set."),
-    PreludeEntry::new("Counter", "Map whose absent values read as zero."),
+    PreludeEntry::new(
+        "Deque",
+        "Double-ended queue: push and pop at either end. `Deque()` is empty.",
+    ),
+    PreludeEntry::new(
+        "Map",
+        "Hash map from keys to values. A key must be a value that cannot change (§4.9). `Map()` is empty.",
+    ),
+    PreludeEntry::new(
+        "Set",
+        "Hash set of distinct values. An element must be a value that cannot change (§4.9). `Set()` is empty.",
+    ),
+    PreludeEntry::new(
+        "Counter",
+        "Map whose absent values read as zero, so `c.inc(k)` needs no first-sighting case. `Counter()` is empty.",
+    ),
     PreludeEntry::new(
         "MinHeap",
-        "Priority queue yielding the smallest element first.",
+        "Priority queue yielding the smallest element first. Its element must be orderable. `MinHeap()` is empty.",
     ),
     PreludeEntry::new(
         "MaxHeap",
-        "Priority queue yielding the largest element first.",
+        "Priority queue yielding the largest element first. Its element must be orderable. `MaxHeap()` is empty.",
     ),
     PreludeEntry::new(
         "Grid",
         "2D grid with rectangular indexing. `Grid()` is 0x0; `Grid(w, h, fill)` is a w-by-h board of fill.",
     ),
-    PreludeEntry::new("BitSet", "Compact set of non-negative integers."),
+    PreludeEntry::new(
+        "BitSet",
+        "Compact set of non-negative integers. Takes no type argument.",
+    ),
     // Optionality (M9). Option[T] is a polymorphic enum: Some(T) carries a
     // value, None marks absence (§4.7 — "normal domain-level absence… not an
     // error channel"). Returned by the `optional(P)` parser, by `Map.get` and
@@ -72,16 +120,82 @@ pub const PRELUDE: &[PreludeEntry] = &[
     // `Option[Int]`. This comment used to say the opposite — that they answered
     // an `Int` with a `-1` miss sentinel — which was true before ADR-082 and
     // has not been since; the catalog rows and a run both say `Some(4)`.
-    PreludeEntry::new("Option", "Optional value: Some(T) or None."),
-    PreludeEntry::variant("Some", "Wrap a value in an Option."),
-    PreludeEntry::variant("None", "The absent Option value."),
-    // Graph algorithms
-    PreludeEntry::new("bfs", "Breadth-first traversal."),
-    PreludeEntry::new("bfs_distance", "Breadth-first shortest distance."),
-    PreludeEntry::new("dfs", "Depth-first traversal."),
-    PreludeEntry::new("dijkstra", "Dijkstra shortest path."),
-    PreludeEntry::new("a_star", "A* search."),
-    PreludeEntry::new("flood_fill", "Flood fill from a starting cell."),
+    PreludeEntry::new(
+        "Option",
+        "Optional value: `Some(T)` or `None`. Domain-level absence, not an error channel — what `Map.get`, `Grid.find`, `find`/`position` and the goal-directed graph walks answer with.",
+    ),
+    PreludeEntry::variant("Some", "Wrap a value in an `Option`."),
+    PreludeEntry::variant(
+        "None",
+        "The absent `Option` value. Not a call — write `None`, never `None()`.",
+    ),
+    // Graph algorithms (§6.5). Each doc string writes the **call**, because the
+    // one thing a reader cannot guess from the name is the shape of the closures
+    // — none of these takes a graph object, so the graph *is* the neighbour
+    // function (ADR-060). Every state a walk visits is remembered, so the state
+    // type has to be usable as a key.
+    PreludeEntry::new(
+        "bfs",
+        "Breadth-first walk: `bfs(start, |s| neighbors(s))` answers every state reached, in the order it was reached.",
+    ),
+    PreludeEntry::new(
+        "bfs_distance",
+        "Steps to the first state a predicate accepts, or `None` when no goal is reachable: `bfs_distance(start, |s| neighbors(s), |s| s == goal)`.",
+    ),
+    PreludeEntry::new(
+        "dfs",
+        "Depth-first walk: `dfs(start, |s| neighbors(s))` answers every state reached, in the order it was reached.",
+    ),
+    PreludeEntry::new(
+        "dijkstra",
+        "Least cost from a start state to each reachable state, as a `Map`: `dijkstra(start, |s| neighbors(s), |a, b| weight(a, b))`. An unreachable state is absent rather than `None`.",
+    ),
+    PreludeEntry::new(
+        "a_star",
+        "Cost of the cheapest path to a goal, or `None`: `a_star(start, neighbors, weight, heuristic, goal)`, where the heuristic estimates the remaining cost from one state.",
+    ),
+    PreludeEntry::new(
+        "flood_fill",
+        "Every state reachable from a start state, unordered, as a `Set`: `flood_fill(start, |s| neighbors(s))`.",
+    ),
+];
+
+/// The built-in **type** names (§4.2's six scalars, `Never`, and `Range`), with
+/// the one-line description the editor shows for each.
+///
+/// This is the table `praxis-hir`'s name resolution seeds the root scope from,
+/// so a type name the checker accepts and a type name the editor can describe
+/// are the same list. Before this it was a bare `&[&str]` in the resolver and
+/// the seven names had no documentation at all — hovering `Int` answered
+/// nothing, and the completion list offered them with neither a signature nor a
+/// sentence.
+///
+/// `UInt` and `Byte` are deliberately absent: §4.2 reserves them and neither is
+/// implemented, so either one in an annotation is an `N002` rather than a name
+/// with a doc string.
+pub const BUILTIN_TYPES: &[TypeEntry] = &[
+    TypeEntry::seeded("Int", "Signed 64-bit integer. Written `42` or `1_000_000`."),
+    TypeEntry::seeded(
+        "Float",
+        "IEEE-754 binary64. Written `3.5`, `1e10` or `2e-3`; `.5` is not a literal.",
+    ),
+    TypeEntry::seeded("Bool", "`true` or `false`."),
+    TypeEntry::seeded("Char", "One Unicode scalar value. Written `'p'`."),
+    TypeEntry::seeded("Text", "Immutable UTF-8 text. Written `\"praxis\"`."),
+    TypeEntry::seeded("Unit", "The type with one value, written `()`."),
+    TypeEntry::seeded(
+        "Never",
+        "The type of an expression that produces no value — `panic(...)`, `return`, `break`. It has no values, so it unifies with anything.",
+    ),
+    // **Not seeded**, and that is the whole of what `TypeEntry::seeded` and
+    // [`TypeEntry::ctor`] distinguish. `Range` is the one built-in type with no
+    // value of the same name: a range is written `0..n`, and `Range()` is
+    // `N001: 'Range' is not defined`. Binding it in the root scope would make
+    // that call resolve and then fail later, somewhere with less to say.
+    TypeEntry::ctor(
+        "Range",
+        "A half-open (`0..n`) or inclusive (`0..=n`) integer range. A type name only — there is no `Range()` constructor.",
+    ),
 ];
 
 /// §6.5's graph helpers: the closure-driven algorithms that walk a graph the
@@ -390,6 +504,78 @@ impl PreludeEntry {
     }
 }
 
+/// One built-in type name and a one-line description.
+#[derive(Clone, Copy, Debug)]
+pub struct TypeEntry {
+    pub name: &'static str,
+    pub doc: &'static str,
+    /// Whether name resolution binds this name in the root scope.
+    ///
+    /// The scalars and `Never` are bound, which is how `var n: Nope` becomes an
+    /// `N002` from a failed lookup. A **type constructor** is not: `Range`, and
+    /// the collection names in [`PRELUDE`], are compiler-owned type names that
+    /// annotation checking accepts without a lookup and inference turns into
+    /// types. The distinction is not cosmetic — a bound name is also a *value*
+    /// name, and `Range` has no value.
+    pub seeded: bool,
+}
+
+impl TypeEntry {
+    /// A type name bound in the root scope.
+    const fn seeded(name: &'static str, doc: &'static str) -> TypeEntry {
+        TypeEntry {
+            name,
+            doc,
+            seeded: true,
+        }
+    }
+
+    /// A compiler-owned type constructor, which is not bound in any scope. See
+    /// [`TypeEntry::seeded`](Self::seeded)'s field documentation.
+    const fn ctor(name: &'static str, doc: &'static str) -> TypeEntry {
+        TypeEntry {
+            name,
+            doc,
+            seeded: false,
+        }
+    }
+}
+
+/// The description of the prelude **value** `name` denotes, or `None` for any
+/// other name.
+///
+/// The one lookup from a source name to its documentation, so the language
+/// server describes the prelude the compiler actually declares. A server that
+/// carried its own sentence about `bfs` would be free to describe a helper this
+/// table no longer has.
+///
+/// Callers must satisfy themselves that the name really is the prelude's: a
+/// `var out = 1` shadows it, and this function only knows the spelling.
+#[must_use]
+pub fn prelude_doc(name: &str) -> Option<&'static str> {
+    PRELUDE.iter().find(|e| e.name == name).map(|e| e.doc)
+}
+
+/// The description of the built-in **type** `name` denotes, or `None` for any
+/// other name.
+///
+/// Type position is a different question from value position and gets a
+/// different answer: `Int` is a type and never a value, `Range` is a type whose
+/// name no value shares, and the nine collection names are both — so this looks
+/// in [`BUILTIN_TYPES`] first and falls back to [`PRELUDE`], where `Vec`'s row
+/// already opens with what a `Vec` *is* before it says what `Vec()` builds.
+///
+/// The fallback is what keeps `Vec[Int]` from needing a second description of a
+/// `Vec` that could drift from the first.
+#[must_use]
+pub fn type_doc(name: &str) -> Option<&'static str> {
+    BUILTIN_TYPES
+        .iter()
+        .find(|e| e.name == name)
+        .map(|e| e.doc)
+        .or_else(|| prelude_doc(name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,6 +592,124 @@ mod tests {
         for e in PRELUDE {
             assert!(seen.insert(e.name), "duplicate prelude name {}", e.name);
         }
+    }
+
+    /// **Every name the editor can offer carries a sentence.** Both tables are
+    /// read by hover, completion and signature help, and a row added later with
+    /// an empty `doc` would surface as a name with a blank description rather
+    /// than as a build failure.
+    ///
+    /// The length floor is the interesting half: `""` is the mistake a
+    /// copy-pasted row makes, and `"."` is the one a placeholder makes.
+    #[test]
+    fn every_documented_name_has_documentation() {
+        for e in PRELUDE {
+            assert!(
+                e.doc.len() > 10,
+                "prelude entry `{}` has no real documentation",
+                e.name
+            );
+            assert!(
+                e.doc.ends_with('.'),
+                "prelude entry `{}`'s doc is not a sentence",
+                e.name
+            );
+        }
+        for e in BUILTIN_TYPES {
+            assert!(
+                e.doc.len() > 10,
+                "type entry `{}` has no real documentation",
+                e.name
+            );
+            assert!(
+                e.doc.ends_with('.'),
+                "type entry `{}`'s doc is not a sentence",
+                e.name
+            );
+        }
+    }
+
+    /// The two lookups answer for every row and for nothing else. `prelude_doc`
+    /// is asked about *values* and `type_doc` about *types*, and the pair that
+    /// keeps them honest is `Int` (a type, never a value) and `out` (a value,
+    /// never a type).
+    #[test]
+    fn the_lookups_answer_for_exactly_their_own_names() {
+        for e in PRELUDE {
+            assert_eq!(prelude_doc(e.name), Some(e.doc), "{}", e.name);
+        }
+        for e in BUILTIN_TYPES {
+            assert_eq!(type_doc(e.name), Some(e.doc), "{}", e.name);
+        }
+        // A collection name is both, and `type_doc` falls back to the prelude
+        // row rather than to a second description of the same type.
+        assert_eq!(type_doc("Vec"), prelude_doc("Vec"));
+        assert!(type_doc("Vec").is_some());
+        // `Int` is a type and not a value; `out` is a value and not a type.
+        assert!(prelude_doc("Int").is_none());
+        assert!(type_doc("Int").is_some());
+        assert!(type_doc("out").is_none() || prelude_doc("out").is_some());
+        // Neither answers for a name the language does not have.
+        assert!(prelude_doc("nope").is_none());
+        assert!(type_doc("nope").is_none());
+        // §4.2 reserves these and neither is implemented, so neither may
+        // acquire a doc string without also acquiring a type.
+        assert!(type_doc("UInt").is_none());
+        assert!(type_doc("Byte").is_none());
+    }
+
+    /// **Every name legal in type position has a description**, which is the
+    /// property that makes "hover over an annotation says something" true by
+    /// construction rather than by a list somebody kept up to date.
+    ///
+    /// The set is `praxis-hir`'s `is_type_ctor_name` — `Option` or a collection
+    /// — plus the seeded scalars. `Seq` is excluded because it is
+    /// compiler-internal and no source name reaches it (§6.3).
+    #[test]
+    fn every_type_position_name_is_documented() {
+        for ctor in [
+            crate::CollectionCtor::Vec,
+            crate::CollectionCtor::Deque,
+            crate::CollectionCtor::Map,
+            crate::CollectionCtor::Set,
+            crate::CollectionCtor::Counter,
+            crate::CollectionCtor::MinHeap,
+            crate::CollectionCtor::MaxHeap,
+            crate::CollectionCtor::BitSet,
+            crate::CollectionCtor::Grid,
+            crate::CollectionCtor::Range,
+        ] {
+            let name = ctor.name();
+            assert!(
+                type_doc(name).is_some(),
+                "the type name `{name}` has no description"
+            );
+        }
+        assert!(type_doc("Option").is_some());
+    }
+
+    /// A **type constructor is not a scope symbol**, and `Range` is the row
+    /// that makes the distinction load-bearing: binding it would make `Range()`
+    /// resolve to a name instead of being the `N001` the book prints.
+    #[test]
+    fn only_a_type_that_has_no_value_is_left_unseeded() {
+        let unseeded: Vec<&str> = BUILTIN_TYPES
+            .iter()
+            .filter(|e| !e.seeded)
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(unseeded, vec!["Range"]);
+        // The seeded names are exactly §4.2's scalars plus `Never` — the set
+        // `praxis-hir`'s `seed_type_names` binds.
+        let seeded: Vec<&str> = BUILTIN_TYPES
+            .iter()
+            .filter(|e| e.seeded)
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(
+            seeded,
+            vec!["Int", "Float", "Bool", "Char", "Text", "Unit", "Never"]
+        );
     }
 
     #[test]

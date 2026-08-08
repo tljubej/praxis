@@ -27,9 +27,10 @@ pub use catalog::{
 };
 pub use completion::{completion_data, CompletionItem};
 pub use prelude::{
-    graph_helper, numeric_helper, sized_ctor, GraphHelper, GraphParam, GraphResult, NumericHelper,
-    SizedCtor, GRAPH_HELPERS, NUMERIC_HELPERS, PRELUDE, SIZED_CTORS,
+    graph_helper, numeric_helper, prelude_doc, sized_ctor, type_doc, GraphHelper, GraphParam,
+    GraphResult, NumericHelper, SizedCtor, TypeEntry, BUILTIN_TYPES, GRAPH_HELPERS,
+    NUMERIC_HELPERS, PRELUDE, SIZED_CTORS,
 };
 pub use type_pattern::{
-    is_pipeline_receiver, pattern_matches, Bound, TypePattern, PIPELINE_RECEIVERS,
+    is_pipeline_receiver, pattern_matches, Bound, CollectionCtor, TypePattern, PIPELINE_RECEIVERS,
 };

@@ -85,8 +85,8 @@ Every code the server can publish is listed in
 
 Hover prefers the innermost thing it can name. Inside a `read` body that is the
 parser expression, because every other map is silent in there; then a method
-name; then a name reference or its declaration; then the innermost expression
-with a recorded type.
+name; then a name reference or its declaration; then a name in type position;
+then the innermost expression with a recorded type.
 
 A method hover is the catalog row dispatch selected, so the signature shown is
 the one the compiler will use, and the sentence under it is the catalog's own:
@@ -110,6 +110,36 @@ Vec[Int]
 input parser result
 ```
 
+A [prelude](../language/prelude.md) name keeps its scheme and gains §16.1's own
+sentence, which for the graph helpers is most of what there is to know — the
+scheme names two type variables and does not say that the closure *is* the
+graph:
+
+```text
+bfs: forall T. (T, (T) -> Vec[T]) -> Vec[T]
+
+Breadth-first walk: `bfs(start, |s| neighbors(s))` answers every state reached, in the order it was reached.
+```
+
+A name in **type position** hovers too, and answers with what the type is:
+
+```text
+Int
+
+Signed 64-bit integer. Written `42` or `1_000_000`.
+
+built-in type
+```
+
+Both sentences come from `crates/praxis-stdlib/src/prelude.rs`, the table name
+resolution seeds the root scope from — so a prelude name the compiler declares
+and a prelude name the editor can describe are the same list.
+
+**A binding that shadows one of these is described as itself.** `var out = 1`
+hovers as `out: Int` with no sentence under it: the lookup is by symbol, and a
+prelude symbol is the one with no declaration site. A lookup by spelling would
+put "Write one value to stdout" under a local that does nothing of the kind.
+
 ### Completion
 
 The context is decided before the list is built, and the order of the tests is
@@ -129,11 +159,19 @@ restatement of it — so a method the list offers is a method the call will
 resolve. The index operators (`[]`, `[]=`, `[]min=`, `[]max=`) are catalog rows
 too and are excluded, because `grid.[]` is not syntax.
 
-Inside a parser expression you get §7.4's atomics and §7.5's constructors, plus
-the enclosing constructor's own keyword argument (`skip:` for `chars`, `fill:`
-for `grid`) and `grid`'s `ragged` flag. Those come from
-`Constructor::keyword_arg`, so a constructor added to the language is offered
-without anybody updating a list.
+Inside a parser expression you get §7.4's atomics and §7.5's constructors, each
+with its own description as documentation, plus the enclosing constructor's own
+keyword argument (`skip:` for `chars`, `fill:` for `grid`) and `grid`'s `ragged`
+flag. Those come from `Constructor::keyword_arg`, so a constructor added to the
+language is offered without anybody updating a list.
+
+The lexical fallback offers what is in scope, and that is mostly the stdlib:
+thirty-one prelude names and seven built-in type names against however many the
+file declares. Each carries its description, and a type name — which has no
+scheme, because nothing instantiates `Int` — says `type` as its detail. A
+`match` over an `Option` offers `Some` and `None` with the prelude's sentences;
+a user enum that happens to spell a variant `Some` gets nothing, because the
+description belongs to `Option` and not to the word.
 
 Trigger characters are `.`, `` ` ``, `{` and `:` — the last three because
 completion inside a template fires on text that is not yet an expression.
@@ -145,6 +183,12 @@ inference gave it or the catalog entry dispatch selected; a parser constructor
 answers from §7.5's argument-shape table — so a constructor added to the
 language has a signature without anybody writing one, and the cursor inside
 `read lines(…)` gets back `lines(parser) -> Vec[T]`.
+
+Each of the three carries its documentation, and this is where it is worth the
+most: `clamp`'s parameters render as `Int, Int, Int` and `a_star`'s as four bare
+closure types, so which one is the low bound and which is the heuristic is
+precisely what the labels cannot say. A constructor with two forms carries it on
+both, rather than on whichever the editor preselects.
 
 The active parameter is counted from the top-level commas before the cursor, so
 it is the parameter you are actually typing. A comma nested inside another

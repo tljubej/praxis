@@ -2902,6 +2902,38 @@ fn seq_to_bitset() -> MethodEntry {
 mod tests {
     use super::*;
 
+    /// **Every catalog row describes itself.** The `doc` field is what hover,
+    /// completion and signature help put in front of a reader, so a row added
+    /// with an empty or placeholder one ships a method the editor can name and
+    /// cannot explain — and nothing else in the build would notice, because the
+    /// field is a `&'static str` that `""` satisfies.
+    ///
+    /// The sentence rule is the half that catches a placeholder: `"TODO"` and
+    /// `"len"` are both long enough to pass a length floor alone.
+    #[test]
+    fn every_catalog_row_documents_itself() {
+        for e in builtin_catalog().entries() {
+            let what = format!("{}.{}/{}", e.receiver, e.name, e.arity());
+            assert!(e.doc.len() > 8, "{what} has no real documentation");
+            assert!(
+                e.doc.ends_with('.') || e.doc.ends_with(')'),
+                "{what}'s doc is not a sentence: {:?}",
+                e.doc
+            );
+            // A backtick opens a sentence too: the subscript rows lead with the
+            // syntax they are about (`` `v[i]` — the element at `i` ``), which
+            // is the clearest thing they could say and not a placeholder.
+            assert!(
+                e.doc
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_uppercase() || c == '`'),
+                "{what}'s doc does not open a sentence: {:?}",
+                e.doc
+            );
+        }
+    }
+
     #[test]
     fn builtin_catalog_has_vec_methods() {
         let cat = builtin_catalog();
