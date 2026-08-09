@@ -1367,25 +1367,73 @@ fn line_index(src: &str, offset: usize) -> usize {
     src[..capped].bytes().filter(|b| *b == b'\n').count()
 }
 
-/// The line a frame wants marked: the `:bp` marker's own for the frame a stop
-/// is in, and the inferred faulting expression's for everything else.
+/// The line a frame wants marked, in the order the three answers are *known*:
+/// the `:bp` marker's own span for the frame a stop is in, the call that
+/// produced the frame above for every caller, and the inference for what is
+/// left.
 ///
-/// The asymmetry is the difference between the two situations rather than a
-/// special case. A stop *knows* its line — the marker is right there, and its
-/// span rode along with the stop — where a fault has to be traced back to the
-/// narrowest expression that started and did not finish. Guessing where the
+/// The ordering is the difference between the three situations rather than a
+/// special case.
+///
+/// A stop *knows* its line — the marker is right there, and its span rode along
+/// with the stop — where a fault has to be traced back. Guessing where the
 /// answer is in hand would point at `doubled + 1` for a marker on the line
 /// above it, which is off by exactly one statement.
 ///
-/// Only frame 0: a stop's *callers* are mid-call like a fault's, so the
-/// inference is the right answer for them.
+/// A **caller** knows its line too, and by the same kind of fact: it is stopped
+/// in a call, and the call is the one whose callee is the frame above it. That
+/// is what [`call_span`] reads, and it is a compile-time fact rather than a
+/// reading of the live slots — which cannot answer it, because the slots do not
+/// say which pass of a loop they are from.
+///
+/// [`fault_span`]'s inference is the answer for the rest: the innermost frame
+/// of a *fault*, which is in no call at all, and a caller whose call the
+/// compiler could not name — an indirect one through a closure value.
 fn marked_span(repl: &Repl, index: usize) -> Option<(u32, u32)> {
     if index == 0 {
         if let Some(span) = repl.stop_span().filter(|s| *s != (0, 0)) {
             return Some(span);
         }
     }
-    repl.snapshot().frames.get(index).and_then(fault_span)
+    let snap = repl.snapshot();
+    let frame = snap.frames.get(index)?;
+    if index > 0 {
+        // SAFETY: frame names are compiler-embedded 'static UTF-8 (the contract
+        // `draw_backtrace` and `render_backtrace` read them under).
+        let callee = unsafe { snap.frame_name(index - 1) };
+        if let Some(span) = call_span(frame, callee) {
+            return Some(span);
+        }
+    }
+    fault_span(frame)
+}
+
+/// The span of the call in `frame` that produced the frame above it — the call
+/// this frame is stopped in the middle of.
+///
+/// The callee's *name* is the join: the compiler records, per call temp, the
+/// function that call targets ([`praxis_mir::ir::Function::debug_callees`]),
+/// and the frame above says which of them is running.
+///
+/// Two calls in one frame can name the same callee. An **unwritten** temp is
+/// preferred there, because a call whose result has already been stored is one
+/// this frame has returned from — `f(); f()` stopped in the second one has the
+/// first one's value in hand. Where that does not separate them either (a loop,
+/// where the earlier pass wrote every temp it reached), the narrowest span
+/// wins, so the answer is at least stable from stop to stop.
+fn call_span(
+    frame: &praxis_runtime::crash_snapshot::SnapshotFrame,
+    callee: &str,
+) -> Option<(u32, u32)> {
+    frame
+        .locals
+        .iter()
+        // SAFETY: as in `marked_span` — a compiler-embedded 'static string.
+        .filter(|l| unsafe { l.callee() } == Some(callee))
+        .filter_map(|l| l.span().map(|(s, e)| (l.value.is_none(), s, e)))
+        .filter(|(_, s, e)| e > s)
+        .min_by_key(|(unwritten, s, e)| (!*unwritten, e - s))
+        .map(|(_, s, e)| (s, e))
 }
 
 /// The 1-based line number to show for a frame in the backtrace: where the fault
@@ -1412,9 +1460,15 @@ fn span_line(
 /// "which line?" — pointing at `fn pick(…) {` is pointing at the wrong line in
 /// every function longer than one. What can answer it is the temps: a compiler
 /// temp that carries a source span but never received a value is an expression
-/// that started evaluating and did not finish. In the frame that faulted that is
-/// the faulting expression; in a caller it is the call that led there, which is
-/// exactly the line that frame should be showing.
+/// that started evaluating and did not finish, which in the frame that faulted
+/// is the faulting expression.
+///
+/// It is an inference, and [`marked_span`] reaches for it last. What it cannot
+/// see is *when* a temp was written: a frame going round a loop has the previous
+/// pass's values in the temps it already reached and nothing in the ones it has
+/// not, so "started and did not finish" and "has not started yet" look alike.
+/// That is why a caller is answered by [`call_span`] where the compiler could
+/// name the callee, and only by this where it could not.
 ///
 /// The *narrowest* such span is the innermost such expression — `xs[scaled]`
 /// rather than the `return xs[scaled]` that encloses it — which is the one worth
@@ -1723,8 +1777,8 @@ mod tests {
     }
 
     /// A stop knows its line; a fault has to infer one. So frame 0 of a stop is
-    /// marked at the `:bp`, and its callers — which are mid-call exactly as a
-    /// fault's are — keep the inference.
+    /// marked at the `:bp`, and a caller falls back to the inference wherever
+    /// the compiler could not name its call — exactly as a fault's caller does.
     #[test]
     fn a_stop_marks_the_marker_and_a_caller_keeps_the_inference() {
         let t = stopped_tui();
@@ -1733,9 +1787,9 @@ mod tests {
             Some((10, 13)),
             "frame 0 points at the marker"
         );
-        // Frame 1 has no unfinished temp in this fixture, so the inference finds
-        // nothing — which is the answer the caller of a *fault* would get too,
-        // and the point is that it is the same answer.
+        // Frame 1 has no locals at all in this fixture — no recorded call and no
+        // unfinished temp — so both answers are absent, which is the answer the
+        // caller of a *fault* would get too.
         assert_eq!(marked_span(&t.repl, 1), None);
 
         // A fault ignores the override entirely: there is none to consult.
@@ -1887,6 +1941,8 @@ mod tests {
             kind: praxis_runtime::LOCAL_KIND_TEMP,
             span_start: span.0,
             span_end: span.1,
+            callee_name: std::ptr::null(),
+            callee_name_len: 0,
         }
     }
 
@@ -1899,6 +1955,15 @@ mod tests {
             locals,
             source_span,
         }
+    }
+
+    /// [`temp_with_span`] for a temp the compiler recorded a **direct callee**
+    /// on: the local a call to `callee` defines.
+    fn call_with_span(callee: &'static str, span: (u32, u32)) -> DebugLocal {
+        let mut l = temp_with_span(0, span);
+        l.callee_name = callee.as_ptr();
+        l.callee_name_len = callee.len() as u32;
+        l
     }
 
     /// The point of `fault_span`: the frame's own span starts at `fn`, so it
@@ -1983,6 +2048,108 @@ mod tests {
             span_line(src, &frame, fault_span(&frame)),
             Some(3),
             "line 3, not line 1"
+        );
+    }
+
+    /// A caller's line is the call to the frame above it, chosen by *name* and
+    /// not by which temp happens to be empty.
+    ///
+    /// The decoys are the point. `zoo(c)` is a call this frame will make and has
+    /// not, and `1` is an expression it has not reached — both are unfinished
+    /// temps, and the narrower of them is what the inference would have picked.
+    #[test]
+    fn a_callers_span_is_the_call_to_the_frame_above_it() {
+        let frame = frame_with(
+            vec![
+                call_with_span("foo", (40, 46)),
+                call_with_span("zoo", (60, 66)),
+                temp_with_span(3, (80, 81)),
+            ],
+            (0, 100),
+        );
+        assert_eq!(call_span(&frame, "foo"), Some((40, 46)));
+        assert_eq!(call_span(&frame, "zoo"), Some((60, 66)));
+        // A callee this frame does not call directly — an indirect call through
+        // a closure value — has no answer here, and the inference takes over.
+        assert_eq!(call_span(&frame, "__closure_0"), None);
+        assert_eq!(
+            fault_span(&frame),
+            Some((80, 81)),
+            "which is what the inference would have said"
+        );
+    }
+
+    /// A loop leaves the previous pass's value in the call's temp, and the call
+    /// is still the one this frame is stopped in. Matching by name is what
+    /// survives that; "the temp with no value" does not.
+    #[test]
+    fn a_calls_span_survives_the_value_an_earlier_pass_left_in_it() {
+        let mut stale = call_with_span("foo", (40, 46));
+        stale.value = Some(praxis_runtime::DebugValue::Scalar(
+            praxis_runtime::ScalarValue::Int(0),
+        ));
+        let frame = frame_with(vec![stale], (0, 100));
+        assert_eq!(call_span(&frame, "foo"), Some((40, 46)));
+    }
+
+    /// Two calls to one callee in one frame: the one whose result is not in yet
+    /// is the one this frame is inside. `f(); f()` stopped in the second has the
+    /// first one's value in hand.
+    #[test]
+    fn the_unfinished_call_wins_when_two_name_the_same_callee() {
+        let mut done = call_with_span("foo", (10, 16));
+        done.value = Some(praxis_runtime::DebugValue::Scalar(
+            praxis_runtime::ScalarValue::Int(1),
+        ));
+        let pending = call_with_span("foo", (20, 26));
+        let frame = frame_with(vec![done, pending], (0, 100));
+        assert_eq!(call_span(&frame, "foo"), Some((20, 26)));
+    }
+
+    /// The whole of it through `marked_span`: frame 0 answers from the marker,
+    /// and its caller answers from the call that produced frame 0 — not from the
+    /// narrower unfinished temp beside it, which is what frame 0 itself would
+    /// have been answered by.
+    #[test]
+    fn a_caller_is_marked_at_its_call_and_frame_zero_at_its_marker() {
+        let boom: &'static str = Box::leak("boom".to_string().into_boxed_str());
+        let main: &'static str = Box::leak("main".to_string().into_boxed_str());
+        let mut snap = CrashSnapshot::new();
+        snap.fault_kind = FaultKind::None;
+        snap.frames = vec![
+            SnapshotFrame {
+                parent: 1,
+                func_name: boom.as_ptr(),
+                func_name_len: boom.len() as u32,
+                locals: Vec::new(),
+                source_span: (0, 20),
+            },
+            SnapshotFrame {
+                parent: usize::MAX,
+                func_name: main.as_ptr(),
+                func_name_len: main.len() as u32,
+                locals: vec![
+                    call_with_span("boom", (40, 46)),
+                    temp_with_span(9, (80, 81)),
+                ],
+                source_span: (30, 100),
+            },
+        ];
+        let repl = Repl::new_stopped(
+            snap,
+            crate::repl::StoppedHost {
+                db: praxis_types::TypeDb::new(),
+                source_text: String::new(),
+                source_name: "stop.px".to_string(),
+                hits: 1,
+                span: (10, 13),
+            },
+        );
+        assert_eq!(marked_span(&repl, 0), Some((10, 13)), "the marker");
+        assert_eq!(
+            marked_span(&repl, 1),
+            Some((40, 46)),
+            "the call to frame 0, not the narrower unfinished temp"
         );
     }
 

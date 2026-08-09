@@ -8,7 +8,7 @@
 //! inference) the inferred [`Scheme`].
 
 use praxis_source::{FileSpan, Span};
-use praxis_types::Scheme;
+use praxis_types::{Scheme, TypeDb, VarId};
 
 /// An opaque, interned identifier for one declaration. Every shadowing
 /// declaration mints a new, distinct id. One value is reserved and names no
@@ -137,6 +137,22 @@ pub struct Symbol {
     /// The inferred type scheme. Filled in by type inference; `None` until then
     /// (and for symbols that fail to infer).
     pub scheme: Option<Scheme>,
+    /// The binders of the scheme that quantified *this* binding's type
+    /// variables, when some enclosing binding did (§5.3).
+    ///
+    /// Generalization records binders on the generalized binding's scheme and
+    /// mutates nothing else (F10), so `c` in `fn foo(c) { c() }` keeps the
+    /// monotype `() -> ?a` while `foo`'s scheme is `forall T. (() -> T) -> T`
+    /// over that same `?a`. The variable is bound; only `c`'s own scheme cannot
+    /// see by what. This says by what, and it is empty for every binding whose
+    /// type mentions no such variable — which is the honest answer for a leak.
+    ///
+    /// Display only. It is deliberately *not* folded into `scheme`: a parameter
+    /// of a generic function is a monotype in that function's body — `c` cannot
+    /// be used at two types inside `foo` — and quantifying it here would make
+    /// [`instantiate`](praxis_types::TypeDb::instantiate) hand `c = |…| …` a
+    /// fresh variable instead of constraining the parameter.
+    pub enclosing_binders: Vec<VarId>,
 }
 
 impl Symbol {
@@ -145,5 +161,22 @@ impl Symbol {
     #[must_use]
     pub fn span(&self) -> Span {
         self.decl.map(|fs| fs.span).unwrap_or(Span::EMPTY)
+    }
+
+    /// This binding's type, rendered the way the program's own generalization
+    /// names its variables — `forall T. …` for a binding that is itself
+    /// polymorphic, and the enclosing scheme's `T` for one whose variables that
+    /// scheme quantified.
+    ///
+    /// The one renderer every surface that shows a binding's type goes through
+    /// (hover, inlay hints, completion, signature help), so a `?` in any of
+    /// them means the same thing in all of them: no scheme binds this variable.
+    #[must_use]
+    pub fn rendered_type(&self, db: &TypeDb) -> Option<String> {
+        let scheme = self.scheme.as_ref()?;
+        if scheme.is_polymorphic() {
+            return Some(db.render_scheme(scheme));
+        }
+        Some(db.render_with_binders(scheme.body(), &self.enclosing_binders))
     }
 }

@@ -53,7 +53,22 @@ impl TypeDb {
     /// prints as `T`, one it does not prints as `?T`.
     #[must_use]
     pub fn render_in_scheme(&self, t: Type, scheme: &Scheme) -> String {
-        let binders = scheme.binders();
+        self.render_with_binders(t, scheme.binders())
+    }
+
+    /// Render `t` where `binders` are the variables something else has already
+    /// quantified: each prints as the name that quantifier gives it (`T`, `U`,
+    /// … in binder order), and every other variable prints `?T`.
+    ///
+    /// [`render_in_scheme`](Self::render_in_scheme) is this for a caller
+    /// holding the scheme itself. The list form is for the one that does not:
+    /// a binding *inside* a generic body has a monotype of its own — a
+    /// parameter of `fn f(c) { c() }` is `() -> ?a`, not a scheme — while the
+    /// variable in it belongs to the enclosing `fn`'s scheme. Rendering it
+    /// against no binders would print the `?` that means "nothing binds this",
+    /// about a variable that something does.
+    #[must_use]
+    pub fn render_with_binders(&self, t: Type, binders: &[VarId]) -> String {
         let mut out = String::new();
         let mut names = NameAssigner::default();
         for q in binders {

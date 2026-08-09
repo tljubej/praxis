@@ -71,6 +71,7 @@ mod tests {
             decl: None,
             reassigned: false,
             scheme: None,
+            enclosing_binders: Vec::new(),
         });
         let b = table.insert(Symbol {
             id: SymbolId(0),
@@ -79,6 +80,7 @@ mod tests {
             decl: None,
             reassigned: false,
             scheme: None,
+            enclosing_binders: Vec::new(),
         });
         assert_ne!(a, b, "shadowed bindings must have distinct ids");
         assert_eq!(a, SymbolId(0));

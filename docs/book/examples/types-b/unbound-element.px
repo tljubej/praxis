@@ -1,0 +1,2 @@
+var v = Vec()
+out(v.len())

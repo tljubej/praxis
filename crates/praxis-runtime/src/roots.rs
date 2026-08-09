@@ -1011,6 +1011,8 @@ mod tests {
 
         let name = b"x";
         let locals = [crate::DebugLocalMeta {
+            callee_name: std::ptr::null(),
+            callee_name_len: 0,
             source_name: name.as_ptr(),
             name_len: 1,
             symbol_id: 1,

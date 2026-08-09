@@ -84,7 +84,7 @@ fn call_signature(snapshot: &Snapshot, list: &SyntaxNode, offset: u32) -> Option
             let resolved = analysis.refs.get(&name_token.text_range())?;
             let symbol = analysis.names.get(resolved.symbol)?;
             let scheme = symbol.scheme.as_ref()?;
-            let rendered = db.render_scheme(scheme);
+            let rendered = symbol.rendered_type(db)?;
             let params = function_params(db, scheme);
             // A prelude callee carries §16.1's sentence, and it is worth more
             // here than anywhere: `a_star(start, neighbors, weight, heuristic,

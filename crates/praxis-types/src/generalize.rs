@@ -140,6 +140,28 @@ impl TypeDb {
         }
     }
 
+    /// Every unbound variable in `t`, in first-encounter order.
+    ///
+    /// [`generalize_at`](Self::generalize_at) without the level test, and for
+    /// the question generalization does not ask: *which* variables are in this
+    /// type, so a caller holding someone else's binder list can tell whether
+    /// they are the same ones. That is what lets a monotype recorded inside a
+    /// generic body be rendered against the scheme that quantified its
+    /// variables ([`render_with_binders`](Self::render_with_binders)).
+    ///
+    /// Inspection only, like generalization: no arena slot is written.
+    #[must_use]
+    pub fn unbound_vars(&mut self, t: Type) -> Vec<VarId> {
+        let mut vars = Vec::new();
+        let mut folder = FreeVars {
+            db: self,
+            memo: FoldMemo::new(),
+            vars: &mut vars,
+        };
+        fold(&mut folder, t);
+        vars
+    }
+
     /// Instantiate `scheme` at the current level: copy its body, replacing each
     /// binder with a fresh unbound var. Monomorphic schemes are returned with
     /// the body as-is (no allocation).
@@ -238,6 +260,33 @@ impl TypeFolder for Generalizer<'_, '_> {
             if level.is_deeper_than(self.site) && !self.binders.contains(&var) {
                 self.binders.push(var);
             }
+        }
+        t
+    }
+    visit_only_composites!();
+}
+
+/// The free-variable collection as a folder (F9): every unbound variable, with
+/// no level test to exclude the ones an enclosing binding still owns.
+///
+/// Inspection only, like [`Generalizer`] — it rebuilds no type and writes
+/// nothing to the arena.
+struct FreeVars<'a, 'q> {
+    db: &'a mut TypeDb,
+    memo: FoldMemo,
+    vars: &'q mut Vec<VarId>,
+}
+
+impl TypeFolder for FreeVars<'_, '_> {
+    fn db(&mut self) -> &mut TypeDb {
+        self.db
+    }
+    fn memo(&mut self) -> &mut FoldMemo {
+        &mut self.memo
+    }
+    fn fold_var(&mut self, t: Type, var: VarId, state: &VarState) -> Type {
+        if matches!(state, VarState::Unbound { .. }) && !self.vars.contains(&var) {
+            self.vars.push(var);
         }
         t
     }

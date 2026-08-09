@@ -10158,6 +10158,12 @@ mod stops {
         pub frames: Vec<String>,
         /// Frame 0's user bindings, as `name = value`.
         pub locals: Vec<String>,
+        /// Per frame (innermost first): each frame's own source extent.
+        pub frame_spans: Vec<(u32, u32)>,
+        /// Per frame (innermost first): the direct calls it records, as
+        /// `(callee name, the call expression's span)`. This is what places a
+        /// caller's line — the frame above says which of these is running.
+        pub calls: Vec<Vec<(String, (u32, u32))>>,
     }
 
     thread_local! {
@@ -10201,11 +10207,30 @@ fn seen_from(stop: &praxis_runtime::BreakpointStop) -> stops::Seen {
                 .collect()
         })
         .unwrap_or_default();
+    let frame_spans = stop.frames.frames.iter().map(|f| f.source_span).collect();
+    let calls = stop
+        .frames
+        .frames
+        .iter()
+        .map(|f| {
+            f.locals
+                .iter()
+                .filter_map(|l| {
+                    // SAFETY: a callee name is compiler-embedded 'static UTF-8,
+                    // the same contract `frame_name` reads under.
+                    let callee = unsafe { l.callee() }?;
+                    Some((callee.to_string(), l.span()?))
+                })
+                .collect()
+        })
+        .collect();
     stops::Seen {
         hits: stop.hits,
         span: stop.span,
         frames,
         locals,
+        frame_spans,
+        calls,
     }
 }
 
@@ -10323,6 +10348,79 @@ fn main() -> Int {
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_int(), 20, "detaching did not change the answer");
     assert_eq!(stops::take().len(), 1, "one stop, then silence");
+}
+
+/// A frame that is not the innermost is *in a call*, and the metadata says
+/// which one: every direct call records its callee on the local it defines, so
+/// the frame above names the call the frame below is stopped in.
+///
+/// The program is the case no reading of the live slots can answer. `run` calls
+/// `foo` on even passes and `zoo` on odd ones, and after the first pass **both**
+/// call temps hold a value — the one from this pass and the one from the pass
+/// before — while the temps for the statements `run` has not reached yet hold
+/// none. "The narrowest temp with no value" therefore points at `i += 1`'s `1`
+/// on the first pass and at the `loop` itself forever after; the callee's name
+/// points at the call, on every pass.
+#[test]
+fn a_callers_frame_records_the_call_that_led_to_the_frame_above() {
+    let src = "\
+fn foo(c) {
+  c()
+}
+
+fn zoo(c) {
+  c()
+}
+
+fn main() -> Int {
+  var c = || { 1 :bp }
+  var i = 0
+  while i < 4 {
+    if i % 2 == 0 {
+      foo(c)
+    } else {
+      zoo(c)
+    }
+    i = i + 1
+  }
+  i
+}
+";
+    let _ = stops::take();
+    praxis_runtime::install_breakpoint_handler(keep_going);
+    let (rt, result) = run_main(src);
+    praxis_runtime::clear_breakpoint_handler();
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 4);
+    let seen = stops::take();
+    assert_eq!(seen.len(), 4, "four passes, four stops");
+
+    for (pass, s) in seen.iter().enumerate() {
+        // #0 the closure, #1 `foo`/`zoo`, #2 `main`.
+        assert_eq!(s.frames.len(), 3, "pass {pass}: {:?}", s.frames);
+        let callee = &s.frames[1];
+        // `main`'s calls, joined on the frame above it by name.
+        let at = s.calls[2]
+            .iter()
+            .find(|(name, _)| name == callee)
+            .unwrap_or_else(|| panic!("pass {pass}: no call to {callee} in {:?}", s.calls[2]));
+        let text = &src[at.1 .0 as usize..at.1 .1 as usize];
+        let expected = if pass % 2 == 0 { "foo(c)" } else { "zoo(c)" };
+        assert_eq!(text, expected, "pass {pass} is inside {expected}");
+    }
+
+    // The closure's own frame has a source extent: only its *name* is synthetic.
+    let closure_span = seen[0].frame_spans[0];
+    assert_eq!(
+        &src[closure_span.0 as usize..closure_span.1 as usize],
+        "|| { 1 :bp }",
+        "a closure frame's extent is the literal that produced it"
+    );
+    // …and the closure calls nothing directly, so it records no callee.
+    assert!(seen[0].calls[0].is_empty(), "{:?}", seen[0].calls[0]);
+    // `foo`/`zoo` reach the closure through a *value*, so there is no name to
+    // record and the debugger falls back to its inference for that frame.
+    assert!(seen[0].calls[1].is_empty(), "{:?}", seen[0].calls[1]);
 }
 
 /// A program compiled with markers and run with **no handler installed** stops

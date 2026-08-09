@@ -440,9 +440,7 @@ fn lexical_items(snapshot: &Snapshot) -> Vec<CompletionItem> {
             // A type name has no scheme — nothing instantiates `Int` — so
             // saying what it is is the only detail there is to give.
             detail: sym
-                .scheme
-                .as_ref()
-                .map(|s| db.render_scheme(s))
+                .rendered_type(db)
                 .or_else(|| (sym.kind == SymbolKind::BuiltinType).then(|| "type".to_string())),
             documentation: builtin_doc(sym).map(|d| Documentation::String(d.to_string())),
             ..CompletionItem::default()

@@ -10149,6 +10149,8 @@ mod tests {
         let captured = rt.alloc_int(UNINTERNED);
         let local_name = b"value";
         let meta = crate::debug::DebugLocalMeta {
+            callee_name: std::ptr::null(),
+            callee_name_len: 0,
             source_name: local_name.as_ptr(),
             name_len: local_name.len() as u32,
             symbol_id: 1,

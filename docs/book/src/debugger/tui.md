@@ -66,9 +66,16 @@ your scrollback. You keep both.
 the function is declared on: for frame 0 it is where the fault happened, and for
 a caller it is the call that led there.
 
-**source** — the selected frame's function, with `▶` on the faulting line and the
-faulting subexpression underlined inside it. The frame's recorded span covers the
-whole function, so the marked line is recovered from the temps instead: a temp
+**source** — the selected frame's function, with `▶` on the marked line and the
+subexpression underlined inside it. The frame's recorded span covers the whole
+function, so the marked line comes from somewhere else, and which somewhere
+depends on what the frame is doing.
+
+A **caller** is in a call, and the compiler recorded which function each call
+targets, so the frame above names the call this one is inside — even in a loop,
+where the temps hold values from an earlier pass. A frame that is in no call —
+the innermost frame of a fault, or a caller whose call went through a closure
+value and so has no name to match — is recovered from the temps instead: a temp
 that carries a source span but never received a value is an expression that
 started evaluating and did not finish, and the narrowest one is the innermost
 such expression.

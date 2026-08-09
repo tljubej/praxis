@@ -85,11 +85,29 @@ pub struct Function {
     /// answers `None` unless the recorded source really is a `Scalar` local,
     /// so a backend handed one of these cannot be handed a reference kind.
     pub debug_scalar_sources: Vec<Option<LocalId>>,
+    /// Per-local: the function a **direct** call defines this local from, by
+    /// the name the backend will emit it under.
+    ///
+    /// This is what lets the debugger answer "which line is this frame on?" for
+    /// a frame that is not the innermost. A frame in the middle of a chain is
+    /// mid-call, and the call it is in the middle of is the one whose callee is
+    /// the frame above it — a fact about the *program*, so it is recorded here
+    /// once at compile time rather than inferred from the live slots, which
+    /// cannot answer it: a loop leaves an earlier pass's value in the call's
+    /// temp, so "the temp with no value" points at a call this pass has not
+    /// reached yet.
+    ///
+    /// `None` for every local that is not a call result, and for a
+    /// `CallIndirect` — a closure's target is a value, so there is no name here
+    /// to match, and the debugger falls back to its inference for those frames.
+    pub debug_callees: Vec<Option<String>>,
     /// The function's source span `[start, end)` as byte offsets into the
     /// program source (§9.3). Threaded AST → HIR → MIR → backend so the crash
     /// debugger's `source` command can render the faulting function. `(0, 0)`
-    /// for synthetic functions with no source (closures get the literal's span;
-    /// the `__p_expr` debugger function is span-less).
+    /// only where there is no source to point at: the `__fnvalue_*` adapter,
+    /// whose body is a forwarding call nobody wrote, and the `__p_expr`
+    /// debugger function. A closure carries its literal's span — the name is
+    /// synthetic, the body is the programmer's.
     pub span: (u32, u32),
 }
 
@@ -1203,10 +1221,10 @@ impl Function {
     /// no source span. [`new_local`](Self::new_local) and
     /// [`new_block`](Self::new_block) fill it in.
     ///
-    /// **The ten fields are spelled once here, and that is the point.** A
-    /// `Function` carries four parallel debug tables, and every fixture that
+    /// **The eleven fields are spelled once here, and that is the point.** A
+    /// `Function` carries five parallel debug tables, and every fixture that
     /// builds one by hand would otherwise have to spell each of them. A
-    /// constructor is what makes a fifth table a single edit instead of one per
+    /// constructor is what makes a sixth table a single edit instead of one per
     /// construction site.
     ///
     /// `return_local` is `LocalId(0)`, which names no slot until one is
@@ -1224,6 +1242,7 @@ impl Function {
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
             debug_scalar_sources: Vec::new(),
+            debug_callees: Vec::new(),
             span: (0, 0),
         }
     }
@@ -1250,6 +1269,7 @@ impl Function {
         self.debug_kinds.push(debug_kind);
         self.debug_spans.push(debug_span);
         self.debug_scalar_sources.push(None);
+        self.debug_callees.push(None);
         id
     }
 
@@ -1295,6 +1315,31 @@ impl Function {
     /// (scalar scratch, the return slot).
     pub fn debug_span(&self, local: LocalId) -> Option<(u32, u32)> {
         self.debug_spans.get(local.0 as usize).copied().flatten()
+    }
+
+    /// The function a direct call defines `local` from, if it is a call result
+    /// at all ([`Function::debug_callees`]).
+    pub fn debug_callee(&self, local: LocalId) -> Option<&str> {
+        self.debug_callees
+            .get(local.0 as usize)
+            .and_then(Option::as_deref)
+    }
+
+    /// Record that `local` is the result of a direct call to `callee`.
+    ///
+    /// **First writer wins.** One local can be the destination of two calls —
+    /// the arms of an `if` write their value into the join's slot — and there
+    /// is no answer to "which callee" for such a slot that is right on both
+    /// paths. Keeping the first is deterministic, and the debugger's fallback
+    /// covers the frame either way. A slot that names a call the program is not
+    /// in would be worse than one that names none.
+    pub fn set_debug_callee(&mut self, local: LocalId, callee: &str) {
+        let Some(slot) = self.debug_callees.get_mut(local.0 as usize) else {
+            return;
+        };
+        if slot.is_none() {
+            *slot = Some(callee.to_string());
+        }
     }
 
     /// Retitle a compiler temp as the binding that *aliases* it: a pattern name

@@ -326,6 +326,8 @@ unsafe fn copy_stack(entries: &[DebugFrameEntry]) -> Vec<SnapshotFrame> {
                     kind: m.kind,
                     span_start: m.span_start,
                     span_end: m.span_end,
+                    callee_name: m.callee_name,
+                    callee_name_len: m.callee_name_len,
                 })
                 .collect()
         };
@@ -381,6 +383,8 @@ mod tests {
                 func_name: std::ptr::null(),
                 func_name_len: 0,
                 locals: vec![DebugLocal {
+                    callee_name: std::ptr::null(),
+                    callee_name_len: 0,
                     source_name: std::ptr::null(),
                     name_len: 0,
                     symbol_id: 0,
@@ -420,6 +424,8 @@ mod tests {
                     func_name: std::ptr::null(),
                     func_name_len: 0,
                     locals: vec![DebugLocal {
+                        callee_name: std::ptr::null(),
+                        callee_name_len: 0,
                         source_name: std::ptr::null(),
                         name_len: 0,
                         symbol_id: 0,
@@ -473,6 +479,8 @@ mod tests {
 
         let name = b"xs";
         let locals = [crate::DebugLocalMeta {
+            callee_name: std::ptr::null(),
+            callee_name_len: 0,
             source_name: name.as_ptr(),
             name_len: 2,
             symbol_id: 1,

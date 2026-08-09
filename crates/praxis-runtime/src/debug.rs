@@ -378,6 +378,20 @@ pub struct DebugLocalMeta {
     /// `(0, 0)` means "no span" (the return slot, span-less captures).
     pub span_start: u32,
     pub span_end: u32,
+    /// The function a **direct** call defines this local from (a `'static`
+    /// embedded string), or null with a zero `callee_name_len` for every local
+    /// that is not one.
+    ///
+    /// It is what places a *caller* frame's line: a frame below the innermost
+    /// is stopped in a call, and the call is the one whose callee is the frame
+    /// above it. Static, because it is a fact about the program — the live
+    /// slots cannot answer it, since a loop leaves an earlier pass's value in
+    /// the call's temp.
+    ///
+    /// Null for a `CallIndirect`: a closure's target is a value, and the name
+    /// this would hold does not exist until the call runs.
+    pub callee_name: *const u8,
+    pub callee_name_len: u32,
     /// What this local's value slot holds (ADR-120 part 2). [`DebugSlotKind::Reference`]
     /// for every local whose box the compiler kept; a scalar kind for a temp
     /// whose box the block-local forwarding deleted and whose payload the
@@ -543,7 +557,8 @@ pub struct FunctionDebugMeta {
     pub locals: *const DebugLocalMeta,
     /// The function's source span `[start, end)` as byte offsets into the
     /// program source (§9.3 "current source span", ADR-035 decision 3). `(0, 0)`
-    /// means "no span recorded" (synthetic/closure functions).
+    /// means "no span recorded" — the `__fnvalue_*` adapter and `__p_expr`,
+    /// whose bodies nobody wrote. A closure's span is its literal's.
     pub span_start: u32,
     pub span_end: u32,
 }
@@ -845,6 +860,26 @@ impl DebugLocal {
         let s = (self.span_start, self.span_end);
         (s != (0, 0)).then_some(s)
     }
+
+    /// The function a direct call defines this local from, or `None` where the
+    /// local is not a direct call's result.
+    ///
+    /// # Safety
+    /// The pointer is a compiler-embedded `'static` UTF-8 string — the same
+    /// contract [`Self::name`] reads `source_name` under — so the borrow this
+    /// returns outlives any frame it came from.
+    pub unsafe fn callee(&self) -> Option<&'static str> {
+        if self.callee_name.is_null() || self.callee_name_len == 0 {
+            return None;
+        }
+        // SAFETY: the caller guarantees compiler-embedded 'static UTF-8.
+        unsafe {
+            Some(std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                self.callee_name,
+                self.callee_name_len as usize,
+            )))
+        }
+    }
 }
 
 /// A debug value slot must stay one machine word: generated code stores into
@@ -1045,6 +1080,8 @@ mod tests {
         let name_a = b"a";
         [
             DebugLocalMeta {
+                callee_name: std::ptr::null(),
+                callee_name_len: 0,
                 source_name: name_a.as_ptr(),
                 name_len: 1,
                 symbol_id: 10,
@@ -1056,6 +1093,8 @@ mod tests {
                 slot_kind: crate::debug::DebugSlotKind::Reference,
             },
             DebugLocalMeta {
+                callee_name: std::ptr::null(),
+                callee_name_len: 0,
                 source_name: name_a.as_ptr(),
                 name_len: 1,
                 symbol_id: 20,

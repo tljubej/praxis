@@ -1615,6 +1615,10 @@ active input parser path
 
 On fault propagation, the function copies or links its debug frame into a persistent crash snapshot before returning. GC references in snapshots become roots. By the time control returns to the host, all language frames have produced stable snapshots even though native stack frames have unwound normally.
 
+A frame's recorded span is the whole function, so the *line* a frame is showing is a separate question, and it has three answers ranked by how well each is known. A stop's innermost frame is at its marker (§9.8). A frame that is not the innermost is in a call, and each call records at compile time which function it targets — so the frame above names the call this one is inside, which is an answer a loop cannot spoil. Anything else — the innermost frame of a fault, or a caller whose call went through a closure value and so has no name to match — is recovered from the temps: one that carries a source span and never received a value is an expression that started and did not finish.
+
+Every function whose body is source has a span, including a lifted closure, whose extent is its literal. `(0, 0)` means the body is one nothing wrote: the adapter behind a `fn` used as a value, and the debugger's own synthetic evaluator function.
+
 This design avoids:
 
 - Rust panic unwinding.
@@ -2179,6 +2183,8 @@ Vec[{
     y2: Int,
 }]
 ```
+
+A type variable is shown rather than hidden, and how it is spelled is the whole of what the surface is claiming. A variable some scheme quantifies prints as that scheme names it — `c` in `fn foo(c) { c() }` is `() -> T`, because `foo` is `forall T. (() -> T) -> T`. A variable no scheme quantifies prints `?T`. Every surface that shows a binding's type — hover, inlay hints, completion, signature help — asks the one question, so `?` means the same thing in all of them, and neither spelling can be written back into the source as an annotation.
 
 #### Completion
 

@@ -107,6 +107,7 @@ pub(crate) fn infer_with_tree(
     };
     inferer.seed_builtin_schemes();
     inferer.infer_declaration_group(root);
+    inferer.name_enclosing_binders();
     // Merge name-resolution diagnostics with type diagnostics, sorted by span.
     diagnostics.append(&mut inferer.diagnostics);
     sort_by_position(&mut diagnostics);
@@ -1577,6 +1578,70 @@ impl Inferer {
         if let Some(&id) = self.decls.get(&range) {
             if let Some(sym) = self.names.get_mut(id) {
                 sym.scheme = Some(scheme);
+            }
+        }
+    }
+
+    /// Record, on every binding whose type a *generalized* binding quantified,
+    /// the binder list that quantified it
+    /// ([`Symbol::enclosing_binders`](crate::Symbol::enclosing_binders)).
+    ///
+    /// Generalization owns its binders and rewrites no arena slot (F10), so the
+    /// bindings *inside* a generic body keep the monotypes they were inferred
+    /// at: `c` in `fn foo(c) { c() }` stays `() -> ?a` while `foo` becomes
+    /// `forall T. (() -> T) -> T` over that same `?a`. Rendered against no
+    /// binders, `?a` prints `?T` — the spelling that means "nothing binds this"
+    /// — so a function inference got exactly right reads to a user as one it
+    /// failed on. This pass is what lets the surfaces print `T`.
+    ///
+    /// It runs once, after the whole file: a binding is generalized *after* its
+    /// body is inferred, so there is no point during inference at which every
+    /// scheme that could own a variable already exists.
+    ///
+    /// The search is over schemes rather than over syntax because that is where
+    /// the fact is. Instantiation mints fresh variables per use site, so a
+    /// variable is normally one scheme's; the exception is a mutually-recursive
+    /// declaration group, whose members generalize at one site and can therefore
+    /// list a shared variable each. The first match wins there, and the tie
+    /// costs nothing: what is read off the list is the *name* a binder gets, and
+    /// two schemes that both quantify one variable both name it.
+    fn name_enclosing_binders(&mut self) {
+        let owners: Vec<Vec<praxis_types::VarId>> = self
+            .names
+            .all()
+            .iter()
+            .filter_map(|s| s.scheme.as_ref())
+            .filter(|sc| sc.is_polymorphic())
+            .map(|sc| sc.binders().to_vec())
+            .collect();
+        if owners.is_empty() {
+            return;
+        }
+        // A binding that is itself polymorphic renders from its own scheme, so
+        // only the monotypes have a question here.
+        let monotypes: Vec<(SymbolId, Type)> = self
+            .names
+            .all()
+            .iter()
+            .filter_map(|s| {
+                let sc = s.scheme.as_ref()?;
+                (!sc.is_polymorphic()).then_some((s.id, sc.body()))
+            })
+            .collect();
+        for (id, body) in monotypes {
+            let vars = self.db.unbound_vars(body);
+            if vars.is_empty() {
+                continue;
+            }
+            let Some(binders) = owners
+                .iter()
+                .find(|bs| vars.iter().any(|v| bs.contains(v)))
+                .cloned()
+            else {
+                continue;
+            };
+            if let Some(sym) = self.names.get_mut(id) {
+                sym.enclosing_binders = binders;
             }
         }
     }

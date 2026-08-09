@@ -140,3 +140,56 @@ fn hover_over_a_receiver_still_reports_the_binding() {
         .expect("the `v` reference");
     assert_eq!(v_use.scheme, "Vec[Int]");
 }
+
+/// A parameter of a generic `fn` is a monotype whose variable that `fn`'s
+/// scheme quantified. Both hover doors name it the way the `fn` does — `T`, not
+/// the `?T` that means "nothing binds this" and reads as a failed inference.
+///
+/// The program is fully inferred: `foo` is `forall T. (() -> T) -> T` and
+/// monomorphization pins `T` at the call site. Only the rendering was ever in
+/// question.
+#[test]
+fn a_generic_fns_parameter_is_named_by_the_scheme_that_bound_it() {
+    let src = "fn foo(c) {\n  c()\n}\n\nvar u = || {}\nfoo(u)\n";
+    let analysis = analyze(src);
+    // The declaration `c` of `fn foo(c)`.
+    let decl = TextRange::new(7u32.into(), 8u32.into());
+    let at_decl = analysis.hover_decl(decl).expect("the parameter's decl");
+    assert_eq!(at_decl.name, "c");
+    assert_eq!(at_decl.scheme, "() -> T");
+    // …and the use of it in the body answers the same type.
+    let at_use = analysis
+        .refs
+        .keys()
+        .find_map(|r| {
+            let h = analysis.hover(*r)?;
+            (h.name == "c").then_some(h)
+        })
+        .expect("the `c` reference");
+    assert_eq!(at_use.scheme, "() -> T");
+    // The owning `fn` still shows its own quantifier.
+    let foo_decl = TextRange::new(3u32.into(), 6u32.into());
+    assert_eq!(
+        analysis.hover_decl(foo_decl).expect("fn foo").scheme,
+        "forall T. (() -> T) -> T"
+    );
+}
+
+/// The `?` is not deleted, only moved off the bindings that never earned it: a
+/// variable no scheme quantifies still renders with it.
+#[test]
+fn a_variable_no_scheme_quantifies_still_renders_unbound() {
+    // An expansive binding is not generalized (§5.3 value restriction) and
+    // nothing here pins its element, so the variable is owned by no scheme at
+    // all — which is exactly what `?` reports.
+    let src = "var v = Vec()\n";
+    let analysis = analyze(src);
+    let decl = TextRange::new(4u32.into(), 5u32.into());
+    let at_decl = analysis.hover_decl(decl).expect("the binding's decl");
+    assert_eq!(at_decl.name, "v");
+    assert!(
+        at_decl.scheme.contains('?'),
+        "an unowned variable keeps its `?`, got {}",
+        at_decl.scheme
+    );
+}

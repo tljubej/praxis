@@ -85,9 +85,6 @@ fn binding_hints(snapshot: &Snapshot, enc: Encoding) -> Vec<(u32, InlayHint)> {
         if !matches!(symbol.kind, SymbolKind::Var | SymbolKind::Param) {
             continue;
         }
-        let Some(scheme) = symbol.scheme.as_ref() else {
-            continue;
-        };
         let Some(token) = name_token_at(snapshot, *range) else {
             continue;
         };
@@ -95,9 +92,12 @@ fn binding_hints(snapshot: &Snapshot, enc: Encoding) -> Vec<(u32, InlayHint)> {
         if owner.as_ref().is_some_and(has_annotation) {
             continue;
         }
-        // The scheme's own rendering, so an unbound variable arrives as `?T`
-        // and a generalized one as `T` — the spelling every other surface uses.
-        let rendered = db.render_scheme(scheme);
+        // The binding's own rendering, so a variable an enclosing `fn` bound
+        // arrives as `T` and one nothing bound as `?T` — the spelling every
+        // other surface uses.
+        let Some(rendered) = symbol.rendered_type(db) else {
+            continue;
+        };
         let at = u32::from(range.end());
         out.push((
             at,
@@ -105,15 +105,21 @@ fn binding_hints(snapshot: &Snapshot, enc: Encoding) -> Vec<(u32, InlayHint)> {
                 position: snapshot.positions().position(at, enc),
                 label: InlayHintLabel::String(format!(": {rendered}")),
                 kind: Some(InlayHintKind::TYPE),
-                text_edits: owner.filter(|_| is_spellable(&rendered)).map(|_| {
-                    vec![TextEdit {
-                        range: Range {
-                            start: snapshot.positions().position(at, enc),
-                            end: snapshot.positions().position(at, enc),
-                        },
-                        new_text: format!(": {rendered}"),
-                    }]
-                }),
+                // A variable an enclosing `fn` quantified renders `T` — and `T`
+                // is not a type name the parser knows. The `?` test cannot see
+                // it, because naming that variable properly is exactly what
+                // took the `?` away, so the binder list is what answers here.
+                text_edits: owner
+                    .filter(|_| is_spellable(&rendered) && symbol.enclosing_binders.is_empty())
+                    .map(|_| {
+                        vec![TextEdit {
+                            range: Range {
+                                start: snapshot.positions().position(at, enc),
+                                end: snapshot.positions().position(at, enc),
+                            },
+                            new_text: format!(": {rendered}"),
+                        }]
+                    }),
                 tooltip: None,
                 padding_left: Some(false),
                 padding_right: Some(false),
@@ -221,6 +227,10 @@ fn has_annotation(owner: &SyntaxNode) -> bool {
 /// Deliberately narrow. `?T` names a variable nothing binds, `{ x: Int }` is a
 /// structural record with no annotation syntax, and a function type's spelling
 /// is not this module's to guess — so those hints show and offer no edit.
+///
+/// It is a test on the *spelling* and so cannot see a variable an enclosing
+/// scheme quantified, which renders as the plain name `T`; the caller answers
+/// that from the binder list beside the type.
 fn is_spellable(rendered: &str) -> bool {
     !rendered.is_empty()
         && !rendered.contains('?')

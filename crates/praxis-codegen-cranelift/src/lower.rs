@@ -4824,6 +4824,13 @@ fn build_function_debug_meta(
             None => DebugSlotKind::Reference,
             Some((_, kind)) => debug_slot_kind_of(kind),
         };
+        // The function a direct call defines this local from, interned in the
+        // same arena as the name above. It is what lets the debugger place a
+        // *caller* frame's line on the call it is stopped inside.
+        let callee: &'static str = mir
+            .debug_callee(local.id)
+            .map(|n| generation.alloc_str(n))
+            .unwrap_or("");
         metas.push(DebugLocalMeta {
             source_name: name.as_ptr(),
             name_len: name.len() as u32,
@@ -4838,6 +4845,8 @@ fn build_function_debug_meta(
             kind,
             span_start,
             span_end,
+            callee_name: callee.as_ptr(),
+            callee_name_len: callee.len() as u32,
             slot_kind,
         });
         symbol_id += 1;
@@ -5141,6 +5150,7 @@ mod tests {
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
             debug_scalar_sources: Vec::new(),
+            debug_callees: Vec::new(),
             span: (0, 0),
         };
         f.new_local(

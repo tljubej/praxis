@@ -66,7 +66,7 @@ Five hints on that file: `pairs: Vec[(Int, Text)]`, then `n: Int` and
 `f: (Int) -> Int` and `q: Int`. The destructured names are hinted individually
 because each is a binding in its own right.
 
-## `?T` is shown, not hidden
+## A variable is shown, never hidden
 
 ```praxis
 fn pair(item) {
@@ -80,14 +80,31 @@ out("pair is declared but never called")
 pair is declared but never called
 ```
 
-Nothing calls `pair`, so nothing says what `item` is, and the hint on it is
-`: ?T`.
+Nothing calls `pair`, so nothing says what `item` is — and that is not a gap in
+the answer. `pair` generalizes to `forall T. (T) -> Vec[T]`, so the hint on
+`item` is `: T`: the name `pair`'s own scheme gives the variable. Hover over
+`pair` and you see the same `T`, because it is the same variable.
 
-That is deliberate. `?T` is how an unresolved type variable renders everywhere —
-in hover, and in `praxis check`'s own output, where the previous chapter's
-`found (Text) -> ?T` is the same spelling. Hiding the hint would make "no hint"
-mean two different things: a type the source already states, and a type the
-compiler does not know. Those are precisely the two cases worth telling apart.
+`?T` is the other case, and the question mark is the whole difference:
+
+```praxis
+var v = Vec()
+out(v.len())
+```
+
+```text
+0
+```
+
+`v` is `Vec[?T]`. The binding is expansive, so the value restriction does not
+generalize it ([Generalization](generalization.md)), and nothing in the program
+pins the element — so no scheme quantifies that variable and none is going to.
+`?` says exactly that, in a hint as in hover as in `praxis check`'s own output,
+where the previous chapter's `found (Text) -> ?T` is the same spelling.
+
+Neither is hidden. Hiding one would make "no hint" mean two different things: a
+type the source already states, and a type nothing named. Those are precisely the
+two cases worth telling apart.
 
 ## Accepting a hint
 
@@ -117,10 +134,12 @@ The edit is offered only where the annotation would be both **legal** and
 - Legal: on a `fn` or closure parameter, or a `var`. A `for` variable has no
   annotation syntax, so its hint shows and cannot be accepted — the `n` and
   `label` above are in that state.
-- Spellable: the rendered type has to be one the parser reads back. `?T` is not.
-  Neither is an anonymous record. Neither is a function type, whose spelling this
-  module deliberately does not guess — which is why `f: (Int) -> Int` above shows
-  with no edit while `q: Int` beside it has one.
+- Spellable: the rendered type has to be one the parser reads back. `?T` is not,
+  and neither is the `T` of a scheme — the language has no syntax for writing a
+  type variable, so `pair`'s `item: T` above shows with no edit. Neither is an
+  anonymous record. Neither is a function type, whose spelling this module
+  deliberately does not guess — which is why `f: (Int) -> Int` above shows with
+  no edit while `q: Int` beside it has one.
 
 ```praxis
 var points = read lines(`{x:int},{y:int}`)

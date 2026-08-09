@@ -540,6 +540,12 @@ pub struct DebugLocal {
     /// The local's source span end (byte offset). `(span_start, span_end) ==
     /// (0, 0)` means "no span" (the return slot, span-less captures).
     pub span_end: u32,
+    /// The function a direct call defines this local from, copied from
+    /// [`DebugLocalMeta::callee_name`](crate::debug::DebugLocalMeta::callee_name).
+    /// Null for every local that is not a direct call's result.
+    pub callee_name: *const u8,
+    /// The callee name's byte length; `0` where there is no name.
+    pub callee_name_len: u32,
 }
 
 /// The hidden first argument to every generated function.

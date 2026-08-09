@@ -294,7 +294,9 @@ fn workspace_symbols_span_the_folder_and_prefer_the_open_buffer() {
 // ---------------------------------------------------------------------------
 
 /// `fn foo(a, b)` reads as `fn foo(a: Int, b: Int)` in the editor, and a
-/// parameter inference could not pin shows `?T` rather than nothing.
+/// parameter that stays a variable shows the name its own `fn` gives it —
+/// `id` is `forall T. (T) -> T`, so `t` is `T`. Not `?T`: that spelling means
+/// no scheme binds the variable, and one does.
 #[test]
 fn hints_write_the_inferred_type_beside_a_parameter() {
     let src = "fn foo(a, b) { a + b }\nfn id(t) { t }\nout(foo(1, 2))\n";
@@ -309,7 +311,7 @@ fn hints_write_the_inferred_type_beside_a_parameter() {
         vec![
             (0, 8, ": Int".to_string()),
             (0, 11, ": Int".to_string()),
-            (1, 7, ": ?T".to_string()),
+            (1, 7, ": T".to_string()),
         ],
         "one hint per unannotated binding, at the end of its name"
     );
@@ -347,8 +349,8 @@ fn a_hint_offers_an_edit_only_where_the_annotation_would_compile() {
         "a `fn` parameter's `Int` is spellable: {by_label:?}"
     );
     assert!(
-        by_label.contains(&(": ?T".to_string(), false)),
-        "`?T` names a variable nothing binds, so there is no edit: {by_label:?}"
+        by_label.contains(&(": T".to_string(), false)),
+        "`T` is a variable the `fn` quantified, not a type name to write: {by_label:?}"
     );
     assert!(
         by_label

@@ -130,8 +130,17 @@ scheme that quantified it knows
 ([ADR-047](../../../decisions/047-scheme-owned-binders-and-the-level-newtype.md)).
 
 That is what decides how a variable prints. Inside a scheme that binds it, a
-variable is `T`; anywhere else — a bare type, an unresolved parameter, a
-half-solved call — it is `?T`. The question mark means "free here", not "broken".
+variable is `T`; where no scheme binds it — a bare type, a half-solved call, an
+element nothing pinned — it is `?T`. The question mark means "free here", not
+"broken".
+
+A parameter of a generic `fn` is on the first side of that line even though its
+own type is a monotype: `c` in `fn foo(c) { c() }` is `() -> T`, because `foo` is
+`forall T. (() -> T) -> T` and that is the variable
+([ADR-151](../../../decisions/151-a-bound-variable-is-not-free-and-a-frame-is-in-a-call.md)).
+Every surface that shows a binding's type — hover, an inlay hint, completion,
+signature help — asks the same question, so a `?` in any of them means the same
+thing in all of them.
 
 The same fact has a user-visible edge: a generic `fn` has no single function
 value, so it cannot be passed as one.

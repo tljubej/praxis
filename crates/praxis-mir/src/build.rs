@@ -170,6 +170,13 @@ struct LiftedClosure {
     /// The closure literal's own type — the type of the hidden `closure_self`
     /// parameter the synthetic function receives.
     self_ty: Type,
+    /// The closure literal's source span — `|x| x + 1`, the whole of it.
+    ///
+    /// A lifted closure is synthetic in its *name* only. Its body is source the
+    /// programmer wrote, so the frame a call to it puts on the stack has a
+    /// source extent like every other frame's, and the debugger's source pane
+    /// shows it.
+    span: (u32, u32),
 }
 
 /// Walk a typed block collecting every `TypedExpr::Closure` (depth-first, source
@@ -214,6 +221,7 @@ fn collect_closures_expr(e: &TypedExpr, out: &mut Vec<LiftedClosure>) {
         body,
         captures,
         ty,
+        span,
         ..
     } = e
     {
@@ -223,6 +231,7 @@ fn collect_closures_expr(e: &TypedExpr, out: &mut Vec<LiftedClosure>) {
             body: (**body).clone(),
             captures: captures.clone(),
             self_ty: *ty,
+            span: *span,
         });
     }
 }
@@ -398,11 +407,11 @@ fn lower_fn(f: &TypedFn, db: &mut TypeDb, bindings: Bindings<'_>) -> Function {
 /// loads its captures at entry; the call site reads `fn_ptr` and emits a
 /// `call_indirect` with the matching signature.
 fn lower_closure_fn(closure: &LiftedClosure, db: &mut TypeDb, bindings: Bindings<'_>) -> Function {
-    // Closures are lifted to synthetic functions, so there is no span of their
-    // own to record; the `__p_expr` debugger function is also span-less. The
-    // `source` command degrades to "no span recorded" for these, which is
-    // acceptable (the faulting frame is almost always a real source function).
-    let mut b = Builder::new(closure.fn_name.clone(), (0, 0), db, bindings);
+    // The *name* is synthetic; the body is not. A closure frame's extent is the
+    // literal that produced it, so `source` and the TUI's source pane show the
+    // lines the programmer wrote rather than "no span recorded" — which is what
+    // a frame with no source at all deserves, and a closure is not one.
+    let mut b = Builder::new(closure.fn_name.clone(), closure.span, db, bindings);
 
     // Param 0 (MIR): the closure value itself (`closure_self`). It is the hidden
     // first explicit arg after the implicit ctx. Bound to a local so the prologue
@@ -546,9 +555,10 @@ impl<'a> Builder<'a> {
     /// and the cached scalar type handles.
     ///
     /// The one prologue for all three lowering entry points ([`lower_fn`],
-    /// [`lower_closure_fn`], [`lower_fn_value_adapter`]). `span` is the source
-    /// span for a real `fn` and `(0, 0)` for the synthetic ones — see their call
-    /// sites.
+    /// [`lower_closure_fn`], [`lower_fn_value_adapter`]). `span` is the extent
+    /// of the source the body was written as — the `fn` item, or the closure
+    /// literal — and `(0, 0)` only where there is no such source at all, which
+    /// is [`lower_fn_value_adapter`] and the debugger's `__p_expr`.
     ///
     /// `return_local` starts as the placeholder `LocalId(0)`: the return slot is
     /// allocated after the params (the ABI slots come first), so it cannot exist
@@ -574,6 +584,7 @@ impl<'a> Builder<'a> {
             debug_kinds: Vec::new(),
             debug_spans: Vec::new(),
             debug_scalar_sources: Vec::new(),
+            debug_callees: Vec::new(),
             span,
         };
         let entry = func.new_block();
@@ -738,6 +749,11 @@ impl<'a> Builder<'a> {
     /// Emit a call to a user function. Always checked: a callee's body may
     /// raise any fault and there is no manifest row for a Praxis function.
     fn call_user(&mut self, dst: LocalId, name: String, args: Vec<LocalId>) {
+        // The one place a direct call is emitted, so it is the one place that
+        // can record what `dst` is the result of. The debugger reads it to
+        // place a *caller* frame's line: the call it is stopped inside is the
+        // one whose callee is the frame above it.
+        self.func.set_debug_callee(dst, &name);
         self.emit(Inst::Call {
             dst,
             callee: CallTarget::User(name),
@@ -5798,6 +5814,72 @@ mod tests {
         assert!(
             rendered.iter().any(|t| t == "(Int) -> Int"),
             "the closure value's own type: {rendered:?}"
+        );
+    }
+
+    /// A lifted closure's frame has a source extent: the literal it came from.
+    ///
+    /// Only its *name* is synthetic. The body is source the programmer wrote, so
+    /// a `(0, 0)` here would make the debugger say "no source span recorded"
+    /// about lines that are right there in the file — while the `__fnvalue_*`
+    /// adapter, whose body is a forwarding call nobody wrote, has nothing to
+    /// point at and keeps the empty span.
+    #[test]
+    fn a_lifted_closure_carries_its_literals_span() {
+        let src = "fn f() -> Int {\n  var g = |n| n + 1\n  g(41)\n}";
+        let lowered = lower_src_to_mir(src);
+        let closure = lowered.function("__closure_0");
+        let (start, end) = closure.span;
+        assert_eq!(
+            &src[start as usize..end as usize],
+            "|n| n + 1",
+            "the closure's extent is the literal"
+        );
+
+        let adapter = lower_src_to_mir(
+            "fn double(n: Int) -> Int { n * 2 }\n\
+             fn main() -> Int {\n  var f = double\n  f(1)\n}",
+        );
+        assert_eq!(
+            adapter.function("__fnvalue_double").span,
+            (0, 0),
+            "an adapter's body is not source"
+        );
+    }
+
+    /// Every direct call records, on the local it defines, the function it
+    /// targets — which is what lets the debugger place a *caller* frame's line
+    /// on the call it is stopped inside, rather than infer it from slots a loop
+    /// has already written.
+    ///
+    /// An indirect call through a closure value records nothing: its target is
+    /// a value, and there is no name here to record.
+    #[test]
+    fn a_direct_calls_local_records_the_function_it_targets() {
+        let lowered = lower_src_to_mir(
+            "fn helper(n: Int) -> Int { n * 2 }\n\
+             fn main() -> Int {\n  var g = |n| n + 1\n  helper(1) + g(2)\n}",
+        );
+        let main = lowered.function("main");
+        let callees: Vec<&str> = main
+            .locals
+            .iter()
+            .filter_map(|l| main.debug_callee(l.id))
+            .collect();
+        assert!(
+            callees.contains(&"helper"),
+            "the direct call names its callee: {callees:?}"
+        );
+        // The `g(2)` result is a call local too, and it has no name to carry.
+        let indirect_spans: Vec<Option<(u32, u32)>> = main
+            .locals
+            .iter()
+            .filter(|l| main.debug_callee(l.id).is_none())
+            .map(|l| main.debug_span(l.id))
+            .collect();
+        assert!(
+            !indirect_spans.is_empty(),
+            "an indirect call's local records no callee"
         );
     }
 

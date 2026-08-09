@@ -588,6 +588,8 @@ mod tests {
             kind,
             span_start,
             span_end,
+            callee_name: std::ptr::null(),
+            callee_name_len: 0,
         }
     }
 

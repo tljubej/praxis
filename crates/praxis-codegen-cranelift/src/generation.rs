@@ -155,6 +155,18 @@ struct DebugMetaKey {
     kind: u8,
     span_start: u32,
     span_end: u32,
+    /// The direct call this local is the result of, compared as an address for
+    /// [`source_name`](Self::source_name)'s reason — callee names are interned
+    /// too, so equal names are one pointer.
+    ///
+    /// Load-bearing for correctness, like `slot_kind` below and not like the
+    /// span above it. Two `__fnvalue_*` adapters are identical in every other
+    /// field — an empty name, a positional symbol id, no span at all — and
+    /// differ only in the function they forward to, so interning them together
+    /// would put one adapter's callee in the other's frame and point the
+    /// debugger at a call that frame is not in.
+    callee_name: usize,
+    callee_name_len: u32,
     /// ADR-120 part 2. Load-bearing for *correctness*, not just for cache hit
     /// rate: two locals identical in every other field but disagreeing about
     /// whether their slot holds a reference are not one local, and interning
@@ -191,6 +203,8 @@ impl DebugMetaKey {
             kind: m.kind,
             span_start: m.span_start,
             span_end: m.span_end,
+            callee_name: m.callee_name as usize,
+            callee_name_len: m.callee_name_len,
             slot_kind: m.slot_kind,
         }
     }
@@ -565,6 +579,8 @@ mod tests {
     fn repeated_identical_metadata_stops_growing_the_arena() {
         let gen = Generation::new();
         let meta = |name: &'static str| DebugLocalMeta {
+            callee_name: std::ptr::null(),
+            callee_name_len: 0,
             source_name: name.as_ptr(),
             name_len: name.len() as u32,
             symbol_id: 0,
@@ -606,6 +622,40 @@ mod tests {
             primed,
             "a hundred repetitions must allocate nothing new"
         );
+    }
+
+    /// Two locals that differ *only* in the call they are the result of are two
+    /// locals, and interning them together would put one function's callee in
+    /// the other's frame.
+    ///
+    /// This is not a hypothetical shape. A `__fnvalue_*` adapter's return slot
+    /// has an empty name, a positional symbol id and no span at all, so two
+    /// adapters over functions of the same type are identical in every field
+    /// but this one — and the debugger would then place a caller's line on a
+    /// call that frame is not in.
+    #[test]
+    fn two_locals_that_differ_only_in_their_callee_are_not_one_local() {
+        let gen = Generation::new();
+        let meta = |callee: &'static str| DebugLocalMeta {
+            callee_name: callee.as_ptr(),
+            callee_name_len: callee.len() as u32,
+            source_name: "".as_ptr(),
+            name_len: 0,
+            symbol_id: 1,
+            descriptor: &praxis_runtime::scalars::INT,
+            type_id: 1,
+            kind: praxis_runtime::LOCAL_KIND_TEMP,
+            span_start: 0,
+            span_end: 0,
+            slot_kind: DebugSlotKind::Reference,
+        };
+        let double = gen.alloc_str("double");
+        let triple = gen.alloc_str("triple");
+        let (a, _) = gen.debug_local_metas(vec![meta(double)]);
+        let (b, _) = gen.debug_local_metas(vec![meta(triple)]);
+        let (a_again, _) = gen.debug_local_metas(vec![meta(double)]);
+        assert!(!std::ptr::eq(a, b), "different callees, different metadata");
+        assert!(std::ptr::eq(a, a_again), "the same callee still interns");
     }
 
     /// A retired generation gives its storage back. The proof is what orders it

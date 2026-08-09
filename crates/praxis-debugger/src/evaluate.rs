@@ -1174,6 +1174,8 @@ mod tests {
             kind,
             span_start: 0,
             span_end: 0,
+            callee_name: std::ptr::null(),
+            callee_name_len: 0,
         }
     }
 
@@ -1197,6 +1199,8 @@ mod tests {
             kind: praxis_runtime::LOCAL_KIND_USER,
             span_start: 0,
             span_end: 0,
+            callee_name: std::ptr::null(),
+            callee_name_len: 0,
         }
     }
 

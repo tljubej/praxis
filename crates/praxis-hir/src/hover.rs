@@ -52,12 +52,17 @@ impl Analysis {
         let resolved = self.refs.get(&range)?;
         let symbol = self.names.get(resolved.symbol)?;
         let ty = self.ref_types.get(&range);
-        let scheme = match (ty, &symbol.scheme) {
+        let scheme = match ty {
             // Prefer the per-reference instantiated type when available (it is
             // the concrete type at this use site), else the binding's scheme.
-            (Some(t), _) => self.db.render(*t),
-            (None, Some(s)) => self.db.render_scheme(s),
-            (None, None) => "?".to_string(),
+            //
+            // Rendered inside the binding's enclosing binders either way: a use
+            // of `c` inside `fn foo(c) { c() }` has the *parameter's* type, and
+            // the variable in it is one `foo`'s scheme quantified.
+            Some(t) => self.db.render_with_binders(*t, &symbol.enclosing_binders),
+            None => symbol
+                .rendered_type(&self.db)
+                .unwrap_or_else(|| "?".to_string()),
         };
         Some(HoverInfo {
             symbol: Some(resolved.symbol),
@@ -81,9 +86,7 @@ impl Analysis {
             .iter()
             .find(|s| s.decl.map(|d| d.span == span).unwrap_or(false))?;
         let scheme = sym
-            .scheme
-            .as_ref()
-            .map(|sc| self.db.render_scheme(sc))
+            .rendered_type(&self.db)
             .unwrap_or_else(|| "?".to_string());
         Some(HoverInfo {
             symbol: Some(sym.id),

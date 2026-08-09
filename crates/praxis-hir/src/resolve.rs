@@ -202,6 +202,9 @@ impl Resolver {
             // when it reaches an assignment whose target name resolves here.
             reassigned: false,
             scheme: None,
+            // Filled in after inference, once there are schemes to read them
+            // off; see `name_enclosing_binders`.
+            enclosing_binders: Vec::new(),
         })
     }
 

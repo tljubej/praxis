@@ -253,14 +253,15 @@ out(total)
 In the editor that file reads as `fn add(a: Int, b: Int)`, `var total: Int = 0`
 and `for n: Int in [1, 2, 3]`.
 
-Two details worth knowing. A type that inference has not pinned shows as `?T` —
-the same spelling hover and `praxis check` use — rather than being hidden, because
-hiding it would make "no hint" mean both *the source already says this* and *the
-compiler does not know*. And a hint carries an edit that writes the annotation
+Two details worth knowing. A type that is still a variable shows as one rather
+than being hidden — as `T` where the enclosing `fn`'s scheme quantifies it and as
+`?T` where nothing does, which is the same spelling hover and `praxis check` use
+— because hiding it would make "no hint" mean both *the source already says this*
+and *nothing named this*. And a hint carries an edit that writes the annotation
 into the file only where the annotation is legal and spellable: a `for` variable
-has no annotation syntax, and neither `?T` nor an anonymous record is something
-the parser would read back. Those hints show and cannot be accepted, which beats
-an edit that does not compile.
+has no annotation syntax, and neither a type variable nor an anonymous record is
+something the parser would read back. Those hints show and cannot be accepted,
+which beats an edit that does not compile.
 
 The server has no setting to turn them off. `editor.inlayHints.enabled` is the
 editor's, and a second switch would be a second place for the answer to live.

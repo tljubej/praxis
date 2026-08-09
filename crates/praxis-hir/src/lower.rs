@@ -917,6 +917,7 @@ pub fn lower(
             decl: None,
             reassigned: false,
             scheme: None,
+            enclosing_binders: Vec::new(),
         })
     });
     let mut l = Lowerer {
