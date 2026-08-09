@@ -1,4 +1,4 @@
-//! The crash debugger (§9, §14.1).
+//! The crash debugger (§9, §14.1) — and the breakpoint one (§9.8).
 //!
 //! Responsibility (per the design): capture stable per-frame snapshots on
 //! fault propagation (function id, current source span, named local slots,
@@ -11,6 +11,16 @@
 //! `locals`), the read-only `p EXPR`/`type EXPR` evaluator, and the `source`/
 //! `input`/`parser`/`heap` context commands with `restart`/`reload`. The
 //! [`session`] module owns the live compile/run state those commands reach.
+//!
+//! ## The second way in
+//!
+//! A `:bp` marker (§9.8, ADR-150) stops a program that has **not** faulted, and
+//! the same [`repl`] and [`tui`] serve it: the snapshot is the same deep copy of
+//! the same debug chain, so the questions and their answers are the same. What
+//! differs is which commands the situation supports, and
+//! [`repl::Repl`]'s attachment settles that in one place — a stopped program has
+//! frames to return to, so it gains `continue`; it is in the middle of using its
+//! own runtime, so it loses everything that would execute.
 
 pub mod evaluate;
 pub mod purity;

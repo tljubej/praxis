@@ -8,6 +8,7 @@
     { "include": "#comments" },
     { "include": "#read-region" },
     { "include": "#keywords" },
+    { "include": "#breakpoint-marker" },
     { "include": "#update-operator" },
     { "include": "#strings" },
     { "include": "#chars" },
@@ -40,6 +41,14 @@
       "comment": "Every keyword in SyntaxKind's table. Checked against SyntaxKind::all_keyword_texts() by a Rust test, because this list is a copy the compiler does not see.",
       "name": "keyword.control.praxis",
       "match": "\\b(var|fn|if|else|while|for|in|loop|match|return|break|continue|read|struct|enum|true|false)\\b"
+    },
+
+    "breakpoint-marker": {
+      "comment": "`:bp` is a statement's breakpoint marker (\u00a79.8) \u2014 a `:` and an identifier joined by adjacency, decided at the one position where a statement has ended, exactly as `min=` is decided where a name cannot be one. The lookbehind-free form is enough because nothing else in the grammar writes `:bp` with no space: a type annotation's `:` is followed by a type, which is capitalized.",
+      "match": "(:bp)\\b",
+      "captures": {
+        "1": { "name": "keyword.control.breakpoint.praxis" }
+      }
     },
 
     "update-operator": {

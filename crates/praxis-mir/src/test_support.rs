@@ -314,6 +314,7 @@ pub enum InstKind {
     LoadTupleElem,
     EnumTag,
     EnumPayloadGet,
+    Breakpoint,
 }
 
 impl InstKind {
@@ -351,6 +352,7 @@ impl From<&Inst> for InstKind {
             Inst::Call { .. } => InstKind::Call,
             Inst::CallIndirect { .. } => InstKind::CallIndirect,
             Inst::CheckFault { .. } => InstKind::CheckFault,
+            Inst::Breakpoint { .. } => InstKind::Breakpoint,
             Inst::MoveGc { .. } => InstKind::MoveGc,
             Inst::MoveScalar { kind, .. } => InstKind::MoveScalar(*kind),
             Inst::LoadCapture { .. } => InstKind::LoadCapture,

@@ -48,6 +48,9 @@ draw on.
 | A pipe, a redirect, a CI runner | `always` | The `Praxis crash>` prompt |
 | A pipe, a redirect, a CI runner | `auto` | [The report, then exit 1](noninteractive.md) |
 
+A [`:bp` stop](breakpoints.md) reads the same table, with the last row's exit
+replaced by "and the program carries on".
+
 So the scripted sessions throughout this chapter still behave exactly as
 written: `printf 'bt\nquit\n' | praxis run … --debug always` is a pipe, and takes
 the prompt.
@@ -96,6 +99,7 @@ Press `?` for this list without leaving the debugger.
 | `u` / `d` | Up / down the *call stack*, from whichever pane has focus |
 | `tab` / `shift-tab` | Move focus between panes |
 | `pgup` / `pgdn` | A page of whatever the focused pane counts in — frames in the backtrace, lines elsewhere |
+| `c` | `continue` — let a program stopped at a [`:bp` marker](breakpoints.md) run on |
 | `p` | Open the command line already primed with `p ` |
 | `r` / `R` | `restart` / `reload` |
 | `l` / `b` | Run `locals` / `bt` into the output pane |

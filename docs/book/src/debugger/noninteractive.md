@@ -16,6 +16,10 @@ being asked to, which is the point.
 | `always` | enter the prompt regardless |
 | `never` | never enter the prompt; print the diagnostic and exit |
 
+The same three rows govern a [`:bp` breakpoint](breakpoints.md), where the
+declining case prints the frame and then **keeps running** — a marker in a
+script is a trace point rather than a prompt nobody is there to answer.
+
 ## What gets printed
 
 ```praxis

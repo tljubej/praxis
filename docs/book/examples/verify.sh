@@ -24,6 +24,12 @@
 #                 does not get as far as running.
 #   name.session  expected stdout+stderr of `praxis run --debug always` driven by
 #                 the debugger commands in `name.cmds` on stdin.
+#   name.trace    expected stdout+stderr of `praxis run` at the default
+#                 `--debug auto` (exit 0) — a program whose `:bp` markers stop,
+#                 print what they found, and let it carry on. The harness runs
+#                 with stdout on a pipe, which is exactly the case `auto`
+#                 declines to prompt in, so this is the form a reader gets by
+#                 running the example in a script.
 #
 # A `.px` with none of these is an error, not a skip: a skipped example is
 # exactly what this script exists to prevent.
@@ -124,7 +130,7 @@ while IFS= read -r -d '' px; do
     # create the `.out` and fill it below. An example meant to fail declares
     # that by having an (even empty) `.fault`, `.err` or `.session` file, which
     # is the only way to say which of the four ways to run it is intended.
-    if (( bless )) && [[ ! -f "$base.out" && ! -f "$base.fault" && ! -f "$base.fault-head" && ! -f "$base.err" && ! -f "$base.session" ]]; then
+    if (( bless )) && [[ ! -f "$base.out" && ! -f "$base.fault" && ! -f "$base.fault-head" && ! -f "$base.err" && ! -f "$base.session" && ! -f "$base.trace" ]]; then
         : >"$base.out"
     fi
 
@@ -164,6 +170,17 @@ while IFS= read -r -d '' px; do
         actual="$(run_example "$dir" check "$file" --color never 2>&1 >/dev/null)"
         check "$label" "$base.err" "$actual"
 
+    elif [[ -f "$base.trace" ]]; then
+        actual="$(run_example "$dir" run "$file" ${input[@]+"${input[@]}"} --color never 2>&1)"
+        status=$?
+        if (( status != 0 )); then
+            (( fail++ ))
+            failed_names+=("$label")
+            echo "FAIL     $label — expected success, exited $status"
+            continue
+        fi
+        check "$label" "$base.trace" "$actual"
+
     elif [[ -f "$base.session" ]]; then
         if [[ ! -f "$base.cmds" ]]; then
             (( fail++ ))
@@ -177,7 +194,7 @@ while IFS= read -r -d '' px; do
     else
         (( fail++ ))
         failed_names+=("$label")
-        echo "FAIL     $label — no .out/.fault/.fault-head/.err/.session expectation"
+        echo "FAIL     $label — no .out/.fault/.fault-head/.err/.session/.trace expectation"
     fi
 done < <(find "$scope" -name '*.px' -print0 | sort -z)
 

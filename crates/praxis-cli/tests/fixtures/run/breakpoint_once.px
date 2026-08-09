@@ -1,0 +1,8 @@
+// One marker, in a called function, so the stop's backtrace has a caller in it
+// (§9.8).
+fn grow(seed: Int) -> Int {
+    var doubled = seed * 2 :bp
+    doubled + 1
+}
+
+out(grow(20))

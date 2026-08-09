@@ -121,6 +121,60 @@ pub fn render_noninteractive<W: Write>(
     Ok(())
 }
 
+/// Render a `:bp` stop for a host that cannot open a debugger (§9.8) — the
+/// marked line, the backtrace, and the stopped frame's locals.
+///
+/// [`render_noninteractive`]'s shape, deliberately, because it answers the same
+/// question about the same kind of snapshot: *where is the program and what does
+/// it hold?* What it does not share is the exit — nothing has failed here, so
+/// the caller prints this and lets the program run on.
+///
+/// The line comes from the marker's own `span` rather than from the frame's,
+/// which is the whole reason the span rides along with the stop: a frame's span
+/// is its *function*, and pointing at `fn solve(…) {` says nothing about which
+/// of its lines the program is on.
+pub fn render_breakpoint_stop<W: Write>(
+    out: &mut W,
+    snapshot: &CrashSnapshot,
+    span: (u32, u32),
+    hits: u64,
+    palette: praxis_source::style::Palette,
+    ctx: &RenderCtx<'_>,
+) -> std::io::Result<()> {
+    use praxis_source::style::Style;
+    // Styled as a *note*, never as an error: a stop is something the program was
+    // asked to do.
+    let label = palette.paint(
+        Style::Severity(praxis_source::style::Severity::Note),
+        "stop:",
+    );
+    match hits {
+        1 => writeln!(out, "{label} breakpoint")?,
+        n => writeln!(out, "{label} breakpoint (stop #{n})")?,
+    }
+    // The marked line, when there is source to resolve it against. Labelled with
+    // the stopped function's name, which is the shape the `source` command
+    // already prints a span in.
+    if let Some(text) = ctx.source_text {
+        // SAFETY: function names are compiler-embedded 'static UTF-8.
+        let name = if snapshot.is_empty() {
+            "<no frame>"
+        } else {
+            unsafe { snapshot.frame_name(0) }
+        };
+        render_source_span(out, text, name, span)?;
+    }
+    if snapshot.is_empty() {
+        return Ok(());
+    }
+    writeln!(out)?;
+    writeln!(out, "Backtrace:")?;
+    render_backtrace(out, snapshot)?;
+    writeln!(out)?;
+    render_frame_locals(out, snapshot, 0, NONINTERACTIVE_LOCAL_LIMIT, ctx)?;
+    Ok(())
+}
+
 /// Render the snapshot's frame chain as a numbered backtrace (`#0 fn`, `#1 fn`,
 /// …), innermost-first. Used by the noninteractive fallback and the REPL `bt`.
 pub fn render_backtrace<W: Write>(out: &mut W, snap: &CrashSnapshot) -> std::io::Result<()> {

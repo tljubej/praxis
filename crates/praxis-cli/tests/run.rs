@@ -1895,3 +1895,140 @@ fn a_nan_key_deduplicates_or_not_depending_on_whether_its_slot_was_promoted() {
          the promoted case that moved from 1 to 2: {stderr}"
     );
 }
+
+// ===========================================================================
+// Breakpoints (§9.8).
+//
+// A `:bp` marker stops a program that has *not* faulted. `--debug` decides what
+// happens at the stop, exactly as it decides what happens at a fault: `never`
+// makes the marker inert, a declining `auto` prints the frame and lets the
+// program run on, and `always` off a terminal opens the `Praxis stop>` prompt on
+// stdin.
+// ===========================================================================
+
+/// Run a fixture with `--debug=always`, piping `cmds` to the stop prompt and
+/// taking `--input` from `/dev/null` so stdin is free for commands. Returns
+/// (exit, stdout, stderr).
+fn run_stop_with_cmds(name: &str, cmds: &str) -> (i32, String, String) {
+    use std::process::Stdio;
+    let mut child = Command::new(bin_path())
+        .args(["run", "--debug=always", "--input", "/dev/null"])
+        .arg(fixture(name))
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn praxis");
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().expect("stdin");
+        stdin.write_all(cmds.as_bytes()).expect("write stop cmds");
+    }
+    let output = child.wait_with_output().expect("wait");
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// A declining `--debug` makes a marker a **trace point**: the frame is printed
+/// to stderr and the program carries on to its own answer, exit 0.
+///
+/// This is the default off a terminal, so it is what a marker does in a script,
+/// a pipeline, or CI — and "the program still finishes" is the half that
+/// separates a stop from a fault.
+#[test]
+fn a_breakpoint_off_a_terminal_prints_and_keeps_running() {
+    let (code, stdout, stderr) = run_fixture("breakpoint_once.px");
+    assert_eq!(code, 0, "a stop is not a failure\nstderr: {stderr}");
+    assert_eq!(stdout.trim(), "41", "the program ran to its own answer");
+    assert!(stderr.contains("stop: breakpoint"), "{stderr}");
+    // The marked line, from the marker's own span rather than the frame's.
+    assert!(
+        stderr.contains(":bp"),
+        "the marked line is quoted: {stderr}"
+    );
+    // The caller is still on the stack: the frames had not unwound.
+    assert!(
+        stderr.contains("#0   grow") && stderr.contains("#1   <entry>"),
+        "the live chain is shown: {stderr}"
+    );
+    // …and the stop is *after* the statement, so the binding it made is there.
+    assert!(
+        stderr.contains("doubled: Int = 40"),
+        "the marked statement had run: {stderr}"
+    );
+    assert!(!stderr.contains("Praxis"), "no prompt was opened: {stderr}");
+}
+
+/// `--debug=never` makes every marker inert without touching the source.
+#[test]
+fn debug_never_makes_a_breakpoint_inert() {
+    let (code, stdout, stderr) = run_fixture_debug("breakpoint_once.px", "never");
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "41");
+    assert_eq!(stderr, "", "nothing was printed at all: {stderr:?}");
+}
+
+/// `--debug=always` off a terminal opens the line prompt, and `continue` walks
+/// from one pass of the loop to the next with that pass's state.
+#[test]
+fn the_stop_prompt_continues_from_one_pass_to_the_next() {
+    let (code, stdout, stderr) =
+        run_stop_with_cmds("breakpoint_loop.px", "locals\ncontinue\nlocals\ncontinue\n");
+    assert_eq!(code, 0, "the program finished\nstderr: {stderr}");
+    assert_eq!(stdout.trim(), "11", "and answered what it always answers");
+    assert!(stderr.contains("Stopped at a breakpoint."), "{stderr}");
+    assert!(
+        stderr.contains("Praxis stop> "),
+        "the stop prompt, not the crash one: {stderr}"
+    );
+    assert!(
+        stderr.contains("(stop #2)"),
+        "the second pass is numbered: {stderr}"
+    );
+    // Two `locals`, one per pass, each showing that pass's running total.
+    assert!(
+        stderr.contains("total: Int = 4") && stderr.contains("total: Int = 11"),
+        "each stop is its own pass's state: {stderr}"
+    );
+}
+
+/// `quit` at a stop detaches: the program runs to completion and no later
+/// marker takes the prompt again.
+#[test]
+fn quitting_a_stop_detaches_instead_of_killing_the_program() {
+    let (code, stdout, stderr) = run_stop_with_cmds("breakpoint_loop.px", "quit\n");
+    assert_eq!(code, 0, "the program was not killed\nstderr: {stderr}");
+    assert_eq!(stdout.trim(), "11", "it ran to its own answer");
+    assert!(
+        stderr.contains("will not stop again"),
+        "the detach is stated: {stderr}"
+    );
+    assert!(
+        !stderr.contains("(stop #2)"),
+        "the second pass did not stop: {stderr}"
+    );
+}
+
+/// A stop refuses the commands that would execute, and says why — it does not
+/// pretend they are unknown.
+#[test]
+fn a_stop_refuses_p_and_restart_with_a_reason() {
+    let (code, _stdout, stderr) =
+        run_stop_with_cmds("breakpoint_once.px", "p doubled\nrestart\ncontinue\n");
+    assert_eq!(code, 0);
+    assert!(
+        stderr.contains("stopped, not faulted"),
+        "`p` explains itself: {stderr}"
+    );
+    assert!(
+        stderr.contains("live frames to return to"),
+        "`restart` explains itself: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unknown command"),
+        "neither is pretended away: {stderr}"
+    );
+}

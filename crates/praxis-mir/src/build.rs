@@ -789,7 +789,16 @@ fn lower_block_body(b: &mut Builder<'_>, block: &praxis_hir::TypedBlock) -> Loca
     for stmt in &block.stmts {
         lower_stmt(b, stmt);
     }
-    lower_expr_gc(b, &block.tail)
+    let value = lower_expr_gc(b, &block.tail);
+    // A `:bp` on the trailing expression stops *after* it has been evaluated and
+    // before the block yields — the same "after the statement it marks" rule the
+    // statement list follows, applied to the one position that is not a
+    // statement. `value` is already computed, so the block's value is unchanged
+    // by the stop.
+    if let Some(span) = block.tail_bp {
+        b.push(Inst::Breakpoint { span });
+    }
+    value
 }
 
 /// How the debugger should classify a parameter's slot: a binding the
@@ -1020,6 +1029,12 @@ fn lower_stmt(b: &mut Builder<'_>, stmt: &TypedStmt) {
         TypedStmt::Expr(e) => {
             let _ = lower_expr_gc(b, e);
         }
+        // The stop goes into whatever block the marked statement *finished* in,
+        // which is what makes "after the statement" true for a statement that
+        // branches: `if c { … } :bp` lowers its arms into their own blocks and
+        // leaves the cursor on the join, so the stop is reached however the `if`
+        // went, and exactly once.
+        TypedStmt::Breakpoint { span } => b.push(Inst::Breakpoint { span: *span }),
     }
 }
 
@@ -5497,6 +5512,76 @@ mod tests {
     /// forgot.
     fn lower_src_forwarded(src: &str) -> Lowered {
         crate::test_support::lower_src_to_mir_forwarded(src)
+    }
+
+    /// §9.8: a `:bp` marker is one instruction, at the point the marked
+    /// statement finished, carrying nothing else.
+    ///
+    /// The three absences are the subject and not incidental: no `RootSlots`
+    /// (the wrapper is `Effect::Pure`, so the site is not a GC safepoint), no
+    /// `DebugSlots` (ADR-104 writes a debug slot per *definition*, so the frame
+    /// is already current here), and no `CheckFault` after it (a stop cannot
+    /// raise). Together they are why a marked statement costs one call.
+    #[test]
+    fn a_breakpoint_is_one_bare_call_where_the_statement_ended() {
+        let lowered = lower_src_to_mir("var a = 1 :bp\nout(a)");
+        let entry = lowered.entry();
+        let bps: Vec<&Inst> = entry
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter(|i| matches!(i, Inst::Breakpoint { .. }))
+            .collect();
+        assert_eq!(bps.len(), 1, "one marker, one instruction");
+        // It carries neither slot set — `slot_sets` is the one match that says
+        // so, and it is the one the backend and the verifier both read.
+        let (roots, debug) = crate::annot::slot_sets(bps[0]);
+        assert!(roots.is_none(), "a stop is not a GC safepoint");
+        assert!(debug.is_none(), "a stop needs no debug spill");
+
+        // Nothing follows it in its block but the block's own continuation: in
+        // particular no `CheckFault`, which the verifier would reject anyway
+        // because `praxis_breakpoint` cannot fault.
+        for block in &entry.blocks {
+            for (i, inst) in block.insts.iter().enumerate() {
+                if !matches!(inst, Inst::Breakpoint { .. }) {
+                    continue;
+                }
+                assert!(
+                    !matches!(block.insts.get(i + 1), Some(Inst::CheckFault { .. })),
+                    "a stop cannot fault, so nothing observes one"
+                );
+            }
+        }
+
+        // A program with no marker emits none at all.
+        let clean = lower_src_to_mir("var a = 1\nout(a)");
+        assert!(
+            !clean
+                .entry()
+                .blocks
+                .iter()
+                .flat_map(|b| &b.insts)
+                .any(|i| matches!(i, Inst::Breakpoint { .. })),
+            "an unmarked program pays nothing"
+        );
+    }
+
+    /// A marker on a statement that *branches* stops once, on the join — which
+    /// is what "after the statement" has to mean for an `if` or a `for`.
+    #[test]
+    fn a_marker_on_a_branching_statement_stops_once_on_the_join() {
+        let lowered =
+            lower_src_to_mir("var a = 0\nif a > 0 { out(1) } else { out(2) } :bp\nout(a)");
+        let entry = lowered.entry();
+        // One instruction, so neither arm carries a copy of it.
+        let total = entry
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter(|i| matches!(i, Inst::Breakpoint { .. }))
+            .count();
+        assert_eq!(total, 1, "the stop is on the join, not in each arm");
     }
 
     /// A `for` binding's slot and the item it holds carry the iterator's element

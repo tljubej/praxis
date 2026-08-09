@@ -25,6 +25,10 @@ session and `> out.txt` does not swallow it.
 Exit is 1 on a fault either way. Quitting the debugger does not change that: a
 program that faulted has still faulted.
 
+The same flag decides what a [`:bp` breakpoint](breakpoints.md) does, which is
+the other way into the debugger — the one that does not need the program to have
+gone wrong first.
+
 ## Two surfaces
 
 Entering the debugger on a terminal opens the

@@ -120,6 +120,20 @@ pub struct TypedBlock {
     pub tail: TypedExpr,
     /// The block's value type (the tail's type, or Unit).
     pub ty: Type,
+    /// The span of a `:bp` marker on the **trailing expression** (§9.8), if it
+    /// carries one.
+    ///
+    /// A field here rather than a [`TypedStmt::Breakpoint`] after the tail,
+    /// because there is no "after the tail" in a block: the tail *is* the
+    /// block's value, and demoting it to a statement so a marker could follow it
+    /// would throw that value away. The stop still happens where the marker says
+    /// — the tail is evaluated, then the program stops, then the block yields
+    /// what the tail produced.
+    ///
+    /// A file's top-level statements never reach this: their entry point's tail
+    /// is a synthesized `Unit` literal, so a `:bp` on the last line of a file is
+    /// a [`TypedStmt::Breakpoint`] like every other one.
+    pub tail_bp: Option<(u32, u32)>,
 }
 
 /// A statement. Every variant carries its source `span` `[start, end)` (byte
@@ -184,6 +198,17 @@ pub enum TypedStmt {
     },
     /// A bare expression evaluated for effect.
     Expr(TypedExpr),
+    /// A `:bp` marker's stop (§9.8), carrying the marker's own span.
+    ///
+    /// **Its own statement, placed after the one it marks**, rather than a flag
+    /// on each of the five variants above. That is what makes "the program stops
+    /// *after* the marked statement has run" a fact about the statement list
+    /// instead of a rule each lowering has to remember — a flag on
+    /// [`Var`](Self::Var) would have to say, somewhere, whether the stop happens
+    /// before or after the binding is stored, and the answer that makes the
+    /// marker useful (after, so `locals` shows the value it just bound) is the
+    /// one an ordering already states.
+    Breakpoint { span: (u32, u32) },
 }
 
 /// The assignment operators.
@@ -940,8 +965,10 @@ pub fn lower(
         // A top-level `var`/`expr`/`assign` **executes**: it goes into the entry
         // point, in the order it is written.
         if is_top_level_stmt(&node) {
+            let bp = l.breakpoint_span(&node);
             if let Some(stmt) = l.lower_stmt(&node) {
                 entry_stmts.push(stmt);
+                Lowerer::push_breakpoint(&mut entry_stmts, bp);
             }
         }
     }
@@ -972,6 +999,10 @@ pub fn lower(
                     span: (0, 0),
                 },
                 ty: unit,
+                // The tail is synthesized, so no marker can be on it — a `:bp`
+                // on the file's last line marks that *statement*, which is
+                // already in `entry_stmts`.
+                tail_bp: None,
             },
             fn_type,
             span,
@@ -1261,7 +1292,13 @@ impl<'a> Lowerer<'a> {
     fn lower_block(&mut self, block: &BlockExpr) -> Option<TypedBlock> {
         let mut stmts = Vec::new();
         let mut tail: Option<TypedExpr> = None;
+        // The `:bp` marker on whatever `tail` currently holds. It travels with
+        // the pending tail rather than being read again later, because a demoted
+        // tail becomes an ordinary statement and its marker has to be demoted
+        // with it — the marker belongs to the statement, not to the position.
+        let mut tail_bp: Option<(u32, u32)> = None;
         for child in block.stmts() {
+            let bp = self.breakpoint_span(&child);
             // A trailing ExprStmt is the block's value. But earlier ExprStmts
             // are effect statements — only the *last* one is the tail. So when a
             // new ExprStmt appears, the previously-recorded tail becomes an
@@ -1270,8 +1307,10 @@ impl<'a> Lowerer<'a> {
                 if let Some(e) = expr_stmt.expr() {
                     if let Some(prev) = tail.take() {
                         stmts.push(TypedStmt::Expr(prev));
+                        Self::push_breakpoint(&mut stmts, tail_bp.take());
                     }
                     tail = Some(self.lower_expr(&e));
+                    tail_bp = bp;
                     continue;
                 }
             }
@@ -1281,9 +1320,11 @@ impl<'a> Lowerer<'a> {
             // order: `{ v.push(i); i = i + 1 }` must push *before* incrementing.
             if let Some(prev) = tail.take() {
                 stmts.push(TypedStmt::Expr(prev));
+                Self::push_breakpoint(&mut stmts, tail_bp.take());
             }
             if let Some(s) = self.lower_stmt(&child) {
                 stmts.push(s);
+                Self::push_breakpoint(&mut stmts, bp);
             }
         }
         // A block whose last child is a statement has no value of its own, so
@@ -1300,9 +1341,31 @@ impl<'a> Lowerer<'a> {
         // which is what this is. The debugger's own dead-scratch rule then
         // drops the temp entirely when it never received a value, which is the
         // right outcome for a slot no program text asked for.
+        // A synthesized tail is not a statement the user wrote, so a marker that
+        // was pending against a *real* tail cannot survive into it — but there
+        // is no such case: `tail_bp` is only ever `Some` while `tail` is, and
+        // both are taken together above.
+        let tail_bp = tail.as_ref().and(tail_bp);
         let tail = tail.unwrap_or_else(|| self.error_expr());
         let ty = expr_ty(&tail);
-        Some(TypedBlock { stmts, tail, ty })
+        Some(TypedBlock {
+            stmts,
+            tail,
+            ty,
+            tail_bp,
+        })
+    }
+
+    /// The span of the `:bp` marker on statement node `stmt`, if it has one.
+    fn breakpoint_span(&self, stmt: &SyntaxNode) -> Option<(u32, u32)> {
+        praxis_ast::breakpoint_marker(stmt).map(|m| self.node_span(m.syntax()))
+    }
+
+    /// Append the stop a `:bp` marker asks for, after the statement it marks.
+    fn push_breakpoint(stmts: &mut Vec<TypedStmt>, span: Option<(u32, u32)>) {
+        if let Some(span) = span {
+            stmts.push(TypedStmt::Breakpoint { span });
+        }
     }
 
     fn lower_stmt(&mut self, node: &SyntaxNode) -> Option<TypedStmt> {
@@ -1553,6 +1616,7 @@ impl<'a> Lowerer<'a> {
                     stmts: Vec::new(),
                     tail,
                     ty,
+                    tail_bp: None,
                 }
             }
             None => self.unit_block(span),
@@ -1728,6 +1792,9 @@ impl<'a> Lowerer<'a> {
                     span,
                 },
                 ty,
+                // The wrapper is the compiler's; the marker, if the body had
+                // one, stayed on the block this now wraps.
+                tail_bp: None,
             };
         }
         block
@@ -2063,6 +2130,7 @@ impl<'a> Lowerer<'a> {
                     stmts: Vec::new(),
                     tail: inner,
                     ty,
+                    tail_bp: None,
                 })
             }
         }
@@ -2513,6 +2581,7 @@ impl<'a> Lowerer<'a> {
                 span,
             },
             ty: self.unit,
+            tail_bp: None,
         }
     }
 
@@ -2882,6 +2951,9 @@ pub fn stmt_exprs(s: &TypedStmt) -> impl Iterator<Item = &TypedExpr> {
             out.push(value);
         }
         TypedStmt::Expr(e) => out.push(e),
+        // A stop is a program *point*, not a computation: nothing is evaluated
+        // there, so there is no sub-expression for a walk to reach.
+        TypedStmt::Breakpoint { .. } => {}
     }
     out.into_iter()
 }
@@ -2910,6 +2982,9 @@ pub fn stmt_exprs_mut(s: &mut TypedStmt) -> impl Iterator<Item = &mut TypedExpr>
             out.push(value);
         }
         TypedStmt::Expr(e) => out.push(e),
+        // A stop is a program *point*, not a computation: nothing is evaluated
+        // there, so there is no sub-expression for a walk to reach.
+        TypedStmt::Breakpoint { .. } => {}
     }
     out.into_iter()
 }
@@ -2921,7 +2996,8 @@ pub fn stmt_span(s: &TypedStmt) -> (u32, u32) {
         TypedStmt::Var { span, .. }
         | TypedStmt::Assign { span, .. }
         | TypedStmt::IndexAssign { span, .. }
-        | TypedStmt::FieldAssign { span, .. } => *span,
+        | TypedStmt::FieldAssign { span, .. }
+        | TypedStmt::Breakpoint { span } => *span,
         TypedStmt::Expr(e) => expr_span(e),
     }
 }

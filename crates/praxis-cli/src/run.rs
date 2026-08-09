@@ -19,6 +19,7 @@ use praxis_runtime::{Runtime, RuntimeContext};
 use praxis_source::diagnostic::sort_by_position;
 use praxis_types::TypeData;
 
+use crate::breakpoint_host;
 use crate::debug_mode::DebugMode;
 use crate::{diagnostic_render, exit_code, source_file};
 
@@ -188,12 +189,32 @@ pub fn run(
         None => praxis_runtime::install_input_reader(lazy_stdin::read),
     }
 
+    // Arm the `:bp` stops (§9.8). This has to happen before the call below and
+    // not inside it: the handler is reached from generated code, several native
+    // frames under this one, so what it renders with is state it finds rather
+    // than state it is passed. `analysis.db` is the database codegen just
+    // compiled against, which is what makes a local's positional `type_id` mean
+    // anything.
+    //
+    // A program with no marker in it never calls the wrapper, so this costs a
+    // clone of the type database and nothing else.
+    let source_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    breakpoint_host::install(&analysis.db, &text, &source_name, debug, color);
+
     // SAFETY: `entry` was just finalized for `main_id`; the JIT outlives the
     // call. `main` declares no parameters, so the entry takes the context and
     // nothing else — the shape `abi_signature` emitted for it.
     let entry: praxis_debugger::session::MainEntry =
         unsafe { std::mem::transmute(jit.entry(main_id)) };
     let result = unsafe { entry(&mut ctx as *mut RuntimeContext) };
+
+    // The run is over, so no later stop has a program to stop. Disarming here
+    // rather than only on the fault path means the crash debugger's `restart`
+    // (§9.7) cannot fire a handler into the terminal the debugger is holding.
+    breakpoint_host::disarm();
 
     if runtime.has_pending_fault() {
         let kind = runtime.fault();
@@ -262,14 +283,15 @@ pub fn run(
                 // alternate screen, so quitting it restores that report — the
                 // crash stays in the scrollback instead of vanishing with the UI.
                 if praxis_debugger::tui::should_use_tui() {
-                    let tui = praxis_debugger::tui::Tui::new(repl, kind, message.clone());
-                    repl = praxis_debugger::tui::run(tui)?;
+                    let stop = praxis_debugger::tui::Stop::Fault(kind, message.clone());
+                    let tui = praxis_debugger::tui::Tui::new(repl, stop);
+                    (repl, _) = praxis_debugger::tui::run(tui)?;
                 } else {
                     let stdin = std::io::stdin();
                     let mut stdin = stdin.lock();
                     let stderr = std::io::stderr();
                     let mut stderr = stderr.lock();
-                    repl.run(&mut stdin, &mut stderr);
+                    let _ = repl.run(&mut stdin, &mut stderr);
                 }
                 // Drop the snapshot, then the heap, then the JIT generations
                 // its objects pointed into (F13, H15). `teardown` is what makes

@@ -313,16 +313,18 @@ statement    := var_stmt
               | expr_stmt
               -- separated by ";" | NEWLINE | end of block
 
-var_stmt     := "var" binder (":" type)? "=" expr
+var_stmt     := "var" binder (":" type)? "=" expr breakpoint?
 binder       := Ident | "_"
 
-assign_stmt  := Ident assign_op expr                -- a bare name target
-              | expr assign_op expr                 -- a place: m[k], p.x
-              | expr update_op expr                 -- m[k] min= v
+assign_stmt  := Ident assign_op expr breakpoint?    -- a bare name target
+              | expr assign_op expr breakpoint?     -- a place: m[k], p.x
+              | expr update_op expr breakpoint?     -- m[k] min= v
 assign_op    := "=" | "+=" | "-=" | "*=" | "/=" | "%="
 update_op    := ("min" | "max") "="                 -- adjacent, no space
 
-expr_stmt    := expr
+expr_stmt    := expr breakpoint?
+
+breakpoint   := ":" "bp"                            -- adjacent, no space
 
 fn_item      := "fn" Ident ("(" param_list? ")")? ("->" type)? block
 param_list   := param ("," param)* ","?
@@ -344,6 +346,12 @@ A `min=` / `max=` operator is two tokens because `min` is an ordinary
 identifier, so the grammar decides it by **adjacency** exactly as it does for
 `+=`: the `=` must immediately follow the name with no trivia between. Written
 with a space, `m[k] min = v` is not that operator, and the run-on is `P002`.
+
+The `:bp` [breakpoint marker](../debugger/breakpoints.md) is settled the same
+way, for the same reason: `bp` is an ordinary identifier, so the `:` and the name
+must be adjacent, and `: bp` is not a marker. There is one position in the
+grammar where a `:` can follow a finished statement, which is why the marker
+needs no keyword of its own.
 
 A block's value is its trailing expression:
 

@@ -484,6 +484,52 @@ impl<'t> Parser<'t> {
             .is_some_and(|t| t.kind == SyntaxKind::EQ)
     }
 
+    /// `true` if a statement's `:bp` breakpoint marker starts here: a `:`
+    /// **immediately** followed by an `Ident` spelling `bp` (§9.8).
+    ///
+    /// [`Parser::at_update_op`]'s shape, and adjacency is the rule for its
+    /// reason: `bp` is an identifier, so `:bp` is one marker spelled in two
+    /// tokens, and `: bp` with a space is a `:` followed by a name. The raw
+    /// token stream is what makes that askable — [`Parser::nth_kind`] skips
+    /// trivia, which is exactly the difference between the two spellings.
+    ///
+    /// A type annotation cannot be mistaken for it, because this is only ever
+    /// asked at the *end* of a statement: `var x: Int = 1` has consumed its `:`
+    /// inside [`Parser::parse_var`] long before this runs, and a `:` that
+    /// survives to a statement's end begins nothing else in the grammar.
+    fn at_breakpoint_marker(&mut self) -> bool {
+        if !self.at(SyntaxKind::COLON) {
+            return false;
+        }
+        let colon = self.meaningful_index();
+        self.tokens.get(colon + 1).is_some_and(|t| {
+            t.kind == SyntaxKind::Ident
+                && &self.text[t.span.start().to_usize()..t.span.end().to_usize()] == "bp"
+        })
+    }
+
+    /// Consume a trailing `:bp` marker into a [`SyntaxKind::BREAKPOINT`] node,
+    /// if one is here. Answers whether it consumed anything.
+    ///
+    /// Called from each statement parser just before it closes its own node, so
+    /// the marker is a *child of the statement it marks* rather than a sibling
+    /// of it. That is what lets HIR lowering ask a statement node whether it
+    /// carries one without re-deriving the association from source positions.
+    fn eat_breakpoint_marker(&mut self) -> bool {
+        if !self.at_breakpoint_marker() {
+            return false;
+        }
+        // `start_node` sweeps the leading trivia into the *enclosing* node, so
+        // the whitespace before `:bp` stays outside the marker. The two tokens
+        // are adjacent by `at_breakpoint_marker`'s check, so neither bump needs
+        // a sweep of its own.
+        self.start_node(SyntaxKind::BREAKPOINT);
+        self.bump_meaningful(); // `:`
+        self.bump_meaningful(); // `bp`
+        self.finish_node();
+        true
+    }
+
     /// `true` if the current meaningful token is `kind`.
     fn at(&mut self, kind: SyntaxKind) -> bool {
         self.peek() == kind
@@ -662,6 +708,7 @@ impl<'t> Parser<'t> {
         }
         self.expect(SyntaxKind::EQ, "`=`");
         self.parse_expr();
+        self.eat_breakpoint_marker();
         self.finish_node();
         true
     }
@@ -675,6 +722,7 @@ impl<'t> Parser<'t> {
         self.bump(); // name
         self.bump(); // assignment operator (=, +=, ...)
         self.parse_expr();
+        self.eat_breakpoint_marker();
         self.finish_node();
         true
     }
@@ -847,6 +895,7 @@ impl<'t> Parser<'t> {
             // A block as a statement is parsed as an expression.
             self.start_node(SyntaxKind::EXPR_STMT);
             self.parse_expr();
+            self.eat_breakpoint_marker();
             self.finish_node();
             return true;
         }
@@ -869,6 +918,7 @@ impl<'t> Parser<'t> {
             self.start_node_at(cp, SyntaxKind::PLACE_ASSIGN_STMT);
             self.bump(); // assignment operator
             self.parse_expr();
+            self.eat_breakpoint_marker();
             self.finish_node(); // PLACE_ASSIGN_STMT
             return true;
         }
@@ -883,10 +933,12 @@ impl<'t> Parser<'t> {
             self.bump(); // `=`
             self.finish_node(); // UPDATE_OP
             self.parse_expr();
+            self.eat_breakpoint_marker();
             self.finish_node(); // PLACE_ASSIGN_STMT
             return true;
         }
         self.start_node_at(cp, SyntaxKind::EXPR_STMT);
+        self.eat_breakpoint_marker();
         self.finish_node();
         true
     }
@@ -3709,6 +3761,96 @@ mod tests {
         // …and a missing value is a mistake, not an empty store.
         let out = parse_text("d[k] min=");
         assert!(!out.diagnostics.is_empty(), "a value is required");
+    }
+
+    /// §9.8's `:bp` marker rides the same rule an updating store does, at the
+    /// one other position where an identifier can decide an operator: the end of
+    /// a statement, where a `:` begins nothing else.
+    #[test]
+    fn a_breakpoint_marker_is_a_marker_only_where_a_type_cannot_be() {
+        let count = |src: &str, kind: SyntaxKind| -> usize {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            construct_names(&out.tree)
+                .into_iter()
+                .filter(|k| *k == kind)
+                .count()
+        };
+
+        // Every statement form takes one, and it lands inside that statement's
+        // own node rather than beside it.
+        for (src, stmt) in [
+            ("var a = 1 :bp", SyntaxKind::VAR_STMT),
+            ("var a: Int = 1 :bp", SyntaxKind::VAR_STMT),
+            (
+                "fn f() {\n  var a = 1\n  a = 2 :bp\n}",
+                SyntaxKind::ASSIGN_STMT,
+            ),
+            ("var m = [1]\nm[0] = 2 :bp", SyntaxKind::PLACE_ASSIGN_STMT),
+            (
+                "var m = [1]\nm[0] min= 2 :bp",
+                SyntaxKind::PLACE_ASSIGN_STMT,
+            ),
+            ("out(1) :bp", SyntaxKind::EXPR_STMT),
+            ("{ }\n:bp", SyntaxKind::EXPR_STMT),
+        ] {
+            assert_eq!(count(src, SyntaxKind::BREAKPOINT), 1, "{src}");
+            assert_eq!(count(src, stmt), 1, "{src}");
+        }
+
+        // The marker is a *child of the statement*, which is what lets lowering
+        // ask a statement node whether it carries one.
+        let out = parse_text("var a = 1 :bp");
+        let var_stmt = out
+            .tree
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::VAR_STMT)
+            .expect("a var statement");
+        assert!(
+            var_stmt
+                .children()
+                .any(|c| c.kind() == SyntaxKind::BREAKPOINT),
+            "the marker is the statement's child"
+        );
+
+        // Adjacent, exactly as `min=` is: with a space it is a `:` that begins
+        // nothing, and the statement runs on.
+        for spaced in ["var a = 1 : bp", "out(1) : bp"] {
+            let out = parse_text(spaced);
+            assert!(!out.diagnostics.is_empty(), "{spaced} must report");
+        }
+
+        // `bp` is an ordinary name everywhere else — the whole reason the rule
+        // is contextual — including as a binding, a call and a type annotation's
+        // *value* position.
+        for src in [
+            "var bp = 1",
+            "var a = bp",
+            "fn bp() {\n  out(1)\n}",
+            "var a: Int = 1\nvar bp = a",
+            // The other `:`s in the grammar are inside declarations, where a
+            // statement has not ended and this rule is never asked.
+            "struct P { bp: Int }",
+            "fn f(bp: Int) -> Int {\n  bp\n}",
+        ] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            assert_eq!(count(src, SyntaxKind::BREAKPOINT), 0, "{src}");
+        }
+
+        // A marker on a nested statement belongs to *that* statement, not to the
+        // block that contains it: the outer `EXPR_STMT` has no marker child.
+        let out = parse_text("{\n  out(1) :bp\n}");
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let outer = out
+            .tree
+            .children()
+            .find(|n| n.kind() == SyntaxKind::EXPR_STMT)
+            .expect("the block statement");
+        assert!(
+            !outer.children().any(|c| c.kind() == SyntaxKind::BREAKPOINT),
+            "the inner statement's marker is not the outer statement's"
+        );
     }
 
     /// **A declaration's members are separated by a comma or a line break** —

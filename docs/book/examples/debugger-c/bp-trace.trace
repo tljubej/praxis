@@ -1,0 +1,19 @@
+stop: breakpoint
+grow:
+  <debug>:3:28
+  3 |     var doubled = seed * 2 :bp
+    |                            ^^^
+
+Backtrace:
+#0   grow
+#1   <entry>
+
+  locals:
+    seed: Int = 20
+    doubled: Int = 40
+  temps:
+    <tmp#2: Int> @ "2" = 2
+    <tmp#3: Int> @ "seed * 2" = 40
+    <tmp#5: Int> @ "1" = <uninit>
+    <tmp#6: Int> @ "doubled + 1" = <uninit>
+41

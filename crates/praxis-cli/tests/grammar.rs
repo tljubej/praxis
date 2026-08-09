@@ -332,3 +332,30 @@ fn the_extension_contributes_the_four_commands_and_the_px_language() {
         "the grammar the gates above read is the one the extension ships"
     );
 }
+
+/// **Gate 6.** The `:bp` breakpoint marker (§9.8) is coloured, and by a rule of
+/// its own.
+///
+/// It is not in `SyntaxKind`'s keyword table — `bp` is an ordinary identifier
+/// and the marker is decided by adjacency at a statement's end, exactly as
+/// `min=` is — so Gate 1's sweep cannot reach it. This is the same shape of
+/// check applied to the one word that sweep will never see: a marker that
+/// quietly stops being coloured is a marker a reader stops noticing in a diff,
+/// which is precisely the thing you must notice before committing it.
+#[test]
+fn the_breakpoint_marker_has_a_rule_of_its_own() {
+    let grammar = grammar();
+    let pattern = rule_pattern(&grammar, "breakpoint-marker");
+    assert!(
+        pattern.contains(":bp"),
+        "the marker's rule must spell the marker: {pattern}"
+    );
+    // …and the rule is actually reached: a repository entry no `patterns` entry
+    // includes is a rule the renderer never runs.
+    let included = grammar["patterns"]
+        .as_array()
+        .expect("the grammar's top-level patterns are a list")
+        .iter()
+        .any(|p| p["include"].as_str() == Some("#breakpoint-marker"));
+    assert!(included, "the rule is in the repository but never included");
+}

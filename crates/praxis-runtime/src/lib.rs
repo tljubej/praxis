@@ -17,6 +17,7 @@
 
 pub mod abi;
 pub mod bitset;
+pub mod breakpoint;
 pub mod closures;
 pub mod collections;
 pub mod context;
@@ -57,6 +58,10 @@ pub mod tuples;
 pub mod var_cell;
 
 pub use abi::{assert_abi_version, RUNTIME_ABI_VERSION};
+pub use breakpoint::{
+    breakpoints_detached, clear_breakpoint_handler, install_breakpoint_handler, BreakpointHandler,
+    BreakpointStop, Resume,
+};
 pub use closures::ClosurePayload;
 pub use collections::{DequePayload, GridPayload, VecPayload};
 pub use context::{

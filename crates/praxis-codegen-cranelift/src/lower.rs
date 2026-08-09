@@ -2578,6 +2578,30 @@ fn lower_inst<M: Module>(
                 .brif(pending, fault_block, &[], fallthrough, &[]);
             builder.switch_to_block(fallthrough);
         }
+        Inst::Breakpoint { span } => {
+            // One call, and nothing around it. `praxis_breakpoint` is
+            // `Effect::Pure`, so MIR gave this instruction no `RootSlots` and no
+            // `CheckFault` follows it — and it needs no debug spill either, for
+            // `CheckFault`'s reason one arm up: `store_debug_defs` has already
+            // written every `Gc` local at its own definition, so the frame the
+            // handler walks is current without anything being written here.
+            //
+            // The span rides as two `RawU32` immediates rather than as boxed
+            // arguments, because there is no MIR local to pass: a `:bp` reads
+            // nothing the program computed. `iconst` of `I32` is what the
+            // manifest's `RawU32` kind asks for — the one kind narrower than a
+            // machine word, which is why `abi_type` exists.
+            let start = builder.ins().iconst(types::I32, i64::from(span.0));
+            let end = builder.ins().iconst(types::I32, i64::from(span.1));
+            call_symbol(
+                builder,
+                ctx_val,
+                &[start, end],
+                RuntimeSymbol::Breakpoint,
+                module,
+                imports,
+            )?;
+        }
         Inst::MoveGc { dst, src } => {
             let v = builder.use_var(vars[src.0 as usize]);
             builder.def_var(vars[dst.0 as usize], v);

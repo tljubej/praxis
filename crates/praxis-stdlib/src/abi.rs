@@ -229,6 +229,14 @@ runtime_symbols! {
     BitsetItems = "praxis_bitset_items": (Ctx, Gc) -> Gc, Allocates;
     BitsetLen = "praxis_bitset_len": (Ctx, Gc) -> Gc, Allocates;
     BitsetNew = "praxis_bitset_new": (Ctx) -> Gc, Allocates;
+    // The `:bp` stop (§9.8). `Pure` is the load-bearing column: the handler this
+    // reaches is given a snapshot and no `RuntimeContext`, so it cannot allocate,
+    // cannot collect and cannot raise — which is what lets a breakpoint be a bare
+    // call with no root spill before it and no fault check after. The two
+    // `RawU32`s are the marker's source span, passed as immediates because a
+    // program has nothing to say here: a boxed span would be an allocation at a
+    // site whose whole point is that it does not have one.
+    Breakpoint = "praxis_breakpoint": (Ctx, RawU32, RawU32) -> Void, Pure;
     BitsetRemove = "praxis_bitset_remove": (Ctx, Gc, Gc) -> GcUnit, Pure;
     BoolLoad = "praxis_bool_load": (Ctx, Gc) -> RawI64, Pure;
     CharLoad = "praxis_char_load": (Ctx, Gc) -> RawI64, Pure;

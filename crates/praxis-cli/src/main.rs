@@ -9,6 +9,7 @@
 //! keeping and they go in a plain `//` comment beside the doc comment, where
 //! clap cannot reach them.
 
+mod breakpoint_host;
 mod check;
 mod color_mode;
 mod debug_mode;

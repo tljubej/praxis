@@ -134,15 +134,29 @@ enum Mode {
     Help,
 }
 
+/// Why the debugger is on screen — a fault, or a `:bp` stop.
+///
+/// The banner is the one place the two look different, and it is worth looking
+/// different: a red ✗ over a program that is merely *paused* would report a
+/// failure that did not happen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stop {
+    /// A runtime fault, with any `panic`/`assert` message it carried (§9.1).
+    Fault(FaultKind, Option<String>),
+    /// A `:bp` marker. Which stop it is comes from the [`Repl`] itself
+    /// ([`Repl::stop_hits`]), so the banner and the line prompt's own banner
+    /// cannot disagree about the number.
+    Breakpoint,
+}
+
 /// The debugger's screen state, wrapped around the [`Repl`] that owns the
 /// snapshot and session.
 pub struct Tui {
     repl: Repl,
-    /// The fault that produced the snapshot, and any `panic`/`assert` message.
-    /// The runtime's fault slot is cleared by a `restart`, so the banner reads
-    /// from here rather than asking the session again.
-    fault: FaultKind,
-    fault_message: Option<String>,
+    /// Why this screen is up. The runtime's fault slot is cleared by a
+    /// `restart`, so the banner reads from here rather than asking the session
+    /// again.
+    stop: Stop,
     focus: Focus,
     mode: Mode,
     /// The command line being typed, and the cursor's byte offset into it.
@@ -172,31 +186,40 @@ pub struct Tui {
     locals_scroll: u16,
     /// Set by `quit` (or the command of the same name) to end the event loop.
     quit: bool,
+    /// How the loop ended, for the caller of a `:bp` stop: [`Control::Resume`]
+    /// to let the program run on and stop again, [`Control::Quit`] to let it run
+    /// on and stop at nothing else. Meaningless for a fault, whose program has
+    /// nothing left to run.
+    control: Control,
 }
 
 impl Tui {
-    /// Wrap `repl` in a screen. `fault`/`message` are the fault that produced its
-    /// snapshot, for the banner.
+    /// Wrap `repl` in a screen. `stop` is why it is up, for the banner.
     #[must_use]
-    pub fn new(repl: Repl, fault: FaultKind, message: Option<String>) -> Tui {
+    pub fn new(repl: Repl, stop: Stop) -> Tui {
+        let mut output = vec![
+            "Type `:` to run a command, `?` for keys.".to_string(),
+            "↑↓ or j/k select a frame; u/d walk the call stack.".to_string(),
+        ];
+        if matches!(stop, Stop::Breakpoint) {
+            output
+                .push("`c` continues the program; `q` runs on without stopping again.".to_string());
+        }
         Tui {
             repl,
-            fault,
-            fault_message: message,
+            stop,
             focus: Focus::Backtrace,
             mode: Mode::Normal,
             input: String::new(),
             input_cursor: 0,
             history: Vec::new(),
             history_pos: None,
-            output: vec![
-                "Type `:` to run a command, `?` for keys.".to_string(),
-                "↑↓ or j/k select a frame; u/d walk the call stack.".to_string(),
-            ],
+            output,
             output_scroll: 0,
             source_scroll: 0,
             locals_scroll: 0,
             quit: false,
+            control: Control::Continue,
         }
     }
 
@@ -206,6 +229,12 @@ impl Tui {
     #[must_use]
     pub fn into_repl(self) -> Repl {
         self.repl
+    }
+
+    /// How the loop ended — what a `:bp` stop's caller does next.
+    #[must_use]
+    pub fn control(&self) -> Control {
+        self.control
     }
 
     /// Run one command through [`Repl::handle`] and append its output.
@@ -226,8 +255,10 @@ impl Tui {
         for l in text.lines() {
             self.output.push(l.to_string());
         }
-        if control == Control::Quit {
-            self.quit = true;
+        // `continue` and `quit` both end the loop; which of the two it was is
+        // what the caller acts on, so it is recorded rather than collapsed.
+        if control != Control::Continue {
+            self.end(control);
         }
         // A command may have moved the frame cursor (`frame N`, `up`, `down`) or
         // replaced the snapshot entirely (`restart`, `reload`); either way the
@@ -237,6 +268,17 @@ impl Tui {
         // Pin the transcript to its newest line: output that scrolls off the
         // moment it arrives is output the user never sees.
         self.scroll_output_to_end();
+    }
+
+    /// End the event loop with `control` as the answer.
+    ///
+    /// The keys that leave the debugger go through this rather than setting
+    /// `quit` directly, because at a `:bp` stop *which* of them was pressed is
+    /// what the host acts on: `q` detaches and `c` resumes, and a bare
+    /// `self.quit = true` would report both as neither.
+    fn end(&mut self, control: Control) {
+        self.control = control;
+        self.quit = true;
     }
 
     /// Park the output scroll at the last line.
@@ -295,7 +337,7 @@ pub fn should_use_tui() -> bool {
 /// Mouse capture is ours to add and remove — `try_init` does not enable it, and
 /// leaving it on would make the terminal swallow selection and scrolling after
 /// the debugger exits.
-pub fn run(mut tui: Tui) -> std::io::Result<Repl> {
+pub fn run(mut tui: Tui) -> std::io::Result<(Repl, Control)> {
     let mut terminal = ratatui::try_init()?;
     let mouse = execute!(std::io::stdout(), EnableMouseCapture);
 
@@ -307,7 +349,10 @@ pub fn run(mut tui: Tui) -> std::io::Result<Repl> {
     ratatui::restore();
     let _ = std::io::stdout().flush();
 
-    result.map(|()| tui.into_repl())
+    result.map(|()| {
+        let control = tui.control();
+        (tui.into_repl(), control)
+    })
 }
 
 /// Draw, wait for an event, apply it; repeat until something sets `quit`.
@@ -352,11 +397,11 @@ fn handle_normal_key(tui: &mut Tui, key: KeyEvent) {
     // Ctrl-C quits from anywhere. In raw mode no signal is delivered, so this is
     // the only thing that makes the conventional key work at all.
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        tui.quit = true;
+        tui.end(Control::Quit);
         return;
     }
     match key.code {
-        KeyCode::Char('q') => tui.quit = true,
+        KeyCode::Char('q') => tui.end(Control::Quit),
         KeyCode::Char('?') => tui.mode = Mode::Help,
         KeyCode::Char(':') => {
             tui.mode = Mode::Command;
@@ -428,7 +473,10 @@ fn handle_normal_key(tui: &mut Tui, key: KeyEvent) {
         KeyCode::PageUp => bump_scroll(tui, -10),
         KeyCode::PageDown => bump_scroll(tui, 10),
         // The commands worth a single key. Each still goes through `handle`, so
-        // the key is a shorthand for the command and not a parallel path.
+        // the key is a shorthand for the command and not a parallel path — which
+        // is also why `c` needs no guard here: at a fault the command answers
+        // "nothing to continue" in the transcript, exactly as typing it would.
+        KeyCode::Char('c') => tui.run_command("continue"),
         KeyCode::Char('r') => tui.run_command("restart"),
         KeyCode::Char('R') => tui.run_command("reload"),
         KeyCode::Char('l') => tui.run_command("locals"),
@@ -656,27 +704,58 @@ fn pane_block(title: &str, focused: bool) -> Block<'_> {
 }
 
 fn draw_banner(frame: &mut Frame, area: Rect, tui: &Tui) {
-    let mut spans = vec![
-        Span::styled(
-            " ✗ ",
-            Style::default()
-                .fg(theme::FAULT)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            tui.fault.to_string(),
-            Style::default()
-                .fg(theme::FAULT)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
-    // For `panic`/`assert` the message *is* the diagnosis — the kind alone says
-    // nothing the program did not already say (the same reasoning
-    // `render_noninteractive` applies).
-    if let Some(msg) = &tui.fault_message {
-        spans.push(Span::styled(": ", Style::default().fg(theme::MUTED)));
-        spans.push(Span::styled(msg.clone(), Style::default().fg(theme::FAULT)));
-    }
+    let mut spans = match &tui.stop {
+        Stop::Fault(kind, message) => {
+            let mut spans = vec![
+                Span::styled(
+                    " ✗ ",
+                    Style::default()
+                        .fg(theme::FAULT)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    kind.to_string(),
+                    Style::default()
+                        .fg(theme::FAULT)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            // For `panic`/`assert` the message *is* the diagnosis — the kind
+            // alone says nothing the program did not already say (the same
+            // reasoning `render_noninteractive` applies).
+            if let Some(msg) = message {
+                spans.push(Span::styled(": ", Style::default().fg(theme::MUTED)));
+                spans.push(Span::styled(msg.clone(), Style::default().fg(theme::FAULT)));
+            }
+            spans
+        }
+        // Not red, and not a ✗: the program is paused, not broken. The colour
+        // the rest of the screen uses for a *name* is the right one for a marker
+        // the programmer wrote.
+        Stop::Breakpoint => {
+            let mut spans = vec![
+                Span::styled(
+                    " ⏸ ",
+                    Style::default()
+                        .fg(theme::NAME)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "stopped at `:bp`",
+                    Style::default()
+                        .fg(theme::NAME)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            if let Some(hits) = tui.repl.stop_hits().filter(|n| *n > 1) {
+                spans.push(Span::styled(
+                    format!(" (stop #{hits})"),
+                    Style::default().fg(theme::MUTED),
+                ));
+            }
+            spans
+        }
+    };
     spans.push(Span::styled(
         format!("  ·  {} frame(s)", tui.repl.snapshot().len()),
         Style::default().fg(theme::MUTED),
@@ -687,7 +766,7 @@ fn draw_banner(frame: &mut Frame, area: Rect, tui: &Tui) {
 fn draw_backtrace(frame: &mut Frame, area: Rect, tui: &Tui) {
     let snap = tui.repl.snapshot();
     let selected = tui.repl.selected();
-    let source = tui.repl.session().map(|s| s.source_text.clone());
+    let source = tui.repl.source_text().map(str::to_string);
     // Align the `:line` column so the names read as a column and the numbers do
     // not wander in behind them.
     let name_width = (0..snap.len())
@@ -725,7 +804,7 @@ fn draw_backtrace(frame: &mut Frame, area: Rect, tui: &Tui) {
         // The frame's line number, when it resolves — a backtrace without
         // locations makes you open the source to place any frame but the top.
         if let (Some(src), Some(f)) = (source.as_deref(), snap.frames.get(i)) {
-            if let Some(line_no) = span_line(src, f) {
+            if let Some(line_no) = span_line(src, f, marked_span(&tui.repl, i)) {
                 spans.push(Span::styled(
                     format!(" :{line_no}"),
                     Style::default().fg(theme::MUTED),
@@ -761,10 +840,11 @@ fn draw_backtrace(frame: &mut Frame, area: Rect, tui: &Tui) {
 fn draw_locals(frame: &mut Frame, area: Rect, tui: &Tui) {
     let snap = tui.repl.snapshot();
     let selected = tui.repl.selected();
-    let (db, source) = match tui.repl.session() {
-        Some(s) => (Some(&s.analysis.db), Some(s.source_text.as_str())),
-        None => (None, None),
-    };
+    // The same `RenderCtx` the `locals` command builds, so the pane and the
+    // command cannot disagree about a local's type or a temp's provenance —
+    // whichever attachment is lending them.
+    let ctx = tui.repl.render_ctx();
+    let (db, source) = (ctx.db, ctx.source_text);
 
     let mut lines: Vec<Line> = Vec::new();
     match snap.frames.get(selected) {
@@ -967,16 +1047,8 @@ fn draw_source(frame: &mut Frame, area: Rect, tui: &mut Tui) {
         .get(selected)
         .map(|f| f.source_span)
         .unwrap_or((0, 0));
-    let (source, path) = match tui.repl.session() {
-        Some(s) => (
-            Some(s.source_text.clone()),
-            s.source_path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default(),
-        ),
-        None => (None, String::new()),
-    };
+    let source = tui.repl.source_text().map(str::to_string);
+    let path = tui.repl.source_name().to_string();
 
     let title = if path.is_empty() {
         fn_name.clone()
@@ -1004,7 +1076,7 @@ fn draw_source(frame: &mut Frame, area: Rect, tui: &mut Tui) {
                     // so the marked line comes from `fault_span`, not from here.
                     let first = line_index(src, start);
                     let last = line_index(src, end.saturating_sub(1));
-                    let fault = snap.frames.get(selected).and_then(fault_span);
+                    let fault = marked_span(&tui.repl, selected);
                     let fault_line = fault.map(|(s, _)| line_index(src, s as usize));
                     let width = digits((last + 1) as u32);
                     for (n, text) in src.lines().enumerate().take(last + 1).skip(first) {
@@ -1147,14 +1219,28 @@ fn draw_status(frame: &mut Frame, area: Rect, tui: &Tui) {
             .fg(Color::Black)
             .add_modifier(Modifier::BOLD),
     )];
-    for (key, label) in [
-        ("↑↓", "frame"),
-        ("tab", "pane"),
-        (":", "cmd"),
-        ("r", "restart"),
-        ("?", "keys"),
-        ("q", "quit"),
-    ] {
+    // The one row that differs by surface: a stop's first key is the one that
+    // lets the program go, and `restart` is not a thing it can do.
+    let actions: &[(&str, &str)] = if tui.repl.is_stopped() {
+        &[
+            ("c", "continue"),
+            ("↑↓", "frame"),
+            ("tab", "pane"),
+            (":", "cmd"),
+            ("?", "keys"),
+            ("q", "detach"),
+        ]
+    } else {
+        &[
+            ("↑↓", "frame"),
+            ("tab", "pane"),
+            (":", "cmd"),
+            ("r", "restart"),
+            ("?", "keys"),
+            ("q", "quit"),
+        ]
+    };
+    for &(key, label) in actions {
         spans.push(Span::styled(
             format!("  {key}"),
             Style::default().fg(theme::KEY).add_modifier(Modifier::BOLD),
@@ -1170,7 +1256,7 @@ fn draw_status(frame: &mut Frame, area: Rect, tui: &Tui) {
 /// The `?` overlay: the key bindings, plus the commands the `:` line accepts.
 /// Reads no state — the bindings are the same on every frame.
 fn draw_help_overlay(frame: &mut Frame) {
-    let area = centered(frame.area(), 62, 24);
+    let area = centered(frame.area(), 62, 26);
     frame.render_widget(Clear, area);
 
     let mut lines = vec![Line::from(Span::styled(
@@ -1197,6 +1283,7 @@ fn draw_help_overlay(frame: &mut Frame) {
             .add_modifier(Modifier::BOLD),
     )));
     for (key, what) in [
+        ("c", "continue — let a stopped program run on"),
         ("p", "start `p ` — evaluate an expression"),
         ("r / R", "restart / reload"),
         ("l / b", "locals / backtrace into output"),
@@ -1214,6 +1301,7 @@ fn draw_help_overlay(frame: &mut Frame) {
             .add_modifier(Modifier::BOLD),
     )));
     for (key, what) in [
+        ("continue", "resume a program stopped at `:bp`"),
         ("p EXPR", "evaluate a read-only expression"),
         ("type EXPR", "show the inferred type"),
         ("heap EXPR", "inspect a value with its type"),
@@ -1279,10 +1367,35 @@ fn line_index(src: &str, offset: usize) -> usize {
     src[..capped].bytes().filter(|b| *b == b'\n').count()
 }
 
+/// The line a frame wants marked: the `:bp` marker's own for the frame a stop
+/// is in, and the inferred faulting expression's for everything else.
+///
+/// The asymmetry is the difference between the two situations rather than a
+/// special case. A stop *knows* its line — the marker is right there, and its
+/// span rode along with the stop — where a fault has to be traced back to the
+/// narrowest expression that started and did not finish. Guessing where the
+/// answer is in hand would point at `doubled + 1` for a marker on the line
+/// above it, which is off by exactly one statement.
+///
+/// Only frame 0: a stop's *callers* are mid-call like a fault's, so the
+/// inference is the right answer for them.
+fn marked_span(repl: &Repl, index: usize) -> Option<(u32, u32)> {
+    if index == 0 {
+        if let Some(span) = repl.stop_span().filter(|s| *s != (0, 0)) {
+            return Some(span);
+        }
+    }
+    repl.snapshot().frames.get(index).and_then(fault_span)
+}
+
 /// The 1-based line number to show for a frame in the backtrace: where the fault
 /// is, falling back to where the function starts.
-fn span_line(src: &str, frame: &praxis_runtime::crash_snapshot::SnapshotFrame) -> Option<usize> {
-    let span = fault_span(frame).unwrap_or(frame.source_span);
+fn span_line(
+    src: &str,
+    frame: &praxis_runtime::crash_snapshot::SnapshotFrame,
+    marked: Option<(u32, u32)>,
+) -> Option<usize> {
+    let span = marked.unwrap_or(frame.source_span);
     if span == (0, 0) {
         return None;
     }
@@ -1421,8 +1534,7 @@ mod tests {
     fn tui() -> Tui {
         Tui::new(
             Repl::new(two_frame_snapshot()),
-            FaultKind::IndexOutOfBounds,
-            None,
+            Stop::Fault(FaultKind::IndexOutOfBounds, None),
         )
     }
 
@@ -1567,6 +1679,82 @@ mod tests {
         let mut t2 = tui();
         press(&mut t2, KeyCode::Char('q'));
         assert!(t2.quit);
+    }
+
+    /// A stopped screen: what the CLI builds at a `:bp` marker.
+    fn stopped_tui() -> Tui {
+        let repl = Repl::new_stopped(
+            two_frame_snapshot(),
+            crate::repl::StoppedHost {
+                db: praxis_types::TypeDb::new(),
+                source_text: "var a = 1 :bp\n".to_string(),
+                source_name: "stop.px".to_string(),
+                hits: 1,
+                span: (10, 13),
+            },
+        );
+        Tui::new(repl, Stop::Breakpoint)
+    }
+
+    /// `c` ends the loop with [`Control::Resume`], which is what tells the host
+    /// to let the program go — a different answer from `q`, which detaches.
+    ///
+    /// The key is a shorthand for the command and not a parallel path, so this
+    /// also pins that the two agree.
+    #[test]
+    fn c_resumes_a_stop_and_q_detaches_it() {
+        let mut t = stopped_tui();
+        press(&mut t, KeyCode::Char('c'));
+        assert!(t.quit, "the loop ends");
+        assert_eq!(t.control(), Control::Resume);
+
+        let mut t = stopped_tui();
+        t.run_command("continue");
+        assert_eq!(
+            t.control(),
+            Control::Resume,
+            "the key and the command agree"
+        );
+
+        let mut t = stopped_tui();
+        press(&mut t, KeyCode::Char('q'));
+        assert!(t.quit);
+        assert_eq!(t.control(), Control::Quit, "quitting is not continuing");
+    }
+
+    /// A stop knows its line; a fault has to infer one. So frame 0 of a stop is
+    /// marked at the `:bp`, and its callers — which are mid-call exactly as a
+    /// fault's are — keep the inference.
+    #[test]
+    fn a_stop_marks_the_marker_and_a_caller_keeps_the_inference() {
+        let t = stopped_tui();
+        assert_eq!(
+            marked_span(&t.repl, 0),
+            Some((10, 13)),
+            "frame 0 points at the marker"
+        );
+        // Frame 1 has no unfinished temp in this fixture, so the inference finds
+        // nothing — which is the answer the caller of a *fault* would get too,
+        // and the point is that it is the same answer.
+        assert_eq!(marked_span(&t.repl, 1), None);
+
+        // A fault ignores the override entirely: there is none to consult.
+        let t = tui();
+        assert_eq!(marked_span(&t.repl, 0), None);
+    }
+
+    /// `c` at a *fault* ends nothing: the command answers "nothing to continue"
+    /// into the transcript, exactly as typing it would.
+    #[test]
+    fn c_at_a_fault_explains_itself_and_stays() {
+        let mut t = tui();
+        press(&mut t, KeyCode::Char('c'));
+        assert!(!t.quit, "a fault has nothing to resume");
+        assert!(
+            t.output.iter().any(|l| l.contains("nothing to continue")),
+            "{:?}",
+            t.output
+        );
     }
 
     /// Ctrl-C quits. In raw mode no SIGINT is delivered, so without this the
@@ -1778,7 +1966,7 @@ mod tests {
         );
         let src = "fn f() {\n  x\n}";
         assert_eq!(
-            span_line(src, &frame_with(Vec::new(), (11, 12))),
+            span_line(src, &frame_with(Vec::new(), (11, 12)), None),
             Some(2),
             "falls back to the frame's own span"
         );
@@ -1791,7 +1979,11 @@ mod tests {
         let src = "fn f() {\n  var a = 1\n  return xs[a]\n}\n";
         // "xs[a]" sits on line 3, at bytes 30..35; the function starts at 0.
         let frame = frame_with(vec![temp_with_span(1, (30, 35))], (0, src.len() as u32));
-        assert_eq!(span_line(src, &frame), Some(3), "line 3, not line 1");
+        assert_eq!(
+            span_line(src, &frame, fault_span(&frame)),
+            Some(3),
+            "line 3, not line 1"
+        );
     }
 
     /// The highlight columns are relative to the line, so the faulting
@@ -1958,13 +2150,16 @@ mod tests {
     fn span_line_is_one_based_and_rejects_the_null_span() {
         let src = "a\nb\nc";
         assert_eq!(
-            span_line(src, &frame_with(Vec::new(), (0, 0))),
+            span_line(src, &frame_with(Vec::new(), (0, 0)), None),
             None,
             "(0,0) is `no span recorded`"
         );
-        assert_eq!(span_line(src, &frame_with(Vec::new(), (2, 3))), Some(2));
         assert_eq!(
-            span_line(src, &frame_with(Vec::new(), (99, 100))),
+            span_line(src, &frame_with(Vec::new(), (2, 3)), None),
+            Some(2)
+        );
+        assert_eq!(
+            span_line(src, &frame_with(Vec::new(), (99, 100)), None),
             None,
             "out of range"
         );

@@ -1,0 +1,25 @@
+Stopped at a breakpoint. 1 frame(s). `continue` resumes; `help` lists commands.
+Praxis stop> #0   <entry>
+  (frame 0 selected)
+Praxis stop>   locals:
+    total: Int = 4
+    n: Int = 4
+  temps:
+    <tmp#1: Int> @ "0" = 0
+    <tmp#3: Vec[Int]> @ "[4, 7]" = [4, 7]
+    <tmp#4: Int> @ "4" = 4
+    <tmp#5: Unit> = Unit
+    <tmp#6: Int> @ "7" = 7
+    <tmp#7: Unit> = Unit
+    <tmp#8: Int> = 0
+    <tmp#9: Int> = 2
+    <tmp#10: Int> = 4
+    <tmp#12: Int> @ "total + n" = 4
+    <tmp#14: Unit> @ "for n in [4, 7] { total = total + n :bp }" = <uninit>
+    <tmp#15: Unit> @ "out(total)" = <uninit>
+    <tmp#17: Int> = 0
+    <tmp#18: Int> @ "var total = 0" = <uninit>
+Praxis stop> continuing.
+Stopped at a breakpoint (stop #2). 1 frame(s). `continue` resumes; `help` lists commands.
+Praxis stop> leaving the debugger; the program runs on and will not stop again.
+11

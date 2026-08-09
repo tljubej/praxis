@@ -4,6 +4,10 @@ Fifteen commands, and `help` lists all of them. They are the same fifteen on
 either surface: the transcripts here show the `Praxis crash>` prompt, and the
 [full-screen debugger](tui.md) runs each of them from its `:` line.
 
+This is the list for a program that **faulted**. A program stopped at a
+[`:bp` marker](breakpoints.md) gets a shorter one — it has a `continue`, and it
+has no `p`, `restart` or `reload`.
+
 ```text
 Crash debugger commands (§9.4):
   bt              show the numbered backtrace
@@ -498,11 +502,17 @@ Praxis crash> quit
 
 ## What is not here
 
-There is no `continue`, no `step`, no `next`, and no breakpoint. The debugger is
-reached by a fault and only by a fault: there is nothing to resume, because the
-faulting operation has no answer to resume with. `restart` and `reload` are the
-only ways to run anything again, and both start from the top.
+There is no `step` and no `next`, and at a *fault* there is no `continue`
+either: the faulting operation has no answer to resume with, and by the time you
+see the prompt every frame has unwound. `restart` and `reload` are the only ways
+to run anything again, and both start from the top.
 
-There is also no way to change a value. `p` is read-only by construction, and
-the reason is the same one — a state that cannot be resumed cannot usefully be
-edited.
+`continue` does exist, at the other prompt. A
+[`:bp` breakpoint](breakpoints.md) stops a program that has **not** faulted, and
+that one has frames to return to — so `Praxis stop>` has `continue` and does not
+have `p`, `restart` or `reload`. The two prompts are the same commands minus
+whatever the situation cannot support.
+
+There is also no way to change a value, at either prompt. `p` is read-only by
+construction, and the reason is the same one — a state that cannot be resumed
+cannot usefully be edited.

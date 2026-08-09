@@ -338,6 +338,9 @@ pub(crate) fn uses(inst: &Inst) -> Vec<LocalId> {
         // `ctx`, which is not a MIR local.
         Inst::ConstGc { .. } => vec![],
         Inst::CheckFault { .. } => vec![],
+        // A stop reads no local: the span is an immediate, and what the debugger
+        // renders is the *frame*, which it reaches through the context.
+        Inst::Breakpoint { .. } => vec![],
     }
 }
 
@@ -422,6 +425,7 @@ pub(crate) fn uses_mut(inst: &mut Inst) -> Vec<&mut LocalId> {
         Inst::ConstFloat { .. } => vec![],
         Inst::ConstGc { .. } => vec![],
         Inst::CheckFault { .. } => vec![],
+        Inst::Breakpoint { .. } => vec![],
     }
 }
 

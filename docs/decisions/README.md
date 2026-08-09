@@ -182,3 +182,4 @@ verifier rule only. Its decision must not claim the elision.
 - [ADR-147: A hole renders anything, because the program wrote the hole](./147-a-hole-renders-anything-because-the-program-wrote-the-hole.md)
 - [ADR-148: A dead block is touched only to finalize it, and the page knows whether any of its blocks needs it](./148-a-dead-block-is-touched-only-to-finalize-it.md)
 - [ADR-149: A chunking partitions and a window slides, and both label the outer sequence](./149-a-chunking-partitions-and-a-window-slides.md)
+- [ADR-150: A marker is a place in the program, and a stop is not a fault](./150-a-marker-is-a-place-in-the-program-and-a-stop-is-not-a-fault.md)

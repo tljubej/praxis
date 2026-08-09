@@ -230,6 +230,50 @@ pub unsafe extern "C" fn praxis_snapshot_debug_chain(ctx: *mut crate::RuntimeCon
     })
 }
 
+/// Deep-copy the debug chain **of a program that is still running** into a fresh
+/// snapshot, without touching the runtime's [`SnapshotSlot`].
+///
+/// This is [`praxis_snapshot_debug_chain`] with both of its fault-shaped
+/// properties removed, and each removal is the point:
+///
+/// - **No `taken` guard.** A fault snapshots once because the unwind calls it
+///   once per frame; a `:bp` marker stops every time control reaches it, and the
+///   tenth stop must show the tenth state.
+/// - **No slot, and no fault kind.** The result is handed straight to the host's
+///   handler and dropped when the stop ends, so it never becomes a root set and
+///   never has to be one — [`crate::breakpoint`]'s header states why the handler
+///   cannot collect underneath it. Writing it into the crash slot would be worse
+///   than unnecessary: that slot is a *fault's*, and filling it would make a
+///   later real fault find one already taken and skip its own.
+///
+/// The frames are ADR-106's weak arm at the moment they are read, so every
+/// reference copied out names a live object or is [`RECLAIMED_WORD`].
+///
+/// [`RECLAIMED_WORD`]: crate::debug::RECLAIMED_WORD
+///
+/// # Safety
+/// `ctx` must be live and wired, and every claimed debug frame entry must
+/// satisfy [`copy_stack`]'s contract — which every generated prologue
+/// establishes.
+pub(crate) unsafe fn copy_live_chain(ctx: *mut crate::RuntimeContext) -> CrashSnapshot {
+    let mut snapshot = CrashSnapshot::new();
+    if ctx.is_null() {
+        return snapshot;
+    }
+    let frames = unsafe { (*ctx).debug_frames };
+    if frames.is_null() {
+        return snapshot;
+    }
+    // SAFETY: a non-null `debug_frames` is the header of a live
+    // `DebugFrameStack` owned by the runtime that wired this context.
+    let entries = unsafe { (*frames).claimed() };
+    // SAFETY: every claimed entry was written by a prologue with a `'static`
+    // meta and the base of its own run of value slots, and this runs *between*
+    // instructions of the innermost frame — so no epilogue has popped anything.
+    snapshot.frames = unsafe { copy_stack(entries) };
+    snapshot
+}
+
 /// Deep-copy the claimed frame entries into a `Vec<SnapshotFrame>`,
 /// innermost-first. The `parent` index of each frame points at the next entry
 /// in the vec (so frame 0's parent is frame 1, etc.); the outermost frame's

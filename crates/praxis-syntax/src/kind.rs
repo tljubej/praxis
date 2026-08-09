@@ -270,6 +270,19 @@ pub enum SyntaxKind {
     /// looking for the assignment operator would read the update as a plain
     /// store.
     UPDATE_OP,
+    /// The two-token `:bp` marker a statement may end with (§9.8): a `COLON`
+    /// immediately followed by an `Ident` spelling `bp`.
+    ///
+    /// A node rather than a token for [`UPDATE_OP`](Self::UPDATE_OP)'s reason,
+    /// and the same reason it is decided by *position* instead of by the lexer:
+    /// `bp` is an identifier everywhere else, and a lexer rule claiming `:bp`
+    /// would take `bp` away from every program that annotates a binding with a
+    /// type whose name begins that way. The one place an identifier cannot
+    /// otherwise follow a `:` is the end of a statement, which is exactly where
+    /// this is admitted. Wrapping the pair keeps the `:` from being a direct
+    /// child of the statement, where a walk looking for a type annotation would
+    /// find it.
+    BREAKPOINT,
     /// A top-level or nested `fn` declaration.
     FN_ITEM,
     /// A `struct Name { field: Type, … }` declaration (§4.5).

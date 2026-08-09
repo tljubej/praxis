@@ -843,8 +843,12 @@ pub fn defines(inst: &Inst) -> Option<LocalId> {
         | Inst::EnumPayloadGet { dst, .. } => Some(*dst),
         // `StoreScalar` and `StoreField` write *into* an existing object,
         // through `dst_gc` and `record`; the local itself is unchanged, which is
-        // why it is a use and not a def. `CheckFault` writes nothing at all.
-        Inst::StoreScalar { .. } | Inst::StoreField { .. } | Inst::CheckFault { .. } => None,
+        // why it is a use and not a def. `CheckFault` and `Breakpoint` write
+        // nothing at all.
+        Inst::StoreScalar { .. }
+        | Inst::StoreField { .. }
+        | Inst::CheckFault { .. }
+        | Inst::Breakpoint { .. } => None,
     }
 }
 
@@ -902,7 +906,7 @@ fn operands(inst: &Inst) -> Vec<LocalId> {
             v.extend(args.iter().copied());
         }
         Inst::LoadCapture { dst, closure, .. } => v.extend([*dst, *closure]),
-        Inst::CheckFault { .. } => {}
+        Inst::CheckFault { .. } | Inst::Breakpoint { .. } => {}
     }
     v
 }

@@ -487,6 +487,27 @@ pub enum Inst {
         roots: RootSlots,
         debug: DebugSlots,
     },
+    /// Stop the program here and hand the host its own frame chain (§9.8) — what
+    /// a `:bp` marker lowers to. `span` is the marker's, so the debugger can say
+    /// which line it stopped on.
+    ///
+    /// **Neither a GC safepoint nor a debugger one**, which is what makes it a
+    /// bare call with nothing around it:
+    ///
+    /// - It carries no [`RootSlots`], because `praxis_breakpoint` is
+    ///   [`Effect::Pure`](praxis_stdlib::abi::Effect::Pure): the host handler it
+    ///   calls is handed a snapshot and *no context*, so there is no door from it
+    ///   to the heap and nothing it can do that collects.
+    /// - It carries no [`DebugSlots`], for ADR-104's reason: the backend writes a
+    ///   debug slot once per definition rather than once per annotated point, so
+    ///   the frame already holds every value produced on the path here. A set
+    ///   would name slots that are already written.
+    /// - No [`CheckFault`](Self::CheckFault) follows, because a stop is not a
+    ///   fault and the handler cannot raise one.
+    ///
+    /// So a `:bp` costs exactly one call at the point it marks, and a program
+    /// with none pays nothing at all.
+    Breakpoint { span: (u32, u32) },
     /// Test `pending_fault`; if set, jump to `on_fault`. Inserted after any
     /// faultable operation (checked arith, div/rem, calls).
     ///
@@ -686,6 +707,12 @@ impl Inst {
             // `EnumTag` above, and the exhaustive match is what forces the
             // decision to be made here rather than assumed at the emit site.
             Inst::ConstGc { .. } => None,
+            // `praxis_breakpoint` is `Effect::Pure`, and its arm goes through
+            // `faulting` for `BitsetContains`'s reason: the row is the answer, so
+            // a stop that ever grew a fault would be observed here without an
+            // edit. It cannot today — the handler is handed no context, so it has
+            // nothing to raise a fault *on*.
+            Inst::Breakpoint { .. } => faulting(RuntimeSymbol::Breakpoint),
             Inst::ConstInt { .. }
             | Inst::ConstFloat { .. }
             | Inst::StoreScalar { .. }

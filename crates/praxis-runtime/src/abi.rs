@@ -137,6 +137,7 @@ pub fn address(symbol: RuntimeSymbol) -> *const u8 {
         RuntimeSymbol::BitsetItems => praxis_bitset_items as *const (),
         RuntimeSymbol::BitsetLen => praxis_bitset_len as *const (),
         RuntimeSymbol::BitsetNew => praxis_bitset_new as *const (),
+        RuntimeSymbol::Breakpoint => praxis_breakpoint as *const (),
         RuntimeSymbol::BitsetRemove => praxis_bitset_remove as *const (),
         RuntimeSymbol::BoolLoad => praxis_bool_load as *const (),
         RuntimeSymbol::CharLoad => praxis_char_load as *const (),
@@ -2115,6 +2116,42 @@ pub unsafe extern "C" fn praxis_check_fault(ctx: *mut RuntimeContext) -> i64 {
             return fault.is_pending().into();
         }
         0
+    })
+}
+
+/// Stop the program at a `:bp` marker and show the host its frame chain (§9.8).
+///
+/// `span_start`/`span_end` are the marker's own source span, passed as
+/// immediates: this is a call with no operands from the program, and boxing a
+/// span so it could ride a `GcRef` argument would put an allocation at the one
+/// site whose cost has to stay a single call.
+///
+/// Everything that makes a stop *not* a fault lives in
+/// [`crate::breakpoint::stop`]: the host handler is given a snapshot and no
+/// context, so it cannot allocate, cannot collect and cannot raise. That is what
+/// lets this be declared [`Effect::Pure`](praxis_stdlib::abi::Effect::Pure), and
+/// therefore what lets generated code emit no root spill before it and no fault
+/// check after.
+///
+/// A program with no handler installed — every JIT test, every embedder that
+/// wants none — finds nothing to call and returns.
+///
+/// # Safety
+/// `ctx` must point at a live, wired `RuntimeContext` whose claimed debug frames
+/// satisfy `copy_stack`'s contract, which every generated prologue establishes.
+#[no_mangle]
+pub unsafe extern "C" fn praxis_breakpoint(
+    ctx: *mut RuntimeContext,
+    span_start: u32,
+    span_end: u32,
+) {
+    abi_guard!("praxis_breakpoint", ctx, {
+        if ctx.is_null() {
+            return;
+        }
+        // SAFETY: `ctx` is non-null and the caller guarantees it is live and
+        // wired; the debug frames are the ones its prologue chain claimed.
+        unsafe { crate::breakpoint::stop(ctx, (span_start, span_end)) };
     })
 }
 

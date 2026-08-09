@@ -235,7 +235,26 @@ fn walk_block(b: &TypedBlock) -> Result<(), String> {
                 );
             }
             TypedStmt::Expr(e) => walk_expr(e)?,
+            // A `:bp` in a `p` expression would stop the debugger inside its own
+            // evaluation — a stop whose frame chain is the synthetic function
+            // (DBG-05), not the program's. Rejected as the mutation of the
+            // *session* it is, and the message says so rather than talking about
+            // purity, because the expression really is pure.
+            TypedStmt::Breakpoint { .. } => {
+                return Err(
+                    "a `:bp` marker stops a running program — `p` evaluates an expression \
+                     against a snapshot, so there is nothing here to stop"
+                        .to_string(),
+                );
+            }
         }
+    }
+    if b.tail_bp.is_some() {
+        return Err(
+            "a `:bp` marker stops a running program — `p` evaluates an expression against \
+             a snapshot, so there is nothing here to stop"
+                .to_string(),
+        );
     }
     walk_expr(&b.tail)
 }
@@ -452,6 +471,7 @@ mod tests {
                     span: (0, 0),
                 },
                 ty,
+                tail_bp: None,
             }),
             ty,
             span: (0, 0),

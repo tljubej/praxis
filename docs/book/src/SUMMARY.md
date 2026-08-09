@@ -53,6 +53,7 @@
 
 - [The fault model](debugger/faults.md)
 - [Entering the debugger](debugger/entering.md)
+- [Breakpoints](debugger/breakpoints.md)
 - [The full-screen debugger](debugger/tui.md)
 - [Command reference](debugger/commands.md)
 - [Evaluating expressions](debugger/expressions.md)

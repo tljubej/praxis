@@ -1,0 +1,11 @@
+// A `:bp` marker in a loop, so a stop can be counted and the state it shows
+// changes from one to the next (§9.8).
+fn tally(xs: Vec[Int]) -> Int {
+    var total = 0
+    for n in xs {
+        total = total + n :bp
+    }
+    total
+}
+
+out(tally([4, 7]))

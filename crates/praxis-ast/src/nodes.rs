@@ -279,6 +279,32 @@ impl ExprStmt {
     }
 }
 
+ast_node! {
+    /// The `:bp` marker a statement may end with (§9.8) — the syntax that puts a
+    /// breakpoint in a program.
+    ///
+    /// It has no accessors, because it has nothing to say beyond *where it is*:
+    /// the two tokens are fixed, and a consumer wants
+    /// [`AstNode::span`](crate::AstNode::span) and nothing else.
+    Breakpoint, BREAKPOINT
+}
+
+/// The `:bp` marker on `stmt`, if the statement carries one.
+///
+/// One function rather than an accessor per statement wrapper: the marker is
+/// admitted at the end of *every* statement form ([`VarStmt`], [`AssignStmt`],
+/// [`PlaceAssignStmt`], [`ExprStmt`]) and means the same thing on each, so four
+/// identical bodies would be four places for the meaning to drift.
+///
+/// The search is over the node's **direct** children, which is what keeps a
+/// marker on a nested statement from being read as this one's: a block statement
+/// whose body ends in `out(x) :bp` has that marker inside the inner `EXPR_STMT`,
+/// several levels down.
+#[must_use]
+pub fn breakpoint_marker(stmt: &SyntaxNode) -> Option<Breakpoint> {
+    stmt.children().find_map(Breakpoint::cast)
+}
+
 // ---------------------------------------------------------------------------
 // Type references
 // ---------------------------------------------------------------------------

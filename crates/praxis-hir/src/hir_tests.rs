@@ -234,3 +234,117 @@ fn references_keyed_by_range_form_a_map() {
     assert!(!refs.is_empty());
     let _: HashMap<TextRange, ResolvedRef> = analysis.refs.clone();
 }
+
+/// §9.8: a `:bp` marker lowers to a stop **after** the statement it marks, not
+/// before — which is what makes the binding it created visible in `locals`.
+///
+/// The ordering is the whole semantics of the marker, and it is a property of
+/// the statement list rather than of any one statement's lowering, so this is
+/// where it is pinned.
+#[test]
+fn a_breakpoint_marker_lowers_to_a_stop_after_its_statement() {
+    use crate::{TypedExpr, TypedStmt};
+
+    let (_, module) = test_util::analyze_and_lower("var a = 1 :bp\nvar b = 2");
+    let entry = test_util::entry_fn(&module);
+    let kinds: Vec<&str> = entry
+        .body
+        .stmts
+        .iter()
+        .map(|s| match s {
+            TypedStmt::Var { .. } => "var",
+            TypedStmt::Breakpoint { .. } => "bp",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        ["var", "bp", "var"],
+        "the stop follows its statement"
+    );
+
+    // The span is the marker's own, so the debugger points at `:bp` and not at
+    // the whole statement.
+    let TypedStmt::Breakpoint { span } = entry.body.stmts[1] else {
+        panic!("statement 1 is the stop");
+    };
+    assert_eq!(&"var a = 1 :bp"[span.0 as usize..span.1 as usize], ":bp");
+
+    // A file's top-level statements have a synthesized `Unit` tail, so a marker
+    // on the last line is a statement's and never the tail's.
+    let (_, module) = test_util::analyze_and_lower("out(1) :bp");
+    let entry = test_util::entry_fn(&module);
+    assert!(
+        entry.body.tail_bp.is_none(),
+        "the entry tail is synthesized"
+    );
+    assert!(matches!(
+        entry.body.stmts.last(),
+        Some(TypedStmt::Breakpoint { .. })
+    ));
+
+    // A marker on a *block's* trailing expression cannot be a statement — the
+    // tail is the block's value — so it rides the block instead, and the tail
+    // is still the expression that was there.
+    let (_, module) =
+        test_util::analyze_and_lower("fn f() -> Int {\n  var m = 1\n  m + 1 :bp\n}\nout(f())");
+    let f = test_util::fn_named(&module, "f");
+    assert!(f.body.tail_bp.is_some(), "the marker rides the block");
+    assert!(
+        matches!(f.body.tail, TypedExpr::Bin { .. }),
+        "the tail is `m + 1`"
+    );
+    assert!(
+        !f.body
+            .stmts
+            .iter()
+            .any(|s| matches!(s, TypedStmt::Breakpoint { .. })),
+        "a tail marker is not also a statement"
+    );
+
+    // An unmarked program has neither.
+    let (_, module) = test_util::analyze_and_lower("var a = 1\nout(a)");
+    let entry = test_util::entry_fn(&module);
+    assert!(entry.body.tail_bp.is_none());
+    assert!(!entry
+        .body
+        .stmts
+        .iter()
+        .any(|s| matches!(s, TypedStmt::Breakpoint { .. })));
+}
+
+/// A pending tail that turns out **not** to be the tail is demoted to a
+/// statement — and its marker has to be demoted with it, in that order.
+///
+/// `{ out(1) :bp\n var a = 2 }` is the case: `out(1)` is recorded as the tail,
+/// then the `var` arrives and pushes it down. A marker left behind on the block
+/// would fire after `var a = 2` instead of after `out(1)`, which is the wrong
+/// line and the wrong state.
+#[test]
+fn a_demoted_tails_marker_is_demoted_with_it() {
+    use crate::TypedStmt;
+
+    let (_, module) =
+        test_util::analyze_and_lower("fn f() {\n  out(1) :bp\n  var a = 2\n  out(a)\n}\nf()");
+    let f = test_util::fn_named(&module, "f");
+    assert!(
+        f.body.tail_bp.is_none(),
+        "the marker did not stay on the block"
+    );
+    let kinds: Vec<&str> = f
+        .body
+        .stmts
+        .iter()
+        .map(|s| match s {
+            TypedStmt::Expr(_) => "expr",
+            TypedStmt::Var { .. } => "var",
+            TypedStmt::Breakpoint { .. } => "bp",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        ["expr", "bp", "var"],
+        "the stop stayed immediately after `out(1)`"
+    );
+}

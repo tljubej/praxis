@@ -10135,3 +10135,235 @@ fn a_labelled_line_is_one_call_for_any_type() {
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
     assert_eq!(result.as_text(), "splits: [1, 2, 3]");
 }
+
+// ---------------------------------------------------------------------------
+// Breakpoints (§9.8)
+// ---------------------------------------------------------------------------
+
+/// What a `:bp` stop handed the host, recorded so the test can read it after
+/// the program has run.
+///
+/// A thread-local because the runtime takes a plain `fn` — it is called from
+/// generated code's stack and carries no captured state, which is the same
+/// reason `praxis-cli` keeps its own state this way.
+mod stops {
+    use std::cell::RefCell;
+
+    /// One stop, flattened to what a test asserts on.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Seen {
+        pub hits: u64,
+        pub span: (u32, u32),
+        /// The frame chain, innermost first.
+        pub frames: Vec<String>,
+        /// Frame 0's user bindings, as `name = value`.
+        pub locals: Vec<String>,
+    }
+
+    thread_local! {
+        static SEEN: RefCell<Vec<Seen>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub fn record(s: Seen) {
+        SEEN.with(|v| v.borrow_mut().push(s));
+    }
+
+    pub fn take() -> Vec<Seen> {
+        SEEN.with(|v| std::mem::take(&mut *v.borrow_mut()))
+    }
+}
+
+/// Flatten a stop into the shape [`stops::Seen`] records.
+fn seen_from(stop: &praxis_runtime::BreakpointStop) -> stops::Seen {
+    let frames = (0..stop.frames.len())
+        // SAFETY: function names are compiler-embedded 'static UTF-8.
+        .map(|i| unsafe { stop.frames.frame_name(i) }.to_string())
+        .collect();
+    let locals = stop
+        .frames
+        .frames
+        .first()
+        .map(|f| {
+            f.locals
+                .iter()
+                .filter(|l| l.is_user())
+                .map(|l| {
+                    let mut value = String::new();
+                    match l.value {
+                        Some(praxis_runtime::DebugValue::Reference(r)) => r.format(&mut value),
+                        Some(praxis_runtime::DebugValue::Scalar(s)) => {
+                            value = s.to_string();
+                        }
+                        _ => value = "<none>".to_string(),
+                    }
+                    format!("{} = {value}", l.name())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    stops::Seen {
+        hits: stop.hits,
+        span: stop.span,
+        frames,
+        locals,
+    }
+}
+
+fn keep_going(stop: praxis_runtime::BreakpointStop) -> praxis_runtime::Resume {
+    stops::record(seen_from(&stop));
+    praxis_runtime::Resume::Continue
+}
+
+fn detach_at_once(stop: praxis_runtime::BreakpointStop) -> praxis_runtime::Resume {
+    stops::record(seen_from(&stop));
+    praxis_runtime::Resume::Detach
+}
+
+/// §9.8: a `:bp` marker stops the program **while its frames are live**, hands
+/// the host the whole chain, and returns so the program finishes normally.
+///
+/// This is the end-to-end statement the unit tests cannot make: the frame chain
+/// here is the one a generated prologue built, the locals are the ones a
+/// generated store wrote, and the value the program answers is what proves the
+/// stop returned rather than diverted.
+#[test]
+fn a_breakpoint_stops_with_live_frames_and_the_program_finishes() {
+    let _ = stops::take();
+    praxis_runtime::install_breakpoint_handler(keep_going);
+    let src = "\
+fn grow(seed: Int) -> Int {
+  var doubled = seed * 2 :bp
+  doubled + 1
+}
+fn main() -> Int {
+  grow(20)
+}
+";
+    let (rt, result) = run_main(src);
+    praxis_runtime::clear_breakpoint_handler();
+    assert!(
+        !rt.has_pending_fault(),
+        "a stop is not a fault: {:?}",
+        rt.fault()
+    );
+    assert_eq!(result.as_int(), 41, "the program ran to its own answer");
+
+    let seen = stops::take();
+    assert_eq!(seen.len(), 1, "one marker, one stop");
+    assert_eq!(seen[0].hits, 1);
+    assert_eq!(
+        &src[seen[0].span.0 as usize..seen[0].span.1 as usize],
+        ":bp",
+        "the span is the marker's own"
+    );
+    assert_eq!(
+        seen[0].frames,
+        ["grow", "main"],
+        "the caller is still on the stack — the frames had not unwound"
+    );
+    // The stop is *after* the statement, so the binding it made is there with
+    // the value it made.
+    assert!(
+        seen[0].locals.contains(&"doubled = 40".to_string()),
+        "the marked statement had run: {:?}",
+        seen[0].locals
+    );
+    assert!(
+        seen[0].locals.contains(&"seed = 20".to_string()),
+        "the parameter is a binding too: {:?}",
+        seen[0].locals
+    );
+}
+
+/// A marker in a loop stops on every pass, numbered, with that pass's state —
+/// and `Resume::Detach` is what stops it doing so.
+#[test]
+fn a_marker_in_a_loop_stops_every_pass_until_the_host_detaches() {
+    let src = "\
+fn main() -> Int {
+  var total = 0
+  for n in [4, 7, 9] {
+    total = total + n :bp
+  }
+  total
+}
+";
+    let _ = stops::take();
+    praxis_runtime::install_breakpoint_handler(keep_going);
+    let (rt, result) = run_main(src);
+    praxis_runtime::clear_breakpoint_handler();
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 20);
+    let seen = stops::take();
+    assert_eq!(seen.len(), 3, "three passes, three stops");
+    assert_eq!(
+        seen.iter().map(|s| s.hits).collect::<Vec<_>>(),
+        [1, 2, 3],
+        "the count is the runtime's, so a host needs none of its own"
+    );
+    // Each stop shows that pass's running total, which is the whole point of a
+    // marker in a loop.
+    let totals: Vec<&String> = seen
+        .iter()
+        .flat_map(|s| s.locals.iter())
+        .filter(|l| l.starts_with("total = "))
+        .collect();
+    assert_eq!(
+        totals,
+        ["total = 4", "total = 11", "total = 20"],
+        "each stop is its own pass's state"
+    );
+
+    // Detaching at the first stop silences the rest, and the program still
+    // answers the same thing: a stop changes nothing the program computes.
+    let _ = stops::take();
+    praxis_runtime::install_breakpoint_handler(detach_at_once);
+    let (rt, result) = run_main(src);
+    praxis_runtime::clear_breakpoint_handler();
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 20, "detaching did not change the answer");
+    assert_eq!(stops::take().len(), 1, "one stop, then silence");
+}
+
+/// A program compiled with markers and run with **no handler installed** stops
+/// at nothing — the state every JIT test above this one is in, and the state an
+/// embedder that wants no debugger is in.
+#[test]
+fn a_marker_with_no_handler_installed_is_inert() {
+    praxis_runtime::clear_breakpoint_handler();
+    let _ = stops::take();
+    let src = "fn main() -> Int {\n  var a = 1 :bp\n  a + 1 :bp\n}\n";
+    let (rt, result) = run_main(src);
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 2);
+    assert!(stops::take().is_empty(), "nothing was installed to stop");
+}
+
+/// A marker on a block's **trailing expression** stops after it is evaluated and
+/// leaves the block's value alone.
+#[test]
+fn a_marker_on_a_tail_stops_after_it_and_keeps_its_value() {
+    let _ = stops::take();
+    praxis_runtime::install_breakpoint_handler(keep_going);
+    let src = "\
+fn twice(n: Int) -> Int {
+  var m = n
+  m + m :bp
+}
+fn main() -> Int {
+  twice(21)
+}
+";
+    let (rt, result) = run_main(src);
+    praxis_runtime::clear_breakpoint_handler();
+    assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
+    assert_eq!(result.as_int(), 42, "the tail is still the block's value");
+    let seen = stops::take();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].frames, ["twice", "main"]);
+    assert!(
+        seen[0].locals.contains(&"m = 21".to_string()),
+        "{:?}",
+        seen[0].locals
+    );
+}

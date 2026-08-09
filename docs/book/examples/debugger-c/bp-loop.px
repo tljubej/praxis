@@ -1,0 +1,6 @@
+// A marker inside a loop stops on every pass, and the stop is numbered.
+var total = 0
+for n in [4, 7] {
+    total = total + n :bp
+}
+out(total)

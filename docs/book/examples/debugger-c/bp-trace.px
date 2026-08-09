@@ -1,0 +1,7 @@
+// `:bp` marks a statement. The program runs it, stops, and shows you the frame.
+fn grow(seed: Int) -> Int {
+    var doubled = seed * 2 :bp
+    doubled + 1
+}
+
+out(grow(20))

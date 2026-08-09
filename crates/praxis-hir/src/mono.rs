@@ -351,6 +351,7 @@ fn resolve_stmt(db: &mut TypeDb, binders: &[VarId], args: &[Type], stmt: &mut Ty
         TypedStmt::Assign { .. }
         | TypedStmt::IndexAssign { .. }
         | TypedStmt::FieldAssign { .. }
+        | TypedStmt::Breakpoint { .. }
         | TypedStmt::Expr(_) => {}
     }
     // …and the sub-expressions, from `stmt_exprs_mut`'s list rather than by hand.

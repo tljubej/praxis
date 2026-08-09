@@ -1698,6 +1698,35 @@ Flags:
 
 It discards old JIT code and crash snapshots after the new compilation succeeds. A failed recompilation leaves the crash REPL active and prints compile diagnostics.
 
+### 9.8 Breakpoints
+
+A statement may carry a trailing `:bp` marker:
+
+```text
+var next = graph[current] :bp
+```
+
+The marker is syntax, not a callable. It is decided by position and adjacency — a `:` immediately followed by an identifier spelling `bp`, at the one place in the grammar where a statement has ended — so `bp` remains an ordinary identifier everywhere else.
+
+Reaching a marker stops the program **after** the marked statement has run, so the values it produced are visible. A marker on a block's trailing expression stops after that expression is evaluated and before the block yields it; the block's value is unchanged.
+
+A stop is not a fault. The frame chain is deep-copied out of the live debug stacks the same way §9.3 copies it on a fault, and handed to a host handler that receives the copy and **no runtime context**. Withholding the context is what makes the copy sound without registering it as a root set: a handler that cannot reach the heap cannot allocate, cannot collect, and therefore cannot invalidate the references it is holding.
+
+The handler answers one of two things:
+
+```text
+continue    return to the program; the next marker stops again
+detach      return to the program; no marker stops again this run
+```
+
+There is no third answer that ends the program. §9.2 forbids unwinding Rust through JIT frames, and the fault epilogue that can unwind them is reached by raising a fault — which would report a failure that did not happen.
+
+Commands at a stop are §9.4's, minus the ones that require a program whose frames have unwound (`p EXPR`, `heap EXPR`, `restart`, `reload`), plus `continue`. `type EXPR` remains available: it type-checks against the frame's captured locals and executes nothing.
+
+The `--debug` modes of §9.6 govern a stop as they govern a fault. A host that declines to prompt prints the stop's frame and locals and lets the program continue, which makes a marker a trace point rather than a prompt nobody is present to answer.
+
+The wrapper a marker compiles to neither allocates nor faults, so a marked statement costs one call: no root spill before it, no fault check after it, and nothing at all in a program that contains no marker.
+
 ---
 
 ## 10. JIT architecture
