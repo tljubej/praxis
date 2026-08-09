@@ -1,0 +1,1144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Praxis — the input is a type</title>
+<meta name="description" content="A small, statically typed, garbage-collected language for puzzle solving. Describe the input once and the compiler derives the type; when something faults, you land in a full-screen debugger.">
+<style>
+/* ── tokens ─────────────────────────────────────────────────────────────────
+   Three hues, and each one means something the compiler means by it:
+   signal = input bytes, type = what inference knows, fault = a diagnostic. */
+:root {
+  --ground:   #F1F3F4;
+  --panel:    #FFFFFF;
+  --panel-2:  #E9EDEF;
+  --rule:     #D3DBDF;
+  --rule-2:   #E3E9EC;
+  --ink:      #12171B;
+  --ink-2:    #55636E;
+  --ink-3:    #7E8B95;
+  --signal:   #9A5F12;
+  --type:     #0B7566;
+  --fault:    #BE3418;
+  --shadow:   0 1px 2px rgba(18,23,27,.06), 0 8px 24px -12px rgba(18,23,27,.18);
+
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  --prose: Charter, "Bitstream Charter", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+
+  --term-bg:  #0A0D10;
+  --term-fg:  #DDE3E9;
+  --measure:  66ch;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground:   #0A0D10;
+    --panel:    #10151A;
+    --panel-2:  #161C22;
+    --rule:     #232C34;
+    --rule-2:   #1A2027;
+    --ink:      #DDE3E9;
+    --ink-2:    #98A6B2;
+    --ink-3:    #6D7B87;
+    --signal:   #E5A54B;
+    --type:     #52C7B4;
+    --fault:    #FF6B4A;
+    --shadow:   0 1px 0 rgba(255,255,255,.02), 0 18px 40px -24px #000;
+  }
+}
+:root[data-theme="dark"] {
+  --ground:   #0A0D10;
+  --panel:    #10151A;
+  --panel-2:  #161C22;
+  --rule:     #232C34;
+  --rule-2:   #1A2027;
+  --ink:      #DDE3E9;
+  --ink-2:    #98A6B2;
+  --ink-3:    #6D7B87;
+  --signal:   #E5A54B;
+  --type:     #52C7B4;
+  --fault:    #FF6B4A;
+  --shadow:   0 1px 0 rgba(255,255,255,.02), 0 18px 40px -24px #000;
+}
+:root[data-theme="light"] {
+  --ground:   #F1F3F4;
+  --panel:    #FFFFFF;
+  --panel-2:  #E9EDEF;
+  --rule:     #D3DBDF;
+  --rule-2:   #E3E9EC;
+  --ink:      #12171B;
+  --ink-2:    #55636E;
+  --ink-3:    #7E8B95;
+  --signal:   #9A5F12;
+  --type:     #0B7566;
+  --fault:    #BE3418;
+  --shadow:   0 1px 2px rgba(18,23,27,.06), 0 8px 24px -12px rgba(18,23,27,.18);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+body {
+  margin: 0;
+  overflow-x: hidden; /* wide content scrolls inside its own pane, never the page */
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--prose);
+  font-size: 17px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+
+/* ── shell ──────────────────────────────────────────────────────────────── */
+.wrap { width: min(1120px, 100% - 2.5rem); margin-inline: auto; }
+@media (max-width: 620px) { .wrap { width: min(1120px, 100% - 1.6rem); } }
+
+/* Pane chrome, after the debugger's own `╭ backtrace ─────╮`. */
+.rule {
+  display: flex; align-items: center; gap: .7rem;
+  margin: 0 0 1.6rem;
+}
+.rule::before {
+  content: ""; width: 1px; height: 11px; background: var(--rule); flex: none;
+}
+.rule-label {
+  font-family: var(--mono); font-size: 11px; font-weight: 600;
+  letter-spacing: .16em; text-transform: uppercase; color: var(--ink-3);
+  white-space: nowrap;
+}
+.rule-line { flex: 1 1 auto; height: 1px; background: var(--rule); }
+.rule-note {
+  font-family: var(--mono); font-size: 11px; letter-spacing: .06em;
+  color: var(--ink-3); white-space: nowrap;
+}
+
+section { padding: 4.6rem 0 0; scroll-margin-top: 54px; }
+section:last-of-type { padding-bottom: 4rem; }
+
+h2 {
+  font-family: var(--mono); font-weight: 600;
+  font-size: clamp(1.5rem, 3.2vw, 2.1rem);
+  letter-spacing: -.035em; line-height: 1.15;
+  text-wrap: balance; margin: 0 0 .9rem;
+}
+h3 {
+  font-family: var(--mono); font-weight: 600; font-size: 1rem;
+  letter-spacing: -.01em; margin: 0 0 .45rem;
+}
+p { margin: 0 0 1rem; max-width: var(--measure); color: var(--ink-2); }
+p strong { color: var(--ink); font-weight: 600; }
+p.lead { font-size: 1.12rem; color: var(--ink); }
+a { color: inherit; }
+a:focus-visible, button:focus-visible {
+  outline: 2px solid var(--type); outline-offset: 3px; border-radius: 2px;
+}
+code, .mono { font-family: var(--mono); font-size: .88em; }
+p code, li code {
+  background: var(--panel-2); padding: .1em .34em; border-radius: 3px;
+  color: var(--ink);
+}
+
+/* ── header ─────────────────────────────────────────────────────────────── */
+header.top {
+  position: sticky; top: 0; z-index: 40;
+  background: color-mix(in srgb, var(--ground) 86%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--rule-2);
+}
+.top-in {
+  display: flex; align-items: center; gap: 1.4rem;
+  height: 54px;
+}
+.mark {
+  font-family: var(--mono); font-weight: 600; font-size: 15px;
+  letter-spacing: -.02em; text-decoration: none; color: var(--ink);
+  display: inline-flex; align-items: baseline; gap: .5rem;
+}
+.mark .caret { color: var(--type); }
+.ver {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em;
+  color: var(--ink-3); border: 1px solid var(--rule); border-radius: 999px;
+  padding: .1rem .45rem; align-self: center;
+}
+nav.top-nav { margin-left: auto; display: flex; gap: 1.15rem; align-items: center; }
+nav.top-nav a {
+  font-family: var(--mono); font-size: 12px; letter-spacing: .02em;
+  color: var(--ink-2); text-decoration: none;
+}
+nav.top-nav a:hover { color: var(--ink); }
+@media (max-width: 700px) { nav.top-nav a.hide-sm { display: none; } }
+.theme-btn {
+  font-family: var(--mono); font-size: 12px; color: var(--ink-2);
+  background: none; border: 1px solid var(--rule); border-radius: 4px;
+  padding: .2rem .45rem; cursor: pointer; line-height: 1.4;
+}
+.theme-btn:hover { color: var(--ink); border-color: var(--ink-3); }
+
+/* ── hero ───────────────────────────────────────────────────────────────── */
+.hero { padding-top: 4.2rem; }
+.hero h1 {
+  font-family: var(--mono); font-weight: 600;
+  font-size: clamp(2.3rem, 7.4vw, 4.4rem);
+  letter-spacing: -.052em; line-height: 1.02;
+  margin: 0 0 1.15rem; text-wrap: balance;
+}
+.hero h1 .is { color: var(--signal); }
+.hero h1 .ty { color: var(--type); }
+.hero .lead { max-width: 60ch; font-size: 1.18rem; }
+.hero-meta {
+  display: flex; flex-wrap: wrap; gap: .45rem .9rem; align-items: center;
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: .04em;
+  color: var(--ink-3); margin: 1.4rem 0 0;
+}
+.hero-meta span { display: inline-flex; align-items: center; gap: .45rem; }
+.hero-meta span::before {
+  content: ""; width: 4px; height: 4px; border-radius: 50%;
+  background: var(--ink-3); flex: none;
+}
+.cta { display: flex; flex-wrap: wrap; gap: .7rem; margin: 1.9rem 0 0; }
+.btn {
+  font-family: var(--mono); font-size: 13px; text-decoration: none;
+  padding: .55rem 1rem; border-radius: 5px; border: 1px solid var(--rule);
+  color: var(--ink); background: var(--panel); box-shadow: var(--shadow);
+  transition: border-color .15s, transform .15s;
+}
+.btn:hover { border-color: var(--ink-3); transform: translateY(-1px); }
+.btn.primary {
+  background: var(--type); border-color: var(--type); color: var(--ground);
+  font-weight: 600;
+}
+.btn.primary:hover { filter: brightness(1.07); }
+
+/* ── the derivation widget ──────────────────────────────────────────────── */
+.derive { margin: 3.2rem 0 0; }
+.derive-grid {
+  display: grid; gap: 1rem;
+  grid-template-columns: minmax(0, 15rem) minmax(0, 1fr);
+  align-items: stretch;
+}
+@media (max-width: 760px) { .derive-grid { grid-template-columns: minmax(0, 1fr); } }
+.card {
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 7px;
+  box-shadow: var(--shadow); overflow: hidden; min-width: 0;
+}
+.card-head {
+  display: flex; align-items: center; gap: .5rem;
+  padding: .5rem .8rem; border-bottom: 1px solid var(--rule-2);
+  font-family: var(--mono); font-size: 11px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+.card-head .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ink-3); }
+.card-head.sig .dot { background: var(--signal); }
+.card-head.ty .dot { background: var(--type); }
+.card-body {
+  padding: .85rem .9rem; font-family: var(--mono); font-size: 12.5px;
+  line-height: 1.75; overflow-x: auto;
+}
+.card-body .line { white-space: pre; }
+
+.byteline { color: var(--ink-2); opacity: .35; transition: opacity .45s ease, color .45s ease; }
+.byteline.on { opacity: 1; color: var(--signal); }
+
+.tmpl { white-space: pre-wrap; word-break: break-word; }
+.tmpl .tick { color: var(--ink-3); }
+.tmpl .lit { color: var(--ink-2); }
+.kw { color: var(--type); }
+.fn { color: var(--ink); }
+.cap {
+  color: var(--signal); border-radius: 3px; padding: 0 1px;
+  transition: background-color .3s, color .3s, box-shadow .3s;
+}
+.cap.hit {
+  background: color-mix(in srgb, var(--signal) 22%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--signal) 45%, transparent);
+}
+.cap.done { color: var(--type); }
+.caret-cursor {
+  display: inline-block; width: .55em; height: 1.05em; vertical-align: -.18em;
+  background: var(--type); animation: blink 1.05s steps(1) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+.derive-arrow {
+  display: flex; align-items: center; gap: .7rem; margin: 1rem 0 .55rem;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .13em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+.derive-arrow .glyph { color: var(--type); font-size: 13px; }
+.derive-arrow i { flex: 1 1 auto; height: 1px; background: var(--rule); }
+
+.typeline {
+  font-family: var(--mono); font-size: clamp(12px, 2.05vw, 16px);
+  line-height: 1.9; white-space: pre; overflow-x: auto;
+  padding: .95rem 1rem; border-radius: 7px;
+  border: 1px solid var(--rule); background: var(--panel);
+  box-shadow: var(--shadow);
+}
+.typeline .name { color: var(--ink); }
+.typeline .punc { color: var(--ink-3); }
+.typeline .fld { color: var(--ink-2); }
+.typeline .prim { color: var(--type); font-weight: 600; }
+.typeline .slot { opacity: 0; }
+.typeline .slot.in { animation: slotin .42s cubic-bezier(.2,.7,.3,1) forwards; }
+@keyframes slotin {
+  from { opacity: 0; transform: translateY(.32em); }
+  to   { opacity: 1; transform: none; }
+}
+.replay {
+  margin-top: .8rem; font-family: var(--mono); font-size: 11.5px;
+  color: var(--ink-3); background: none; border: 0; cursor: pointer;
+  padding: .2rem 0; letter-spacing: .04em;
+}
+.replay:hover { color: var(--type); }
+
+/* ── prose + terminals ──────────────────────────────────────────────────── */
+.two {
+  display: grid; gap: 2.2rem 3rem;
+  grid-template-columns: minmax(0, 27rem) minmax(0, 1fr);
+  align-items: start;
+}
+@media (max-width: 900px) { .two { grid-template-columns: minmax(0, 1fr); } }
+.two > * { min-width: 0; }
+
+.term {
+  background: var(--term-bg); border: 1px solid #1E262E; border-radius: 7px;
+  overflow: hidden; box-shadow: var(--shadow); min-width: 0;
+}
+.term-head {
+  display: flex; align-items: center; gap: .55rem;
+  padding: .45rem .75rem; border-bottom: 1px solid #1A222A;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .06em; color: #6D7B87;
+}
+.term-head .exit { margin-left: auto; }
+.term-head .exit.ok { color: #6FCF7F; }
+.term-head .exit.bad { color: #FF6B4A; }
+.term-body {
+  padding: .75rem .85rem .9rem; overflow-x: auto;
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.55;
+  color: var(--term-fg);
+}
+.term-body .l { white-space: pre; min-height: 1.55em; }
+.term-body .l.cmd { color: #98A6B2; }
+.term-body .l.cmd .p { color: #52C7B4; }
+.term-body .reveal { opacity: 0; }
+.term-body .reveal.in { animation: fadein .3s ease forwards; }
+@keyframes fadein { to { opacity: 1; } }
+
+/* ── the debugger replay ────────────────────────────────────────────────── */
+.replay-shell { margin-top: 1.8rem; }
+.screen {
+  background: var(--term-bg); border: 1px solid #1E262E; border-radius: 7px;
+  padding: .55rem .6rem; overflow-x: auto; box-shadow: var(--shadow);
+}
+.screen-grid {
+  font-family: var(--mono); font-size: 12px; line-height: 1.28;
+  color: var(--term-fg); width: max-content;
+}
+/* A 104-column screen cannot both fit a phone and stay legible, so on a narrow
+   viewport the pane takes the whole width before the type is shrunk to it. */
+@media (max-width: 620px) {
+  .screen {
+    margin-inline: calc(50% - 50vw); border-radius: 0;
+    border-left: 0; border-right: 0; padding: .5rem .25rem;
+  }
+}
+.screen-grid .r { white-space: pre; min-height: 1.28em; }
+.controls {
+  display: flex; align-items: center; gap: .8rem; margin-top: .85rem;
+  font-family: var(--mono); font-size: 11.5px; color: var(--ink-3);
+  flex-wrap: wrap;
+}
+.ctl {
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 4px;
+  color: var(--ink-2); font-family: var(--mono); font-size: 11.5px;
+  padding: .25rem .6rem; cursor: pointer; min-width: 4.6rem;
+}
+.ctl:hover { color: var(--ink); border-color: var(--ink-3); }
+.track {
+  flex: 1 1 12rem; height: 3px; background: var(--rule); border-radius: 2px;
+  position: relative; cursor: pointer; min-width: 8rem;
+}
+.track .fill {
+  position: absolute; inset: 0 auto 0 0; width: 0;
+  background: var(--type); border-radius: 2px;
+}
+.keys { display: flex; gap: .3rem; }
+.key {
+  font-family: var(--mono); font-size: 11px; min-width: 1.5rem; text-align: center;
+  border: 1px solid var(--rule); border-radius: 3px; padding: .1rem .25rem;
+  color: var(--ink-3); transition: color .15s, border-color .15s, background-color .15s;
+}
+.key.lit {
+  color: var(--ground); background: var(--type); border-color: var(--type);
+  font-weight: 600;
+}
+.caption {
+  margin-top: .75rem; font-family: var(--mono); font-size: 12px;
+  color: var(--ink-2); min-height: 4.5em; max-width: 78ch; line-height: 1.5;
+}
+.caption code { color: var(--ink); }
+.caption b { color: var(--type); font-weight: 600; }
+
+/* ── grids ──────────────────────────────────────────────────────────────── */
+.feats {
+  display: grid; gap: 1px; background: var(--rule-2);
+  border: 1px solid var(--rule-2); border-radius: 7px; overflow: hidden;
+  grid-template-columns: repeat(auto-fit, minmax(17.5rem, 1fr));
+}
+/* Cards that carry a program need a column wide enough for one, so they sit
+   two-up where the prose-only cards sit three-up. */
+.feats.code { grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr)); }
+.feat { background: var(--panel); padding: 1.25rem 1.3rem 1.35rem; min-width: 0; }
+.feat p { font-size: .93rem; margin: 0; max-width: none; }
+.feat pre {
+  margin: .8rem 0 0; font-family: var(--mono); font-size: 11.5px;
+  line-height: 1.6; color: var(--ink-2); overflow-x: auto;
+  padding: .6rem .7rem; background: var(--panel-2); border-radius: 5px;
+}
+.feat .tag {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--ink-3); display: block; margin-bottom: .35rem;
+}
+
+table.bench {
+  width: 100%; border-collapse: collapse; font-family: var(--mono);
+  font-size: 12.5px; font-variant-numeric: tabular-nums;
+}
+table.bench th, table.bench td {
+  text-align: right; padding: .42rem .6rem; border-bottom: 1px solid var(--rule-2);
+  white-space: nowrap;
+}
+table.bench th { color: var(--ink-3); font-weight: 500; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+table.bench td:first-child, table.bench th:first-child { text-align: left; color: var(--ink); }
+table.bench tr.total td { border-bottom: 0; border-top: 1px solid var(--rule); font-weight: 600; color: var(--ink); }
+table.bench td.px { color: var(--type); }
+.scroll-x { overflow-x: auto; }
+
+.stats { display: grid; gap: 1.4rem 2.4rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); margin-bottom: 2rem; }
+.stat .n {
+  font-family: var(--mono); font-size: clamp(1.6rem, 4vw, 2.3rem); font-weight: 600;
+  letter-spacing: -.04em; color: var(--type); display: block; line-height: 1.1;
+}
+.stat .l { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); letter-spacing: .04em; }
+
+.steps { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); }
+.steps > * { min-width: 0; }
+pre.sh {
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.75; margin: 0;
+  padding: .9rem 1rem; border-radius: 7px; background: var(--term-bg);
+  color: var(--term-fg); overflow-x: auto; border: 1px solid #1E262E;
+}
+pre.sh .c { color: #6D7B87; }
+pre.sh .p { color: #52C7B4; }
+
+ul.plain { margin: 0; padding: 0; list-style: none; }
+ul.plain li {
+  padding: .5rem 0; border-bottom: 1px solid var(--rule-2);
+  font-size: .95rem; color: var(--ink-2);
+}
+ul.plain li:last-child { border-bottom: 0; }
+ul.plain li b { color: var(--ink); font-weight: 600; font-family: var(--mono); font-size: .88em; }
+
+footer {
+  border-top: 1px solid var(--rule-2); margin-top: 3rem; padding: 2rem 0 3rem;
+  font-family: var(--mono); font-size: 11.5px; color: var(--ink-3);
+}
+footer .fin { display: flex; flex-wrap: wrap; gap: .6rem 1.6rem; align-items: baseline; }
+footer a { color: var(--ink-2); }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap top-in">
+    <a class="mark" href="#top"><span class="caret">▶</span>praxis</a>
+    <span class="ver">v0.1.0</span>
+    <nav class="top-nav">
+      <a href="#read">read</a>
+      <a href="#crash">crash</a>
+      <a href="#language" class="hide-sm">language</a>
+      <a href="#speed" class="hide-sm">speed</a>
+      <a href="#start">start</a>
+      <button class="theme-btn" id="theme" type="button" aria-label="Switch theme">◐</button>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ═══ hero ═══════════════════════════════════════════════════════════════ -->
+<section class="hero wrap" style="padding-top:4.2rem">
+  <h1>The <span class="is">input</span><br>is a <span class="ty">type</span>.</h1>
+  <p class="lead">Praxis is a small, statically typed, garbage-collected language for
+  Advent-of-Code-style puzzle solving. You describe the shape of the input once, in a
+  sublanguage of templates and captures — and from that one line the compiler derives
+  the type, parses the bytes, and names the byte that broke.</p>
+
+  <div class="cta">
+    <a class="btn primary" href="#start">Get started</a>
+    <a class="btn" href="#read">See the parser</a>
+    <a class="btn" href="#crash">See the debugger</a>
+  </div>
+
+  <div class="hero-meta">
+    <span>compiled — Cranelift JIT</span>
+    <span>full type inference</span>
+    <span>crash debugger, not a stack trace</span>
+    <span>language server included</span>
+  </div>
+
+  <!-- the derivation: this is the thesis of the language, so it is the hero -->
+  <div class="derive" id="derive">
+    <div class="derive-grid">
+      <div class="card">
+        <div class="card-head sig"><span class="dot"></span>input.txt</div>
+        <div class="card-body" id="d-input"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="dot"></span>day05.px</div>
+        <div class="card-body" id="d-code"></div>
+      </div>
+    </div>
+
+    <div class="derive-arrow"><span class="glyph">↳</span>the compiler already knows<i></i></div>
+    <div class="typeline" id="d-type"></div>
+    <button class="replay" id="d-replay" type="button">↺ replay</button>
+  </div>
+</section>
+
+<!-- ═══ read ═══════════════════════════════════════════════════════════════ -->
+<section class="wrap" id="read">
+  <div class="rule"><span class="rule-label">read</span><i class="rule-line"></i><span class="rule-note">the input parser</span></div>
+
+  <div class="two">
+    <div>
+      <h2>Parsing is not a phase of your program.</h2>
+      <p>There is no scanner, no line iterator, no <code>Result</code> to unwrap. A backtick
+      template is a parser: a comma matches a comma, a space matches a run of horizontal
+      whitespace, and <code>{name:atom}</code> is a capture. Everything outside the backticks is a
+      grammar of constructors — <code>lines</code>, <code>sections</code>, <code>grid</code>,
+      <code>csv</code>, <code>repeated</code>, <code>choice</code> — whose own whitespace means nothing.</p>
+      <p>The type falls out of the shape. Four named captures become a record with four
+      fields; <code>lines</code> wraps it in a <code>Vec</code>. So a typo in a field name is a
+      <strong>compile error naming the record the template built</strong>, and it never gets as far
+      as running.</p>
+      <ul class="plain" data-parsers>
+        <li><b>lines(int)</b> one number per line</li>
+        <li><b>lines(`{left:int} {right:int}`)</b> two columns</li>
+        <li><b>csv(int)</b> one comma-separated line</li>
+        <li><b>sections(lines(int))</b> blank-line groups</li>
+        <li><b>grid(char)</b> a rectangle of characters</li>
+        <li><b>sections(draws: csv(int), boards: repeated(matrix(int)))</b> a header and N boards</li>
+        <li><b>scan(choice(Mul: `mul({a:int},{b:int})`, Enable: `do()`))</b> instructions in noise</li>
+      </ul>
+    </div>
+
+    <div>
+      <div class="term" data-cap="typo" data-cmd="praxis check day05.px">
+        <div class="term-head"><span>day05.px — one field renamed</span><span class="exit"></span></div>
+        <div class="term-body"></div>
+      </div>
+      <p style="margin:.9rem 0 1.6rem;font-size:.95rem">The template is the only place the shape is
+      written down, and the error quotes the record it produced.</p>
+
+      <div class="term" data-cap="points" data-cmd="praxis run points.px --input points.in">
+        <div class="term-head"><span>a semicolon where a comma was promised</span><span class="exit"></span></div>
+        <div class="term-body"></div>
+      </div>
+      <p style="margin:.9rem 0 0;font-size:.95rem">When the <em>input</em> is what's wrong, the fault
+      carries the byte offset, what the parser wanted there, and a window of the real bytes with
+      newlines drawn as <code>⏎</code>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ crash ══════════════════════════════════════════════════════════════ -->
+<section class="wrap" id="crash">
+  <div class="rule"><span class="rule-label">crash</span><i class="rule-line"></i><span class="rule-note">recorded from a real terminal</span></div>
+
+  <h2>A fault opens a debugger, not a stack trace.</h2>
+  <p class="lead" style="max-width:74ch">Index out of bounds, division by zero, a parse mismatch — the
+  program stops and you land in a full-screen debugger holding the snapshot: every frame, the
+  selected frame's source with the failing subexpression marked, and its locals <em>and the
+  compiler's temporaries</em>, each labelled with the expression that produced it. The last temp with a
+  real value is the last thing that worked.</p>
+
+  <div class="replay-shell">
+    <div class="screen"><div class="screen-grid" id="tui" role="img" aria-label="A recording of the Praxis crash debugger: three stack frames, source, locals and an expression evaluated at the crash site."></div></div>
+    <div class="controls">
+      <button class="ctl" id="tui-play" type="button">▶ play</button>
+      <div class="track" id="tui-track" role="slider" aria-label="Replay position" tabindex="0" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="fill" id="tui-fill"></div></div>
+      <div class="keys" id="tui-keys"></div>
+    </div>
+    <div class="caption" id="tui-caption"></div>
+  </div>
+
+  <div class="feats" style="margin-top:2.4rem">
+    <div class="feat">
+      <span class="tag">temps are named</span>
+      <p>The compiler's intermediates are kept with the source expression each one materialized, so a
+      frame reads as <em>this arithmetic, and how far it got</em> — not just "these variables".</p>
+    </div>
+    <div class="feat">
+      <span class="tag">p — evaluate</span>
+      <p>An expression runs against the crash snapshot's own locals. Re-running the faulting
+      expression faults again, on demand, from the values the program actually had.</p>
+    </div>
+    <div class="feat">
+      <span class="tag">:bp — stop anywhere</span>
+      <p>A marker in the source stops the program at that point and drops into the same screen; press
+      <code>c</code> and it carries on.</p>
+    </div>
+    <div class="feat">
+      <span class="tag">input / parser</span>
+      <p>After a parse mismatch, two commands show the bytes around the failure and what the parser
+      wanted there — no frame required.</p>
+    </div>
+    <div class="feat">
+      <span class="tag">not a terminal</span>
+      <p>A pipe gets the line-oriented prompt; CI gets the printed fault report and exit 1. The
+      surface changes, the engine does not.</p>
+    </div>
+    <div class="feat">
+      <span class="tag">the report survives</span>
+      <p>The crash report is printed before the screen opens, and the screen is an alternate one — so
+      quitting leaves the report in your scrollback.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ language ═══════════════════════════════════════════════════════════ -->
+<section class="wrap" id="language">
+  <div class="rule"><span class="rule-label">language</span><i class="rule-line"></i><span class="rule-note">one binding form, everything inferred</span></div>
+
+  <h2>Small enough to hold in your head at 6am.</h2>
+  <p class="lead" style="max-width:74ch"><code>var</code> is the only binding form. Types are inferred
+  and only written when you want them read. A match must be exhaustive, and the compiler writes the
+  missing arms for you.</p>
+
+  <div class="feats code">
+    <div class="feat">
+      <span class="tag">pipelines</span>
+      <p>A chain compiles to one loop. It is eager — it runs where it is written — and it materializes
+      on its own, so there is no <code>collect</code>. Answers <code data-out="pipelines">147</code>.</p>
+      <pre data-snippet="pipelines">var readings = [3, -1, 4, 1, -5, 9, 2, 6]
+
+var answer = readings
+    .filter(|x| x &gt; 0)
+    .map(|x| x * x)
+    .sum()
+
+out(answer)</pre>
+    </div>
+    <div class="feat">
+      <span class="tag">grids and graphs</span>
+      <p><code>grid(char)</code> reads the rectangle; <code>neighbors4</code> and
+      <code>bfs_distance</code> are in the prelude. The search never sees the grid, so the graph is
+      just that closure. Answers <code data-out="grids">Some(8)</code>.</p>
+      <pre data-snippet="grids">var maze = read grid(char)
+var wall = "#"[0]
+
+// The search never sees the grid. It only asks
+// what is next to here.
+fn open(g: Grid[Char], w: Char, p: (Int, Int)) {
+    g.neighbors4(p).filter(|q| g[q.0, q.1] != w)
+}
+
+out(bfs_distance(
+    (0, 0),
+    |p| open(maze, wall, p),
+    |p| p == (4, 4),
+))</pre>
+    </div>
+    <div class="feat">
+      <span class="tag">pattern matching</span>
+      <p>One pattern grammar, used by <code>match</code> arms, <code>for</code> headers and closure
+      parameters alike. A bare name that is a variant of the scrutinee's enum is that variant, not a
+      binding.</p>
+      <pre data-snippet="patterns">struct Point { x: Int, y: Int }
+
+var points = [
+    Point { x: 1, y: 2 },
+    Point { x: 3, y: 4 },
+]
+
+for { x, y } in points {
+    out(x * y)
+}</pre>
+    </div>
+    <div class="feat">
+      <span class="tag">records without names</span>
+      <p>A record type needs no declaration — the parser's captures are already
+      <code>{ x: Int, y: Int }</code>. Another anonymous record with the same fields is the same type;
+      a <code>struct</code> that happens to look like it is not.</p>
+      <pre data-snippet="records">// No struct declared anywhere:
+// the template made the type.
+var points = read lines(`{x:int},{y:int}`)
+
+fn area(r) -&gt; Int { r.x * r.y }
+
+out(area(points[0]))</pre>
+    </div>
+    <div class="feat">
+      <span class="tag">the editor knows too</span>
+      <p>A language server ships in the box: hover, completion with receiver methods, rename,
+      references, semantic tokens, and inlay hints that show what inference concluded — <code>?T</code>
+      where it has not pinned one.</p>
+      <pre>you write   fn foo(a, b)
+you read    fn foo(a: Int, b: Int)</pre>
+    </div>
+    <div class="feat">
+      <span class="tag">a fix is a diagnostic</span>
+      <p>Every quick fix the editor offers is a suggestion <code>praxis check</code> also prints, and each
+      one is gated by applying it and re-analyzing. The two surfaces cannot disagree.</p>
+    </div>
+  </div>
+
+  <div style="margin-top:1.6rem">
+    <div class="term" data-cap="tiles" data-cmd="praxis check tiles.px">
+      <div class="term-head"><span>an enum grew two variants</span><span class="exit"></span></div>
+      <div class="term-body"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ speed ══════════════════════════════════════════════════════════════ -->
+<section class="wrap" id="speed">
+  <div class="rule"><span class="rule-label">speed</span><i class="rule-line"></i><span class="rule-note">benchmarks/REPORT.md</span></div>
+
+  <h2>Fast enough that the puzzle is the slow part.</h2>
+  <p class="lead" style="max-width:74ch">Eight benchmarks, each written three times — in Praxis, in Rust
+  and in Python — with byte-identical output enforced. Wall clock, whole process, best of five.</p>
+
+  <div class="stats">
+    <div class="stat"><span class="n">5×</span><span class="l">faster than CPython 3.14, geomean</span></div>
+    <div class="stat"><span class="n">8 / 8</span><span class="l">benchmarks faster than Python</span></div>
+    <div class="stat"><span class="n">7×</span><span class="l">slower than Rust, geomean</span></div>
+    <div class="stat"><span class="n">1.09×</span><span class="l">CPython's peak resident set</span></div>
+  </div>
+
+  <div class="scroll-x">
+    <table class="bench">
+      <thead><tr><th>benchmark</th><th>Rust</th><th>Python</th><th>Praxis</th><th>vs Rust</th><th>vs Python</th></tr></thead>
+      <tbody>
+        <tr><td>primes</td><td>65 ms</td><td>3.48 s</td><td class="px">225 ms</td><td>3×</td><td>0.1×</td></tr>
+        <tr><td>mandelbrot</td><td>60 ms</td><td>2.50 s</td><td class="px">252 ms</td><td>4×</td><td>0.1×</td></tr>
+        <tr><td>collatz</td><td>42 ms</td><td>2.68 s</td><td class="px">123 ms</td><td>3×</td><td>0.0×</td></tr>
+        <tr><td>vm</td><td>114 ms</td><td>8.12 s</td><td class="px">968 ms</td><td>9×</td><td>0.1×</td></tr>
+        <tr><td>hashwork</td><td>337 ms</td><td>4.81 s</td><td class="px">1.76 s</td><td>5×</td><td>0.4×</td></tr>
+        <tr><td>tree</td><td>86 ms</td><td>3.71 s</td><td class="px">1.01 s</td><td>12×</td><td>0.3×</td></tr>
+        <tr><td>pipeline</td><td>64 ms</td><td>2.62 s</td><td class="px">1.52 s</td><td>24×</td><td>0.6×</td></tr>
+        <tr><td>bfs</td><td>144 ms</td><td>3.97 s</td><td class="px">1.44 s</td><td>10×</td><td>0.4×</td></tr>
+        <tr class="total"><td>geometric mean</td><td></td><td></td><td></td><td>7×</td><td>0.2×</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="margin-top:1rem;font-size:.9rem">Read the last two columns as <em>how many times longer
+  than</em>: below 1.0 means Praxis was faster. The JIT is not hiding in these numbers — the whole fixed
+  cost of <code>praxis run</code>, lexing through Cranelift codegen, is between 0.41% and 3.92% of each
+  measured run.</p>
+</section>
+
+<!-- ═══ start ══════════════════════════════════════════════════════════════ -->
+<section class="wrap" id="start">
+  <div class="rule"><span class="rule-label">start</span><i class="rule-line"></i><span class="rule-note">a stable Rust toolchain and just</span></div>
+
+  <h2>Build it, then solve something.</h2>
+
+  <div class="steps" style="margin-top:1.6rem">
+    <div>
+      <h3>Build</h3>
+      <p style="font-size:.93rem">The one dependency outside cargo is the <code>just</code> command runner.</p>
+      <pre class="sh"><span class="p">$</span> cargo install just
+<span class="p">$</span> just build
+<span class="c"># the whole gate CI runs — fmt, clippy,
+# tests, and every book example re-run</span>
+<span class="p">$</span> just ci</pre>
+    </div>
+    <div>
+      <h3>Run</h3>
+      <p style="font-size:.93rem">Standard input is read lazily; <code>--input</code> is the eager half.</p>
+      <pre class="sh"><span class="p">$</span> praxis run day05.px &lt; input.txt
+<span class="p">$</span> praxis run day05.px --input in.txt
+<span class="p">$</span> praxis check day05.px
+<span class="p">$</span> praxis run day05.px --debug never</pre>
+    </div>
+    <div>
+      <h3>Read</h3>
+      <p style="font-size:.93rem">The book is <span data-stat="chapters">47</span> chapters, and every one
+      of its <span data-stat="examples">405</span> examples is re-run and diffed by <code>just ci</code>
+      rather than being illustrative.</p>
+      <pre class="sh"><span class="p">$</span> just book-serve
+<span class="c"># localhost:3000</span></pre>
+    </div>
+  </div>
+
+  <div class="two" style="margin-top:2.6rem">
+    <div>
+      <h3 style="margin-bottom:.6rem">A file is a program</h3>
+      <p style="font-size:.95rem">Top-level statements are the entry point — there is no <code>main</code>
+      to declare — and <code>out</code> is in the prelude. This is the segments program from the top of
+      the page, run against those three lines.</p>
+      <div class="term" data-cap="segments" data-cmd="praxis run day05.px --input input.txt">
+        <div class="term-head"><span>day05.px</span><span class="exit"></span></div>
+        <div class="term-body"></div>
+      </div>
+    </div>
+    <div>
+      <h3 style="margin-bottom:.6rem">The command surface</h3>
+      <p style="font-size:.95rem"><code>check</code> routes through the same query layer the language
+      server uses, so what the CLI prints and what the editor underlines cannot diverge.</p>
+      <ul class="plain">
+        <li><b>praxis run</b> lex, parse, infer, lower, monomorphize, MIR, Cranelift, execute</li>
+        <li><b>praxis check</b> the front end only — no code generated</li>
+        <li><b>praxis lsp</b> JSON-RPC on stdio; the editor extension launches it</li>
+        <li><b>exit codes</b> 0 clean, 1 a language error or a runtime fault, 2 the job could not start</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap fin">
+    <span>Praxis 0.1.0</span>
+    <span>design decisions in <code>docs/decisions/</code></span>
+    <span>handovers in <code>docs/handovers/</code></span>
+    <span style="margin-left:auto">every terminal on this page is real output, recorded from the binary in this tree</span>
+  </div>
+</footer>
+
+<script id="demo-data" type="application/json">{"attrs":[[1,null,1],[null,null,0],[8,null,0],[6,null,0],[6,null,1],[1,null,9],[8,null,1],[3,null,0],[2,null,0],[8,null,4],[0,6,1],[5,null,1],[null,null,16],[null,null,1],[1,null,0],[null,null,2]],"tui":{"cols":104,"rows":32,"frames":[{"t":0.005,"f":[[["error:",0],[" program faulted: index out of bounds                                                             ",1]],[],[["Backtrace:                                                                                              ",1]],[["#0   window                                                                                             ",1]],[["#1   count_increases                                                                                    ",1]],[["#2   <entry>                                                                                            ",1]],[],[["  locals:                                                                                               ",1]],[["    depths: Vec[Int] = [199, 200, 208, 210, 200, 207, 240, 269, 260, 263]                               ",1]],[["    i: Int = 8                                                                                          ",1]],[["  temps:                                                                                                ",1]],[["    <tmp#3: Int> @ \"depths[i]\" = 260                                                                    ",1]],[["    <tmp#4: Int> @ \"1\" = 1                                                                              ",1]],[["    <tmp#5: Int> @ \"i + 1\" = 9                                                                          ",1]],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[],[]]},{"t":0.006,"d":[[0,[[" \u2717 index out of bounds",0],["  \u00b7  3 frame(s)",2]]],[1,[["\u256d",3],[" backtrace ",4],["\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e",3],["\u256d window \u00b7 walkthrough.px \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e",2]]],[2,[["\u2502\u25b6 #0  ",3],["window         ",4],[" :4",2],["              ",1],["\u2502",3],["\u2502",2],[" ",0],[" 3 \u2502 ",2],["fn window(depths: Vec[Int], i: Int) -> Int {            ",1],["\u2502",2]]],[3,[["\u2502  ",3],["#1  ",2],["count_increases",1],[" :11",2],["             ",1],["\u2502",3],["\u2502",2],["\u25b6",0],[" 4 \u2502 ",2],["    depths[i] + depths[i + 1] + ",1],["depths[i + 2]",5],["           ",1],["\u2502",2]]],[4,[["\u2502  ",3],["#2  ",2],["<entry>        ",1],[" :20",2],["             ",1],["\u2502",3],["\u2502",2],[" ",0],[" 5 \u2502 ",2],["}                                                       ",1],["\u2502",2]]],[5,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],["                                                              ",1],["\u2502",2]]],[6,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],["                                                              ",1],["\u2502",2]]],[7,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],["                                                              ",1],["\u2502",2]]],[8,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],["                                                              ",1],["\u2502",2]]],[9,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],["                                                              ",1],["\u2502",2]]],[10,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],["                                                              ",1],["\u2502",2]]],[11,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],["                                                              ",1],["\u2502",2]]],[12,[["\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f",3],["\u2502",2],["                                                              ",1],["\u2502",2]]],[13,[["\u256d locals \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\u2502",2],["                                                              ",1],["\u2502",2]]],[14,[["\u2502",2],[" bindings",6],["                             ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[15,[["\u2502",2],["  ",1],["depths",3],[" ",1],["Vec[Int]",7],[" ",1],["= ",2],["[199, 200, ...]",8],["   ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[16,[["\u2502",2],["  ",1],["i     ",3],[" ",1],["Int     ",7],[" ",1],["= ",2],["8",8],["                 ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[17,[["\u2502",2],[" temps",6],["                                ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[18,[["\u2502",2],["  ",1],["tmp#3 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["260",8],["               ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[19,[["\u2502",2],["  ",1],["tmp#4 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["1",8],["                 ",1],["\u2502\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f",2]]],[20,[["\u2502",2],["  ",1],["tmp#5 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["9",8],["                 ",1],["\u2502\u256d output \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e",2]]],[21,[["\u2502",2],["  ",1],["tmp#6 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["263",8],["               ",1],["\u2502\u2502",2],["Type `:` to run a command, `?` for keys.                      ",1],["\u2502",2]]],[22,[["\u2502",2],["  ",1],["tmp#7 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["523",8],["               ",1],["\u2502\u2502",2],["\u2191\u2193 or j/k select a frame; u/d walk the call stack.            ",1],["\u2502",2]]],[23,[["\u2502",2],["  ",1],["tmp#8 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["2",8],["                 ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[24,[["\u2502",2],["  ",1],["tmp#9 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["10",8],["                ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[25,[["\u2502",2],["  ",1],["tmp#10",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["<uninit>",9],["          ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[26,[["\u2502",2],["  ",1],["tmp#11",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["<uninit>",9],["          ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[27,[["\u2502",2],["                                      ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[28,[["\u2502",2],["                                      ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[29,[["\u2502",2],["                                      ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[30,[["\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f",2]]],[31,[[" backtrace ",10],["  \u2191\u2193",11],[" frame",2],["  tab",11],[" pane",2],["  :",11],[" cmd",2],["  r",11],[" restart",2],["  ?",11],[" keys",2],["  q",11],[" quit",2]]]]},{"t":2.003,"d":[[1,[["\u256d",3],[" backtrace ",4],["\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e",3],["\u256d count_increases \u00b7 walkthrough.px \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e",2]]],[2,[["\u2502  ",3],["#0  ",2],["window         ",1],[" :4",2],["              ",1],["\u2502",3],["\u2502",2],[" ",0],["  7 \u2502 ",2],["fn count_increases(depths: Vec[Int]) -> Int {          ",1],["\u2502",2]]],[3,[["\u2502\u25b6 #1  ",3],["count_increases",4],[" :11",2],["             ",1],["\u2502",3],["\u2502",2],[" ",0],["  8 \u2502 ",2],["    var larger = 0                                     ",1],["\u2502",2]]],[4,[["\u2502  ",3],["#2  ",2],["<entry>        ",1],[" :20",2],["             ",1],["\u2502",3],["\u2502",2],[" ",0],["  9 \u2502 ",2],["    var i = 1                                          ",1],["\u2502",2]]],[5,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],[" 10 \u2502 ",2],["    while i < depths.len() {                           ",1],["\u2502",2]]],[6,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],["\u25b6",0],[" 11 \u2502 ",2],["        if ",1],["window(depths, i)",5],[" > window(depths, i - 1) { ",1],["\u2502",2]]],[7,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],[" 12 \u2502 ",2],["            larger = larger + 1                        ",1],["\u2502",2]]],[8,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],[" 13 \u2502 ",2],["        }                                              ",1],["\u2502",2]]],[9,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],[" 14 \u2502 ",2],["        i = i + 1                                      ",1],["\u2502",2]]],[10,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],[" 15 \u2502 ",2],["    }                                                  ",1],["\u2502",2]]],[11,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],[" 16 \u2502 ",2],["    larger                                             ",1],["\u2502",2]]],[12,[["\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f",3],["\u2502",2],[" ",0],[" 17 \u2502 ",2],["}                                                      ",1],["\u2502",2]]],[16,[["\u2502",2],["  ",1],["larger",3],[" ",1],["Int     ",7],[" ",1],["= ",2],["5",8],["                 ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[17,[["\u2502",2],["  ",1],["i     ",3],[" ",1],["Int     ",7],[" ",1],["= ",2],["8",8],["                 ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[18,[["\u2502",2],[" temps",6],["                                ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[19,[["\u2502",2],["  ",1],["tmp#2 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["0",8],["                 ",1],["\u2502\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f",2]]],[20,[["\u2502",2],["  ",1],["tmp#4 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["1",8],["                 ",1],["\u2502\u256d output \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e",2]]],[21,[["\u2502",2],["  ",1],["tmp#6 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["10",8],["                ",1],["\u2502\u2502",2],["Type `:` to run a command, `?` for keys.                      ",1],["\u2502",2]]],[22,[["\u2502",2],["  ",1],["tmp#7 ",2],[" ",1],["Bool    ",7],[" ",1],["= ",2],["true",8],["              ",1],["\u2502\u2502",2],["\u2191\u2193 or j/k select a frame; u/d walk the call stack.            ",1],["\u2502",2]]],[23,[["\u2502",2],["  ",1],["tmp#8 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["792",8],["               ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[24,[["\u2502",2],["  ",1],["tmp#9 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["1",8],["                 ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[25,[["\u2502",2],["  ",1],["tmp#10",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["6",8],["                 ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[26,[["\u2502",2],["  ",1],["tmp#11",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["769",8],["               ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[27,[["\u2502",2],["  ",1],["tmp#12",2],[" ",1],["Bool    ",7],[" ",1],["= ",2],["true",8],["              ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[28,[["\u2502",2],["  ",1],["tmp#13",2],[" ",1],["Unit    ",7],[" ",1],["= ",2],["Unit",8],["              ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[29,[["\u2502",2],["  ",1],["tmp#14",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["1",8],["                 ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]]]},{"t":3.604,"d":[[1,[["\u256d",3],[" backtrace ",4],["\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e",3],["\u256d <entry> \u00b7 walkthrough.px \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e",2]]],[2,[["\u2502  ",3],["#0  ",2],["window         ",1],[" :4",2],["              ",1],["\u2502",3],["\u2502",2],[" ",0],["  4 \u2502 ",2],["    depths[i] + depths[i + 1] + depths[i + 2]          ",1],["\u2502",2]]],[3,[["\u2502  ",3],["#1  ",2],["count_increases",1],[" :11",2],["             ",1],["\u2502",3],["\u2502",2],[" ",0],["  5 \u2502 ",2],["}                                                      ",1],["\u2502",2]]],[4,[["\u2502\u25b6 #2  ",3],["<entry>        ",4],[" :20",2],["             ",1],["\u2502",3],["\u2502",2],[" ",0],["  6 \u2502 ",2],["                                                       ",1],["\u2502",2]]],[5,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],["  7 \u2502 ",2],["fn count_increases(depths: Vec[Int]) -> Int {          ",1],["\u2502",2]]],[6,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],["  8 \u2502 ",2],["    var larger = 0                                     ",1],["\u2502",2]]],[7,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],["  9 \u2502 ",2],["    var i = 1                                          ",1],["\u2502",2]]],[8,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],[" 10 \u2502 ",2],["    while i < depths.len() {                           ",1],["\u2502",2]]],[9,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],[" 11 \u2502 ",2],["        if window(depths, i) > window(depths, i - 1) { ",1],["\u2502",2]]],[10,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],[" 12 \u2502 ",2],["            larger = larger + 1                        ",1],["\u2502",2]]],[11,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],[" 13 \u2502 ",2],["        }                                              ",1],["\u2502",2]]],[12,[["\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f",3],["\u2502",2],[" ",0],[" 14 \u2502 ",2],["        i = i + 1                                      ",1],["\u2502",2]]],[13,[["\u256d locals \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\u2502",2],[" ",0],[" 15 \u2502 ",2],["    }                                                  ",1],["\u2502",2]]],[14,[["\u2502",2],[" bindings",6],["                             ",1],["\u2502\u2502",2],[" ",0],[" 16 \u2502 ",2],["    larger                                             ",1],["\u2502",2]]],[15,[["\u2502",2],["  ",1],["depths",3],[" ",1],["Vec[Int]",7],[" ",1],["= ",2],["[199, 200, ...]",8],["   ",1],["\u2502\u2502",2],[" ",0],[" 17 \u2502 ",2],["}                                                      ",1],["\u2502",2]]],[16,[["\u2502",2],[" temps",6],["                                ",1],["\u2502\u2502",2],[" ",0],[" 18 \u2502 ",2],["                                                       ",1],["\u2502",2]]],[17,[["\u2502",2],["  ",1],["tmp#1 ",2],[" ",1],["        ",7],[" ",1],["= ",2],["\"199\\n200\\n208\\n\u2026\"",8],["\u2502\u2502",2],[" ",0],[" 19 \u2502 ",2],["var depths = read lines(int)                           ",1],["\u2502",2]]],[18,[["\u2502",2],["  ",1],["tmp#2 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["1",8],["                 ",1],["\u2502\u2502",2],["\u25b6",0],[" 20 \u2502 ",2],["out(",1],["count_increases(depths)",5],[")                           ",1],["\u2502",2]]],[19,[["\u2502",2],["  ",1],["tmp#3 ",2],[" ",1],["Vec[Int]",7],[" ",1],["= ",2],["[199, 200, ...]",8],["   ",1],["\u2502\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f",2]]],[20,[["\u2502",2],["  ",1],["tmp#5 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["<uninit>",9],["          ",1],["\u2502\u256d output \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e",2]]],[21,[["\u2502",2],["  ",1],["tmp#6 ",2],[" ",1],["Unit    ",7],[" ",1],["= ",2],["<uninit>",9],["          ",1],["\u2502\u2502",2],["Type `:` to run a command, `?` for keys.                      ",1],["\u2502",2]]],[22,[["\u2502",2],["                                      ",1],["\u2502\u2502",2],["\u2191\u2193 or j/k select a frame; u/d walk the call stack.            ",1],["\u2502",2]]],[23,[["\u2502",2],["                                      ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[24,[["\u2502",2],["                                      ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[25,[["\u2502",2],["                                      ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[26,[["\u2502",2],["                                      ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[27,[["\u2502",2],["                                      ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[28,[["\u2502",2],["                                      ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[29,[["\u2502",2],["                                      ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]]]},{"t":5.205,"d":[[1,[["\u256d",3],[" backtrace ",4],["\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e",3],["\u256d count_increases \u00b7 walkthrough.px \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e",2]]],[2,[["\u2502  ",3],["#0  ",2],["window         ",1],[" :4",2],["              ",1],["\u2502",3],["\u2502",2],[" ",0],["  7 \u2502 ",2],["fn count_increases(depths: Vec[Int]) -> Int {          ",1],["\u2502",2]]],[3,[["\u2502\u25b6 #1  ",3],["count_increases",4],[" :11",2],["             ",1],["\u2502",3],["\u2502",2],[" ",0],["  8 \u2502 ",2],["    var larger = 0                                     ",1],["\u2502",2]]],[4,[["\u2502  ",3],["#2  ",2],["<entry>        ",1],[" :20",2],["             ",1],["\u2502",3],["\u2502",2],[" ",0],["  9 \u2502 ",2],["    var i = 1                                          ",1],["\u2502",2]]],[5,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],[" 10 \u2502 ",2],["    while i < depths.len() {                           ",1],["\u2502",2]]],[6,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],["\u25b6",0],[" 11 \u2502 ",2],["        if ",1],["window(depths, i)",5],[" > window(depths, i - 1) { ",1],["\u2502",2]]],[7,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],[" 12 \u2502 ",2],["            larger = larger + 1                        ",1],["\u2502",2]]],[8,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],[" 13 \u2502 ",2],["        }                                              ",1],["\u2502",2]]],[9,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],[" 14 \u2502 ",2],["        i = i + 1                                      ",1],["\u2502",2]]],[10,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],[" 15 \u2502 ",2],["    }                                                  ",1],["\u2502",2]]],[11,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],[" ",0],[" 16 \u2502 ",2],["    larger                                             ",1],["\u2502",2]]],[12,[["\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f",3],["\u2502",2],[" ",0],[" 17 \u2502 ",2],["}                                                      ",1],["\u2502",2]]],[13,[["\u256d locals \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e\u2502",2],["                                                              ",1],["\u2502",2]]],[14,[["\u2502",2],[" bindings",6],["                             ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[15,[["\u2502",2],["  ",1],["depths",3],[" ",1],["Vec[Int]",7],[" ",1],["= ",2],["[199, 200, ...]",8],["   ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[16,[["\u2502",2],["  ",1],["larger",3],[" ",1],["Int     ",7],[" ",1],["= ",2],["5",8],["                 ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[17,[["\u2502",2],["  ",1],["i     ",3],[" ",1],["Int     ",7],[" ",1],["= ",2],["8",8],["                 ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[18,[["\u2502",2],[" temps",6],["                                ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[19,[["\u2502",2],["  ",1],["tmp#2 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["0",8],["                 ",1],["\u2502\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f",2]]],[20,[["\u2502",2],["  ",1],["tmp#4 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["1",8],["                 ",1],["\u2502\u256d output \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e",2]]],[21,[["\u2502",2],["  ",1],["tmp#6 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["10",8],["                ",1],["\u2502\u2502",2],["Type `:` to run a command, `?` for keys.                      ",1],["\u2502",2]]],[22,[["\u2502",2],["  ",1],["tmp#7 ",2],[" ",1],["Bool    ",7],[" ",1],["= ",2],["true",8],["              ",1],["\u2502\u2502",2],["\u2191\u2193 or j/k select a frame; u/d walk the call stack.            ",1],["\u2502",2]]],[23,[["\u2502",2],["  ",1],["tmp#8 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["792",8],["               ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[24,[["\u2502",2],["  ",1],["tmp#9 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["1",8],["                 ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[25,[["\u2502",2],["  ",1],["tmp#10",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["6",8],["                 ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[26,[["\u2502",2],["  ",1],["tmp#11",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["769",8],["               ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[27,[["\u2502",2],["  ",1],["tmp#12",2],[" ",1],["Bool    ",7],[" ",1],["= ",2],["true",8],["              ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[28,[["\u2502",2],["  ",1],["tmp#13",2],[" ",1],["Unit    ",7],[" ",1],["= ",2],["Unit",8],["              ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[29,[["\u2502",2],["  ",1],["tmp#14",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["1",8],["                 ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]]]},{"t":6.605,"d":[[1,[["\u256d",3],[" backtrace ",4],["\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e",3],["\u256d window \u00b7 walkthrough.px \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e",2]]],[2,[["\u2502\u25b6 #0  ",3],["window         ",4],[" :4",2],["              ",1],["\u2502",3],["\u2502",2],[" ",0],[" 3 \u2502 ",2],["fn window(depths: Vec[Int], i: Int) -> Int {            ",1],["\u2502",2]]],[3,[["\u2502  ",3],["#1  ",2],["count_increases",1],[" :11",2],["             ",1],["\u2502",3],["\u2502",2],["\u25b6",0],[" 4 \u2502 ",2],["    depths[i] + depths[i + 1] + ",1],["depths[i + 2]",5],["           ",1],["\u2502",2]]],[4,[["\u2502  ",3],["#2  ",2],["<entry>        ",1],[" :20",2],["             ",1],["\u2502",3],["\u2502",2],[" ",0],[" 5 \u2502 ",2],["}                                                       ",1],["\u2502",2]]],[5,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],["                                                              ",1],["\u2502",2]]],[6,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],["                                                              ",1],["\u2502",2]]],[7,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],["                                                              ",1],["\u2502",2]]],[8,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],["                                                              ",1],["\u2502",2]]],[9,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],["                                                              ",1],["\u2502",2]]],[10,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],["                                                              ",1],["\u2502",2]]],[11,[["\u2502",3],["                                      ",1],["\u2502",3],["\u2502",2],["                                                              ",1],["\u2502",2]]],[12,[["\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f",3],["\u2502",2],["                                                              ",1],["\u2502",2]]],[16,[["\u2502",2],["  ",1],["i     ",3],[" ",1],["Int     ",7],[" ",1],["= ",2],["8",8],["                 ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[17,[["\u2502",2],[" temps",6],["                                ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[18,[["\u2502",2],["  ",1],["tmp#3 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["260",8],["               ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[19,[["\u2502",2],["  ",1],["tmp#4 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["1",8],["                 ",1],["\u2502\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f",2]]],[20,[["\u2502",2],["  ",1],["tmp#5 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["9",8],["                 ",1],["\u2502\u256d output \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e",2]]],[21,[["\u2502",2],["  ",1],["tmp#6 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["263",8],["               ",1],["\u2502\u2502",2],["Type `:` to run a command, `?` for keys.                      ",1],["\u2502",2]]],[22,[["\u2502",2],["  ",1],["tmp#7 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["523",8],["               ",1],["\u2502\u2502",2],["\u2191\u2193 or j/k select a frame; u/d walk the call stack.            ",1],["\u2502",2]]],[23,[["\u2502",2],["  ",1],["tmp#8 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["2",8],["                 ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[24,[["\u2502",2],["  ",1],["tmp#9 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["10",8],["                ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[25,[["\u2502",2],["  ",1],["tmp#10",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["<uninit>",9],["          ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[26,[["\u2502",2],["  ",1],["tmp#11",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["<uninit>",9],["          ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[27,[["\u2502",2],["                                      ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[28,[["\u2502",2],["                                      ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]],[29,[["\u2502",2],["                                      ",1],["\u2502\u2502",2],["                                                              ",1],["\u2502",2]]]]},{"t":8.205,"d":[[31,[[" \u276f ",4],["p ",1],[" ",12]]]]},{"t":8.706,"d":[[31,[[" \u276f ",4],["p d",1],[" ",12]]]]},{"t":8.787,"d":[[31,[[" \u276f ",4],["p de",1],[" ",12]]]]},{"t":8.87,"d":[[31,[[" \u276f ",4],["p dep",1],[" ",12]]]]},{"t":8.965,"d":[[31,[[" \u276f ",4],["p dept",1],[" ",12]]]]},{"t":9.039,"d":[[31,[[" \u276f ",4],["p depth",1],[" ",12]]]]},{"t":9.123,"d":[[31,[[" \u276f ",4],["p depths",1],[" ",12]]]]},{"t":9.245,"d":[[31,[[" \u276f ",4],["p depths[",1],[" ",12]]]]},{"t":9.35,"d":[[31,[[" \u276f ",4],["p depths[i",1],[" ",12]]]]},{"t":9.443,"d":[[31,[[" \u276f ",4],["p depths[i ",1],[" ",12]]]]},{"t":9.526,"d":[[31,[[" \u276f ",4],["p depths[i +",1],[" ",12]]]]},{"t":9.617,"d":[[31,[[" \u276f ",4],["p depths[i + ",1],[" ",12]]]]},{"t":9.701,"d":[[31,[[" \u276f ",4],["p depths[i + 2",1],[" ",12]]]]},{"t":9.807,"d":[[31,[[" \u276f ",4],["p depths[i + 2]",1],[" ",12]]]]},{"t":10.714,"d":[[23,[["\u2502",2],["  ",1],["tmp#8 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["2",8],["                 ",1],["\u2502\u2502",2],["\u276f ",3],["p depths[i + 2]",13],["                                             ",1],["\u2502",2]]],[24,[["\u2502",2],["  ",1],["tmp#9 ",2],[" ",1],["Int     ",7],[" ",1],["= ",2],["10",8],["                ",1],["\u2502\u2502",2],["error: expression faulted: index out of bounds",14],["                ",1],["\u2502",2]]],[31,[[" backtrace ",10],["  \u2191\u2193",11],[" frame",2],["  tab",11],[" pane",2],["  :",11],[" cmd",2],["  r",11],[" restart",2],["  ?",11],[" keys",2],["  q",11],[" quit",2]]]]}]},"caps":{"segments":{"out":[[["3",1]],[["27",1]]],"err":[],"code":0},"typo":{"out":[],"err":[[["error",0],["[Y112]",13],[": no field `y3` on type `{ x1: Int, y1: Int, x2: Int, y2: Int }`",1]],[],[["  typo.px:4:39",15]],[["  4 | ",15],["    .map(|s| abs(s.x2 - s.x1) + abs(s.y3 - s.y1))",1]],[["    | ",15],["                                      ",1],["^^",14],[" no field `y3` on type `{ x1: Int, y1: Int, x2: Int, y2: Int }`",1]],[],[["praxis: 1 error(s)",1]]],"code":1},"points":{"out":[],"err":[[["error:",0],[" program faulted: input parse mismatch",1]],[["       at input offset 10..11: expected literal \",\"",1]],[["       actual: 12,7\u23ce5,3\u23ce9;1\u23ce4,4\u23ce",1]],[],[["Backtrace:",1]],[["#0   <entry>",1]],[],[["  locals:",1]],[["    points: Vec[{ x: Int, y: Int }] = <uninit>",1]],[["  temps:",1]],[["    <tmp#1> = \"12,7\\n5,3\\n9;1\\n4,4\\n\"",1]],[["    <tmp#2: Int> = 1",1]],[["    <tmp#5: Int> @ \"points.len()\" = <uninit>",1]],[["    <tmp#6: Unit> @ \"out(points.len())\" = <uninit>",1]]],"code":1},"tiles":{"out":[],"err":[[["error",0],["[Y120]",13],[": non-exhaustive match: missing `Wall`, `Portal(_)`",1]],[],[["  tiles.px:9:5",15]],[["  9 | ",15],["    match t {",1]],[["     | ",15],["    ",1],["^^^^^^^^^",14],[" non-exhaustive match: missing `Wall`, `Portal(_)`...",1]],[["  10 | ",15],["        Empty => 1",1]],[["     | ",15],["^^^^^^^^^^^^^^^^^^",14],["...",1]],[["  11 | ",15],["        Number(n) => n",1]],[["     | ",15],["^^^^^^^^^^^^^^^^^^^^^^",14],["...",1]],[["  12 | ",15],["    }",1]],[["     | ",15],["^^^^^",14]],[],[["help:",4],[" add the missing match arms",1]],[["              Wall => panic(\"todo\")",1]],[["              Portal(_) => panic(\"todo\")",1]],[],[["praxis: 1 error(s)",1]]],"code":1},"maze":{"out":[[["11",1]]],"err":[],"code":0}}}</script>
+<script>
+(() => {
+  "use strict";
+  const DATA = JSON.parse(document.getElementById("demo-data").textContent);
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ── theme toggle ──────────────────────────────────────────────────────── */
+  const root = document.documentElement;
+  const btn = document.getElementById("theme");
+  const stored = (() => { try { return localStorage.getItem("praxis-theme"); } catch { return null; } })();
+  if (stored) root.setAttribute("data-theme", stored);
+  btn.addEventListener("click", () => {
+    const isDark = root.getAttribute("data-theme")
+      ? root.getAttribute("data-theme") === "dark"
+      : matchMedia("(prefers-color-scheme: dark)").matches;
+    const next = isDark ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("praxis-theme", next); } catch {}
+  });
+
+  /* ── ANSI attributes -> one stylesheet ─────────────────────────────────── */
+  const BASE = ["#0A0D10","#FF6B4A","#6FCF7F","#E5A54B","#6BA6FF","#C792EA","#52C7B4","#DDE3E9",
+                "#6D7B87","#FF8E73","#93E3A0","#F2C57C","#96C4FF","#DEB6F3","#82DCCE","#FFFFFF"];
+  const xterm = (n) => {
+    if (n < 16) return BASE[n];
+    if (n < 232) {
+      const c = n - 16, s = [0,95,135,175,215,255];
+      return `rgb(${s[Math.floor(c/36)%6]},${s[Math.floor(c/6)%6]},${s[c%6]})`;
+    }
+    const v = 8 + (n - 232) * 10;
+    return `rgb(${v},${v},${v})`;
+  };
+  const color = (v) => (v === null ? null : typeof v === "string" ? v : xterm(v));
+
+  const css = [];
+  DATA.attrs.forEach(([fg, bg, flags], i) => {
+    let f = color(fg), b = color(bg);
+    if (flags & 16) { const t = f; f = b || "#0A0D10"; b = t || "#DDE3E9"; }
+    const d = [];
+    if (f) d.push(`color:${f}`);
+    if (b) d.push(`background:${b}`);
+    if (flags & 1) d.push("font-weight:700");
+    if (flags & 2) d.push("opacity:.62");
+    if (flags & 4) d.push("font-style:italic");
+    if (flags & 8) d.push("text-decoration:underline");
+    if (d.length) css.push(`.a${i}{${d.join(";")}}`);
+  });
+  const sheet = document.createElement("style");
+  sheet.textContent = css.join("");
+  document.head.appendChild(sheet);
+
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const runs = (row) => row.map(([t, a]) => `<span class="a${a}">${esc(t)}</span>`).join("");
+
+  /* ── captured command output ───────────────────────────────────────────── */
+  document.querySelectorAll(".term[data-cap]").forEach((term) => {
+    const cap = DATA.caps[term.dataset.cap];
+    if (!cap) return;
+    const body = term.querySelector(".term-body");
+    const lines = [`<div class="l cmd reveal"><span class="p">$</span> ${esc(term.dataset.cmd)}</div>`];
+    for (const l of [...cap.err, ...cap.out]) lines.push(`<div class="l reveal">${runs(l)}</div>`);
+    body.innerHTML = lines.join("");
+    const exit = term.querySelector(".exit");
+    exit.textContent = `exit ${cap.code}`;
+    exit.className = "exit " + (cap.code === 0 ? "ok" : "bad");
+
+    const els = [...body.querySelectorAll(".reveal")];
+    if (reduced) { els.forEach((e) => e.classList.add("in")); return; }
+    const io = new IntersectionObserver((es) => {
+      es.forEach((e) => {
+        if (!e.isIntersecting) return;
+        io.disconnect();
+        els.forEach((el, i) => setTimeout(() => el.classList.add("in"), 60 + i * 45));
+      });
+    }, { threshold: .25 });
+    io.observe(term);
+  });
+
+  /* ── the hero derivation ───────────────────────────────────────────────── */
+  const CAPS = ["x1", "y1", "x2", "y2"];
+  const TMPL = [
+    { lit: "`" }, { c: 0 }, { lit: "," }, { c: 1 }, { lit: " -&gt; " },
+    { c: 2 }, { lit: "," }, { c: 3 }, { lit: "`" },
+  ];
+  const INPUT = ["0,9 -&gt; 5,9", "8,0 -&gt; 0,8", "9,4 -&gt; 3,4"];
+
+  const dInput = document.getElementById("d-input");
+  const dCode = document.getElementById("d-code");
+  const dType = document.getElementById("d-type");
+  let timers = [];
+  const after = (ms, fn) => timers.push(setTimeout(fn, ms));
+
+  function buildDerive() {
+    timers.forEach(clearTimeout); timers = [];
+
+    dInput.innerHTML = INPUT.map((l) => `<div class="line byteline">${l}</div>`).join("");
+
+    const tmplHtml = TMPL.map((p) =>
+      p.lit !== undefined
+        ? `<span class="${p.lit === "`" ? "tick" : "lit"}">${p.lit}</span>`
+        : `<span class="cap" data-c="${p.c}">{${CAPS[p.c]}:int}</span>`
+    ).join("");
+    dCode.innerHTML =
+      `<div class="line"><span class="kw">var</span> segments = <span class="kw">read</span> <span class="fn">lines</span>(</div>` +
+      `<div class="line tmpl" id="d-tmpl" style="padding-left:2ch"></div>` +
+      `<div class="line" id="d-close" style="visibility:hidden">)</div>`;
+
+    const fields = CAPS.map((n, i) =>
+      `<span class="slot" data-f="${i}"><span class="fld">${n}</span><span class="punc">: </span><span class="prim">Int</span>${i < 3 ? '<span class="punc">, </span>' : ""}</span>`
+    ).join("");
+    dType.innerHTML =
+      `<span class="name">segments</span><span class="punc"> : </span>` +
+      `<span class="slot" data-f="wrap"><span class="prim">Vec</span><span class="punc">[{ </span></span>` +
+      fields +
+      `<span class="slot" data-f="wrap2"><span class="punc"> }]</span></span>`;
+
+    const tmpl = document.getElementById("d-tmpl");
+    const slots = [...dType.querySelectorAll(".slot")];
+    // The template is retyped in place, so a capture is looked up when it is
+    // needed rather than held from before the redraw that replaced it.
+    const capAt = (i) => [...dCode.querySelectorAll(".cap")].find((e) => e.dataset.c == i);
+
+    if (reduced) {
+      tmpl.innerHTML = tmplHtml;
+      document.getElementById("d-close").style.visibility = "visible";
+      dInput.querySelectorAll(".byteline").forEach((b) => b.classList.add("on"));
+      slots.forEach((s) => { s.style.opacity = 1; });
+      dCode.querySelectorAll(".cap").forEach((c) => c.classList.add("done"));
+      return;
+    }
+
+    // 1. type the template out, one piece at a time.
+    let t = 260;
+    const pieces = [];
+    TMPL.forEach((p) => {
+      if (p.lit !== undefined) pieces.push(`<span class="${p.lit === "`" ? "tick" : "lit"}">${p.lit}</span>`);
+      else pieces.push(`<span class="cap" data-c="${p.c}">{${CAPS[p.c]}:int}</span>`);
+    });
+    pieces.forEach((_, i) => {
+      after(t, () => { tmpl.innerHTML = pieces.slice(0, i + 1).join("") + '<span class="caret-cursor"></span>'; });
+      t += 190;
+    });
+    after(t, () => {
+      tmpl.innerHTML = pieces.join("");
+      document.getElementById("d-close").style.visibility = "visible";
+    });
+
+    // 2. each capture lights, and its field lands in the type.
+    t += 420;
+    after(t, () => slots.find((s) => s.dataset.f === "wrap").classList.add("in"));
+    t += 220;
+    CAPS.forEach((_, i) => {
+      after(t, () => {
+        const c = capAt(i);
+        if (c) c.classList.add("hit");
+        slots.find((s) => s.dataset.f == i).classList.add("in");
+      });
+      after(t + 430, () => {
+        const c = capAt(i);
+        if (c) { c.classList.remove("hit"); c.classList.add("done"); }
+      });
+      t += 480;
+    });
+    after(t, () => slots.find((s) => s.dataset.f === "wrap2").classList.add("in"));
+
+    // 3. the bytes the parser would eat.
+    t += 380;
+    dInput.querySelectorAll(".byteline").forEach((b, i) => after(t + i * 170, () => b.classList.add("on")));
+  }
+
+  let derived = false;
+  const dio = new IntersectionObserver((es) => {
+    es.forEach((e) => { if (e.isIntersecting && !derived) { derived = true; buildDerive(); } });
+  }, { threshold: .3 });
+  dio.observe(document.getElementById("derive"));
+  document.getElementById("d-replay").addEventListener("click", buildDerive);
+
+  /* ── the debugger replay ───────────────────────────────────────────────── */
+  const tui = DATA.tui;
+  const grid = document.getElementById("tui");
+  const rowEls = [];
+  for (let i = 0; i < tui.rows; i++) {
+    const d = document.createElement("div");
+    d.className = "r";
+    grid.appendChild(d);
+    rowEls.push(d);
+  }
+
+  // Precompute every frame as full row HTML, so seeking is a straight assignment.
+  const states = [];
+  let cur = new Array(tui.rows).fill("");
+  tui.frames.forEach((f) => {
+    if (f.f) cur = f.f.map(runs);
+    else { cur = cur.slice(); f.d.forEach(([i, row]) => { cur[i] = runs(row); }); }
+    states.push(cur);
+  });
+
+  // Real timestamps, with idle gaps clamped: the pauses are a person thinking.
+  const times = [0];
+  for (let i = 1; i < tui.frames.length; i++) {
+    times.push(times[i - 1] + Math.min(0.72, Math.max(0.05, tui.frames[i].t - tui.frames[i - 1].t)));
+  }
+  const total = times[times.length - 1] + 1.4;
+
+  // What the recording is doing, keyed to the original clock.
+  const TRACK = [
+    { t: 0.0,  key: "",  cap: "The fault, and the whole diagnosis on one screen: <b>three frames</b>, the failing line with <code>▶</code> on it, and the locals — <code>i = 8</code> into a ten-element vector." },
+    { t: 2.0,  key: "j", cap: "<b>j</b> — down a frame. <code>count_increases</code> is the caller, and the source pane follows the selection to the call that led here." },
+    { t: 3.6,  key: "j", cap: "<b>j</b> — the entry point. Every frame carries its own source and its own locals; nothing has to be held in your head." },
+    { t: 5.2,  key: "k", cap: "<b>k</b> — back up toward <code>#0</code>. The arrows are spatial, and the list is drawn innermost-first." },
+    { t: 6.6,  key: "k", cap: "Frame 0 again. <code>tmp#9 @ \"i + 2\" = 10</code> computed the index; <code>tmp#10 @ \"depths[i + 2]\"</code> is <code>&lt;uninit&gt;</code> because it never produced a value." },
+    { t: 8.2,  key: "p", cap: "<b>p</b> — open the command line, primed to evaluate an expression against the crash snapshot's own locals." },
+    { t: 9.8,  key: "↵", cap: "<b>p depths[i + 2]</b> faults again, right there. Not a re-derivation — the faulting expression, run a second time from the values the program actually had." },
+    { t: 10.7, key: "q", cap: "<b>q</b> — quit. The screen was an alternate one, so the printed crash report is still in the scrollback." },
+  ];
+  const keysEl = document.getElementById("tui-keys");
+  TRACK.filter((s) => s.key).forEach((s) => {
+    const k = document.createElement("span");
+    k.className = "key";
+    k.textContent = s.key;
+    keysEl.appendChild(k);
+  });
+  const keyEls = [...keysEl.children];
+  const capEl = document.getElementById("tui-caption");
+  const fill = document.getElementById("tui-fill");
+  const playBtn = document.getElementById("tui-play");
+  const track = document.getElementById("tui-track");
+
+  let shown = new Array(tui.rows).fill(null);
+  function paint(i) {
+    const st = states[Math.max(0, Math.min(states.length - 1, i))];
+    for (let r = 0; r < tui.rows; r++) {
+      if (shown[r] !== st[r]) { rowEls[r].innerHTML = st[r]; shown[r] = st[r]; }
+    }
+  }
+  function narrate(origT) {
+    let idx = 0;
+    for (let i = 0; i < TRACK.length; i++) if (origT >= TRACK[i].t - 0.05) idx = i;
+    if (capEl.dataset.i != idx) { capEl.dataset.i = idx; capEl.innerHTML = TRACK[idx].cap; }
+    const keyIdx = TRACK.slice(0, idx + 1).filter((s) => s.key).length - 1;
+    keyEls.forEach((k, i) => k.classList.toggle("lit", i === keyIdx));
+  }
+
+  // The recording opens on the printed crash report and switches to the
+  // alternate screen within 8ms, so frame 0 is a poor still. Rest on the first
+  // drawn screen instead, and rewind to 0 the first time someone presses play
+  // — the report going by is part of what the recording shows.
+  const POSTER = Math.max(0, states.findIndex((rows) =>
+    rows[0] && rows[0].includes("frame(s)")));
+  let atPoster = true;
+
+  let playing = false, t0 = 0, offset = 0, raf = 0;
+  function seek(sec) {
+    sec = Math.max(0, Math.min(total, sec));
+    offset = sec;
+    atPoster = false;
+    let i = 0;
+    while (i + 1 < times.length && times[i + 1] <= sec) i++;
+    paint(i);
+    narrate(tui.frames[i].t);
+    fill.style.width = `${(sec / total) * 100}%`;
+    track.setAttribute("aria-valuenow", Math.round((sec / total) * 100));
+  }
+  function tick() {
+    if (!playing) return;
+    const sec = offset + (performance.now() - t0) / 1000;
+    if (sec >= total) { pause(); seek(total); return; }
+    let i = 0;
+    while (i + 1 < times.length && times[i + 1] <= sec) i++;
+    paint(i);
+    narrate(tui.frames[i].t);
+    fill.style.width = `${(sec / total) * 100}%`;
+    raf = requestAnimationFrame(tick);
+  }
+  function play() {
+    if (atPoster || offset >= total - 0.01) offset = 0;
+    atPoster = false;
+    playing = true; t0 = performance.now();
+    playBtn.textContent = "❚❚ pause";
+    raf = requestAnimationFrame(tick);
+  }
+  function pause() {
+    if (playing) offset += (performance.now() - t0) / 1000;
+    playing = false;
+    cancelAnimationFrame(raf);
+    playBtn.textContent = offset >= total - 0.01 ? "↺ replay" : "▶ play";
+  }
+  playBtn.addEventListener("click", () => (playing ? pause() : play()));
+  const scrub = (e) => {
+    const r = track.getBoundingClientRect();
+    const x = ((e.touches ? e.touches[0].clientX : e.clientX) - r.left) / r.width;
+    pause(); seek(x * total);
+  };
+  track.addEventListener("pointerdown", (e) => { scrub(e); track.setPointerCapture(e.pointerId); });
+  track.addEventListener("pointermove", (e) => { if (track.hasPointerCapture(e.pointerId)) scrub(e); });
+  track.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowRight") { pause(); seek(offset + 0.6); e.preventDefault(); }
+    if (e.key === "ArrowLeft") { pause(); seek(offset - 0.6); e.preventDefault(); }
+    if (e.key === " " || e.key === "Enter") { playing ? pause() : play(); e.preventDefault(); }
+  });
+
+  seek(times[POSTER]);
+  atPoster = true;
+  if (reduced) { seek(total); }
+  else {
+    let started = false;
+    const tio = new IntersectionObserver((es) => {
+      es.forEach((e) => {
+        if (e.isIntersecting && !started) { started = true; setTimeout(play, 350); }
+        else if (!e.isIntersecting && playing) pause();
+      });
+    }, { threshold: .35 });
+    tio.observe(grid);
+  }
+
+  /* Fit the 104-column screen to the pane where it can, scroll where it can't. */
+  const fit = () => {
+    const pane = grid.parentElement;
+    const cs = getComputedStyle(pane);
+    const avail = pane.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - 3;
+    const size = Math.max(6, Math.min(12, avail / tui.cols / 0.601));
+    grid.style.fontSize = `${size}px`;
+  };
+  fit();
+  addEventListener("resize", fit);
+})();
+</script>
+</body>
+</html>

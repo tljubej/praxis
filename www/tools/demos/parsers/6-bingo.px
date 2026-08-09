@@ -1,0 +1,4 @@
+//! a header and N boards
+//= sections(draws: csv(int), boards: repeated(matrix(int)))
+var v = read sections(draws: csv(int), boards: repeated(matrix(int)))
+out(v)

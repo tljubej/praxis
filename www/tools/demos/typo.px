@@ -1,0 +1,7 @@
+var segments = read lines(`{x1:int},{y1:int} -> {x2:int},{y2:int}`)
+
+var total = segments
+    .map(|s| abs(s.x2 - s.x1) + abs(s.y3 - s.y1))
+    .sum()
+
+out(total)

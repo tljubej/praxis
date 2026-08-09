@@ -1,0 +1,7 @@
+// No struct declared anywhere:
+// the template made the type.
+var points = read lines(`{x:int},{y:int}`)
+
+fn area(r) -> Int { r.x * r.y }
+
+out(area(points[0]))

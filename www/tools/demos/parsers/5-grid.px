@@ -1,0 +1,4 @@
+//! a rectangle of characters
+//= grid(char)
+var v = read grid(char)
+out(v)

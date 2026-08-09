@@ -1,0 +1,14 @@
+var maze = read grid(char)
+var wall = "#"[0]
+
+// The search never sees the grid. It only asks
+// what is next to here.
+fn open(g: Grid[Char], w: Char, p: (Int, Int)) {
+    g.neighbors4(p).filter(|q| g[q.0, q.1] != w)
+}
+
+out(bfs_distance(
+    (0, 0),
+    |p| open(maze, wall, p),
+    |p| p == (4, 4),
+))

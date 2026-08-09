@@ -1,0 +1,4 @@
+//! instructions in noise
+//= scan(choice(Mul: `mul({a:int},{b:int})`, Enable: `do()`))
+var v = read scan(choice(Mul: `mul({a:int},{b:int})`, Enable: `do()`))
+out(v)

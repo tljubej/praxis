@@ -1,0 +1,4 @@
+//! blank-line groups
+//= sections(lines(int))
+var v = read sections(lines(int))
+out(v)

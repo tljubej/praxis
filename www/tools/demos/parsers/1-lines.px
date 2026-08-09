@@ -1,0 +1,4 @@
+//! one number per line
+//= lines(int)
+var v = read lines(int)
+out(v)

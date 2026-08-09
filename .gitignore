@@ -25,3 +25,7 @@ docs/book/book/
 # with `rustc` on demand). `results.json` and `REPORT.md` are *not* ignored:
 # they are the evidence the report is generated from.
 benchmarks/.build/
+
+# The website's recording scratch dir (www/tools/capture.py rebuilds it).
+www/tools/.build/
+__pycache__/

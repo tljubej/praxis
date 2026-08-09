@@ -1,0 +1,3 @@
+// Every line of the input is meant to be `x,y`. One of them is not.
+var points = read lines(`{x:int},{y:int}`)
+out(points.len())

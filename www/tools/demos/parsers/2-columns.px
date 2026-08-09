@@ -1,0 +1,4 @@
+//! two columns
+//= lines(`{left:int} {right:int}`)
+var v = read lines(`{left:int} {right:int}`)
+out(v)

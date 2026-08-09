@@ -1,0 +1,4 @@
+//! one comma-separated line
+//= csv(int)
+var v = read csv(int)
+out(v)
