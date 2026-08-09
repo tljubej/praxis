@@ -159,6 +159,22 @@ SIZES_SHA256 = "194ad251f4c2387ffc36a7586572fbea2c81a06bdc592d03939fa5fe87f6927a
 # number. What it cannot absorb is a *step change* mid-sweep, which is what the
 # between-benchmarks re-check is for and which stays armed at the raised ceiling.
 MAX_LOAD_1MIN = 0.5
+
+# The process half is matched against each process's **name**, not its whole
+# command line, and that is a correctness fix rather than a relaxation.
+#
+# The repository directory is called `praxis`, so *any* command line that names a
+# path inside it contains the pattern. `pgrep -f` therefore matched every editor,
+# every shell, and — the case that found this — another agent's idle `until …;
+# do sleep 15; done` poller, whose only relationship to a build was the word in
+# a log path it was tailing. Excluding self and ancestors is not enough: a
+# sibling session's shell is neither. So the gate reported a machine saturated by
+# builds while every core was free, and the half of quiescence that *cannot* be
+# waived was the half producing false positives.
+#
+# A name match still catches everything the gate is for. `cargo` and `rustc` are
+# process names; so is the staged `praxis-a`/`praxis-b` a competing sweep runs,
+# and so is a `praxis` a `run.py` has under way. What it stops catching is text.
 QUIET_PATTERN = "cargo|rustc|praxis"
 
 # §6: "a sub-2% single-benchmark delta on this machine is not a result". Used
@@ -250,23 +266,34 @@ def _ancestors(pid: int) -> set[int]:
 def competing_processes() -> list[str]:
     """Live `cargo`/`rustc`/`praxis` processes that are not this measurement.
 
-    `pgrep -f` matches the whole command line, and this script's own path
-    contains "praxis", so it matches itself and every shell that invoked it. Own
-    pid and ancestors are excluded: the process that started this measurement is
-    by construction not competing with it. Nothing else is filtered — a sibling
-    agent's `cargo test` is exactly what this is for.
+    Matched on the process **name** (`pgrep` without `-f`) — see
+    [`QUIET_PATTERN`] for why the command-line match this replaced reported a
+    busy machine whenever a shell mentioned a path inside the repository.
+
+    Own pid and ancestors are still excluded: the process that started this
+    measurement is by construction not competing with it. Nothing else is
+    filtered — a sibling agent's `cargo test` is exactly what this is for, and
+    `cargo` is its name.
+
+    The *message* still carries the full command line, read per hit, because
+    "68120 cargo" does not tell you whose build to go and wait for.
     """
-    proc = subprocess.run(
-        ["pgrep", "-fl", QUIET_PATTERN], capture_output=True, text=True
-    )
+    proc = subprocess.run(["pgrep", QUIET_PATTERN], capture_output=True, text=True)
     mine = _ancestors(os.getpid())
     out = []
-    for line in proc.stdout.splitlines():
-        pid, _, cmd = line.partition(" ")
-        if pid.isdigit() and int(pid) not in mine:
-            # One `rustc` command line is ~2600 characters of `--extern` flags.
-            # Eight of them buries the load average this message also carries.
-            out.append(f"{pid} {cmd[:110]}…" if len(cmd) > 110 else f"{pid} {cmd}")
+    for line in proc.stdout.split():
+        if not line.isdigit() or int(line) in mine:
+            continue
+        cmd = subprocess.run(
+            ["ps", "-o", "command=", "-p", line], capture_output=True, text=True
+        ).stdout.strip()
+        # A process that exited between the `pgrep` and the `ps` is not
+        # competing with anything; it left before the sweep began.
+        if not cmd:
+            continue
+        # One `rustc` command line is ~2600 characters of `--extern` flags.
+        # Eight of them buries the load average this message also carries.
+        out.append(f"{line} {cmd[:110]}…" if len(cmd) > 110 else f"{line} {cmd}")
     return out
 
 
@@ -419,11 +446,20 @@ def main() -> None:
 
     quiet, load, busy = check_quiescent(args.max_load)
     if not quiet and not args.smoke:
-        detail = "\n".join(f"    {p}" for p in busy) or "    (none)"
+        # Only the half that actually failed. Printing an empty process list
+        # under a load refusal reads as "and there are builds running too",
+        # which sends the reader to look for one that is not there.
+        procs = (
+            f"  competing processes matching /{QUIET_PATTERN}/:\n"
+            + "\n".join(f"    {p}" for p in busy)
+            + "\n"
+            if busy
+            else ""
+        )
         die(
             "the machine is not quiescent — refusing to measure.\n"
             f"  1-minute load {load:.2f} (must be < {args.max_load})\n"
-            f"  competing processes matching /{QUIET_PATTERN}/:\n{detail}\n"
+            f"{procs}"
             "  Note this gate is blind to XProtect: a freshly linked binary is "
             "exec-scanned by `syspolicyd`, which matches none of those names, so "
             "a `just ci` that has just finished linking is still costing you "
