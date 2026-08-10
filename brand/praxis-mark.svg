@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Keep fill and stroke on separate classes. A CSS rule outranks a
+       presentation attribute, so a class that sets `fill` would override the
+       outlined post's fill="none" and close its counter. -->
+  <style>
+    .solid{fill:#171214}
+    .open{fill:none;stroke:#171214}
+    .strut{fill:#C8102E}
+    @media (prefers-color-scheme:dark){
+      .solid{fill:#EAE3E4}
+      .open{stroke:#EAE3E4}
+      .strut{fill:#F04555}
+    }
+  </style>
+  <rect class="solid" x="14" y="14" width="106" height="19"/>
+  <path class="open" d="M25.5 33 V112.5 H37.5 V33" stroke-width="7"/>
+  <polygon class="strut" points="87,33 106,33 120,116 101,116"/>
+</svg>

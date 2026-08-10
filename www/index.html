@@ -4,75 +4,63 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Praxis — the input is a type</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%20128%20128%22%3E%3Cstyle%3E.a%7Bfill:%23171214%7D.b%7Bfill:none;stroke:%23171214%7D.c%7Bfill:%23C8102E%7D@media(prefers-color-scheme:dark)%7B.a%7Bfill:%23EAE3E4%7D.b%7Bstroke:%23EAE3E4%7D.c%7Bfill:%23F04555%7D%7D%3C/style%3E%3Crect%20class=%22a%22%20x=%2214%22%20y=%2214%22%20width=%22106%22%20height=%2219%22/%3E%3Cpath%20class=%22b%22%20d=%22M25.5%2033V112.5H37.5V33%22%20stroke-width=%227%22/%3E%3Cpolygon%20class=%22c%22%20points=%2287,33%20106,33%20120,116%20101,116%22/%3E%3C/svg%3E">
 <meta name="description" content="A small, statically typed, garbage-collected language for puzzle solving. Describe the input once and the compiler derives the type; when something faults, you land in a full-screen debugger.">
 <style>
 /* ── tokens ─────────────────────────────────────────────────────────────────
-   Three hues, and each one means something the compiler means by it:
-   signal = input bytes, type = what inference knows, fault = a diagnostic. */
+   Dark is the page. Light is a preference, reachable from the toggle, not the
+   default the OS picks for us.
+
+   Three hues still mean what the compiler means by them — signal = input bytes,
+   type = what inference knows, fault = a diagnostic — and each one is the colour
+   the terminal captures further down actually print, so the prose cannot
+   contradict the screenshot beside it.
+
+   The neutrals carry the mark instead. They are a warm charcoal biased a few
+   degrees toward the strut's crimson rather than the blue-black they were, so
+   the page and the logo share a world without the page going red. --accent is
+   the mark itself, spent only on chrome: what you can press, and what counts as
+   ours. It is deliberately close to --fault, so never put the two side by side
+   and never use --accent where a diagnostic could appear. */
 :root {
-  --ground:   #F1F3F4;
-  --panel:    #FFFFFF;
-  --panel-2:  #E9EDEF;
-  --rule:     #D3DBDF;
-  --rule-2:   #E3E9EC;
-  --ink:      #12171B;
-  --ink-2:    #55636E;
-  --ink-3:    #7E8B95;
-  --signal:   #9A5F12;
-  --type:     #0B7566;
-  --fault:    #BE3418;
-  --shadow:   0 1px 2px rgba(18,23,27,.06), 0 8px 24px -12px rgba(18,23,27,.18);
+  --ground:   #0F0C0D;
+  --panel:    #161214;
+  --panel-2:  #1D1719;
+  --rule:     #2E2528;
+  --rule-2:   #221B1D;
+  --ink:      #EAE3E4;
+  --ink-2:    #ADA1A3;
+  --ink-3:    #8A7C7F;
+  --signal:   #E5A54B;
+  --type:     #52C7B4;
+  --fault:    #FF6B4A;
+  --mark:     #F04555;
+  --accent:   var(--mark);
+  --shadow:   0 1px 0 rgba(255,255,255,.02), 0 18px 40px -24px #000;
 
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
   --prose: Charter, "Bitstream Charter", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
 
+  /* The terminals stay the cool near-black they were captured on. They are a
+     picture of another program, and reading as a separate surface is correct. */
   --term-bg:  #0A0D10;
   --term-fg:  #DDE3E9;
   --measure:  66ch;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --ground:   #0A0D10;
-    --panel:    #10151A;
-    --panel-2:  #161C22;
-    --rule:     #232C34;
-    --rule-2:   #1A2027;
-    --ink:      #DDE3E9;
-    --ink-2:    #98A6B2;
-    --ink-3:    #6D7B87;
-    --signal:   #E5A54B;
-    --type:     #52C7B4;
-    --fault:    #FF6B4A;
-    --shadow:   0 1px 0 rgba(255,255,255,.02), 0 18px 40px -24px #000;
-  }
-}
-:root[data-theme="dark"] {
-  --ground:   #0A0D10;
-  --panel:    #10151A;
-  --panel-2:  #161C22;
-  --rule:     #232C34;
-  --rule-2:   #1A2027;
-  --ink:      #DDE3E9;
-  --ink-2:    #98A6B2;
-  --ink-3:    #6D7B87;
-  --signal:   #E5A54B;
-  --type:     #52C7B4;
-  --fault:    #FF6B4A;
-  --shadow:   0 1px 0 rgba(255,255,255,.02), 0 18px 40px -24px #000;
-}
 :root[data-theme="light"] {
-  --ground:   #F1F3F4;
+  --ground:   #F5F1F1;
   --panel:    #FFFFFF;
-  --panel-2:  #E9EDEF;
-  --rule:     #D3DBDF;
-  --rule-2:   #E3E9EC;
-  --ink:      #12171B;
-  --ink-2:    #55636E;
-  --ink-3:    #7E8B95;
+  --panel-2:  #EDE6E7;
+  --rule:     #DCD1D2;
+  --rule-2:   #E9E1E2;
+  --ink:      #171214;
+  --ink-2:    #5C4F52;
+  --ink-3:    #756769;
   --signal:   #9A5F12;
   --type:     #0B7566;
   --fault:    #BE3418;
-  --shadow:   0 1px 2px rgba(18,23,27,.06), 0 8px 24px -12px rgba(18,23,27,.18);
+  --mark:     #C8102E;
+  --shadow:   0 1px 2px rgba(23,18,20,.06), 0 8px 24px -12px rgba(23,18,20,.18);
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -102,11 +90,11 @@ body {
   margin: 0 0 1.6rem;
 }
 .rule::before {
-  content: ""; width: 1px; height: 11px; background: var(--rule); flex: none;
+  content: ""; width: 1px; height: 11px; background: var(--accent); flex: none;
 }
 .rule-label {
   font-family: var(--mono); font-size: 11px; font-weight: 600;
-  letter-spacing: .16em; text-transform: uppercase; color: var(--ink-3);
+  letter-spacing: .16em; text-transform: uppercase; color: var(--accent);
   white-space: nowrap;
 }
 .rule-line { flex: 1 1 auto; height: 1px; background: var(--rule); }
@@ -133,7 +121,7 @@ p strong { color: var(--ink); font-weight: 600; }
 p.lead { font-size: 1.12rem; color: var(--ink); }
 a { color: inherit; }
 a:focus-visible, button:focus-visible {
-  outline: 2px solid var(--type); outline-offset: 3px; border-radius: 2px;
+  outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px;
 }
 code, .mono { font-family: var(--mono); font-size: .88em; }
 p code, li code {
@@ -157,7 +145,14 @@ header.top {
   letter-spacing: -.02em; text-decoration: none; color: var(--ink);
   display: inline-flex; align-items: baseline; gap: .5rem;
 }
-.mark .caret { color: var(--type); }
+/* The mark is Π, the initial of πρᾶξις, with one post an outline and one post
+   built and raked. The frame takes the surrounding ink; only the strut is
+   --mark, so the whole lockup follows the theme toggle without a second file. */
+.mark .caret {
+  width: 1.4em; height: 1.4em; display: block; align-self: center;
+  fill: currentColor; overflow: visible;
+}
+.mark .caret .strut { fill: var(--mark); }
 .ver {
   font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em;
   color: var(--ink-3); border: 1px solid var(--rule); border-radius: 999px;
@@ -187,6 +182,7 @@ nav.top-nav a:hover { color: var(--ink); }
 }
 .hero h1 .is { color: var(--signal); }
 .hero h1 .ty { color: var(--type); }
+.hero h1 .dot { color: var(--accent); }
 .hero .lead { max-width: 60ch; font-size: 1.18rem; }
 .hero-meta {
   display: flex; flex-wrap: wrap; gap: .45rem .9rem; align-items: center;
@@ -207,7 +203,7 @@ nav.top-nav a:hover { color: var(--ink); }
 }
 .btn:hover { border-color: var(--ink-3); transform: translateY(-1px); }
 .btn.primary {
-  background: var(--type); border-color: var(--type); color: var(--ground);
+  background: var(--accent); border-color: var(--accent); color: var(--ground);
   font-weight: 600;
 }
 .btn.primary:hover { filter: brightness(1.07); }
@@ -292,7 +288,7 @@ nav.top-nav a:hover { color: var(--ink); }
   color: var(--ink-3); background: none; border: 0; cursor: pointer;
   padding: .2rem 0; letter-spacing: .04em;
 }
-.replay:hover { color: var(--type); }
+.replay:hover { color: var(--accent); }
 
 /* ── prose + terminals ──────────────────────────────────────────────────── */
 .two {
@@ -363,7 +359,7 @@ nav.top-nav a:hover { color: var(--ink); }
 }
 .track .fill {
   position: absolute; inset: 0 auto 0 0; width: 0;
-  background: var(--type); border-radius: 2px;
+  background: var(--accent); border-radius: 2px;
 }
 .keys { display: flex; gap: .3rem; }
 .key {
@@ -372,7 +368,7 @@ nav.top-nav a:hover { color: var(--ink); }
   color: var(--ink-3); transition: color .15s, border-color .15s, background-color .15s;
 }
 .key.lit {
-  color: var(--ground); background: var(--type); border-color: var(--type);
+  color: var(--ground); background: var(--accent); border-color: var(--accent);
   font-weight: 600;
 }
 .caption {
@@ -380,7 +376,7 @@ nav.top-nav a:hover { color: var(--ink); }
   color: var(--ink-2); min-height: 4.5em; max-width: 78ch; line-height: 1.5;
 }
 .caption code { color: var(--ink); }
-.caption b { color: var(--type); font-weight: 600; }
+.caption b { color: var(--ink); font-weight: 600; }
 
 /* ── grids ──────────────────────────────────────────────────────────────── */
 .feats {
@@ -414,13 +410,13 @@ table.bench th, table.bench td {
 table.bench th { color: var(--ink-3); font-weight: 500; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
 table.bench td:first-child, table.bench th:first-child { text-align: left; color: var(--ink); }
 table.bench tr.total td { border-bottom: 0; border-top: 1px solid var(--rule); font-weight: 600; color: var(--ink); }
-table.bench td.px { color: var(--type); }
+table.bench td.px { color: var(--ink); font-weight: 600; }
 .scroll-x { overflow-x: auto; }
 
 .stats { display: grid; gap: 1.4rem 2.4rem; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); margin-bottom: 2rem; }
 .stat .n {
   font-family: var(--mono); font-size: clamp(1.6rem, 4vw, 2.3rem); font-weight: 600;
-  letter-spacing: -.04em; color: var(--type); display: block; line-height: 1.1;
+  letter-spacing: -.04em; color: var(--ink); display: block; line-height: 1.1;
 }
 .stat .l { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); letter-spacing: .04em; }
 
@@ -454,7 +450,7 @@ footer a { color: var(--ink-2); }
 
 <header class="top">
   <div class="wrap top-in">
-    <a class="mark" href="#top"><span class="caret">▶</span>praxis</a>
+    <a class="mark" href="#top"><svg class="caret" viewBox="0 0 128 128" aria-hidden="true" focusable="false"><rect x="14" y="14" width="106" height="19"/><path d="M25.5 33 V112.5 H37.5 V33" fill="none" stroke="currentColor" stroke-width="7"/><polygon class="strut" points="87,33 106,33 120,116 101,116"/></svg>praxis</a>
     <span class="ver">v0.1.0</span>
     <nav class="top-nav">
       <a href="#read">read</a>
@@ -471,7 +467,7 @@ footer a { color: var(--ink-2); }
 
 <!-- ═══ hero ═══════════════════════════════════════════════════════════════ -->
 <section class="hero wrap" style="padding-top:4.2rem">
-  <h1>The <span class="is">input</span><br>is a <span class="ty">type</span>.</h1>
+  <h1>The <span class="is">input</span><br>is a <span class="ty">type</span><span class="dot">.</span></h1>
   <p class="lead">Praxis is a small, statically typed, garbage-collected language for
   Advent-of-Code-style puzzle solving. You describe the shape of the input once, in a
   sublanguage of templates and captures — and from that one line the compiler derives
@@ -827,10 +823,10 @@ you read    fn foo(a: Int, b: Int)</pre>
   const stored = (() => { try { return localStorage.getItem("praxis-theme"); } catch { return null; } })();
   if (stored) root.setAttribute("data-theme", stored);
   btn.addEventListener("click", () => {
-    const isDark = root.getAttribute("data-theme")
-      ? root.getAttribute("data-theme") === "dark"
-      : matchMedia("(prefers-color-scheme: dark)").matches;
-    const next = isDark ? "light" : "dark";
+    /* Dark is the page, so anything that is not an explicit light is dark.
+       The OS preference is deliberately not consulted: it decides the tab
+       strip and the favicon, not this. */
+    const next = root.getAttribute("data-theme") === "light" ? "dark" : "light";
     root.setAttribute("data-theme", next);
     try { localStorage.setItem("praxis-theme", next); } catch {}
   });

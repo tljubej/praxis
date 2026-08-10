@@ -7,6 +7,11 @@ dependencies and no network requests. Open it directly, or serve the directory:
 python3 -m http.server -d www 8000
 ```
 
+That last property is why the mark in the header is inlined SVG in the markup and
+the favicon is inlined as a `data:` URI rather than either one being a `<link>`
+to a file. The source of truth for both is [`brand/`](../brand), which the page
+does not load; changing the geometry there means changing it here by hand.
+
 ## Nothing on it is transcribed
 
 Every terminal, every code sample and every count on the page is produced by
