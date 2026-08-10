@@ -47,7 +47,10 @@ pub fn analyze_parser_expr(
     };
     // Registration is bounded and can refuse. A refusal is a diagnostic, not a
     // wrapped index into somebody else's plan.
-    let plan = match register_plan(lower_to_plan(&ast)) {
+    // The arena decides the record layout order, because it is the only thing
+    // that has seen every spelling of a shape in this program (ADR-152). It has
+    // already seen this one: `synthesize` above registered a definition for it.
+    let plan = match register_plan(lower_to_plan(&ast, db)) {
         Ok(id) => id,
         Err(e) => {
             report_conversion(diagnostics, file, parser_expr, e);

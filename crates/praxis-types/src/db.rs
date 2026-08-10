@@ -9,6 +9,8 @@
 //! a `&mut TypeDb` for the duration of inference and then read it through shared
 //! references for diagnostics/hover.
 
+use std::collections::HashMap;
+
 use praxis_stdlib::type_pattern::ScalarType;
 
 use crate::constraint::Constraint;
@@ -52,6 +54,15 @@ pub struct TypeDb {
     /// is established through unification (not construction), mirroring how
     /// tuples/funcs work.
     pub(crate) record_defs: Vec<RecordDef>,
+    /// The canonical field order of each **anonymous** record shape, keyed by
+    /// that shape's field names sorted (ADR-152).
+    ///
+    /// §5.6 says field order does not decide an anonymous record's identity, so
+    /// two spellings of one shape are one type — and a type has exactly one
+    /// field order, because a field read compiles to a slot index. This is
+    /// where that order is decided: the first spelling of a shape registers its
+    /// own order, and every later one is permuted into it.
+    anonymous_field_orders: HashMap<Vec<String>, Vec<String>>,
     /// Enum definitions, indexed by [`EnumDefId`] (ADR-025).
     pub(crate) enum_defs: Vec<EnumDef>,
     /// The prelude `Option`'s def, seeded at construction so there is exactly
@@ -89,6 +100,7 @@ impl TypeDb {
             slots: Vec::new(),
             level: Level::OUTERMOST,
             record_defs: Vec::new(),
+            anonymous_field_orders: HashMap::new(),
             enum_defs: Vec::new(),
             // Overwritten below; `register_enum` needs the arena to exist.
             option_def: EnumDefId(0),
@@ -598,11 +610,18 @@ impl TypeDb {
     /// Register a record definition (§4.5 nominal, §5.6 anonymous structural).
     ///
     /// `name` is `Some` for a source-declared record and `None` for an anonymous
-    /// structural one (a parser template, ADR-024). Each call mints a fresh def:
-    /// nominal records are distinct by name even with identical fields, and
-    /// anonymous ones establish identity through unification (two with the same
-    /// field-name set unify and get linked), mirroring how tuples and functions
-    /// work. Field display order follows the order given here.
+    /// structural one (a parser template, ADR-024, or a `{ x: 1 }` literal,
+    /// ADR-152). Each call mints a fresh def: nominal records are distinct by
+    /// name even with identical fields, and anonymous ones establish identity
+    /// through unification (two with the same field-name set unify and get
+    /// linked), mirroring how tuples and functions work.
+    ///
+    /// **A nominal record's field order is the declaration's; an anonymous
+    /// one's is [`canonical_field_order`](Self::canonical_field_order)'s** —
+    /// the order the shape was first written in anywhere in this program. Two
+    /// spellings of one anonymous shape are one type (§5.6), a type has one
+    /// field order because a field read compiles to a slot index, and this is
+    /// the one place that can decide it for every producer at once.
     ///
     /// Takes a validated [`FieldSet`] — the one place a duplicate field name is
     /// rejected, rather than at whichever syntax caller happened to remember.
@@ -616,14 +635,47 @@ impl TypeDb {
         params: Vec<VarId>,
         fields: FieldSet,
     ) -> RecordDefId {
+        let mut fields = fields.into_vec();
+        if name.is_none() {
+            let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+            let order = self.canonical_field_order(&names).to_vec();
+            fields.sort_by_key(|f| {
+                order
+                    .iter()
+                    .position(|n| *n == f.name)
+                    .unwrap_or(usize::MAX)
+            });
+        }
         let def = RecordDef {
             name,
             params,
-            fields: fields.into_vec(),
+            fields,
         };
         let id = RecordDefId(self.record_defs.len() as u32);
         self.record_defs.push(def);
         id
+    }
+
+    /// The canonical field order of the anonymous record shape whose fields are
+    /// `names` — the order `names` were written in, if this shape has not been
+    /// seen before, and the order the *first* spelling used if it has.
+    ///
+    /// Establishing it on first sight is what lets every producer of a value
+    /// agree without any of them knowing about the others: a `{ h: 4, w: 3 }`
+    /// literal, a ``{h:int}x{w:int}`` template and a `{w:int}x{h:int}` template
+    /// are one type, and every value of it is laid out in one order — so the
+    /// slot index a field read compiles to means the same thing in all three.
+    ///
+    /// Keyed by the **sorted** names, because that is the identity §5.6 gives
+    /// the shape. The answer is in canonical order, which the caller matches its
+    /// own names against; a name not in `names` cannot come back, since the key
+    /// is the name set itself.
+    pub fn canonical_field_order(&mut self, names: &[&str]) -> &[String] {
+        let mut key: Vec<String> = names.iter().map(|n| (*n).to_string()).collect();
+        key.sort();
+        self.anonymous_field_orders
+            .entry(key)
+            .or_insert_with(|| names.iter().map(|n| (*n).to_string()).collect())
     }
 
     /// Register an enum definition (§4.6), nominal (`Some(name)`) or anonymous

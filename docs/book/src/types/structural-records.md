@@ -2,14 +2,14 @@
 
 There are two kinds of record type in Praxis. A `struct` declaration makes a
 **nominal** one: `Point` is `Point` because it is that declaration, and a second
-declaration with identical fields is a different type. The input parser makes
-**anonymous** ones: `{ x: Int, y: Int }` is that field set and nothing else, and
-any two of them with the same fields are the same type (§5.6).
+declaration with identical fields is a different type. The other kind is
+**anonymous**: `{ x: Int, y: Int }` is that field set and nothing else, and any
+two of them with the same fields are the same type (§5.6).
 
-The anonymous kind is not something you can write. There is no record literal
-without a name in front of it: a `{ … }` in expression position is a block, so
-`{ x: 1, y: 2 }` is read as one and rejected. Every anonymous record in a
-program comes from a named capture in a parser expression:
+Two things produce an anonymous record, and they produce the same one. You write
+a literal with no name in front of it — `{ x: 1, y: 2 }`, whose type is the
+fields it just listed. Or a named capture in a parser expression derives one
+with no literal at all:
 
 ```praxis
 var rows = read lines(`{x:int},{y:int}`)
@@ -40,6 +40,103 @@ it prints
 `rows` is a `Vec[{ x: Int, y: Int }]`, and it is that type before the program
 runs. How a parser expression arrives at it is
 [type derivation](../input/type-derivation.md).
+
+## Writing one
+
+A record literal with no name in front of it builds an anonymous record. Nothing
+is declared first, because there is nothing to declare: the fields are the type.
+
+```praxis
+var p = { x: 1, y: 2 }
+out(p.x + p.y)
+
+p.x = 9
+out(p)
+
+var name = "origin"
+var tagged = { name, pos: p }
+out(tagged)
+out(tagged.pos.y)
+```
+
+```text
+3
+{ x: 9, y: 2 }
+{ name: origin, pos: { x: 9, y: 2 } }
+2
+```
+
+Fields are read and assigned like any other record's, they nest, and `{ name }`
+puns — it takes the field from the binding of that name, exactly as the headed
+form does. The parser and the literal build the same type, so a helper written
+for rows a template produced takes one you wrote by hand:
+
+```praxis
+fn area(r) { r.w * r.h }
+
+var rooms = read lines(`{w:int}x{h:int}`)
+var default_room = { w: 2, h: 5 }
+
+for room in rooms {
+    out(area(room))
+}
+out(area(default_room))
+```
+
+Given
+
+```text
+3x4
+10x10
+```
+
+it prints
+
+```text
+12
+100
+10
+```
+
+### The one brace that stays a block
+
+A `{` where an expression must begin could open either a block or a record, and
+the tie is broken by **what a block cannot be**: a name followed by a `:`, or a
+name followed by a `,`. So `{ x: 1 }`, `{ x: 1, y: 2 }` and `{ x, y }` are
+records, and everything else at that position is the block it always was.
+
+`{ x }` is the one case the rule cannot have both ways. It is a well-formed
+block whose value is `x` *and* a well-formed one-field punned record, and blocks
+had the spelling first:
+
+```praxis
+var x = 7
+
+// A block, whose value is its last statement.
+var from_block = { x }
+out(from_block)
+
+// A record with one field, which needs the field written out.
+var from_record = { x: x }
+out(from_record)
+```
+
+```text
+7
+{ x: 7 }
+```
+
+The other one is `{ x:bp }`, which is a block holding the statement `x` with a
+[`:bp` marker](../debugger/breakpoints.md) on it. `{ x: bp }` with a space is the
+record whose field is the binding `bp` — the same adjacency that separates
+`min=` from `min =`.
+
+A keyword head does not suppress the literal, and does not need to. What the
+[record-literal suppression](../language/records.md#a-record-literal-must-not-be-mistaken-for-a-block) protects is `p { … }`, a
+*name* followed by the brace that could be the `if`'s own block; a brace where
+an operand is still required cannot be that block, because the block comes after
+a complete condition. So `if { hit: true }.hit { … }` reads both braces the way
+you would expect.
 
 ## Same fields, same type
 
@@ -153,17 +250,15 @@ Note the last `read`: every `read` parses the whole input from its start, so the
 second one produces a fresh `{ x: 1, y: 2 }` — a different value of the same
 type, which is why the set holds two.
 
-## Field order does not decide the type
+## Field order does not decide the type, and the type decides field order
 
 `{ w: Int, h: Int }` and `{ h: Int, w: Int }` are one type. Unification matches
-fields by name, not by position. What *is* preserved is display and
-construction: a value prints in the order its own parser wrote the captures.
+fields by name, not by position.
 
-**One caveat, and it is a real one.** The runtime layout also follows source
-order, and a field read compiles to a slot index taken from whichever definition
-unification made canonical. So if two anonymous records of the same type were
-written in different field orders and are then used together, the field read
-takes the wrong slot:
+That has a second half worth stating outright, because it is the one people do
+not expect: **one type has one field order**, and it is the order the shape was
+first written in anywhere in the program. Every value of it is laid out and
+printed that way, whichever spelling built it.
 
 ```praxis
 fn width_of(r) { r.w }
@@ -179,15 +274,27 @@ out(width_of(b))
 
 ```text
 { w: 3, h: 4 }
-{ h: 4, w: 3 }
+{ w: 3, h: 4 }
 3
-4
+3
 ```
 
-`b.w` is 3, and `width_of(b)` answers 4. This is a compiler bug, not a language
-rule; until it is fixed, write the captures of a shared shape in one order. A
-program with a single spelling of each shape — which is nearly all of them —
-cannot reach it.
+`b`'s template writes `h` first and `b` prints `w` first, because `a` got there
+first and fixed the shape's order. The *values* are still what the input said:
+`b` read `4` as its `h` and `3` as its `w`, so `width_of(b)` is 3.
+
+The order has to come from something that has seen every spelling, and within
+one compile that is the type arena, which registered a definition for each. It
+cannot be a property of the template or literal doing the building, because the
+whole point of the rule above is that those all produce one type — and a field
+read compiles to a slot index against that one type. A value laid out in its own
+producer's order would put `w` in `h`'s slot for whichever spelling was not
+canonical, and the read would answer the wrong field with nothing to report
+([ADR-152](../../../decisions/152-a-brace-a-block-cannot-explain-is-a-record-and-a-shape-has-one-field-order.md)).
+
+All this costs is that display order depends on where the *first* spelling
+appears in the file. A program with a single spelling of each shape — which is
+nearly all of them — cannot tell.
 
 ## Nominal identity is a definition applied to arguments
 
@@ -259,25 +366,27 @@ free and identity is just the definition.
 
 ## When to declare a `struct` instead
 
-Use what the parser derives when the shape appears once and is used near where
-it was read. That is most of a puzzle solution, and declaring a `struct` to hold
-what ``lines(`{x:int},{y:int}`)`` already produces buys nothing.
+Use an anonymous record — derived or written — when the shape appears once and
+is used near where it was made. That is most of a puzzle solution, and declaring
+a `struct` to hold what ``lines(`{x:int},{y:int}`)`` already produces buys
+nothing.
 
-Declare a `struct` when you want one of these three things:
+Declare a `struct` when you want one of these two things:
 
 **A name in every diagnostic.** `expected (Point) -> Int` reads better than
 `expected ({ x: Int, y: Int }) -> Int`, and the difference grows with the field
 count.
 
-**Two shapes kept apart.** This is the real one. Two anonymous records with the
-same fields are the *same type*, so nothing stops a `{ x: Int, y: Int }` meant
-as a position being passed where one meant as a velocity is expected. Two
-`struct`s make that a compile error, as above.
+**Two shapes kept apart.** This is the real one, and it is the only thing a
+literal cannot do for you. Two anonymous records with the same fields are the
+*same type*, so nothing stops a `{ x: Int, y: Int }` meant as a position being
+passed where one meant as a velocity is expected. Two `struct`s make that a
+compile error, as above.
 
-**Fields the parser did not give you.** A record you build yourself can carry a
-computed field, a default, or a value from somewhere else in the program.
+The third reason this list used to give — a record carrying a field the parser
+did not produce — is gone: write the literal.
 
-The conversion is a loop and a literal:
+Converting to a declared one is a loop and a literal:
 
 ```praxis
 struct Segment { x1: Int, y1: Int, x2: Int, y2: Int }

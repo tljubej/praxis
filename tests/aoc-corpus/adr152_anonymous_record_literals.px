@@ -1,0 +1,68 @@
+// §5.6, ADR-152: an anonymous record is written `{ field: expr, … }`, with no
+// name in front of it. Its type is its field set, so nothing has to be
+// declared before it is built.
+var a = [{foo: 1, bar: "asd"}, {foo: 2, bar: "dsad"}]
+var b = {foo: 3, bar: "sdsadasd"}
+a.push(b)
+out(a)
+
+// Fields are read and assigned like any other record's.
+var p = { x: 1, y: 2 }
+out(p.x + p.y)
+p.x = 9
+out(p)
+
+// Punning: `{ x, y }` takes the fields from the bindings of those names, and
+// mixes with explicit fields.
+var x = 5
+var y = 6
+out({ x, y })
+out({ x, y: y * 2 })
+
+// Records nest, and a field holds whatever it was given.
+var nested = { pos: { x: 1, y: 2 }, name: "origin" }
+out(nested.pos.y)
+out(nested)
+
+// Two literals with the same field names are one type, with no declaration in
+// between — which is what lets one function take both.
+fn area(r) { r.w * r.h }
+out(area({ w: 3, h: 4 }))
+out(area({ w: 10, h: 10 }))
+
+// Structural equality, and therefore `Set` elements and `Map` keys (§5.5).
+out({ x: 1, y: 2 } == { x: 1, y: 2 })
+out({ x: 1, y: 2 } == { x: 1, y: 3 })
+var seen = Set()
+seen.insert({ x: 1, y: 2 })
+seen.insert({ x: 1, y: 2 })
+seen.insert({ x: 3, y: 4 })
+out(seen.len())
+var m = Map()
+m[{ x: 1, y: 2 }] = "here"
+out(m[{ x: 1, y: 2 }])
+
+// A headless record pattern takes one apart — there is no name a head could
+// write (ADR-091).
+match p {
+    { x, y } => out(x + y)
+}
+
+// In collections, closures and pipelines.
+var vs = [{ n: 1 }, { n: 2 }, { n: 3 }]
+out(vs.map(|v| v.n * 10))
+out(vs.filter(|v| v.n > 1).map(|v| v.n).sum())
+for v in vs {
+    out(v.n)
+}
+
+// A `{` that cannot be a record body is still a block, and a block is still an
+// expression: `{ x }` has one statement and evaluates to it.
+var block_value = { x }
+out(block_value)
+
+// A `{` at the head of an `if` condition is unambiguous — the condition comes
+// before the branch's brace, so nothing here is waiting for one.
+if { hit: true }.hit {
+    out("read as a record literal")
+}

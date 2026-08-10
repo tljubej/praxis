@@ -1829,6 +1829,11 @@ impl Inferer {
     /// is a variable) look like a failure and would say nothing useful about an
     /// `enum`, which is a perfectly good type with no fields to initialize.
     fn infer_record_lit(&mut self, r: &RecordLitExpr) -> Type {
+        // A literal with no head is anonymous (§5.6). There is no declaration to
+        // check the fields against, because the fields *are* the declaration.
+        if r.name().is_none() {
+            return self.infer_anonymous_record_lit(r);
+        }
         // The literal's head is an ordinary name reference, so resolution
         // already decided which symbol it names — including under shadowing,
         // where a scope lookup here would answer differently.
@@ -1903,15 +1908,7 @@ impl Inferer {
                 let init_ty = match &f.expr() {
                     Some(e) => Some(self.infer_expr(e)),
                     // Punned field `{ x }` — x must be a binding of the field's type.
-                    None => {
-                        // Look up the name as a path reference.
-                        let range = fname_tok.text_range();
-                        self.refs.get(&range).and_then(|rf| {
-                            self.names
-                                .get(rf.symbol)
-                                .and_then(|s| s.scheme.as_ref().map(|sc| self.db.instantiate(sc)))
-                        })
-                    }
+                    None => self.punned_field_type(fname_tok.text_range()),
                 };
                 if seen.contains(&fname) {
                     self.diagnostics
@@ -1964,6 +1961,70 @@ impl Inferer {
             }
         }
         self.db.fresh_var()
+    }
+
+    /// The type of a punned field `{ x }` — the binding `x`, instantiated.
+    ///
+    /// `None` when the name resolved to nothing (`N001`, already reported) or to
+    /// a symbol inference has not given a scheme yet. Both spellings of the
+    /// literal ask this the same way: punning means *the binding of that name*,
+    /// and the head, where there is one, changes only what the answer is checked
+    /// against.
+    fn punned_field_type(&mut self, range: TextRange) -> Option<Type> {
+        let rf = *self.refs.get(&range)?;
+        let scheme = self.names.get(rf.symbol)?.scheme.clone()?;
+        Some(self.db.instantiate(&scheme))
+    }
+
+    /// Infer the type of an **anonymous** record literal `{ x: 1, y: 2 }` (§5.6).
+    ///
+    /// The type is registered here rather than looked up: an anonymous record's
+    /// identity is its field set, so a literal writing one *is* a definition of
+    /// it. Every literal mints its own def and [`unify`](praxis_types::unify)
+    /// links two with matching field names into one — the same way the input
+    /// parser's derived records establish identity, and for the same reason
+    /// (ADR-025): going through unification is what makes the field *types* get
+    /// checked instead of assumed.
+    ///
+    /// So none of the nominal path's three checks apply. There is no declaration
+    /// to be missing a field of, none to have an unknown field of, and none to
+    /// disagree with about a type. **Duplicate field names are still refused** —
+    /// `{ x: 1, x: 2 }` names one slot twice whatever the type turns out to be,
+    /// and a [`FieldSet`](praxis_types::FieldSet) is the one thing that cannot
+    /// hold it.
+    ///
+    /// Field order is kept as written. §5.6 makes it irrelevant to *identity* —
+    /// unification matches fields by name — and it is what the value displays
+    /// as, so the literal's own order is the one thing worth preserving.
+    fn infer_anonymous_record_lit(&mut self, r: &RecordLitExpr) -> Type {
+        let mut fields: Vec<(String, Type)> = Vec::new();
+        if let Some(fl) = r.field_list() {
+            for f in fl.fields() {
+                let Some(fname_tok) = f.name() else { continue };
+                let fname = fname_tok.text().to_string();
+                let at = self.file_span(fname_tok.text_range());
+                // Inferred before the duplicate check, for the nominal path's
+                // reason: the initializer is an expression the program wrote,
+                // and dropping it drops whatever else is wrong inside it.
+                let init_ty = match &f.expr() {
+                    Some(e) => Some(self.infer_expr(e)),
+                    None => self.punned_field_type(fname_tok.text_range()),
+                };
+                if fields.iter().any(|(seen, _)| *seen == fname) {
+                    self.diagnostics
+                        .push(crate::diagnostics::duplicate_record_field(at, &fname));
+                    continue;
+                }
+                let init_ty = init_ty.unwrap_or_else(|| self.db.fresh_var());
+                fields.push((fname, init_ty));
+            }
+        }
+        // The duplicate check above is what makes this infallible: `FieldSet`
+        // rejects a repeated name and there is no other way to build one.
+        match praxis_types::FieldSet::from_pairs(fields) {
+            Ok(field_set) => self.db.record(None, field_set),
+            Err(_) => self.db.fresh_var(),
+        }
     }
 
     /// Infer the type of a field access `receiver.field` (§4.5). Returns the

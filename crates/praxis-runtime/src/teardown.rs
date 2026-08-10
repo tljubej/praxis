@@ -86,17 +86,18 @@ mod tests {
     /// one-shot.
     #[test]
     fn retiring_parser_plans_empties_the_arena() {
-        use praxis_input_parser::{lower_to_plan, register_plan, ParserAst};
+        use praxis_input_parser::{lower_to_plan, register_plan, ParserAst, SourceOrder};
         let ast = ParserAst::Atomic {
             kind: praxis_input_parser::AtomicKind::Int,
             span: praxis_source::Span::at(0),
         };
-        register_plan(lower_to_plan(&ast)).expect("the arena has room");
+        register_plan(lower_to_plan(&ast, &mut SourceOrder)).expect("the arena has room");
         assert!(praxis_input_parser::plan_count() > 0);
         let proof = Runtime::new().teardown();
         retire_parser_plans(&proof);
         assert_eq!(praxis_input_parser::plan_count(), 0);
-        let after = register_plan(lower_to_plan(&ast)).expect("registration still works");
+        let after =
+            register_plan(lower_to_plan(&ast, &mut SourceOrder)).expect("registration still works");
         assert_eq!(after.get(), 1, "ids restart from one after a retirement");
     }
 

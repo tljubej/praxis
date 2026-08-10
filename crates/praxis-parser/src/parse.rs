@@ -498,10 +498,20 @@ impl<'t> Parser<'t> {
     /// inside [`Parser::parse_var`] long before this runs, and a `:` that
     /// survives to a statement's end begins nothing else in the grammar.
     fn at_breakpoint_marker(&mut self) -> bool {
-        if !self.at(SyntaxKind::COLON) {
+        self.is_breakpoint_marker_at(self.meaningful_index())
+    }
+
+    /// Whether the raw token at `colon` is a `:` that begins a `:bp` marker.
+    ///
+    /// The marker's rule lives here and nowhere else. A `{`'s lookahead has to
+    /// ask the same question one token further along — `{ x:bp }` is a block
+    /// holding a marked statement, `{ x: bp }` is a record literal whose field
+    /// is the binding `bp` — and asking it by re-spelling the adjacency test
+    /// would put the rule in two places for the two positions to drift apart.
+    fn is_breakpoint_marker_at(&self, colon: usize) -> bool {
+        if self.tokens.get(colon).map(|t| t.kind) != Some(SyntaxKind::COLON) {
             return false;
         }
-        let colon = self.meaningful_index();
         self.tokens.get(colon + 1).is_some_and(|t| {
             t.kind == SyntaxKind::Ident
                 && &self.text[t.span.start().to_usize()..t.span.end().to_usize()] == "bp"
@@ -572,12 +582,35 @@ impl<'t> Parser<'t> {
     /// The index of the current *meaningful* token (skipping trivia). Used to
     /// detect whether a sub-parse made progress; an infinite loop anywhere in
     /// the grammar would show up as `meaningful_index()` not advancing.
-    fn meaningful_index(&mut self) -> usize {
+    fn meaningful_index(&self) -> usize {
+        self.nth_index(0).unwrap_or(self.tokens.len())
+    }
+
+    /// The **raw** token index of the meaningful token `n` positions ahead
+    /// (0 = current), or `None` past the last one.
+    ///
+    /// [`Parser::nth_kind`]'s answer with the position kept, which is what an
+    /// adjacency question needs: `nth_kind` skips trivia, so it cannot tell
+    /// `:bp` from `: bp`, and every two-token operator in this grammar
+    /// (`min=`, `:bp`) is decided by whether the second token *touches* the
+    /// first. `meaningful_index` answers that for the token under the cursor;
+    /// this answers it for one further ahead, which is where a `{`'s contents
+    /// are read from.
+    fn nth_index(&self, n: usize) -> Option<usize> {
         let mut idx = self.cursor;
-        while idx < self.tokens.len() && self.tokens[idx].kind.is_trivia() {
+        let mut want = n;
+        while idx < self.tokens.len() {
+            if self.tokens[idx].kind.is_trivia() {
+                idx += 1;
+                continue;
+            }
+            if want == 0 {
+                return Some(idx);
+            }
+            want -= 1;
             idx += 1;
         }
-        idx
+        None
     }
 
     /// Defense against catastrophic infinite loops: if the cursor did not
@@ -1294,6 +1327,13 @@ impl<'t> Parser<'t> {
             SyntaxKind::InterpOpen => self.parse_interp(),
             SyntaxKind::L_PAREN => self.parse_paren(),
             SyntaxKind::L_BRACK => self.parse_list(),
+            // An anonymous record literal `{ x: 1, y }` (§5.6) and a block are
+            // both a `{` here; [`Parser::at_anonymous_record_lit`] is the whole
+            // of the tie-break.
+            SyntaxKind::L_BRACE if self.at_anonymous_record_lit() => {
+                let cp = self.checkpoint_lhs();
+                self.parse_record_lit_body(cp);
+            }
             SyntaxKind::L_BRACE => self.parse_block(),
             SyntaxKind::KW_IF => self.parse_if(),
             SyntaxKind::KW_WHILE => self.parse_while(),
@@ -1907,36 +1947,90 @@ impl<'t> Parser<'t> {
             // punning). In expression position, a bare name followed by `{` is a
             // record construction; the keyword heads suppress that reading (see
             // [`StructLit`]) so their block is not taken as a record body.
-            self.start_node_at(cp, SyntaxKind::RECORD_LIT_EXPR);
-            self.bump(); // `{`
-            self.start_node(SyntaxKind::FIELD_LIST);
-            if !self.at(SyntaxKind::R_BRACE) {
-                loop {
-                    let before = self.meaningful_index();
-                    self.start_node(SyntaxKind::FIELD);
-                    self.expect(SyntaxKind::Ident, "field name");
-                    // Field punning (`{ x, y }`) or explicit (`{ x: expr }`).
-                    if self.eat(SyntaxKind::COLON) {
-                        self.parse_expr();
-                    }
-                    self.finish_node();
-                    if !self.eat(SyntaxKind::COMMA) {
-                        break;
-                    }
-                    // A trailing comma closes the list.
-                    if self.at(SyntaxKind::R_BRACE) {
-                        break;
-                    }
-                    self.ensure_progress(before);
-                }
-            }
-            self.expect(SyntaxKind::R_BRACE, "`}` to close record literal");
-            self.finish_node(); // FIELD_LIST
-            self.finish_node(); // RECORD_LIT_EXPR
+            self.parse_record_lit_body(cp);
         }
         // The rest of the postfix chain — `.method(args)`, `.field` and further
         // `(args)` calls in any order.
         self.parse_postfix(cp);
+    }
+
+    /// Whether the `{` under the cursor opens an **anonymous record literal**
+    /// (§5.6) rather than a block.
+    ///
+    /// Both are a `{` where an expression must begin, so one of the two readings
+    /// has to be chosen from what follows. The rule is that a record literal is
+    /// what a **block cannot be**, decided from two tokens:
+    ///
+    /// - `{ x: …` — a block's first statement cannot be a name followed by a
+    ///   `:`. The one thing that looks like it is a marked statement, `{ x:bp }`,
+    ///   and the `:bp` adjacency rule ([`Parser::is_breakpoint_marker_at`]) is
+    ///   what separates the two. `{ x: bp }` with a space is the record literal
+    ///   whose field is the binding `bp`, which is the same answer `min=` gives.
+    /// - `{ x, …` — a block's first statement cannot be a name followed by a
+    ///   `,`. This is what admits an all-punned literal, `{ x, y }`.
+    ///
+    /// **`{ x }` stays a block**, and that is the one case the rule cannot have
+    /// both ways: it is a well-formed block whose value is `x` *and* a
+    /// well-formed one-field punned literal, and blocks-as-values had the
+    /// spelling first. Write `{ x: x }` for the record. A `{}` is likewise the
+    /// empty block it already was — a record with no fields has no field set to
+    /// be identified by, so nothing is lost.
+    ///
+    /// The [`StructLit`] suppression the four keyword heads set is deliberately
+    /// **not** consulted. What that flag protects is `p { … }` — a *name*
+    /// followed by the brace that could be the keyword's block (ADR-050). A `{`
+    /// where an operand is still required is not that: `if { x: 1 } == p { … }`
+    /// has the literal at the head of the condition, so the block the `if` is
+    /// waiting for cannot be it.
+    fn at_anonymous_record_lit(&mut self) -> bool {
+        if !self.at(SyntaxKind::L_BRACE) || self.nth_kind(1) != SyntaxKind::Ident {
+            return false;
+        }
+        match self.nth_kind(2) {
+            SyntaxKind::COLON => !self
+                .nth_index(2)
+                .is_some_and(|colon| self.is_breakpoint_marker_at(colon)),
+            SyntaxKind::COMMA => true,
+            _ => false,
+        }
+    }
+
+    /// The `{ field: expr, … }` body of a record literal, opened as a
+    /// [`RECORD_LIT_EXPR`](SyntaxKind::RECORD_LIT_EXPR) at `cp`.
+    ///
+    /// One production for both spellings. `cp` is what decides which: taken
+    /// before a head name was emitted it wraps that name as the literal's
+    /// `PATH_EXPR` child, and taken at the `{` there is no child before the
+    /// field list — which is exactly how [`praxis_ast::RecordLitExpr::name`]
+    /// reports an anonymous literal, and the shape a headless record *pattern*
+    /// already has (ADR-091).
+    fn parse_record_lit_body(&mut self, cp: rowan::Checkpoint) {
+        self.start_node_at(cp, SyntaxKind::RECORD_LIT_EXPR);
+        self.bump(); // `{`
+        self.start_node(SyntaxKind::FIELD_LIST);
+        if !self.at(SyntaxKind::R_BRACE) {
+            loop {
+                let before = self.meaningful_index();
+                self.start_node(SyntaxKind::FIELD);
+                self.expect(SyntaxKind::Ident, "field name");
+                // Field punning (`{ x, y }`) or explicit (`{ x: expr }`).
+                if self.eat(SyntaxKind::COLON) {
+                    self.parse_expr();
+                }
+                self.finish_node();
+                if !self.eat(SyntaxKind::COMMA) {
+                    break;
+                }
+                // A trailing comma closes the list.
+                if self.at(SyntaxKind::R_BRACE) {
+                    break;
+                }
+                self.ensure_progress(before);
+            }
+        }
+        self.expect(SyntaxKind::R_BRACE, "`}` to close record literal");
+        self.finish_node(); // FIELD_LIST
+        self.finish_node(); // RECORD_LIT_EXPR
     }
 
     // -----------------------------------------------------------------------
@@ -2895,6 +2989,119 @@ mod tests {
                 "{src}: the head's brace was eaten as a record body"
             );
         }
+    }
+
+    // --- the headless record literal `{ x: 1 }` (§5.6, ADR-152) -------------
+
+    /// A `{` where an expression must begin is a record literal when a block
+    /// could not be what follows: a name and a `:`, or a name and a `,`.
+    #[test]
+    fn a_brace_a_block_cannot_explain_is_a_record_literal() {
+        for src in [
+            "var p = { x: 1 }",
+            "var p = { x: 1, y: 2 }",
+            "var p = { x: 1, }",
+            "var p = { x, y }",
+            "var p = { x, y: 2 }",
+            "var p = { x: 1, y }",
+            "var p = { pos: { x: 1 }, n: 2 }",
+            "f({ x: 1 })",
+            "var vs = [{ x: 1 }, { x: 2 }]",
+            "var f = |q| { x: q }",
+            "out({ x: 1 }.x)",
+        ] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            assert!(
+                construct_names(&out.tree).contains(&SyntaxKind::RECORD_LIT_EXPR),
+                "{src}: read as a block"
+            );
+        }
+    }
+
+    /// …and everything else at that position is still the block it was.
+    ///
+    /// `{ x }` is the case the rule cannot have both ways — a block whose value
+    /// is `x`, and a one-field punned literal, are the same six characters — and
+    /// the block had the spelling first. `{ x:bp }` is the other: `:bp` is a
+    /// marker on the statement `x`, told from the field `x: bp` by the same
+    /// adjacency that tells `min=` from `min =`.
+    #[test]
+    fn a_brace_a_block_can_explain_is_still_a_block() {
+        for src in [
+            "var p = { x }",
+            "var p = { }",
+            "var p = { x\n y }",
+            "var p = { f(1) }",
+            "var p = { x:bp }",
+            "var p = { var t = 1\n t }",
+        ] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            let kinds = construct_names(&out.tree);
+            assert!(kinds.contains(&SyntaxKind::BLOCK_EXPR), "{src}: no block");
+            assert!(
+                !kinds.contains(&SyntaxKind::RECORD_LIT_EXPR),
+                "{src}: the block was eaten as a record literal"
+            );
+        }
+    }
+
+    /// The marker rule is adjacency and only adjacency, so the spacing decides
+    /// — and both spellings are things somebody means.
+    #[test]
+    fn a_space_after_the_colon_is_a_field_and_not_a_marker() {
+        let marker = parse_text("var p = { x:bp }");
+        assert!(marker.diagnostics.is_empty(), "{:?}", marker.diagnostics);
+        assert!(construct_names(&marker.tree).contains(&SyntaxKind::BREAKPOINT));
+
+        let field = parse_text("var p = { x: bp }");
+        assert!(field.diagnostics.is_empty(), "{:?}", field.diagnostics);
+        let kinds = construct_names(&field.tree);
+        assert!(kinds.contains(&SyntaxKind::RECORD_LIT_EXPR));
+        assert!(
+            !kinds.contains(&SyntaxKind::BREAKPOINT),
+            "`: bp` with a space is a field whose value is the binding `bp`"
+        );
+    }
+
+    /// **A keyword head does not suppress it**, and does not need to.
+    ///
+    /// What [`StructLit`] suppression protects is `p { … }` — a *name* followed
+    /// by the brace that could be the keyword's block (ADR-050). A `{` where an
+    /// operand is still required cannot be that block: the block comes after a
+    /// complete head, so a brace at the head's start has nothing to be confused
+    /// with.
+    #[test]
+    fn a_keyword_head_may_open_with_a_record_literal() {
+        for src in [
+            "if { hit: true }.hit { 0 }",
+            "while { n: 1 }.n == 1 { 0 }",
+            "for q in { xs: ps }.xs { 0 }",
+            "match { tag: t }.tag { A => 1 }",
+        ] {
+            let out = parse_text(src);
+            assert!(out.diagnostics.is_empty(), "{src}: {:?}", out.diagnostics);
+            assert!(
+                construct_names(&out.tree).contains(&SyntaxKind::RECORD_LIT_EXPR),
+                "{src}: the head's own literal was read as a block"
+            );
+        }
+    }
+
+    /// An anonymous literal is the same node as a headed one, with the head
+    /// absent — which is what `RecordLitExpr::name()` answers `None` from.
+    #[test]
+    fn an_anonymous_literal_has_no_path_child() {
+        let anon = dump("var p = { x: 1 }");
+        let headed = dump("var p = Point { x: 1 }");
+        assert!(anon.contains("RECORD_LIT_EXPR"), "{anon}");
+        assert!(anon.contains("FIELD_LIST"), "{anon}");
+        assert!(
+            !anon.contains("PATH_EXPR"),
+            "an anonymous literal names nothing: {anon}"
+        );
+        assert!(headed.contains("PATH_EXPR"), "{headed}");
     }
 
     // --- Pratt precedence ---

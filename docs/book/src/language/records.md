@@ -194,10 +194,21 @@ list becomes statements, and one line yields a dozen diagnostics. The fix is the
 parentheses. See
 [ADR-050](../../../decisions/050-record-literals-are-legal-wherever-a-brace-cannot-be-a-block.md).
 
+The **anonymous** literal has no such ambiguity to suppress, and none of this
+applies to it. `p { … }` is ambiguous because the name could be the whole head;
+a `{` where an operand is still required cannot be a keyword's block, because
+that block comes after a complete head. So `if { hit: true }.hit { … }` needs no
+parentheses. What that form has instead is its own tie with the block —
+`{ x: 1 }` versus `{ x }` — which
+[Records without names](../types/structural-records.md#the-one-brace-that-stays-a-block)
+covers.
+
 ## Anonymous records
 
-A named-capture template derives a record type with no declaration anywhere.
-This is where most records in a puzzle-shaped program come from.
+A record literal with no name in front of it — `{ x: 1, y: 2 }` — builds a
+record whose type *is* its field set, and a named-capture template derives the
+same kind with no declaration anywhere. Between them this is where most records
+in a puzzle-shaped program come from.
 
 ```praxis
 // A named-capture template derives a record type with no declaration anywhere.
@@ -228,11 +239,13 @@ Given this input:
 ```
 
 An anonymous record is a type of its own. It *prints* as `{ x: Int, y: Int }`,
-but that is a spelling diagnostics use and not one you can write: the type
-grammar has no record form, so `var p: { x: Int, y: Int }` does not parse and an
-anonymous record only ever gets its type from inference. Two anonymous records
-are the same type when their field names match and their field types unify. A
-`struct` is not one of them, however alike the two look.
+but that is a spelling diagnostics use and not one you can write as an
+**annotation**: the type grammar has no record form, so
+`var p: { x: Int, y: Int }` does not parse and an anonymous record only ever
+gets its type from inference — including from a `{ x: 1, y: 2 }` literal, which
+is the *value* form and does parse. Two anonymous records are the same type when
+their field names match and their field types unify. A `struct` is not one of
+them, however alike the two look.
 
 ```praxis
 struct Point { x: Int, y: Int }

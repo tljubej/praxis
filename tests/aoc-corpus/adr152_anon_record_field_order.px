@@ -1,0 +1,59 @@
+// §5.6, ADR-152: an anonymous record's field order does not decide its type,
+// so two spellings of one field set are one type — and that one type has one
+// field order, because a field read compiles to a slot index against it.
+//
+// The order is the one the shape was **first written in**, and every later
+// spelling is laid out and displayed in it. Before ADR-152 each producer used
+// its own order, so `width_of` read whichever slot the compiler had made
+// canonical and answered the wrong field with nothing to report.
+fn width_of(r) { r.w }
+fn height_of(r) { r.h }
+
+// Two templates, disagreeing about the order.
+var a = parse("3x4", `{w:int}x{h:int}`)
+var b = parse("4x3", `{h:int}x{w:int}`)
+out(a)
+out(b)
+out(width_of(a))
+out(width_of(b))
+out(height_of(a))
+out(height_of(b))
+
+// A hand-written literal and a template of the same shape.
+var c = { w: 7, h: 8 }
+var d = parse("80x70", `{h:int}x{w:int}`)
+out(c)
+out(d)
+out(width_of(c))
+out(width_of(d))
+
+// Two literals.
+var e = { w: 30, h: 40 }
+var f = { h: 400, w: 300 }
+out(e)
+out(f)
+out(width_of(e))
+out(width_of(f))
+
+// The rule is per shape, not per program: a different field set has its own
+// first spelling, and `{ h, w }` here is the first anything wrote it.
+var g = { hh: 1, ww: 2 }
+var h = { ww: 20, hh: 10 }
+out(g)
+out(h)
+out(g.ww + h.ww)
+
+// Equality does not care which spelling built the value.
+out(a == b)
+out(c == { h: 8, w: 7 })
+var seen = Set()
+seen.insert(a)
+seen.insert(b)
+out(seen.len())
+
+// A `lines(...)` of the same shape reads through the same slots.
+var rows = read lines(`{h:int}x{w:int}`)
+for r in rows {
+    out(width_of(r))
+}
+out(rows)

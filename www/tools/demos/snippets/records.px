@@ -1,7 +1,8 @@
-// No struct declared anywhere:
-// the template made the type.
+// No struct declared anywhere: the template
+// derived the type and the literal writes it.
 var points = read lines(`{x:int},{y:int}`)
+var origin = { x: 2, y: 5 }
 
 fn area(r) -> Int { r.x * r.y }
 
-out(area(points[0]))
+out(area(points[0]) + area(origin))

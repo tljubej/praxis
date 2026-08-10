@@ -1,0 +1,9 @@
+var x = 7
+
+// A block, whose value is its last statement.
+var from_block = { x }
+out(from_block)
+
+// A record with one field, which needs the field written out.
+var from_record = { x: x }
+out(from_record)

@@ -81,7 +81,12 @@ enum Attached {
     /// compile/run state and every command works.
     Fault(Box<DebugSession>),
     /// A run stopped at a `:bp` marker with its frames still live.
-    Stopped(StoppedHost),
+    ///
+    /// Boxed for [`Fault`](Self::Fault)'s reason: the host owns a whole
+    /// `TypeDb`, so the variant is two orders of magnitude larger than the
+    /// other two and every `Attached` — including the `Nothing` the REPL sits
+    /// in most of the time — would be sized for it.
+    Stopped(Box<StoppedHost>),
 }
 
 /// What the host lends the debugger for the duration of a `:bp` stop.
@@ -170,7 +175,7 @@ impl Repl {
         Repl {
             snapshot,
             selected: 0,
-            attached: Attached::Stopped(host),
+            attached: Attached::Stopped(Box::new(host)),
         }
     }
 

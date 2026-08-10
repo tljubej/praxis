@@ -837,10 +837,16 @@ fn is_text(db: &TypeDb, t: crate::Type) -> bool {
     matches!(db.data(db.follow(t)), TypeData::Scalar(ScalarType::Text))
 }
 
+/// **The first spelling of an anonymous shape fixes its field order, and every
+/// later one adopts it** (§5.6, ADR-152).
+///
+/// Not a display preference. §5.6 makes two spellings of one field set the same
+/// type, and a field read compiles to a slot index against that one type — so a
+/// second definition keeping its own order would lay `y` in `x`'s slot and the
+/// read would answer the wrong field with nothing to report. Deciding the order
+/// once, here, is what leaves the two producers nothing to disagree about.
 #[test]
-fn anon_record_display_preserves_source_order() {
-    // Each anon_record call preserves its own field order for display.
-    // Identity through unification does not retroactively reorder fields.
+fn a_later_spelling_of_an_anon_shape_adopts_the_first_ones_field_order() {
     let mut db = TypeDb::new();
     let i = db.int();
     let j = db.int();
@@ -849,8 +855,43 @@ fn anon_record_display_preserves_source_order() {
     let k = db.int();
     let l = db.int();
     let yx = anon_record(&mut db, vec![("y".into(), l), ("x".into(), k)]);
-    assert_eq!(db.render(yx), "{ y: Int, x: Int }");
+    assert_eq!(
+        db.render(yx),
+        "{ x: Int, y: Int }",
+        "the shape was first written `x`-then-`y`, so that is the order it has"
+    );
+    // The *types* travelled with their names, not with their positions: `yx`
+    // was written with `l` under `y`, and that is where it still is.
+    let TypeData::Record { def, .. } = db.data(db.follow(yx)) else {
+        panic!("an anonymous record is a Record");
+    };
+    let fields = &db.record_def(*def).fields;
+    assert_eq!(fields[0].name, "x");
+    assert_eq!(fields[1].name, "y");
     let _ = RecordDefId(0); // exercise the debug impl / keep the import used
+}
+
+/// A **nominal** record is its declaration, so its field order is the one it was
+/// declared with — the canonicalization above is for the shapes that have no
+/// declaration to appeal to.
+#[test]
+fn a_nominal_records_field_order_is_its_declarations() {
+    let mut db = TypeDb::new();
+    let i = db.int();
+    let j = db.int();
+    let anon = anon_record(&mut db, vec![("x".into(), i), ("y".into(), j)]);
+    assert_eq!(db.render(anon), "{ x: Int, y: Int }");
+    let named = record(&mut db, "P", vec![("y".into(), j), ("x".into(), i)]);
+    assert_eq!(db.render(named), "P");
+    let TypeData::Record { def, .. } = db.data(db.follow(named)) else {
+        panic!("a declared record is a Record");
+    };
+    let fields = &db.record_def(*def).fields;
+    assert_eq!(
+        fields[0].name, "y",
+        "declaration order, not the anon shape's"
+    );
+    assert_eq!(fields[1].name, "x");
 }
 
 // ---- enum unification for polymorphic / anonymous enums --------------------

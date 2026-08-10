@@ -384,6 +384,7 @@ atom         := literal
               | "(" expr ")"                -- grouping
               | "(" expr ("," expr)* ","? ")"  -- tuple: the first "," makes it one
               | "[" arg_list? "]"           -- list literal (a Vec)
+              | anon_record_lit             -- a `{` a block cannot explain
               | block
               | if_expr | while_expr | for_expr | loop_expr
               | break_expr | continue_expr | return_expr | match_expr
@@ -403,6 +404,13 @@ name_or_call := "parse" "(" expr "," parser_expr ")"
 type_arg_list    := "[" type ("," type)* ","? "]"
 record_field_list:= record_field ("," record_field)* ","?
 record_field     := Ident (":" expr)?        -- `{ x }` puns, `{ x: e }` is explicit
+
+-- The anonymous form has no head, so nothing separates it from a block but what
+-- follows the `{`: a name then a `:` (that is not the `:bp` marker), or a name
+-- then a `,`. Neither can begin a statement, so neither can begin a block; every
+-- other `{` here is the block it already was, `{ x }` included (§5.6, ADR-152).
+anon_record_lit  := "{" Ident ":" expr ("," record_field)* ","? "}"
+                  | "{" Ident "," record_field ("," record_field)* ","? "}"
 
 closure      := "|" (cparam ("," cparam)* ","?)? "|" expr
               | "||" expr                    -- the zero-parameter form

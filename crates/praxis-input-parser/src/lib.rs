@@ -28,8 +28,8 @@ pub use ast::{
 pub use call::{build_call, build_repeated_tail, CallArg};
 pub use plan::{
     get_plan, lower_to_plan, plan_count, register_plan, retire_all_plans, BlockItemNode,
-    CompiledPlan, ParserPlan, PlanId, PlanNode, SectionItemNode, TemplatePartNode, TemplateShape,
-    TooManyPlans, MAX_PLANS,
+    CompiledPlan, FieldOrder, ParserPlan, PlanId, PlanNode, SectionItemNode, SourceOrder,
+    TemplatePartNode, TemplateShape, TooManyPlans, MAX_PLANS,
 };
 pub use scan::{scan_template, ScanError, MAX_NESTING};
 pub use synthesize::{synthesize, synthesize_indexed};

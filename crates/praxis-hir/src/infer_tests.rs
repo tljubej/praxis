@@ -3318,6 +3318,95 @@ fn record_literal_rejects_duplicate_fields() {
     );
 }
 
+// --- the anonymous record literal `{ x: 1 }` (§5.6, ADR-152) ----------------
+
+/// An anonymous literal's type is its field set, inferred from the
+/// initializers. Nothing was declared and nothing had to be.
+#[test]
+fn an_anonymous_literal_types_as_its_field_set() {
+    insta::assert_snapshot!(expr_type("{ x: 1, y: 2 }"), @"{ x: Int, y: Int }");
+    insta::assert_snapshot!(expr_type("{ n: 1, s: \"a\", b: true }"), @"{ n: Int, s: Text, b: Bool }");
+    insta::assert_snapshot!(expr_type("{ pos: { x: 1 } }"), @"{ pos: { x: Int } }");
+    insta::assert_snapshot!(expr_type("[{ x: 1 }, { x: 2 }]"), @"Vec[{ x: Int }]");
+}
+
+/// A punned field takes the binding of its own name — the same rule the headed
+/// form has, with no declared type for the answer to be checked against.
+#[test]
+fn a_punned_field_takes_the_binding_of_its_name() {
+    let scheme = scheme_of("var x = 1\nvar s = \"a\"\nvar p = { x, s }", "p");
+    insta::assert_snapshot!(scheme.expect("p has a scheme"), @"{ x: Int, s: Text }");
+}
+
+/// Two literals with the same field names are **one type**, established by
+/// unification the way two tuples are (§5.6) — which is what lets one inferred
+/// function take both without a declaration in between.
+#[test]
+fn two_anonymous_literals_with_the_same_fields_are_one_type() {
+    let scheme = scheme_of(
+        "fn area(r) { r.w * r.h }\nvar a = area({ w: 3, h: 4 })\nvar b = area({ h: 1, w: 2 })",
+        "area",
+    );
+    insta::assert_snapshot!(scheme.expect("area has a scheme"), @"({ w: Int, h: Int }) -> Int");
+    assert!(
+        is_clean_with_lower(
+            "fn area(r) { r.w * r.h }\nvar a = area({ w: 3, h: 4 })\nvar b = area({ h: 1, w: 2 })"
+        ),
+        "the two spellings are one type"
+    );
+}
+
+/// A different field *set* is a different type, and a different field *type*
+/// under the same name is too. Both are the ordinary unification failure.
+#[test]
+fn anonymous_records_that_disagree_do_not_unify() {
+    for src in [
+        "fn area(r) { r.w * r.h }\nvar a = area({ w: 3, h: 4 })\nvar b = area({ w: 1, d: 2 })",
+        "fn wide(r) { r.w }\nvar a = wide({ w: 3 })\nvar b = wide({ w: \"x\" })",
+        "fn wide(r) { r.w }\nvar a = wide({ w: 3 })\nvar b = wide({ w: 1, h: 2 })",
+    ] {
+        assert!(!is_clean_with_lower(src), "{src}: expected a mismatch");
+    }
+}
+
+/// A **nominal** record is never a structural one, however well the fields line
+/// up: identity is the declaration (ADR-048).
+#[test]
+fn a_declared_record_is_not_an_anonymous_one_with_the_same_fields() {
+    let src = "struct Room { w: Int, h: Int }\n\
+               fn area(r) { r.w * r.h }\n\
+               var a = area({ w: 3, h: 4 })\n\
+               var b = area(Room { w: 2, h: 5 })";
+    assert!(!is_clean_with_lower(src), "no coercion between the two");
+}
+
+/// The one check the anonymous form keeps from the headed one: a field named
+/// twice is one slot written twice, whatever its type turns out to be. The
+/// other two — a missing field and an unknown one — have no declaration to be
+/// missing from or unknown to.
+#[test]
+fn an_anonymous_literal_rejects_a_duplicate_field() {
+    let dup = analyze_and_lower_diags("var p = { x: 1, x: 2 }\nout(p.x)");
+    assert!(
+        dup.iter().any(|d| d.code().number() == 115),
+        "a duplicate field is Y115: {dup:?}"
+    );
+    assert!(
+        is_clean_with_lower("var p = { x: 1, y: 2 }\nout(p.x)"),
+        "a literal that names each field once is complete by construction"
+    );
+}
+
+/// Reading a field the literal does not have is the ordinary field-capability
+/// failure, reported against the shape rather than a declaration's name.
+#[test]
+fn reading_a_field_an_anonymous_record_lacks_is_reported() {
+    assert!(
+        !is_clean_with_lower("var p = { x: 1 }\nout(p.z)"),
+        "`{{ x: Int }}` has no `z`"
+    );
+}
+
 /// A wildcard binds nothing, so `_` is not readable as a value. `_` is its own
 /// token with no expression form at all, so the parser — not the resolver — is
 /// what rejects it where it stands.

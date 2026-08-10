@@ -1,0 +1,10 @@
+var p = { x: 1, y: 2 }
+out(p.x + p.y)
+
+p.x = 9
+out(p)
+
+var name = "origin"
+var tagged = { name, pos: p }
+out(tagged)
+out(tagged.pos.y)

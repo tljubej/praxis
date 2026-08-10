@@ -489,10 +489,17 @@ ast_node! {
     /// `Name { field: expr, … }` — a record-literal expression (§4.5). The
     /// first child is the `PATH_EXPR` naming the struct type; the `FIELD_LIST` holds
     /// the field initializers (explicit `name: expr` or punned `name`).
+    ///
+    /// The `PATH_EXPR` is **absent** for an anonymous record literal,
+    /// `{ x: 1, y: 2 }` (§5.6): that record's type is its field set, so there is
+    /// no name a head could write. One node for both, because everything after
+    /// the head — the fields, their punning, the arity check, the lowering — is
+    /// the same; [`name`](Self::name) is the one question whose answer differs.
     RecordLitExpr, RECORD_LIT_EXPR
 }
 impl RecordLitExpr {
-    /// The struct name (a path) being constructed.
+    /// The struct name (a path) being constructed, or `None` for an anonymous
+    /// literal (§5.6).
     pub fn name(&self) -> Option<PathExpr> {
         child(&self.syntax)
     }

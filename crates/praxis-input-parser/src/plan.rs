@@ -68,11 +68,17 @@ pub enum PlanNode {
     SectionsNamed {
         fields: &'static [SectionItemNode],
         repeated_tail: Option<(&'static str, u32)>,
+        /// The result record's canonical field order (see [`FieldOrder`]).
+        field_order: &'static [&'static str],
     },
     /// `block(item, ...)` (§7.5). Sequential parsers within one region;
     /// positional named-capture templates flatten their fields into the result
     /// record, named items contribute one field each.
-    Block { items: &'static [BlockItemNode] },
+    Block {
+        items: &'static [BlockItemNode],
+        /// The result record's canonical field order (see [`FieldOrder`]).
+        field_order: &'static [&'static str],
+    },
     /// `choice(Name: P, ...)` (§7.5). Try each case in source order; the
     /// first match wins and its value becomes the variant's payload. `cases`
     /// are `(name, child_index)` pairs.
@@ -106,7 +112,14 @@ pub enum PlanNode {
     /// **Every template shape lowers to this**, multi-anonymous-capture tuples
     /// included; see [`TemplateShape`]. There is deliberately no `Tuple` node
     /// beside it — see that type's doc for why one cannot exist.
-    Template { parts: &'static [TemplatePartNode] },
+    Template {
+        parts: &'static [TemplatePartNode],
+        /// The result record's canonical field order (see [`FieldOrder`]), and
+        /// **empty for the shapes that are not records** — a tuple's element
+        /// order is its capture order and nothing reorders it, so there is no
+        /// second opinion for this to carry.
+        field_order: &'static [&'static str],
+    },
 }
 
 /// One part of a template, in plan form.
@@ -282,16 +295,31 @@ struct PlanBuilder<'a> {
     nodes: Vec<PlanNode>,
     template_parts: Vec<TemplatePartNode>,
     literals: Vec<&'static str>,
+    order: &'a mut dyn FieldOrder,
 }
 
 impl<'a> PlanBuilder<'a> {
-    fn new(arena: &'a Bump) -> Self {
+    fn new(arena: &'a Bump, order: &'a mut dyn FieldOrder) -> Self {
         PlanBuilder {
             arena,
             nodes: Vec::new(),
             template_parts: Vec::new(),
             literals: Vec::new(),
+            order,
         }
+    }
+
+    /// The canonical order of an anonymous record shape's fields, allocated in
+    /// this plan's arena so the runtime reads `&'static str`.
+    ///
+    /// `names` are the fields in the order this parser *writes* them, which is
+    /// the order the value is assembled in; the answer is the order the value
+    /// must be **laid out** in. The two differ only when some other spelling of
+    /// the same shape got there first — see [`FieldOrder`].
+    fn canonical_order(&mut self, names: &[&str]) -> &'static [&'static str] {
+        let canonical = self.order.canonical(names);
+        let entries: Vec<&'static str> = canonical.iter().map(|n| self.alloc_str(n)).collect();
+        self.alloc_slice(entries)
     }
 
     /// Push a node and return its index.
@@ -326,6 +354,7 @@ impl<'a> PlanBuilder<'a> {
             nodes,
             template_parts,
             literals,
+            order: _,
         } = self;
         let plan: &ParserPlan = arena.alloc(ParserPlan {
             nodes: alloc_slice(arena, nodes),
@@ -401,14 +430,53 @@ unsafe impl Send for CompiledPlan {}
 ///
 /// # Panics
 /// Only on an internal inconsistency (the AST should have passed validation).
-pub fn lower_to_plan(ast: &ParserAst) -> CompiledPlan {
+pub fn lower_to_plan(ast: &ParserAst, order: &mut dyn FieldOrder) -> CompiledPlan {
     let arena = Bump::new();
     let plan = {
-        let mut b = PlanBuilder::new(&arena);
+        let mut b = PlanBuilder::new(&arena, order);
         let root = lower_node(&mut b, ast);
         b.finish(root) as *const ParserPlan
     };
     CompiledPlan { arena, plan }
+}
+
+/// Who decides the **layout order** of the anonymous record a named-capture
+/// parser builds (§5.6, ADR-152).
+///
+/// An anonymous record's identity is its field-name set, so two parsers that
+/// name the same fields in different orders produce one type — and a type has
+/// exactly one field order, because a field read compiles to a slot index. The
+/// order therefore cannot be a property of the parser that happens to be
+/// building the value; it has to come from whatever knows about *every*
+/// spelling in the program. During a compile that is the
+/// [`TypeDb`](praxis_types::TypeDb), which registered a definition for each.
+///
+/// The plan stores the answer per record-producing node so the runtime places
+/// fields with an index rather than a name lookup.
+pub trait FieldOrder {
+    /// The canonical order of the shape whose fields are `names`. The answer is
+    /// a permutation of `names` — same set, possibly reordered.
+    fn canonical(&mut self, names: &[&str]) -> Vec<String>;
+}
+
+/// The order the parser wrote them in — [`FieldOrder`] for a plan lowered
+/// outside a compilation, where there is no other spelling to agree with.
+///
+/// Correct on its own terms: with one spelling of a shape, the first one *is*
+/// the canonical one. It is what the teardown and plan tests use, and what
+/// makes those tests independent of the type arena.
+pub struct SourceOrder;
+
+impl FieldOrder for SourceOrder {
+    fn canonical(&mut self, names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_string()).collect()
+    }
+}
+
+impl FieldOrder for praxis_types::TypeDb {
+    fn canonical(&mut self, names: &[&str]) -> Vec<String> {
+        self.canonical_field_order(names).to_vec()
+    }
 }
 
 // ===========================================================================
@@ -600,10 +668,19 @@ fn lower_node(b: &mut PlanBuilder<'_>, ast: &ParserAst) -> u32 {
                 let c = lower_node(b, p);
                 (n, c)
             });
+            // The record's fields are the named arguments in source order, then
+            // the unbounded tail, which is the order the runtime assembles them
+            // in and therefore the order to ask about.
+            let mut names: Vec<&str> = field_entries.iter().map(|f| f.name()).collect();
+            if let Some((tail_name, _)) = tail_entry {
+                names.push(tail_name);
+            }
+            let field_order = b.canonical_order(&names);
             let field_slice = b.alloc_slice(field_entries);
             b.push_node(PlanNode::SectionsNamed {
                 fields: field_slice,
                 repeated_tail: tail_entry,
+                field_order,
             })
         }
         ParserAst::Csv { child, .. } => unary!(Csv, child),
@@ -621,6 +698,20 @@ fn lower_node(b: &mut PlanBuilder<'_>, ast: &ParserAst) -> u32 {
         }
         ParserAst::Grid { child, .. } => unary!(Grid, child),
         ParserAst::Block { items, .. } => {
+            // The block record's fields, in the order the runtime assembles
+            // them: a named item contributes its own name, and a positional
+            // template contributes each of its captures' names, flattened in
+            // place (§7.5). Read off the *AST* because that is where a
+            // positional's capture names still are — the lowered child is a
+            // node index, and its parts are the runtime's to walk.
+            let mut names: Vec<&str> = Vec::new();
+            for item in items {
+                match item {
+                    crate::ast::BlockItem::Positional(p) => names.extend(template_field_names(p)),
+                    crate::ast::BlockItem::Named { name, .. } => names.push(name),
+                }
+            }
+            let field_order = b.canonical_order(&names);
             let item_nodes: Vec<BlockItemNode> = items
                 .iter()
                 .map(|item| match item {
@@ -634,7 +725,10 @@ fn lower_node(b: &mut PlanBuilder<'_>, ast: &ParserAst) -> u32 {
                 })
                 .collect();
             let items_slice = b.alloc_slice(item_nodes);
-            b.push_node(PlanNode::Block { items: items_slice })
+            b.push_node(PlanNode::Block {
+                items: items_slice,
+                field_order,
+            })
         }
         ParserAst::Choice { cases, .. } => {
             let case_entries: Vec<(&'static str, u32)> = cases
@@ -694,10 +788,48 @@ fn lower_template(b: &mut PlanBuilder<'_>, parts: &[TemplatePart]) -> u32 {
         .enumerate()
         .filter(|(_, p)| matches!(p, TemplatePart::Capture { .. }))
         .collect();
+    // A record shape only — a tuple has no field names to reorder by, and
+    // `TemplateShape::of` reads the same "is any capture named?" question off
+    // the lowered parts.
+    let names = template_field_names_of(parts);
+    let field_order = if names.is_empty() {
+        &[][..]
+    } else {
+        b.canonical_order(&names)
+    };
     let part_indices = lower_template_parts(b, parts, &captures);
     b.push_node(PlanNode::Template {
         parts: part_indices,
+        field_order,
     })
+}
+
+/// The field names a *template* parser contributes to a record, in source
+/// order, or empty when it builds no record.
+///
+/// The two callers ask for different reasons — one is lowering the template
+/// itself, one is a `block(...)` flattening it (§7.5) — and both need the same
+/// answer, which is the one `TemplateShape::Record` is defined by: a template
+/// is a record when any capture is named.
+fn template_field_names_of(parts: &[TemplatePart]) -> Vec<&str> {
+    let names: Vec<&str> = parts
+        .iter()
+        .filter_map(|p| match p {
+            TemplatePart::Capture { name, .. } => name.as_ref().map(|n| n.as_str()),
+            TemplatePart::Literal { .. } => None,
+        })
+        .collect();
+    names
+}
+
+/// [`template_field_names_of`] for a parser that *may* be a template. A
+/// positional `block(...)` item that is not one contributes no fields —
+/// validation has already refused it (I026).
+fn template_field_names(ast: &ParserAst) -> Vec<&str> {
+    match ast {
+        ParserAst::Template { parts, .. } => template_field_names_of(parts),
+        _ => Vec::new(),
+    }
 }
 
 /// Lower template parts into the `template_parts` arena, returning a static
@@ -747,7 +879,7 @@ mod tests {
             kind: AtomicKind::Int,
             span: Span::at(0),
         };
-        let compiled = lower_to_plan(&ast);
+        let compiled = lower_to_plan(&ast, &mut SourceOrder);
         let plan = compiled.plan();
         assert_eq!(plan.root, 0);
         assert!(matches!(
@@ -767,7 +899,7 @@ mod tests {
             }),
             span: Span::at(0),
         };
-        let compiled = lower_to_plan(&ast);
+        let compiled = lower_to_plan(&ast, &mut SourceOrder);
         let plan = compiled.plan();
         // Children are lowered first (lower index); the parent (Lines) is root.
         assert!(matches!(
@@ -792,7 +924,7 @@ mod tests {
             }),
             span: Span::at(0),
         };
-        let compiled = lower_to_plan(&ast);
+        let compiled = lower_to_plan(&ast, &mut SourceOrder);
         let plan = compiled.plan();
         match plan.nodes[plan.root as usize] {
             PlanNode::Sep {
@@ -815,15 +947,21 @@ mod tests {
     /// `u32` MIR embeds, and each one resolves to the plan it named.
     #[test]
     fn registered_plans_round_trip_through_their_raw_id() {
-        let first = register_plan(lower_to_plan(&ParserAst::Atomic {
-            kind: AtomicKind::Int,
-            span: Span::at(0),
-        }))
+        let first = register_plan(lower_to_plan(
+            &ParserAst::Atomic {
+                kind: AtomicKind::Int,
+                span: Span::at(0),
+            },
+            &mut SourceOrder,
+        ))
         .expect("the arena is far from full");
-        let second = register_plan(lower_to_plan(&ParserAst::Atomic {
-            kind: AtomicKind::Word,
-            span: Span::at(0),
-        }))
+        let second = register_plan(lower_to_plan(
+            &ParserAst::Atomic {
+                kind: AtomicKind::Word,
+                span: Span::at(0),
+            },
+            &mut SourceOrder,
+        ))
         .expect("the arena is far from full");
         assert_ne!(first, second);
         for (id, expected) in [(first, AtomicKind::Int), (second, AtomicKind::Word)] {
@@ -849,13 +987,14 @@ mod tests {
             kind: AtomicKind::Int,
             span: Span::at(0),
         };
-        let refused = register_with_limit(lower_to_plan(&atom()), 0)
+        let refused = register_with_limit(lower_to_plan(&atom(), &mut SourceOrder), 0)
             .expect_err("a zero limit admits no plans at all");
         assert_eq!(refused.limit, 0);
         assert!(refused.to_string().contains("too many parser plans"));
         // The refusal happens before the push, so it consumed nothing: an
         // ordinary registration still succeeds and still yields a usable id.
-        let accepted = register_plan(lower_to_plan(&atom())).expect("the real arena has room");
+        let accepted = register_plan(lower_to_plan(&atom(), &mut SourceOrder))
+            .expect("the real arena has room");
         assert!(get_plan(accepted).is_some());
     }
 
@@ -872,15 +1011,106 @@ mod tests {
     /// alive.
     #[test]
     fn a_compiled_plan_owns_its_interned_strings() {
-        let compiled = lower_to_plan(&ParserAst::Sep {
-            separator: Separator::new(" -> ").expect("a non-empty separator"),
-            child: Box::new(ParserAst::Atomic {
-                kind: AtomicKind::Word,
+        let compiled = lower_to_plan(
+            &ParserAst::Sep {
+                separator: Separator::new(" -> ").expect("a non-empty separator"),
+                child: Box::new(ParserAst::Atomic {
+                    kind: AtomicKind::Word,
+                    span: Span::at(0),
+                }),
+                span: Span::at(0),
+            },
+            &mut SourceOrder,
+        );
+        assert_eq!(compiled.plan().literals, &[" -> "]);
+    }
+
+    /// A named-capture template lowers with the record's **canonical** field
+    /// order, not its own (§5.6, ADR-152).
+    ///
+    /// The order is the [`FieldOrder`]'s answer and the plan carries it, which
+    /// is how the runtime lays two spellings of one shape out the same way. The
+    /// oracle here stands in for the type arena's "the first spelling of this
+    /// shape wrote `w` before `h`"; the template writes them the other way.
+    #[test]
+    fn a_named_template_carries_the_canonical_field_order_and_not_its_own() {
+        struct WThenH;
+        impl FieldOrder for WThenH {
+            fn canonical(&mut self, _names: &[&str]) -> Vec<String> {
+                vec!["w".to_string(), "h".to_string()]
+            }
+        }
+        let named = |name: &str| TemplatePart::Capture {
+            name: Some(crate::ast::CaptureName::parse(name).expect("a legal name")),
+            parser: Box::new(ParserAst::Atomic {
+                kind: AtomicKind::Int,
                 span: Span::at(0),
             }),
             span: Span::at(0),
-        });
-        assert_eq!(compiled.plan().literals, &[" -> "]);
+            name_span: None,
+        };
+        let ast = ParserAst::Template {
+            parts: vec![
+                named("h"),
+                TemplatePart::Literal {
+                    text: "x".to_string(),
+                    ws: WsPolicy::SpaceRun,
+                    span: Span::at(0),
+                },
+                named("w"),
+            ],
+            span: Span::at(0),
+        };
+        let compiled = lower_to_plan(&ast, &mut WThenH);
+        let plan = compiled.plan();
+        let PlanNode::Template { parts, field_order } = &plan.nodes[plan.root as usize] else {
+            panic!("a named-capture template lowers to a Template node");
+        };
+        assert_eq!(TemplateShape::of(parts), TemplateShape::Record);
+        assert_eq!(*field_order, &["w", "h"]);
+
+        // A shape nobody wrote first keeps its own order, which is what
+        // `SourceOrder` is: the first spelling *is* the canonical one.
+        let compiled = lower_to_plan(&ast, &mut SourceOrder);
+        let PlanNode::Template { field_order, .. } =
+            &compiled.plan().nodes[compiled.plan().root as usize]
+        else {
+            panic!("a named-capture template lowers to a Template node");
+        };
+        assert_eq!(*field_order, &["h", "w"]);
+    }
+
+    /// A template that builds no record carries no order to disagree about.
+    #[test]
+    fn a_tuple_template_carries_no_field_order() {
+        let anonymous = || TemplatePart::Capture {
+            name: None,
+            parser: Box::new(ParserAst::Atomic {
+                kind: AtomicKind::Int,
+                span: Span::at(0),
+            }),
+            span: Span::at(0),
+            name_span: None,
+        };
+        let ast = ParserAst::Template {
+            parts: vec![
+                anonymous(),
+                TemplatePart::Literal {
+                    text: ",".to_string(),
+                    ws: WsPolicy::SpaceRun,
+                    span: Span::at(0),
+                },
+                anonymous(),
+            ],
+            span: Span::at(0),
+        };
+        let compiled = lower_to_plan(&ast, &mut SourceOrder);
+        let PlanNode::Template { field_order, .. } =
+            &compiled.plan().nodes[compiled.plan().root as usize]
+        else {
+            panic!("a template lowers to a Template node");
+        };
+        assert!(field_order.is_empty(), "a tuple has no fields to order");
     }
 
     /// Two anonymous captures lower to a `Template` node — **not** to a tuple
@@ -921,10 +1151,10 @@ mod tests {
             ],
             span: Span::at(0),
         };
-        let compiled = lower_to_plan(&ast);
+        let compiled = lower_to_plan(&ast, &mut SourceOrder);
         let plan = compiled.plan();
         // The root is the last-pushed node.
-        let PlanNode::Template { parts } = &plan.nodes[plan.root as usize] else {
+        let PlanNode::Template { parts, .. } = &plan.nodes[plan.root as usize] else {
             panic!("a two-anonymous-capture template lowers to a Template node");
         };
         // And the shape the interpreter reads back off those parts is the tuple
@@ -965,11 +1195,12 @@ mod tests {
             repeated_tail: None,
             span: Span::at(0),
         };
-        let compiled = lower_to_plan(&ast);
+        let compiled = lower_to_plan(&ast, &mut SourceOrder);
         let plan = compiled.plan();
         let PlanNode::SectionsNamed {
             fields,
             repeated_tail,
+            ..
         } = &plan.nodes[plan.root as usize]
         else {
             panic!("a named `sections` lowers to a SectionsNamed node");

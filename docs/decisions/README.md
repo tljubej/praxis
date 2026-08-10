@@ -184,3 +184,4 @@ verifier rule only. Its decision must not claim the elision.
 - [ADR-149: A chunking partitions and a window slides, and both label the outer sequence](./149-a-chunking-partitions-and-a-window-slides.md)
 - [ADR-150: A marker is a place in the program, and a stop is not a fault](./150-a-marker-is-a-place-in-the-program-and-a-stop-is-not-a-fault.md)
 - [ADR-151: A variable a scheme quantified is not free, and a frame that is not the innermost is in a call](./151-a-bound-variable-is-not-free-and-a-frame-is-in-a-call.md)
+- [ADR-152: A brace a block cannot explain is a record, and a shape has one field order](./152-a-brace-a-block-cannot-explain-is-a-record-and-a-shape-has-one-field-order.md)

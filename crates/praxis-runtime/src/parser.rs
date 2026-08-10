@@ -351,8 +351,11 @@ unsafe fn walk(
         PlanNode::SectionsNamed {
             fields,
             repeated_tail,
-        } => walk_sections_named(&rt, i, plan, fields, *repeated_tail, region),
-        PlanNode::Block { items } => walk_block(&rt, i, plan, items, region),
+            field_order,
+        } => walk_sections_named(&rt, i, plan, fields, *repeated_tail, field_order, region),
+        PlanNode::Block { items, field_order } => {
+            walk_block(&rt, i, plan, items, field_order, region)
+        }
         PlanNode::Choice { cases } => walk_choice(&rt, i, plan, cases, region),
         PlanNode::Optional { child } => walk_optional(&rt, i, plan, *child, region),
         PlanNode::Scan { child } => walk_scan(&rt, i, plan, *child, region),
@@ -378,7 +381,9 @@ unsafe fn walk(
             walk_sep(&rt, i, plan, *child, sep, region)
         }
         PlanNode::Grid { child } => walk_grid(&rt, i, plan, *child, region),
-        PlanNode::Template { parts } => walk_template(&rt, i, plan, parts, region),
+        PlanNode::Template { parts, field_order } => {
+            walk_template(&rt, i, plan, parts, field_order, region)
+        }
     }
 }
 
@@ -891,6 +896,7 @@ fn walk_sections_named(
     plan: &ParserPlan,
     fields: &'static [SectionItemNode],
     repeated_tail: Option<(&'static str, u32)>,
+    field_order: &'static [&'static str],
     region: ByteRegion,
 ) -> WalkResult {
     let sections = split_sections(i, region);
@@ -962,7 +968,7 @@ fn walk_sections_named(
         // child; its value is the assembled Vec.
         captures.push((Some(tail_name), tail_child, tail_vec));
     }
-    let record = alloc_record(rt, &captures);
+    let record = alloc_record(rt, &captures, field_order);
     Ok(Walked {
         value: record,
         next: region.end(),
@@ -1009,6 +1015,7 @@ fn walk_block(
     i: &Input<'_>,
     plan: &ParserPlan,
     items: &'static [praxis_input_parser::BlockItemNode],
+    field_order: &'static [&'static str],
     region: ByteRegion,
 ) -> WalkResult {
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
@@ -1069,7 +1076,7 @@ fn walk_block(
             }
         }
     }
-    let record = alloc_record(rt, &captures);
+    let record = alloc_record(rt, &captures, field_order);
     Ok(Walked {
         value: record,
         next: cursor,
@@ -1117,7 +1124,7 @@ fn block_item_window(
     region: ByteRegion,
     cursor: Cursor,
 ) -> ByteRegion {
-    let PlanNode::Template { parts } = &plan.nodes[child as usize] else {
+    let PlanNode::Template { parts, .. } = &plan.nodes[child as usize] else {
         return region.from(cursor);
     };
     let extra = parts
@@ -1925,6 +1932,7 @@ fn walk_template(
     i: &Input<'_>,
     plan: &ParserPlan,
     parts: &[praxis_input_parser::TemplatePartNode],
+    field_order: &'static [&'static str],
     region: ByteRegion,
 ) -> WalkResult {
     // Every `GcRef` this helper holds is rooted here. A `NativeScope` claims the
@@ -2049,7 +2057,7 @@ fn walk_template(
     // stopped so a `block(...)` parent can advance item by item (§7.5).
     let value = match (TemplateShape::of(parts), captures.as_slice()) {
         // Named captures → Record. Build the schema at runtime.
-        (TemplateShape::Record, _) => alloc_record(rt, &captures),
+        (TemplateShape::Record, _) => alloc_record(rt, &captures, field_order),
         // One anonymous capture → the captured value itself.
         (TemplateShape::Scalar { .. }, [(_, _, only)]) => *only,
         // Two or more anonymous captures → Tuple. The schema comes from the
@@ -2167,7 +2175,19 @@ fn alloc_unit(rt: &Rt) -> GcRef {
 /// `RecordSchema` from the capture names + the child result descriptors, and
 /// fills the payload with the captured values. The schema is owned by the cache
 /// below, not leaked.
-fn alloc_record(rt: &Rt, captures: &[(Option<&'static str>, u32, GcRef)]) -> GcRef {
+fn alloc_record(
+    rt: &Rt,
+    captures: &[(Option<&'static str>, u32, GcRef)],
+    field_order: &'static [&'static str],
+) -> GcRef {
+    // **The record is laid out in `field_order`, not in capture order** (§5.6,
+    // ADR-152). An anonymous record's identity is its field-name set, so a
+    // second parser naming the same fields in another order builds the *same
+    // type* — and a field read compiles to a slot index against that one type's
+    // definition. Assembling in capture order would put `w` in `h`'s slot for
+    // whichever spelling the compiler did not make canonical, and the read
+    // would answer the wrong field with no error anywhere.
+    //
     // Build the schema fields. Named captures only (the record case requires
     // every capture to have a name in well-formed input; anonymous ones in a
     // named template are a parser-validation concern, treated as `_` here).
@@ -2178,7 +2198,8 @@ fn alloc_record(rt: &Rt, captures: &[(Option<&'static str>, u32, GcRef)]) -> GcR
     // real type — hardcoding INT here miscompares/misformats/segsfaults on any
     // non-Int field (Text, Char, nested record, …) because the INT callback
     // reinterprets the foreign payload as an i64.
-    let fields: Vec<crate::records::RecordField> = captures
+    let ordered = canonical_captures(captures, field_order);
+    let fields: Vec<crate::records::RecordField> = ordered
         .iter()
         .map(|(name, _child, value)| crate::records::RecordField {
             name: name.unwrap_or("_"),
@@ -2186,11 +2207,55 @@ fn alloc_record(rt: &Rt, captures: &[(Option<&'static str>, u32, GcRef)]) -> GcR
         })
         .collect();
     let schema = record_schema_for(fields);
-    let items: Vec<GcRef> = captures.iter().map(|(_, _, v)| *v).collect();
+    let items: Vec<GcRef> = ordered.iter().map(|(_, _, v)| *v).collect();
     let payload = crate::records::RecordPayload { schema, items };
     let (heap, safepoint) = rt.safepoint();
     // SAFETY: RecordPayload is RECORD's payload type.
     unsafe { heap.alloc_payload(safepoint, &crate::records::RECORD, payload) }
+}
+
+/// `captures` permuted into `field_order`, borrowed unchanged when they already
+/// agree.
+///
+/// They almost always do: a program with one spelling of a shape gets its own
+/// order back, which is the whole of `SourceOrder`'s case and nearly all of a
+/// compile's. So the common path is one name comparison per field and no
+/// allocation, and the copy is paid only by the spelling that lost.
+///
+/// An empty `field_order` means the plan node builds no record — a tuple or
+/// scalar template — and the captures stand as they are.
+fn canonical_captures<'a>(
+    captures: &'a [(Option<&'static str>, u32, GcRef)],
+    field_order: &'static [&'static str],
+) -> std::borrow::Cow<'a, [(Option<&'static str>, u32, GcRef)]> {
+    let agrees = field_order.len() == captures.len()
+        && captures
+            .iter()
+            .zip(field_order)
+            .all(|((name, _, _), want)| *name == Some(*want));
+    if agrees || field_order.is_empty() {
+        return std::borrow::Cow::Borrowed(captures);
+    }
+    // A name in `field_order` that no capture carries cannot happen — the order
+    // was computed from these same names — but the walk is written to be total
+    // rather than to assert: this runs beneath an `extern "C"` entry point,
+    // where a panic is undefined behaviour. A capture left over keeps its place
+    // at the end, so no field is ever dropped.
+    let mut ordered: Vec<(Option<&'static str>, u32, GcRef)> = Vec::with_capacity(captures.len());
+    for want in field_order {
+        if let Some(c) = captures
+            .iter()
+            .find(|(name, _, _)| *name == Some(*want) && !ordered.iter().any(|o| o.0 == *name))
+        {
+            ordered.push(*c);
+        }
+    }
+    for c in captures {
+        if !ordered.iter().any(|o| o.0 == c.0) {
+            ordered.push(*c);
+        }
+    }
+    std::borrow::Cow::Owned(ordered)
 }
 
 /// Allocate a tuple from positional capture values (§7.3). Builds (and caches)
@@ -2624,7 +2689,7 @@ fn child_descriptor(plan: &ParserPlan, child: u32) -> &'static crate::TypeDescri
         PlanNode::Matrix { .. } | PlanNode::GridRagged { .. } => &crate::collections::GRID,
         // A template's result is one of §7.3's four shapes, decided by the same
         // classifier that assembles the value.
-        PlanNode::Template { parts } => template_result_descriptor(plan, parts),
+        PlanNode::Template { parts, .. } => template_result_descriptor(plan, parts),
     }
 }
 
@@ -3194,8 +3259,14 @@ mod tests {
                 PlanNode::Atomic {
                     kind: AtomicKind::Int,
                 },
-                PlanNode::Template { parts: short },
-                PlanNode::Template { parts: long },
+                PlanNode::Template {
+                    parts: short,
+                    field_order: &[],
+                },
+                PlanNode::Template {
+                    parts: long,
+                    field_order: &[],
+                },
                 PlanNode::Choice { cases },
             ],
             3,
@@ -3538,7 +3609,10 @@ mod tests {
                 PlanNode::Atomic {
                     kind: AtomicKind::Word,
                 },
-                PlanNode::Template { parts },
+                PlanNode::Template {
+                    parts,
+                    field_order: &[],
+                },
             ]
             .into_boxed_slice(),
         );
@@ -3591,7 +3665,10 @@ mod tests {
                 PlanNode::Atomic {
                     kind: AtomicKind::Word,
                 },
-                PlanNode::Template { parts },
+                PlanNode::Template {
+                    parts,
+                    field_order: &[],
+                },
             ]
             .into_boxed_slice(),
         );

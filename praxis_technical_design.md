@@ -690,7 +690,19 @@ Anonymous records are structurally identified within one compilation session by 
 { x: Int, y: Int }
 ```
 
-Field order in source does not affect type identity after canonicalization, but display and construction preserve source order.
+Field order in source does not affect type identity after canonicalization.
+
+**A shape's field order is its first spelling's** (ADR-152). Identity by field
+set makes every spelling of a shape one type, and a type has exactly one field
+order because a field read compiles to a slot index against it — so the order
+cannot belong to whichever producer built a given value. The first spelling
+anywhere in the program registers its order; every later one, whether a
+`{ x: 1, y: 2 }` literal or a named-capture template, is laid out and displayed
+in it. A program with one spelling of each shape therefore does preserve source
+order, which is what the original sentence here promised.
+
+An anonymous record is written as well as derived: `{ x: 1, y: 2 }` is a record
+literal with no head, admitted wherever a `{` cannot open a block (ADR-152).
 
 ### 5.7 Method resolution
 
