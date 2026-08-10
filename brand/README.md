@@ -10,11 +10,26 @@ praxis-mark-inline.svg   currentColor + --mark    -> inlined into a page that ha
 praxis-mark-mono.svg     one colour               -> stencils, one-colour print, embroidery
 ```
 
-The website does not load any of these. `www/index.html` is a single file that
-makes no network requests, so the header mark is inlined into the markup and the
-favicon is inlined as a `data:` URI. These files exist for everything outside the
-page. If you change the geometry here, change it there too — there is no build
-step that would notice.
+Nothing loads these at runtime, because both consumers have to be self-contained.
+`www/index.html` is a single file that makes no network requests, so the header
+mark is inlined into the markup and the favicon is inlined as a `data:` URI; a
+`.vsix` ships its own assets, so the extension carries its own copies too.
+
+**The geometry therefore exists in four places, and no build step reconciles
+them.** Change one and change the rest by hand:
+
+| where | what |
+| ----- | ---- |
+| `brand/*.svg` | the source of truth |
+| `www/index.html` | inline SVG in the header, plus the favicon `data:` URI |
+| `editors/vscode/icon.png` | 128×128 marketplace tile, rasterised |
+| `editors/vscode/icons/praxis-file-*.svg` | the `.px` file icon, one per UI theme |
+
+The marketplace tile must be a **PNG** — VS Code does not accept SVG for
+`package.json`'s `icon` — and it is drawn on the solid `#0F0C0D` ground rather
+than on transparency, so it survives both the light marketplace page and the
+dark extensions sidebar. To regenerate it, render `praxis-mark.svg` centred at
+96px inside a 128px `#0F0C0D` tile.
 
 ## Construction
 

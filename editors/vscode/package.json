@@ -5,6 +5,11 @@
   "description": "Language support for Praxis: syntax highlighting, diagnostics, hover, completion, inlay hints, references, rename, quick fixes, and the local toolchain commands.",
   "version": "0.1.0",
   "license": "MIT OR Apache-2.0",
+  "icon": "icon.png",
+  "galleryBanner": {
+    "color": "#0F0C0D",
+    "theme": "dark"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/tljubej/praxis"
@@ -30,7 +35,11 @@
         "extensions": [
           ".px"
         ],
-        "configuration": "./language-configuration.json"
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/praxis-file-light.svg",
+          "dark": "./icons/praxis-file-dark.svg"
+        }
       }
     ],
     "grammars": [
