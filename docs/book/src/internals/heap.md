@@ -254,10 +254,12 @@ Over the AoC corpus that took the summed declared width from 1925 slots to 216
 Shadow-stack exhaustion is unrepresentable rather than handled, and the argument
 runs through the recursion guard. Every prologue refuses before it pushes
 anything if the remaining stack budget will not cover this frame's cost, where
-the cost is a measured floor of 134 bytes plus 2 bytes per `Gc` local past the
-eleventh. The budget is 8000 reference-width frames' worth. The shadow-stack
-reservation is sized from that same arithmetic plus one frame of headroom, so
-there is no bounds check in the prologue, because there is nothing left to check
+the cost is a measured floor of 160 bytes plus 2 bytes per `Gc` local past the
+eleventh — the floor being the high-water mark across both targets the backend
+supports, so a program faults at the same depth on either. The budget is 8000
+reference-width frames' worth. The shadow-stack reservation is sized from that
+same arithmetic plus one frame of headroom, so there is no bounds check in the
+prologue, because there is nothing left to check
 ([ADR-105](../../../decisions/105-the-recursion-guard-spends-a-byte-budget.md)).
 
 This is the one place the machinery becomes a fault you can hit:

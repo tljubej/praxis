@@ -812,12 +812,19 @@ fn lower_function_capturing<M: Module>(
 /// Check the prologue's byte model against the frame Cranelift actually laid
 /// out (ADR-105).
 ///
-/// `frame_cost` is a *measurement* — `112 + 2 × slots` bytes, fitted by
-/// bisecting the abort depth of recursive programs under `ulimit -s` and rounded
-/// up. Measurements go stale: a Cranelift upgrade, a new target, or a lowering
-/// that spills more can widen the real frame past what the guard charged for it,
-/// and the symptom would be the SIGABRT the guard exists to prevent, in a build
+/// `frame_cost` is a *measurement* — `FRAME_BYTES_BASE + 2 × slots` bytes,
+/// rounded up from the real frames of both targets this backend supports.
+/// Measurements go stale: a Cranelift upgrade, a new target, or a lowering that
+/// spills more can widen the real frame past what the guard charged for it, and
+/// the symptom would be the SIGABRT the guard exists to prevent, in a build
 /// nobody connected to a codegen bump.
+///
+/// **That is not hypothetical, and this is what caught it.** ADR-105 fitted the
+/// model by bisecting abort depths on arm64 alone. On x86_64 the same lowering
+/// spills into half as many registers, so narrow frames run wider than the fit
+/// allowed and this assert fired on a twenty-one-slot `main` — 160 real bytes
+/// against 154 charged. `FRAME_BYTES_BASE` carries the re-measurement and the
+/// census it came from.
 ///
 /// So the model is not trusted, it is audited. Cranelift knows the exact frame
 /// size once it has compiled the function, and this compares the two on every

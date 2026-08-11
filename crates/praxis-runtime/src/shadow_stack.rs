@@ -174,8 +174,8 @@ impl DebugSlotCount {
 /// deepest recursion" by "the widest frame" as if a program could have both at
 /// once. It cannot, and the guard is what says so: a maximum-width frame spends
 /// `FRAME_BYTES_BASE + 2 × (MAX_SHADOW_SLOTS − REFERENCE_FRAME_SLOTS)` bytes, so
-/// a stack of them runs out of budget at 2161 frames, not 8000. The reservation
-/// is therefore 4.77 MiB of *virtual address space* per
+/// a stack of them runs out of budget at 2452 frames, not 8000. The reservation
+/// is therefore 5.56 MiB of *virtual address space* per
 /// [`Runtime`](crate::Runtime). [`SlotStack::new`] allocates it zeroed, which is
 /// an `mmap` of fresh zero pages: resident memory tracks how deep the program
 /// actually recurses, not how deep it is allowed to.
@@ -355,7 +355,7 @@ impl<T: Copy> SlotStack<T> {
     /// `zero` is a parameter rather than a `Default` bound so the caller names
     /// the all-zero value — and because that is what lets this lower to a
     /// single `alloc_zeroed`. `vec![zero; n]` hits std's `IsZero`
-    /// specialization for raw pointers, so the 4.77 MiB shadow reservation is
+    /// specialization for raw pointers, so the 5.56 MiB shadow reservation is
     /// an `mmap` of untouched zero pages rather than a memset at every
     /// `Runtime::new()`. An instantiation whose `zero` std does not recognise
     /// as all-zero-bytes still works; it pays that memset.

@@ -27,12 +27,44 @@ use crate::{
 /// What *any* call spends, however narrow: the floor of [`frame_cost`], in
 /// bytes (ADR-105).
 ///
-/// Measured, not assumed. Bisecting the abort depth of recursive Praxis
-/// programs under `ulimit -s`, on this backend (arm64, release), gives a native
-/// frame of `99 + 1.06 × gc_locals` bytes: 86 B for a minimal frame, 294 B for
-/// one carrying twenty-two live collections. This is that fit at
-/// [`REFERENCE_FRAME_SLOTS`], rounded up — so the model over-charges every real
-/// frame and the budget below is a ceiling rather than an estimate.
+/// Measured, not assumed, and measured on **both** targets this backend
+/// supports — which is the whole of why it is 160 and not the 134 ADR-105
+/// landed.
+///
+/// - **arm64.** Bisecting the abort depth of recursive Praxis programs under
+///   `ulimit -s` (release) gives a native frame of `99 + 1.06 × gc_locals`
+///   bytes: 86 B for a minimal frame, 294 B for one carrying twenty-two live
+///   collections. 134 was that fit at [`REFERENCE_FRAME_SLOTS`], rounded up.
+/// - **x86_64.** Read straight off Cranelift's own `frame_layout` by
+///   `audit_frame_cost` over every function the test suite and the book compile
+///   — 2669 frames, which is a census rather than a fit. Narrow frames are
+///   *wider* here than arm64's: the x64 backend has half the registers to
+///   allocate out of and spills accordingly, so a function of eleven `Gc` locals
+///   or fewer reaches 128 B and one of twenty-seven reaches 176 B, against a
+///   134 B charge. That is the assert ADR-105 decision 5 exists to fire, and it
+///   fired.
+///
+/// 160 covers the worst frame in that census with a 16-byte margin — one full
+/// stack quantum on a target that aligns to 16 — so the model still over-charges
+/// every real frame and the budget below is still a ceiling rather than an
+/// estimate.
+///
+/// **One constant, not one per target, and that is deliberate.** ADR-105
+/// decision 3 refused to derive the budget from the host's `getrlimit` because
+/// it would make the same program fault at different depths on different
+/// machines, "and the depth at which a Praxis program stops recursing would stop
+/// being a property of Praxis". A per-target charge gives that away just as
+/// surely: [`STACK_BUDGET_BYTES`] scales with this constant, so a target-varying
+/// base leaves a *reference* frame at [`MAX_RECURSION_DEPTH`] everywhere but
+/// moves the depth of every wider one. The charge is therefore the high-water
+/// mark across targets, which costs arm64 only headroom it does not use.
+///
+/// **[`FRAME_BYTES_PER_SLOT`] is left alone at 2**, though raising it would have
+/// bought the same margin. The x86_64 census finds no slope worth the name — a
+/// 450-slot function frames in 192 B and a 105-slot one in 288 B, because `Gc`
+/// locals live in the shadow and debug slot stacks rather than in the native
+/// frame — so a steeper per-slot term would be an invented number that took
+/// depth from wide frames to fix a floor that was too low.
 ///
 /// **It is a floor and not merely a base, and that is load-bearing.** A frame
 /// narrower than the reference is charged the same, so no call can ever cost
@@ -45,10 +77,12 @@ use crate::{
 /// compiled a function it knows the real frame size, and a `debug_assert`
 /// there fails the build's test run if any function's actual frame outgrows
 /// what [`frame_cost`] charged for it.
-pub const FRAME_BYTES_BASE: u32 = 134;
+pub const FRAME_BYTES_BASE: u32 = 160;
 
 /// What each `Gc` local *past* [`REFERENCE_FRAME_SLOTS`] adds to a frame's cost,
-/// in bytes (ADR-105). Rounds up the measured 1.06 B per local.
+/// in bytes (ADR-105). Rounds up arm64's measured 1.06 B per local; x86_64
+/// measures no slope at all, and [`FRAME_BYTES_BASE`] says why that left this
+/// constant where it was.
 pub const FRAME_BYTES_PER_SLOT: u32 = 2;
 
 /// The deepest recursion a *reference-width* function reaches, and the figure
@@ -94,9 +128,16 @@ pub const REFERENCE_FRAME_SLOTS: u32 = 11;
 /// the second, so asking the OS gives a number that is wrong exactly where the
 /// suite lives. Choosing one figure that fits under *both*, with room to spare,
 /// removes the question instead of answering it: it is what
-/// `MAX_RECURSION_DEPTH` reference frames cost — about 1.02 MiB charged,
-/// 768 KiB actually consumed — and no frame shape can exceed it, because the
-/// guard charges by shape.
+/// `MAX_RECURSION_DEPTH` reference frames cost — about 1.22 MiB charged — and no
+/// frame shape can exceed it, because the guard charges by shape.
+///
+/// What is *consumed* is below that by however much the model over-charges the
+/// shape doing the recursing, and the model over-charges every shape: the
+/// reference program frames in 80 bytes on x86_64 against a 160-byte charge, so
+/// it reaches 8000 deep on 625 KiB. The tightest ratio in the census behind
+/// [`FRAME_BYTES_BASE`] — 176 actual bytes against 192 charged — puts the true
+/// worst case at 1.12 MiB, which is the figure to hold against the 2 MiB thread
+/// stack rather than the charged one.
 ///
 /// A host that knows better may lower it through
 /// [`Runtime::set_stack_budget`](crate::Runtime::set_stack_budget). It may not
@@ -127,8 +168,8 @@ pub const STACK_BUDGET_BYTES: u32 = MAX_RECURSION_DEPTH * FRAME_BYTES_BASE;
 /// it is a calibrated proxy for the *native* frame, and under-reporting that is
 /// the SIGABRT ADR-105 exists to remove.
 ///
-/// So the bound this must not overflow is `frame_cost(4096)` = `134 + 2 × 4085`
-/// = 8304, comfortably inside `u32` and inside [`STACK_BUDGET_BYTES`] — and the
+/// So the bound this must not overflow is `frame_cost(4096)` = `160 + 2 × 4085`
+/// = 8330, comfortably inside `u32` and inside [`STACK_BUDGET_BYTES`] — and the
 /// saturating arithmetic is belt-and-braces for a caller that has not proved
 /// even that.
 #[must_use]

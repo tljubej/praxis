@@ -664,7 +664,7 @@ pub const DEBUG_VALUE_STACK_SLOTS: usize = MAX_LIVE_SLOTS + MAX_DEBUG_VALUE_SLOT
 // The capacity identity for this stack, spelled the same way and for the same
 // reason `SHADOW_STACK_SLOTS`'s is (ADR-128 decision 3: "the assert is not
 // optional"). The hazard is not someone raising the budget — the reservation
-// follows it — it is someone deciding ~5 MiB of address space is too much and
+// follows it — it is someone deciding ~5.6 MiB of address space is too much and
 // writing a smaller number. That edit makes debug-value-stack overflow reachable
 // from generated code, silently, because generated code does not check the limit.
 // This fails the *build* instead.
@@ -1727,7 +1727,7 @@ mod tests {
         assert!(
             widest * 50 < reference,
             "and the widest function there is must be far dearer than the \
-             reference one — 129 against 8000 as this is written: {widest} vs \
+             reference one — 153 against 8000 as this is written: {widest} vs \
              {reference}"
         );
     }
