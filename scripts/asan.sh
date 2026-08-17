@@ -92,7 +92,16 @@ if [ -z "$TARGET" ]; then
     exit 1
 fi
 
-export RUSTFLAGS="-Zsanitizer=address"
+# `-C debug-assertions` on a `--release` build, because checks this job exists
+# to run are gated on them and `[profile.release]` turns them off: every
+# `debug_assert!` in the workspace, Rust's own integer-overflow checks (which
+# follow `debug-assertions` unless `overflow-checks` overrides it), and — since
+# it is the reason the flag is spelled out here — the **Cranelift IR verifier**
+# (`praxis_codegen_cranelift::module::CRANELIFT_FLAGS`), the net that catches
+# malformed CLIF this tree emits before the backend miscompiles it. Without
+# this the nightly sanitizer run would be the one gate compiling unverified,
+# which is precisely backwards.
+export RUSTFLAGS="-Zsanitizer=address -C debug-assertions"
 export ASAN_OPTIONS="detect_leaks=0"
 
 echo "asan: target $TARGET, RUSTFLAGS=$RUSTFLAGS, ASAN_OPTIONS=$ASAN_OPTIONS" >&2

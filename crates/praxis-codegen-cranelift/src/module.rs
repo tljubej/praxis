@@ -85,11 +85,39 @@ pub struct Jit {
 /// there is not redundant to Cranelift, and redundancy inside a loop is the
 /// lowering's to remove rather than the optimizer's.
 ///
+/// **`enable_verifier` is off in a release build and on everywhere else.**
+/// Cranelift defaults it to *on* — "useful during development", says the
+/// setting's own documentation — and it is the single most expensive thing this
+/// backend does. `Context::compile` runs `verify_context` after the legalizer,
+/// after each mid-end pass and again before lowering; sampling a `praxis run` of
+/// `aoc2025_day12.px` puts **29% of all Cranelift time inside the verifier**,
+/// ahead of the egraph mid-end and behind only register allocation. Turning it
+/// off measures 1.47× on `Jit::compile` (12.4 ms from 18.2 ms on that program;
+/// 1.42–1.50× across six corpus programs) and 1.16× on the wall clock of the
+/// whole corpus, every program faster and none slower.
+///
+/// It costs no generated code: the verifier reads the IR and never rewrites it,
+/// and the two arms' `PRAXIS_DUMP_VCODE` output is identical once the immediates
+/// holding ASLR'd runtime addresses are normalized — which two runs of the *same*
+/// arm also need.
+///
+/// What it costs is a net that catches malformed CLIF this crate emits before
+/// Cranelift miscompiles it, so the gate is `debug_assertions` rather than an
+/// unconditional `false`: `cargo test` builds the whole workspace with them on,
+/// `just ci` runs the suite and `book-verify` against the debug binary, and
+/// `scripts/asan.sh` passes `-C debug-assertions` for exactly this reason. Every
+/// gate that could catch a bad lowering still runs the verifier; only the
+/// optimized binary a user runs a program with does not.
+///
 /// Cranelift's settings builder is stringly typed, so a name or a value it does
 /// not know is an error from `JITBuilder::with_flags` at run time and not a build
 /// failure. `the_opt_level_flag_is_accepted_and_takes_effect` is the build
 /// failure.
-pub(crate) const CRANELIFT_FLAGS: &[(&str, &str)] = &[("opt_level", "speed")];
+pub(crate) const CRANELIFT_FLAGS: &[(&str, &str)] = if cfg!(debug_assertions) {
+    &[("opt_level", "speed")]
+} else {
+    &[("opt_level", "speed"), ("enable_verifier", "false")]
+};
 
 /// The contiguous address space one [`Jit`] reserves up front to carve every
 /// piece of generated code out of.
@@ -366,6 +394,27 @@ mod tests {
             "the fifth measurement reopened this: `collatz` +16.5%, `tree` \
              +4.2%, both reproduced, and the mechanism is code size rather \
              than the loop body"
+        );
+    }
+
+    /// The CLIF verifier runs in every build that could catch a bad lowering,
+    /// and in no other.
+    ///
+    /// Read off the ISA rather than off [`CRANELIFT_FLAGS`], for the reason the
+    /// test above reads the opt level back: a settings pair is accepted or
+    /// rejected at run time, so the constant says what was *asked for* and only
+    /// the ISA says what governs the compilation. This test runs under `cargo
+    /// test`, which builds with `debug_assertions` on, so the assertion it makes
+    /// today is `true` — the `cfg!` is what makes it also the assertion an
+    /// optimized build would fail if the gate were dropped.
+    #[test]
+    fn the_clif_verifier_is_on_exactly_when_debug_assertions_are() {
+        let jit = Jit::new().expect("the explicit flags must be accepted");
+        assert_eq!(
+            jit.module.isa().flags().enable_verifier(),
+            cfg!(debug_assertions),
+            "the verifier is 29% of Cranelift's time and catches malformed CLIF \
+             this crate emits: it belongs in every gate and in no user's run"
         );
     }
 

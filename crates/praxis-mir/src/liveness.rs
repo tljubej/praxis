@@ -63,15 +63,23 @@ fn compute_fixpoint(func: &mut Function) -> usize {
         .collect();
 
     let live_in = live_in_fixpoint(func);
-    let dirty_in = dirty_in_fixpoint(func, &gc_locals, &live_in);
+    // The root set at each instruction of each block, in program order: one
+    // backward walk per block from its live_out, snapshotting live-*before*
+    // each instruction (which is exactly `((live_out \ defs) ∪ uses)`).
+    //
+    // Computed **once**, here, because it is a function of `live_in` and
+    // `gc_locals` and neither changes again: the dirty fixpoint below reads it
+    // on every round, and so does the annotation walk after it.
+    let roots_per_block: Vec<Vec<BTreeSet<LocalId>>> = func
+        .blocks
+        .iter()
+        .map(|blk| block_roots(blk, &live_in, &gc_locals))
+        .collect();
+    let dirty_in = dirty_in_fixpoint(func, &roots_per_block);
 
     let mut count = 0;
-    for blk_idx in 0..func.blocks.len() {
+    for (blk_idx, (blk, roots_at)) in func.blocks.iter_mut().zip(&roots_per_block).enumerate() {
         let blk_id = BlockId(blk_idx as u32);
-        // The root set at each instruction, in program order: one backward walk
-        // from the block's live_out, snapshotting live-*before* each
-        // instruction (which is exactly `((live_out \ defs) ∪ uses)`).
-        let roots_at = block_roots(&func.blocks[blk_idx], &live_in, &gc_locals);
 
         // The debugger's view and the dirty-slot tracker both run forward.
         let mut visible: BTreeSet<LocalId> = live_in
@@ -80,7 +88,7 @@ fn compute_fixpoint(func: &mut Function) -> usize {
             .unwrap_or_default();
         let mut dirty: BTreeSet<LocalId> = dirty_in.get(&blk_id).cloned().unwrap_or_default();
 
-        for (i, inst) in func.blocks[blk_idx].insts.iter_mut().enumerate() {
+        for (i, inst) in blk.insts.iter_mut().enumerate() {
             let debug_now: Vec<LocalId> = visible.iter().copied().collect();
             if let Some((roots, debug)) = gc_safepoint_slots(inst) {
                 let live: BTreeSet<LocalId> = roots_at[i].clone();
@@ -170,16 +178,13 @@ fn block_roots(
 /// so the set changes only there.
 fn dirty_in_fixpoint(
     func: &Function,
-    gc_locals: &BTreeSet<LocalId>,
-    live_in: &HashMap<BlockId, BTreeSet<LocalId>>,
+    roots_per_block: &[Vec<BTreeSet<LocalId>>],
 ) -> HashMap<BlockId, BTreeSet<LocalId>> {
     let mut dirty_in: HashMap<BlockId, BTreeSet<LocalId>> = HashMap::new();
     loop {
         let mut changed = false;
-        for blk_idx in 0..func.blocks.len() {
+        for (blk_idx, (blk, roots_at)) in func.blocks.iter().zip(roots_per_block).enumerate() {
             let blk_id = BlockId(blk_idx as u32);
-            let blk = &func.blocks[blk_idx];
-            let roots_at = block_roots(blk, live_in, gc_locals);
             // Walk the block: after each safepoint the frame holds its roots.
             let mut dirty = dirty_in.get(&blk_id).cloned().unwrap_or_default();
             for (i, inst) in blk.insts.iter().enumerate() {

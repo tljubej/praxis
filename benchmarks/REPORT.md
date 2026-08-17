@@ -32,14 +32,14 @@ Wall clock, whole process, best of 5 runs. Every row's three implementations pri
 
 | Benchmark | Size | Rust | Python | Praxis | Praxis / Rust | Praxis / Python | Python / Rust |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `primes` | 1,600,000 | 65 ms | 3.48 s | 225 ms | 3× | 0.1× | 54× |
-| `mandelbrot` | 430 | 60 ms | 2.50 s | 252 ms | 4× | 0.1× | 42× |
-| `collatz` | 340,000 | 42 ms | 2.68 s | 123 ms | 3× | 0.0× | 64× |
-| `vm` | 2,800,000 | 114 ms | 8.12 s | 968 ms | 9× | 0.1× | 72× |
-| `hashwork` | 9,400,000 | 337 ms | 4.81 s | 1.76 s | 5× | 0.4× | 14× |
-| `tree` | 330 | 86 ms | 3.71 s | 1.01 s | 12× | 0.3× | 43× |
-| `pipeline` | 1,000,000 | 64 ms | 2.62 s | 1.52 s | 24× | 0.6× | 41× |
-| `bfs` | 200 | 144 ms | 3.97 s | 1.44 s | 10× | 0.4× | 28× |
+| `primes` | 1,600,000 | 67 ms | 3.45 s | 225 ms | 3× | 0.1× | 51× |
+| `mandelbrot` | 430 | 62 ms | 2.49 s | 257 ms | 4× | 0.1× | 40× |
+| `collatz` | 340,000 | 43 ms | 2.68 s | 123 ms | 3× | 0.0× | 62× |
+| `vm` | 2,800,000 | 112 ms | 8.14 s | 965 ms | 9× | 0.1× | 72× |
+| `hashwork` | 9,400,000 | 339 ms | 4.91 s | 1.93 s | 6× | 0.4× | 14× |
+| `tree` | 330 | 90 ms | 3.89 s | 1.07 s | 12× | 0.3× | 43× |
+| `pipeline` | 1,000,000 | 67 ms | 2.67 s | 1.61 s | 24× | 0.6× | 40× |
+| `bfs` | 200 | 154 ms | 4.72 s | 1.82 s | 12× | 0.4× | 31× |
 | **geometric mean** | | | | | **7×** | **0.2×** | **40×** |
 
 Read the last three columns as *how many times longer than*. Praxis / Python above 1.0 means Praxis was slower.
@@ -56,31 +56,35 @@ The second is the sharper one. `Heap::alloc_raw` charges the pacer at constructi
 
 | Benchmark | Rust | Python | Praxis | Praxis retained per second |
 |---|---:|---:|---:|---:|
-| `primes` | 2 MiB | 15 MiB | 12 MiB | 52 MiB/s |
-| `mandelbrot` | 1 MiB | 15 MiB | 11 MiB | 45 MiB/s |
+| `primes` | 2 MiB | 15 MiB | 12 MiB | 51 MiB/s |
+| `mandelbrot` | 1 MiB | 15 MiB | 11 MiB | 44 MiB/s |
 | `collatz` | 2 MiB | 15 MiB | 7 MiB | 57 MiB/s |
 | `vm` | 2 MiB | 15 MiB | 13 MiB | 13 MiB/s |
-| `hashwork` | 6 MiB | 23 MiB | 23 MiB | 13 MiB/s |
-| `tree` | 6 MiB | 34 MiB | 51 MiB | 51 MiB/s |
-| `pipeline` | 11 MiB | 55 MiB | 107 MiB | 70 MiB/s |
-| `bfs` | 9 MiB | 35 MiB | 55 MiB | 38 MiB/s |
+| `hashwork` | 6 MiB | 24 MiB | 22 MiB | 12 MiB/s |
+| `tree` | 6 MiB | 34 MiB | 51 MiB | 48 MiB/s |
+| `pipeline` | 11 MiB | 55 MiB | 106 MiB | 66 MiB/s |
+| `bfs` | 9 MiB | 35 MiB | 55 MiB | 30 MiB/s |
 
 ## Is the JIT contaminating this?
 
-No. The fixed cost is between 0.41% and 3.92% of the measured run, and most of the upper end is not compilation at all. The *floor* column is that exact source file run at size 0 — the whole fixed cost of `praxis run`: lex, parse, infer, lower to MIR, Cranelift codegen, process startup, plus whatever size-independent setup the program does before its measured loop (`tree` builds its 131071-node arena, `bfs` builds its adjacency lists). The *front end* column is `praxis check` on the same file, which stops after inference.
+No. The fixed cost is between 0.32% and 3.62% of the measured run, and most of the upper end is not compilation at all. The *floor* column is that exact source file run at size 0 — the whole fixed cost of `praxis run`: lex, parse, infer, lower to MIR, Cranelift codegen, process startup, plus whatever size-independent setup the program does before its measured loop (`tree` builds its 131071-node arena, `bfs` builds its adjacency lists). The *front end* column is `praxis check` on the same file, which stops after inference.
 
 | Benchmark | Praxis front end | Praxis floor (size 0) | Timed run | Floor as % of run |
 |---|---:|---:|---:|---:|
-| `primes` | 3 ms | 5 ms | 225 ms | 2.40% |
-| `mandelbrot` | 3 ms | 5 ms | 252 ms | 2.14% |
-| `collatz` | 3 ms | 5 ms | 123 ms | 3.92% |
-| `vm` | 3 ms | 9 ms | 968 ms | 0.98% |
-| `hashwork` | 3 ms | 7 ms | 1.76 s | 0.41% |
-| `tree` | 3 ms | 23 ms | 1.01 s | 2.25% |
-| `pipeline` | 3 ms | 9 ms | 1.52 s | 0.58% |
-| `bfs` | 3 ms | 37 ms | 1.44 s | 2.57% |
+| `primes` | 3 ms | 5 ms | 225 ms | 2.26% |
+| `mandelbrot` | 3 ms | 6 ms | 257 ms | 2.15% |
+| `collatz` | 3 ms | 4 ms | 123 ms | 3.62% |
+| `vm` | 4 ms | 9 ms | 965 ms | 0.94% |
+| `hashwork` | 3 ms | 6 ms | 1.93 s | 0.32% |
+| `tree` | 3 ms | 23 ms | 1.07 s | 2.12% |
+| `pipeline` | 4 ms | 8 ms | 1.61 s | 0.51% |
+| `bfs` | 4 ms | 34 ms | 1.82 s | 1.89% |
 
-The worst case is 3.92%, and most of even that is the size-independent setup rather than compilation: compiling and starting the largest program in the suite costs single-digit milliseconds. Making the workloads bigger would not change any ratio in this report; it would only make the floor percentages smaller, and since the pacer gained a ceiling it would no longer run the machine out of memory either.
+The worst case is 3.62%, and most of even that is the size-independent setup rather than compilation: compiling and starting the largest program in the suite costs single-digit milliseconds. Making the workloads bigger would not change any ratio in this report; it would only make the floor percentages smaller, and since the pacer gained a ceiling it would no longer run the machine out of memory either.
+
+**That column is 11% lower than the sweep before it, and the reason is one flag.** Cranelift enables its IR verifier by default and it was running in the release binary, where it was 29% of all Cranelift time and could catch nothing a gate had not already had a chance to; it is now off in a build without debug assertions ([`CRANELIFT_FLAGS`](../crates/praxis-codegen-cranelift/src/module.rs), [handover 32](../docs/handovers/32-the-verifier-was-a-third-of-the-jit.md)). Paired against a binary of the previous commit — 14 palindromic reps per program, minimum per arm — the size-0 floor of these eight totals **104.11 ms against 93.64**, a geometric mean of **1.133×**, best on `vm` at 1.221× and least on `tree` at 1.055× because most of `tree`'s floor is its arena rather than its compile.
+
+**Nothing in the timed columns can have moved with it.** The two binaries emit *identical* machine code for all eight of these programs — `PRAXIS_DUMP_VCODE=all` compared byte for byte, once the immediates that encode ASLR'd runtime addresses are normalized, which two runs of the *same* binary need as well. That is a deterministic answer where the clock would only have given a noisy one, and it is the reason no `ab.py` sweep was run for the change.
 
 ## Where the time goes
 
@@ -88,7 +92,7 @@ The worst case is 3.92%, and most of even that is the size-independent setup rat
 
 §4.3 is explicit that this is normative: *no language-visible storage location contains an unboxed scalar*, and *an arithmetic result becomes a `GcRef` before it can be stored, passed, returned, captured, or inspected*. So `acc = acc + i` is an add, an allocation, a header write and a root update, where Rust emits one instruction. §4.3 also anticipates the way out — *later optimizations [may] intern small integers, use tagged pointers, or eliminate allocations through escape analysis*. The first of the three now exists: an `Int` in [-256, 1024] is one immortal object per value and an in-range literal is a load rather than a call and an allocation ([ADR-100](../docs/decisions/100-a-small-int-is-one-object-and-a-literal-is-a-load.md)). Tagged pointers and escape analysis do not, and every allocation outside that range is still a real one.
 
-The spread across the suite still follows the amount of boxing per unit of work, but the ordering is no longer the one the pre-fix report described. `collatz` is now the closest to Rust (3×) and `pipeline` the furthest (24×). `hashwork` (5×) is close because its inner loop is a SipHash of a key and a probe of a `HashMap` — work both languages pay identically, since the Praxis runtime *is* `std::collections::HashMap`. `collatz` (3×) used to be the furthest, because its inner loop is nothing but arithmetic and therefore nothing but boxing; small-`Int` interning reaches exactly that shape, and it moved the most. What is furthest now is the collection-heavy end of the suite, where the boxed values are the elements themselves and interning cannot help.
+The spread across the suite still follows the amount of boxing per unit of work, but the ordering is no longer the one the pre-fix report described. `collatz` is now the closest to Rust (3×) and `pipeline` the furthest (24×). `hashwork` (6×) is close because its inner loop is a SipHash of a key and a probe of a `HashMap` — work both languages pay identically, since the Praxis runtime *is* `std::collections::HashMap`. `collatz` (3×) used to be the furthest, because its inner loop is nothing but arithmetic and therefore nothing but boxing; small-`Int` interning reaches exactly that shape, and it moved the most. What is furthest now is the collection-heavy end of the suite, where the boxed values are the elements themselves and interning cannot help.
 
 ### The collector's pacer has a ceiling
 
@@ -139,7 +143,7 @@ The exception is `pipeline`, at 0.80×. It is the one benchmark that holds a lar
 - **CPython 3.14 is a fast baseline.** This is a PGO+LTO Homebrew build with mimalloc and the 3.11+ specializing interpreter. Against the CPython most people picture — 3.8, no PGO — the same numbers would flatter Praxis noticeably.
 - **Rust is the ceiling, not a fair fight.** It is here to scale the axis. A garbage-collected language with a uniform boxed representation is not trying to reach it.
 - **Single machine, single run of the suite.** Best-of-5 on an otherwise-idle laptop; no CPU pinning, no frequency locking.
-- **The sizes were memory-bound and are no longer bounded by memory at all.** They were chosen when these workloads peaked near 6 GiB; the largest now peaks at 107 MiB. They have deliberately not been re-tuned, because changing a size moves a benchmark to a different rung of the pacer's ladder and the pacer is what the appendix measures. Every Rust column here is therefore smaller than it needs to be, and raising the sizes is now free.
+- **The sizes were memory-bound and are no longer bounded by memory at all.** They were chosen when these workloads peaked near 6 GiB; the largest now peaks at 106 MiB. They have deliberately not been re-tuned, because changing a size moves a benchmark to a different rung of the pacer's ladder and the pacer is what the appendix measures. Every Rust column here is therefore smaller than it needs to be, and raising the sizes is now free.
 - **`vm` and `bfs` give Python its two idiom advantages.** A Python `list` of tuples and a `bytearray` are closer to the metal than the tagged union and `BitSet` the other two use. That is the point of comparing idiomatic code, but it is worth knowing which way it cuts.
 
 ## Environment

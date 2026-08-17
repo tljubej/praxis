@@ -420,6 +420,31 @@ def main() -> None:
         "would no longer run the machine out of memory either."
     )
     w("")
+    w(
+        "**That column is 11% lower than the sweep before it, and the reason is one "
+        "flag.** Cranelift enables its IR verifier by default and it was running in "
+        "the release binary, where it was 29% of all Cranelift time and could catch "
+        "nothing a gate had not already had a chance to; it is now off in a build "
+        "without debug assertions "
+        "([`CRANELIFT_FLAGS`](../crates/praxis-codegen-cranelift/src/module.rs), "
+        "[handover 32](../docs/handovers/32-the-verifier-was-a-third-of-the-jit.md)). "
+        "Paired against a binary of the previous commit — 14 palindromic reps per "
+        "program, minimum per arm — the size-0 floor of these eight totals **104.11 ms "
+        "against 93.64**, a geometric mean of **1.133×**, best on `vm` at 1.221× and "
+        "least on `tree` at 1.055× because most of `tree`'s floor is its arena rather "
+        "than its compile."
+    )
+    w("")
+    w(
+        "**Nothing in the timed columns can have moved with it.** The two binaries "
+        "emit *identical* machine code for all eight of these programs — "
+        "`PRAXIS_DUMP_VCODE=all` compared byte for byte, once the immediates that "
+        "encode ASLR'd runtime addresses are normalized, which two runs of the *same* "
+        "binary need as well. That is a deterministic answer where the clock would "
+        "only have given a noisy one, and it is the reason no `ab.py` sweep was run "
+        "for the change."
+    )
+    w("")
 
     # --- analysis -----------------------------------------------------------
     w("## Where the time goes")
