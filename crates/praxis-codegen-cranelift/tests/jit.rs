@@ -1869,6 +1869,51 @@ fn pipeline_three_stage_map_filter_map_sum() {
     assert_eq!(result.as_int(), 36);
 }
 
+/// Every generated function must sit within ±2GiB of every other one.
+///
+/// User functions are declared `Linkage::Export`, a final linkage, so Cranelift
+/// encodes cross-function references with `call rel32` and `lea (%rip)` — both
+/// `Reloc::X86CallPCRel4`, both limited to a signed 32-bit displacement, and
+/// both resolved by cranelift-jit with an `unwrap` that *panics* rather than
+/// returning an error a caller could handle. The reservation
+/// `CODE_RESERVATION_BYTES` establishes the range; this asserts it.
+///
+/// A pipeline is the program shape that stresses it hardest: every stage is a
+/// closure lowered to its own synthetic function, so a chain mints the most
+/// functions and therefore the most chunks that have to reach each other.
+///
+/// **This test cannot fail on aarch64 and is still worth running there.** A
+/// too-far `Reloc::Arm64Call` is rewritten into a veneer, so the host repairs
+/// exactly the breakage being guarded against; the assertion is on the addresses
+/// rather than on whether the code runs precisely so that it states the property
+/// on every host instead of only where violating it is fatal.
+#[test]
+fn every_generated_function_is_within_reach_of_every_other() {
+    let src = "fn main() -> Int {\n  var k = 10\n  var v = Vec()\n  v.push(1)\n  v.push(2)\n  v.push(3)\n  v.map(|x| x + k).filter(|x| x > 11).map(|x| x * 3).sum()\n}\n";
+    let (jit, ids) = compile(src);
+
+    let mut entries: Vec<(String, usize)> = ids
+        .iter()
+        .map(|(name, &id)| (name.clone(), unsafe { jit.entry(id) } as usize))
+        .collect();
+    entries.sort_by_key(|&(_, addr)| addr);
+    assert!(
+        entries.len() > 1,
+        "a fused pipeline should lower to several functions, got {entries:?}"
+    );
+
+    // Sorted, so the extremes bound every pair.
+    let (ref lo_name, lo) = entries[0];
+    let (ref hi_name, hi) = entries[entries.len() - 1];
+    let span = hi - lo;
+    assert!(
+        i32::try_from(span).is_ok(),
+        "`{lo_name}` at {lo:#x} and `{hi_name}` at {hi:#x} are {span} bytes apart, \
+         past the ±2GiB a colocated relocation can encode: {} functions total",
+        entries.len()
+    );
+}
+
 #[test]
 fn pipeline_chain_with_capturing_closure() {
     // Capturing closure in a fused chain.

@@ -12,7 +12,7 @@ use anyhow::anyhow;
 use cranelift::codegen::isa::CallConv;
 use cranelift::prelude::{AbiParam, Signature};
 use cranelift_frontend::FunctionBuilderContext;
-use cranelift_jit::{JITBuilder, JITModule};
+use cranelift_jit::{ArenaMemoryProvider, JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
 use praxis_mir::Function as MirFunction;
 use praxis_runtime::{GcRef, HeapDrained, RuntimeContext};
@@ -39,6 +39,10 @@ pub enum JitError {
     Cranelift(#[from] Box<anyhow::Error>),
     #[error("module error: {0}")]
     Module(#[from] Box<cranelift_module::ModuleError>),
+    #[error(
+        "could not reserve {CODE_RESERVATION_BYTES} bytes of address space for generated code: {0}"
+    )]
+    CodeReservation(String),
 }
 
 /// Owns one JIT generation: the `JITModule` (code + data memory), the
@@ -87,6 +91,45 @@ pub struct Jit {
 /// failure.
 pub(crate) const CRANELIFT_FLAGS: &[(&str, &str)] = &[("opt_level", "speed")];
 
+/// The contiguous address space one [`Jit`] reserves up front to carve every
+/// piece of generated code out of.
+///
+/// **Every generated function has to land within ±2GiB of every other one, and
+/// this reservation is what makes that true.** [`Jit::compile`] declares user
+/// functions `Linkage::Export`; that linkage is *final*, so Cranelift treats
+/// each cross-function reference as colocated and picks its ±2GiB encodings —
+/// `call rel32` for a call, `lea (%rip)` for the `func_addr` behind a closure.
+/// Both are `Reloc::X86CallPCRel4`, and cranelift-jit resolves them with a bare
+/// `i32::try_from(..).unwrap()`. An out-of-range target is therefore a **panic
+/// inside the relocation pass**, not a `ModuleError` this crate could turn into
+/// a [`JitError`], so the range cannot be recovered from — only established.
+///
+/// Cranelift's default `SystemMemoryProvider` does not establish it. It takes a
+/// fresh `mmap` per code chunk and never over-allocates, so a ~3KB function gets
+/// roughly a chunk to itself and the spacing between chunks is whatever the
+/// kernel felt like. It is adjacent often enough to look correct and is not a
+/// guarantee. `ArenaMemoryProvider` hands out every chunk from one reservation
+/// instead, which is what makes the encoding Cranelift already chose legal.
+///
+/// **The size is a ceiling on one `Jit`'s total generated code**, and exhausting
+/// it fails compilation rather than miscompiling: the `ModuleError::Allocation`
+/// leaves `define_function` and arrives as a [`JitError::Cranelift`]. No program
+/// in `tests/aoc-corpus` comes close — the largest emits 58,508 bytes and the
+/// widest is 17 functions, so this leaves ~1100× headroom (ADR-153).
+///
+/// It costs address space and not memory — the region is reserved `PROT_NONE`
+/// and pages are committed as segments are handed out, so the resident cost
+/// stays the size of the code. That matters because a finalized reservation is
+/// deliberately leaked (generated code stays callable), and the debugger mints a
+/// `Jit` per `p EXPR`: a long session leaks this constant per expression in
+/// address space, which is affordable exactly because it is not memory.
+///
+/// A target whose relocations carry their own out-of-range fallback does not
+/// need any of this — aarch64 rewrites a too-far `Reloc::Arm64Call` into a
+/// veneer. That is why the bound must be held here rather than trusted to hold
+/// itself: it is invisible on a host that repairs it.
+pub(crate) const CODE_RESERVATION_BYTES: usize = 64 << 20;
+
 impl Jit {
     /// Create a fresh JIT with the `praxis_*` symbols registered, in its own
     /// new generation.
@@ -94,7 +137,9 @@ impl Jit {
     /// # Errors
     /// Returns [`JitError::UnsupportedTarget`] if the host CPU isn't supported,
     /// or if its pointer width or endianness is not the one the lowering
-    /// assumes (see [`Jit::check_target`]).
+    /// assumes (see [`Jit::check_target`]); [`JitError::CodeReservation`] if the
+    /// address space for generated code cannot be reserved (see
+    /// [`CODE_RESERVATION_BYTES`]).
     pub fn new() -> Result<Self, JitError> {
         Self::in_generation(Rc::new(Generation::new()))
     }
@@ -117,6 +162,14 @@ impl Jit {
         // falls back to `dlsym`, which finds the statically linked runtime and
         // hides any omission.
         builder.symbol_lookup_fn(Box::new(symbols::resolve));
+        // Every chunk out of one reservation, so the colocated ±2GiB encodings
+        // Cranelift picks for cross-function references are in range by
+        // construction rather than by the kernel's habit of placing consecutive
+        // `mmap`s adjacently. See [`CODE_RESERVATION_BYTES`].
+        builder.memory_provider(Box::new(
+            ArenaMemoryProvider::new_with_size(CODE_RESERVATION_BYTES)
+                .map_err(|e| JitError::CodeReservation(e.to_string()))?,
+        ));
         let module = JITModule::new(builder);
         Self::check_target(module.isa().pointer_type(), module.isa().endianness())?;
         Ok(Jit {
