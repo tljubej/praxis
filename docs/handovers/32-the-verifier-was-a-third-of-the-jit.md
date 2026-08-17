@@ -5,7 +5,8 @@
 trade priced and left alone. `just ci` green — 2570 tests, clippy clean,
 `book-verify` 408 ok, and all 36 corpus programs byte-identical against the
 release binary. `benchmarks/results.json` and `REPORT.md` are regenerated; §5 is
-what the suite said, including one row it could not explain.
+what the suite said, and §5.1 is the row that looked like a regression and is
+not one.
 **Scope:** the time `praxis run` spends *compiling*, from source text to a
 callable entry point. Nothing here touches the code that gets generated or the
 runtime that executes it — which is what every performance document before this
@@ -238,12 +239,62 @@ same runs was 0.7–4.0%. That is the whole reason per-package credit is assigne
 by `ab.py` and not by subtracting one `run.py` table from the last.
 
 **`hashwork` is the one row the controls do not explain** — its Praxis column
-moved five times what either control did. It is not this work: `hashwork.px`
-compiles to the same instructions in both arms (above). It is something in the
-ten days of commits between the two sweeps, or it is `hashwork` being the most
-memory-traffic-bound row in the suite, and this document cannot tell which.
-Recorded rather than netted away; it wants a paired `ab.py` against the Aug 7
-build before anyone quotes it either way.
+moved five times what either control did. It was chased, and it is **not a
+regression**; §5.1 is the chase.
+
+### 5.1 `hashwork` did not get slower, and the Aug 7 binary proves it
+
+`b1887c4` is the commit that *wrote* the old `results.json`, so it is the exact
+baseline rather than an approximation of one, and `rustc` is the same build
+(1.97.1, `8bab26f4f`) in both `meta` blocks — a rebuild of it today is faithful.
+Three answers, in increasing order of how little they depend on a clock.
+
+**The machine code is identical.** `hashwork.px` compiles to byte-identical
+vcode at `b1887c4` and at `e8e63d2`, normalized the way §5 describes. Ten days
+of commits changed nothing about the program that runs, so whatever moved is
+either the runtime library or the machine.
+
+**Two independent paired passes say flat.** `ab.py`, palindromic, arm A the Aug 7
+build and arm B this tree: **+0.4% ± 1.4%** over 6 reps and **+0.7% ± 1.4%** over
+8, `primes` clean as a control in the second. Both are inside their own paired
+dispersion and under the 2% floor — the clock cannot resolve them, and they
+agree on the sign being *positive*, which is arm B faster. (The first pass is
+stamped `void`: load crossed the raised ceiling after `hashwork`, so the sweep
+stopped. It corroborates and is not quoted as the result. The second is `ok, with
+caveats`, the caveat being the same waiver.)
+
+**The Aug 7 binary is slower today than it was on Aug 7.** This is the one that
+settles it, because it holds the code fixed and varies only the date:
+
+| benchmark | peak RSS | Aug 7 record | same source, today | delta |
+|---|---:|---:|---:|---:|
+| `primes` | 12 MiB | 0.225 s | 0.232 s | +2.9% |
+| `mandelbrot` | 11 MiB | 0.252 s | 0.267 s | +6.0% |
+| `collatz` | 7 MiB | 0.123 s | 0.128 s | +3.9% |
+| `vm` | 13 MiB | 0.968 s | 0.987 s | +2.0% |
+| `hashwork` | 23 MiB | 1.759 s | **1.975 s** | **+12.3%** |
+
++12.3% on code that has not changed, against the +9.8% the sweep-to-sweep
+comparison attributed to ten days of work. The whole delta is in the baseline
+arm, and then some.
+
+**What `hashwork` actually is, is the noisiest row in the suite.** Its paired
+dispersion is ±1.4% where every other benchmark's is ±0.3–0.6%, and its
+within-sweep drift ran **4.2% and 9.4%** in the first pass and **10.5% and 4.5%**
+in the second — a spread the size of the "regression", in one arm, in one sitting.
+`speedup_min` swung **+3.9% then −4.0%** across the two passes on the same pair of
+binaries, which is the cleanest possible demonstration of why the headline here is
+a median of paired ratios and not a `min`. `run.py`'s min-of-5 does not tame it:
+the Aug 7 samples were 1.759–1.776 s and today's 1.932–1.990 s, each tight within
+its own sitting and 10% apart between them.
+
+**The carry-forward is the method, not the row.** A `run.py` sweep is a snapshot
+of a machine on a day; `README.md` already says its drift ran 5–23% against the
+paired 0.7–4.0%, and this is that sentence arriving as a concrete false alarm.
+`hashwork` is the row where it will keep arriving, because it is the one with a
+23 MiB working set and a SipHash in its inner loop on a laptop with a compositor
+and an Electron application resident. A number quoted off two sweeps is a
+hypothesis; `ab.py` is what turns it into a measurement.
 
 ## 6. Three hypotheses that did not survive measurement
 
