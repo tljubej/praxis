@@ -1,9 +1,7 @@
 // Every capture is bounded by the run of literal parts that follows it, and
 // the bound is the earliest place that whole run can match. A run that can
 // match nothing — `\s*`, or nothing at all — is no bound.
-fn main() {
-    out(parse("x y bar", `{a:text} bar`))
-    out(parse("x y bar", `{a:text}\s+bar`))
-    out(parse("x  bar", `{a:text}\s*bar`))
-    out(parse("aaa", `{a:text}a{b:rest}`))
-}
+out(parse("x y bar", `{a:text} bar`))
+out(parse("x y bar", `{a:text}\s+bar`))
+out(parse("x  bar", `{a:text}\s*bar`))
+out(parse("aaa", `{a:text}a{b:rest}`))

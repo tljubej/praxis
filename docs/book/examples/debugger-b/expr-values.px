@@ -10,12 +10,10 @@ enum Signal {
     Quiet
 }
 
-fn main() {
-    var readings = [Reading { site: "north", depth: 12 }, Reading { site: "south", depth: 30 }]
-    var totals = Map()
-    totals["north"] = 12
-    totals["south"] = 30
-    var latest = Ping(30)
-    var label = "sonar"
-    out(readings[9].depth)
-}
+var readings = [Reading { site: "north", depth: 12 }, Reading { site: "south", depth: 30 }]
+var totals = Map()
+totals["north"] = 12
+totals["south"] = 30
+var latest = Ping(30)
+var label = "sonar"
+out(readings[9].depth)

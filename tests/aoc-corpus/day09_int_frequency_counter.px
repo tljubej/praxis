@@ -4,21 +4,19 @@
 //
 // Input (on stdin): integers, one per line.
 // Output: the highest frequency (the count of the most common value).
-fn main() -> Int {
-    var values = read lines(int)
-    var counts = Counter()
-    var i = 0
-    while i < values.len() {
-        counts.inc(values.get(i))
-        i = i + 1
-    }
-    // The max count (re-scan; for-over-Map is a follow-up).
-    var best = 0
-    var j = 0
-    while j < values.len() {
-        var c = counts.get(values.get(j))
-        if c > best { best = c }
-        j = j + 1
-    }
-    best
+var values = read lines(int)
+var counts = Counter()
+var i = 0
+while i < values.len() {
+    counts.inc(values.get(i))
+    i = i + 1
 }
+// The max count (re-scan; for-over-Map is a follow-up).
+var best = 0
+var j = 0
+while j < values.len() {
+    var c = counts.get(values.get(j))
+    if c > best { best = c }
+    j = j + 1
+}
+out(best)

@@ -1,7 +1,7 @@
 error[I020]: named and anonymous captures may not be mixed in one template
 
-  template-mixed-captures.px:4:20
-  4 |     out(read lines(`{x:int},{int}`))
-    |                    ^^^^^^^^^^^^^^^ named and anonymous captures may not be mixed in one template
+  template-mixed-captures.px:3:16
+  3 | out(read lines(`{x:int},{int}`))
+    |                ^^^^^^^^^^^^^^^ named and anonymous captures may not be mixed in one template
 
 praxis: 1 error(s)

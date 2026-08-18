@@ -8,42 +8,39 @@
 // Input (on stdin): lines of `x,y` points.
 // Output: how many points appear at least twice, the busiest count, a value
 // computed through Map subscripts, and an absent Counter key's zero.
-fn main() {
-    var points = read lines(`{x:int},{y:int}`)
+var points = read lines(`{x:int},{y:int}`)
 
-    var counts = Counter[(Int, Int)]()
-    for p in points {
-        counts[(p.x, p.y)] += 1
-    }
-
-    var busiest = 0
-    for p in points {
-        var n = counts[(p.x, p.y)]
-        if n > busiest { busiest = n }
-    }
-
-    // Count the *distinct* repeated points. Each one is visited once per
-    // occurrence, so the first visit records it and stores a 1 through the
-    // subscript, which is what stops the later visits from counting it again.
-    var repeated = 0
-    for p in points {
-        if counts[(p.x, p.y)] > 1 {
-            repeated += 1
-            counts[(p.x, p.y)] = 1
-        }
-    }
-    out(repeated)
-    out(busiest)
-
-    // A Map indexes to its value type and stores through the same brackets.
-    var labels = Map()
-    labels["origin"] = 0
-    labels["far"] = 99
-    labels["far"] += 1
-    out(labels["far"] - labels["origin"])
-
-    // An absent Counter key reads as zero (§6.2) where an absent Map key would
-    // fault (§4.7) — the difference the two catalog rows exist for.
-    out(counts[(1000, 1000)])
+var counts = Counter[(Int, Int)]()
+for p in points {
+    counts[(p.x, p.y)] += 1
 }
-main()
+
+var busiest = 0
+for p in points {
+    var n = counts[(p.x, p.y)]
+    if n > busiest { busiest = n }
+}
+
+// Count the *distinct* repeated points. Each one is visited once per
+// occurrence, so the first visit records it and stores a 1 through the
+// subscript, which is what stops the later visits from counting it again.
+var repeated = 0
+for p in points {
+    if counts[(p.x, p.y)] > 1 {
+        repeated += 1
+        counts[(p.x, p.y)] = 1
+    }
+}
+out(repeated)
+out(busiest)
+
+// A Map indexes to its value type and stores through the same brackets.
+var labels = Map()
+labels["origin"] = 0
+labels["far"] = 99
+labels["far"] += 1
+out(labels["far"] - labels["origin"])
+
+// An absent Counter key reads as zero (§6.2) where an absent Map key would
+// fault (§4.7) — the difference the two catalog rows exist for.
+out(counts[(1000, 1000)])

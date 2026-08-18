@@ -1,6 +1,4 @@
 // A space run requires a space. A template written ` -> ` does not match
 // `1->2`, and the mismatch names the position where the run was expected.
-fn main() -> Int {
-    var pair = read `{a:int} -> {b:int}`
-    pair.a + pair.b
-}
+var pair = read `{a:int} -> {b:int}`
+out(pair.a + pair.b)

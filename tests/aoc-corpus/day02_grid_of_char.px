@@ -9,7 +9,5 @@
 // list one, and "how many" would have to choose between cells and rows. This
 // program called `len()` anyway, which is reported at *lowering*, so
 // `praxis check` was clean and only `praxis run` broke (REP-12).
-fn main() -> Int {
-    var map = read grid(char);
-    map.width() * map.height()
-}
+var map = read grid(char);
+out(map.width() * map.height())

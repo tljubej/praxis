@@ -1,7 +1,7 @@
 error: program faulted: division by zero
 
 Backtrace:
-#0   main
+#0   <entry>
 
   locals:
     alpha: Int = 1

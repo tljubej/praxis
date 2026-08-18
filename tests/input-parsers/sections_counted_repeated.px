@@ -11,23 +11,21 @@
 // The two halves of the rule are both here: the counted group is *followed*,
 // which is the point, and the section after it is the one the count leaves
 // standing rather than the first one that happens to look different.
-fn main() {
-    var data = read sections(
-        shapes: repeated(block(`{i:int}:`, rows: grid(char)), 2),
-        regions: lines(`{w:int}x{h:int}: {counts:ws(int)}`),
-    )
+var data = read sections(
+    shapes: repeated(block(`{i:int}:`, rows: grid(char)), 2),
+    regions: lines(`{w:int}x{h:int}: {counts:ws(int)}`),
+)
 
-    out(data.shapes.len())
-    // Each shape kept its own header and its own grid: a group is a `Vec` of
-    // whatever the repeated parser produces, not a flattening of them.
-    for shape in data.shapes {
-        out(shape.i)
-        out(shape.rows.find_all("#"[0]).len())
-    }
-
-    // And the field after the group read the section the count left, which is
-    // the whole claim the unbounded tail cannot make.
-    out(data.regions.len())
-    out(data.regions.get(0).w * data.regions.get(0).h)
-    out(data.regions.get(1).counts)
+out(data.shapes.len())
+// Each shape kept its own header and its own grid: a group is a `Vec` of
+// whatever the repeated parser produces, not a flattening of them.
+for shape in data.shapes {
+    out(shape.i)
+    out(shape.rows.find_all("#"[0]).len())
 }
+
+// And the field after the group read the section the count left, which is
+// the whole claim the unbounded tail cannot make.
+out(data.regions.len())
+out(data.regions.get(0).w * data.regions.get(0).h)
+out(data.regions.get(1).counts)

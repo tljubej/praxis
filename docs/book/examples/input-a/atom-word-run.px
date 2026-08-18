@@ -1,8 +1,6 @@
 // `word` stops on a space, a tab, a comma, CR or LF, and on nothing else. It
 // runs straight through `-` and `:`, which is what makes `-to-` templates work
 // — the literal that follows the capture is what stops it there.
-fn main() {
-    out(parse("a-b:c d", word))
-    out(parse("seed-to-soil map:", `{source:word}-to-{destination:word} map:`))
-    out(parse("hello,world", csv(word)))
-}
+out(parse("a-b:c d", word))
+out(parse("seed-to-soil map:", `{source:word}-to-{destination:word} map:`))
+out(parse("hello,world", csv(word)))

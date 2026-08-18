@@ -6,13 +6,11 @@
 // → parses as { head: Vec[Text], maps: Vec[{ name: Text, ranges: Vec[Int] }] }
 //   via sections(head: lines(word), maps: repeated(block(...))).
 // Acceptance: "Parse almanac-style repeated mapping sections."
-fn main() -> Int {
-    var almanac = read sections(
-        head: lines(word),
-        maps: repeated(block(
-            `map {name:word}`,
-            ranges: lines(int),
-        )),
-    );
-    almanac.head.len() + almanac.maps.len()
-}
+var almanac = read sections(
+    head: lines(word),
+    maps: repeated(block(
+        `map {name:word}`,
+        ranges: lines(int),
+    )),
+);
+out(almanac.head.len() + almanac.maps.len())

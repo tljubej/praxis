@@ -30,15 +30,13 @@ enum Signal {
     Quiet
 }
 
-fn main() {
-    var readings = [Reading { site: "north", depth: 12 }, Reading { site: "south", depth: 30 }]
-    var totals = Map()
-    totals["north"] = 12
-    totals["south"] = 30
-    var latest = Ping(30)
-    var label = "sonar"
-    out(readings[9].depth)
-}
+var readings = [Reading { site: "north", depth: 12 }, Reading { site: "south", depth: 30 }]
+var totals = Map()
+totals["north"] = 12
+totals["south"] = 30
+var latest = Ping(30)
+var label = "sonar"
+out(readings[9].depth)
 ```
 
 Every kind of expression you would write in the program works at the prompt:
@@ -110,18 +108,16 @@ fn edge(grid: Vec[Int], width: Int) -> Int {
     cell(grid, row * width)
 }
 
-fn main() {
-    var grid = [1, 2, 3, 4, 5, 6]
-    var width = 3
-    out(edge(grid, width))
-}
+var grid = [1, 2, 3, 4, 5, 6]
+var width = 3
+out(edge(grid, width))
 ```
 
 ```text
 Praxis crash> bt
 #0   cell
 #1   edge
-#2   main
+#2   <entry>
   (frame 0 selected)
 Praxis crash> p at
 6
@@ -138,7 +134,7 @@ Praxis crash> p row * width
 Praxis crash> p at
 error: type error: `at` is not defined
 Praxis crash> up
-frame 2: main
+frame 2: <entry>
 Praxis crash> p grid.len()
 6
 Praxis crash> p width
@@ -187,15 +183,13 @@ type.
 ```praxis
 // A snapshot frame is flat: every scope of the function contributes its
 // bindings, so a shadowed name is listed once per binding.
-fn main() {
-    var n = 1
-    if n > 0 {
-        var n = "two"
-        out(n)
-    }
-    var xs = [1]
-    out(xs[9])
+var n = 1
+if n > 0 {
+    var n = "two"
+    out(n)
 }
+var xs = [1]
+out(xs[9])
 ```
 
 ```text
@@ -235,17 +229,15 @@ the call and answers a seven-local expression without complaint.
 // Seven bindings and one long vector: enough to hit the two ceilings `p` has —
 // six named locals per expression, and the twelve-local cap the banner (but not
 // the `locals` command) applies.
-fn main() {
-    var a = 1
-    var b = 2
-    var c = 3
-    var d = 4
-    var e = 5
-    var f = 6
-    var g = 7
-    var squares = (0..40).map(|n| n * n)
-    out(squares[500])
-}
+var a = 1
+var b = 2
+var c = 3
+var d = 4
+var e = 5
+var f = 6
+var g = 7
+var squares = (0..40).map(|n| n * n)
+out(squares[500])
 ```
 
 ```text
@@ -270,13 +262,11 @@ and code generation, so a rejected expression never executes.
 ```praxis
 // The purity gate has to have something to refuse, so this frame holds a
 // mutable collection, and the session below asks it to mutate.
-fn main() {
-    var seen = Set()
-    seen.insert(3)
-    var queue = [1, 2, 3]
-    var steps = 0
-    out(queue[7])
-}
+var seen = Set()
+seen.insert(3)
+var queue = [1, 2, 3]
+var steps = 0
+out(queue[7])
 ```
 
 ```text

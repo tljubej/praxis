@@ -3,9 +3,10 @@ error: program faulted: input parse mismatch
        actual: alpha⏎beta⏎⏎gamma⏎has space⏎
 
 Backtrace:
-#0   main
+#0   <entry>
 
   temps:
     <tmp#1> = "alpha\nbeta\n\ngamma\nhas space\n"
     <tmp#2: Int> = 1
     <tmp#4: Int> @ "(read sections(lines(word))).len()" = <uninit>
+    <tmp#5: Unit> @ "out((read sections(lines(word))).len())" = <uninit>

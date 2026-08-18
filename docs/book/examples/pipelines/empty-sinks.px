@@ -1,13 +1,11 @@
 // The sinks that have a right answer for an empty sequence.
-fn main() {
-    var scores: Vec[Int] = []
-    out(scores.sum())
-    out(scores.product())
-    out(scores.count())
-    out(scores.any(|x| x > 0))
-    out(scores.all(|x| x > 0))
-    out(scores.find(|x| x > 0))
-    out(scores.position(|x| x > 0))
-    out(scores.fold(100, |acc, x| acc + x))
-    out(scores.map(|x| x * 2))
-}
+var scores: Vec[Int] = []
+out(scores.sum())
+out(scores.product())
+out(scores.count())
+out(scores.any(|x| x > 0))
+out(scores.all(|x| x > 0))
+out(scores.find(|x| x > 0))
+out(scores.position(|x| x > 0))
+out(scores.fold(100, |acc, x| acc + x))
+out(scores.map(|x| x * 2))

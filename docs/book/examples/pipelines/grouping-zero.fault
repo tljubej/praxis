@@ -1,7 +1,7 @@
 error: program faulted: size or extent out of range
 
 Backtrace:
-#0   main
+#0   <entry>
 
   locals:
     v: Vec[Int] = [1, 2, 3]

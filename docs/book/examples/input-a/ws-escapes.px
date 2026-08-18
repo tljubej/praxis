@@ -1,10 +1,8 @@
 // A template's whitespace escapes: `\s*` zero or more, `\s+` one or more,
 // `\x20` exactly one space, `\t` exactly one tab, `\n` one line ending.
-fn main() {
-    out(parse("1  ,2", `{a:int}\s*,{b:int}`))
-    out(parse("1,2", `{a:int}\s*,{b:int}`))
-    out(parse("1  ,2", `{a:int}\s+,{b:int}`))
-    out(parse("1  2", `{a:int}\x20{b:rest}`))
-    out(parse("1  2", `{a:int} {b:rest}`))
-    out(parse("1\t2", `{a:int}\t{b:rest}`))
-}
+out(parse("1  ,2", `{a:int}\s*,{b:int}`))
+out(parse("1,2", `{a:int}\s*,{b:int}`))
+out(parse("1  ,2", `{a:int}\s+,{b:int}`))
+out(parse("1  2", `{a:int}\x20{b:rest}`))
+out(parse("1  2", `{a:int} {b:rest}`))
+out(parse("1\t2", `{a:int}\t{b:rest}`))

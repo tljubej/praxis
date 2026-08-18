@@ -5,6 +5,4 @@ fn steps(v: Vec[Int]) -> Vec[Vec[Int]] {
     Vec()
 }
 
-fn main() -> Int {
-    bfs(Vec(), steps).len()
-}
+out(bfs(Vec(), steps).len())

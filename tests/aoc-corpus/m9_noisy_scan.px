@@ -4,12 +4,10 @@
 //   "xmul(2,3)ymul(4,5)don't()do()mul(6,7)"
 // → parses as Vec of choice matches (Multiply variants) in source order.
 // Acceptance: "Parse noisy embedded instructions."
-fn main() -> Int {
-    var instructions = read scan(choice(
-        Mul: `mul({a:int},{b:int})`,
-        Do: `do()`,
-        Dont: `don't()`,
-    ));
-    // 3 mul + 1 do + 1 don't = 5 matches.
-    instructions.len()
-}
+var instructions = read scan(choice(
+    Mul: `mul({a:int},{b:int})`,
+    Do: `do()`,
+    Dont: `don't()`,
+));
+// 3 mul + 1 do + 1 don't = 5 matches.
+out(instructions.len())

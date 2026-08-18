@@ -5,60 +5,58 @@
 //
 // The graph is a small adjacency list encoded as a Vec of (from, to) int pairs.
 // BFS finds the shortest hop-count from `start` to `goal`.
-fn main() -> Int {
-    // Build a small graph: 0-1, 0-2, 1-3, 2-3, 3-4. Shortest 0->4 is 3 hops.
-    var edges = Vec()
-    edges.push((0, 1))
-    edges.push((0, 2))
-    edges.push((1, 3))
-    edges.push((2, 3))
-    edges.push((3, 4))
+// Build a small graph: 0-1, 0-2, 1-3, 2-3, 3-4. Shortest 0->4 is 3 hops.
+var edges = Vec()
+edges.push((0, 1))
+edges.push((0, 2))
+edges.push((1, 3))
+edges.push((2, 3))
+edges.push((3, 4))
 
-    var start = 0
-    var goal = 4
+var start = 0
+var goal = 4
 
-    // BFS: a FIFO Deque of frontier nodes, a Set of visited, a Map of distances.
-    var frontier = Deque()
-    frontier.push_back(start)
-    var visited = Set()
-    visited.insert(start)
-    var dist = Map()
-    dist.insert(start, 0)
+// BFS: a FIFO Deque of frontier nodes, a Set of visited, a Map of distances.
+var frontier = Deque()
+frontier.push_back(start)
+var visited = Set()
+visited.insert(start)
+var dist = Map()
+dist.insert(start, 0)
 
-    var found = -1
-    while frontier.len() > 0 {
-        var node = frontier.pop_front()
-        var d = dist[node]
-        if node == goal {
-            found = d
-            break
-        }
-        // Scan edges for neighbors of `node`.
-        var i = 0
-        while i < edges.len() {
-            var e = edges.get(i)
-            // e is (from, to); if e.0-like matches node, enqueue e.1.
-            // (Tuple field access .0/.1 is a follow-up; we re-derive via the
-            // edge list encoding: push neighbors explicitly.)
-            i = i + 1
-        }
-        // Since tuple field access is deferred, encode neighbors directly:
-        // node 0 -> [1,2], node 1 -> [3], node 2 -> [3], node 3 -> [4].
-        var neighbors = Vec()
-        if node == 0 { neighbors.push(1); neighbors.push(2) }
-        if node == 1 { neighbors.push(3) }
-        if node == 2 { neighbors.push(3) }
-        if node == 3 { neighbors.push(4) }
-        var k = 0
-        while k < neighbors.len() {
-            var nb = neighbors.get(k)
-            if !visited.contains(nb) {
-                visited.insert(nb)
-                dist.insert(nb, d + 1)
-                frontier.push_back(nb)
-            }
-            k = k + 1
-        }
+var found = -1
+while frontier.len() > 0 {
+    var node = frontier.pop_front()
+    var d = dist[node]
+    if node == goal {
+        found = d
+        break
     }
-    found
+    // Scan edges for neighbors of `node`.
+    var i = 0
+    while i < edges.len() {
+        var e = edges.get(i)
+        // e is (from, to); if e.0-like matches node, enqueue e.1.
+        // (Tuple field access .0/.1 is a follow-up; we re-derive via the
+        // edge list encoding: push neighbors explicitly.)
+        i = i + 1
+    }
+    // Since tuple field access is deferred, encode neighbors directly:
+    // node 0 -> [1,2], node 1 -> [3], node 2 -> [3], node 3 -> [4].
+    var neighbors = Vec()
+    if node == 0 { neighbors.push(1); neighbors.push(2) }
+    if node == 1 { neighbors.push(3) }
+    if node == 2 { neighbors.push(3) }
+    if node == 3 { neighbors.push(4) }
+    var k = 0
+    while k < neighbors.len() {
+        var nb = neighbors.get(k)
+        if !visited.contains(nb) {
+            visited.insert(nb)
+            dist.insert(nb, d + 1)
+            frontier.push_back(nb)
+        }
+        k = k + 1
+    }
 }
+out(found)

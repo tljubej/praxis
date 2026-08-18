@@ -1,7 +1,5 @@
 // A capture is offered the bytes at the cursor, its own leading whitespace
 // included — the child decides. What the leading run does *not* do is bound
 // the capture, or `{a:text}` would stop at byte 0 on an indented line.
-fn main() {
-    out(parse("  foo 3", `{a:text} {v:int}`))
-    out(parse("  foo 3", `{a:word} {v:int}`))
-}
+out(parse("  foo 3", `{a:text} {v:int}`))
+out(parse("  foo 3", `{a:word} {v:int}`))

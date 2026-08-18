@@ -1,4 +1,0 @@
-fn main() -> Unit {
-    var x = 1
-    var y = 2
-}

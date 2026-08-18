@@ -833,22 +833,18 @@ pub const ENTRY_NAME: &str = "<entry>";
 
 /// The entry point of a compiled module, given the function names it defines.
 ///
-/// A file's top-level statements are its program, so [`ENTRY_NAME`] wins when it
-/// exists. A file with no top-level statements has none, and falls back to a
-/// declared `fn main` — which is the convention every corpus program and every
-/// end-to-end test is written in, and which the design doc never mentions.
+/// A file's top-level statements are its program, and they are the *only* entry
+/// point (ADR-154): [`ENTRY_NAME`] when the file has any, and nothing at all
+/// when it does not. A declared `fn main` is an ordinary function — the host
+/// does not single it out, so a file whose whole program sits inside one has
+/// nothing to run until something calls it.
 ///
-/// Both hosts that execute a module (the CLI's `run` and the debugger's reload)
-/// ask this, so the rule is in one place rather than two.
+/// Every host that executes a module asks this — the CLI's `run`, the
+/// debugger's reload, and the MIR and codegen test helpers — so the rule is in
+/// one place rather than four.
 #[must_use]
 pub fn entry_point<'n>(defines: impl Fn(&str) -> bool) -> Option<&'n str> {
-    if defines(ENTRY_NAME) {
-        Some(ENTRY_NAME)
-    } else if defines("main") {
-        Some("main")
-    } else {
-        None
-    }
+    defines(ENTRY_NAME).then_some(ENTRY_NAME)
 }
 
 /// Whether a top-level node is a *statement* — something the entry point runs —

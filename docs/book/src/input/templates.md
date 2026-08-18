@@ -35,13 +35,11 @@ shape of the result, and the rule is read off the template's own parts.
 // The four shapes, read off the template's own parts: no capture is Unit, one
 // anonymous capture is that value, two or more are a tuple, and named captures
 // are an anonymous record.
-fn main() {
-    out(parse("hello", `hello`))
-    out(parse("42", `{int}`))
-    out(parse("1,2", `{int},{int}`))
-    out(parse("1,2,x", `{int},{int},{word}`))
-    out(parse("x=1", `{name:word}={v:int}`))
-}
+out(parse("hello", `hello`))
+out(parse("42", `{int}`))
+out(parse("1,2", `{int},{int}`))
+out(parse("1,2,x", `{int},{int},{word}`))
+out(parse("x=1", `{name:word}={v:int}`))
 ```
 
 ```text
@@ -63,14 +61,12 @@ it:
 ```praxis
 // A multi-capture template's value is an ordinary tuple, all the way into the
 // collection that holds it: it renders and compares like one built by hand.
-fn main() {
-    var pairs = read lines(`{int},{int}`)
-    var same = Vec()
-    same.push((1, 2))
-    same.push((3, 4))
-    out(pairs)
-    out(pairs == same)
-}
+var pairs = read lines(`{int},{int}`)
+var same = Vec()
+same.push((1, 2))
+same.push((3, 4))
+out(pairs)
+out(pairs == same)
 ```
 
 Over `1,2\n3,4\n`:
@@ -89,17 +85,15 @@ would have to be a record and a tuple at once.
 ```praxis
 // Named and anonymous captures may not be mixed in one template: the shape
 // would have to be a record and a tuple at once.
-fn main() {
-    out(read lines(`{x:int},{int}`))
-}
+out(read lines(`{x:int},{int}`))
 ```
 
 ```text
 error[I020]: named and anonymous captures may not be mixed in one template
 
-  template-mixed-captures.px:4:20
-  4 |     out(read lines(`{x:int},{int}`))
-    |                    ^^^^^^^^^^^^^^^ named and anonymous captures may not be mixed in one template
+  template-mixed-captures.px:3:16
+  3 | out(read lines(`{x:int},{int}`))
+    |                ^^^^^^^^^^^^^^^ named and anonymous captures may not be mixed in one template
 
 praxis: 1 error(s)
 ```
@@ -117,12 +111,10 @@ own all go inside the braces.
 // A capture body is a whole parser expression, not just an atomic name: a
 // constructor call, a call with a string argument, a `}` inside that string,
 // and a template of its own all sit inside `{...}`.
-fn main() {
-    out(parse("Monkey 0: 79, 98", `Monkey {id:int}: {items:csv(int)}`))
-    out(parse("a-b-c", `{parts:sep("-", word)}`))
-    out(parse("}", `{c:one_of("}")}`))
-    out(parse("at 3,4", `at {p:`{x:int},{y:int}`}`))
-}
+out(parse("Monkey 0: 79, 98", `Monkey {id:int}: {items:csv(int)}`))
+out(parse("a-b-c", `{parts:sep("-", word)}`))
+out(parse("}", `{c:one_of("}")}`))
+out(parse("at 3,4", `at {p:`{x:int},{y:int}`}`))
 ```
 
 ```text
@@ -166,12 +158,10 @@ rest of its region.
 // Every capture is bounded by the run of literal parts that follows it, and
 // the bound is the earliest place that whole run can match. A run that can
 // match nothing — `\s*`, or nothing at all — is no bound.
-fn main() {
-    out(parse("x y bar", `{a:text} bar`))
-    out(parse("x y bar", `{a:text}\s+bar`))
-    out(parse("x  bar", `{a:text}\s*bar`))
-    out(parse("aaa", `{a:text}a{b:rest}`))
-}
+out(parse("x y bar", `{a:text} bar`))
+out(parse("x y bar", `{a:text}\s+bar`))
+out(parse("x  bar", `{a:text}\s*bar`))
+out(parse("aaa", `{a:text}a{b:rest}`))
 ```
 
 ```text
@@ -213,10 +203,8 @@ second line.
 // A template ends at the line it opens on, so `\n` is the only way it matches
 // a line ending — and the only way one reaches a second line. The escape
 // matches CRLF as well as LF.
-fn main() {
-    out(parse("1\n2\n", `{a:int}\n{b:int}`))
-    out(parse("1\r\n2\n", `{a:int}\n{b:int}`))
-}
+out(parse("1\n2\n", `{a:int}\n{b:int}`))
+out(parse("1\r\n2\n", `{a:int}\n{b:int}`))
 ```
 
 ```text
@@ -237,18 +225,16 @@ file:
 ```praxis
 // The same rule bounds the report when a template is left open: the run ends
 // at the line's end, so `T002` names one line and there is no cascade.
-fn main() {
-    var v = read `{int`
-    out(v)
-}
+var v = read `{int`
+out(v)
 ```
 
 ```text
 error[T002]: unterminated backtick template
 
-  template-unterminated.px:4:18
-  4 |     var v = read `{int`
-    |                  ^^^^^^ unterminated backtick template
+  template-unterminated.px:3:14
+  3 | var v = read `{int`
+    |              ^^^^^^ unterminated backtick template
 
 praxis: 1 error(s)
 ```
@@ -266,18 +252,16 @@ that happens to contain braces.
 // A backtick template is a parser expression everywhere or nowhere.
 // Outside `read` and `parse` it has nothing to read from, so it is an error
 // rather than a `Text` that happens to contain braces.
-fn main() {
-    var t = `n = {int}`
-    out(t)
-}
+var t = `n = {int}`
+out(t)
 ```
 
 ```text
 error[Y023]: a backtick template is a parser expression; write `read` before it, or pass it to `parse(text, ...)`
 
-  template-value-position.px:5:13
-  5 |     var t = `n = {int}`
-    |             ^^^^^^^^^^^ a backtick template is a parser expression; write `read` before it, or pass it to `parse(text, ...)`
+  template-value-position.px:4:9
+  4 | var t = `n = {int}`
+    |         ^^^^^^^^^^^ a backtick template is a parser expression; write `read` before it, or pass it to `parse(text, ...)`
 
 praxis: 1 error(s)
 ```
@@ -306,11 +290,9 @@ template.
 ```praxis
 // Backticks and backslashes take ordinary escapes; a quote inside literal text
 // is just a quote, because a string literal is only a thing inside a capture.
-fn main() {
-    out(parse("a`b 3", `a\`b {x:int}`))
-    out(parse("a\\b 4", `a\\b {x:int}`))
-    out(parse("He said \"hi\" 5", `He said "hi" {x:int}`))
-}
+out(parse("a`b 3", `a\`b {x:int}`))
+out(parse("a\\b 4", `a\\b {x:int}`))
+out(parse("He said \"hi\" 5", `He said "hi" {x:int}`))
 ```
 
 ```text

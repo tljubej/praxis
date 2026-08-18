@@ -5,14 +5,12 @@ fn seen(x) {
     x
 }
 
-fn main() {
-    var v = [1, 2, 3, 4, 5]
+var v = [1, 2, 3, 4, 5]
 
-    // `any` answers as soon as it can, and the map behind it stops with it.
-    out(v.map(|x| seen(x)).any(|x| x > 1))
-    out("---")
+// `any` answers as soon as it can, and the map behind it stops with it.
+out(v.map(|x| seen(x)).any(|x| x > 1))
+out("---")
 
-    // `take` stops when it meets the element after the last one it keeps, so
-    // the stage in front of it runs once more than it keeps.
-    out(v.map(|x| seen(x)).take(2))
-}
+// `take` stops when it meets the element after the last one it keeps, so
+// the stage in front of it runs once more than it keeps.
+out(v.map(|x| seen(x)).take(2))

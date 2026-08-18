@@ -76,15 +76,13 @@ the crash debugger's prompt. So `praxis run day05.px > answer.txt` captures the
 answer and still shows you the errors, and `2>/dev/null` gets you the answer and
 nothing else.
 
-There is one more thing that can land on stdout. When the program's entry point
-is an `fn main` with a return type other than `Unit`, `run` prints the value it
-returned:
+Everything a program reports, it prints itself. `run` adds nothing of its own to
+stdout — there is no result line, because a file's top level has no answer
+value:
 
 ```praxis
-fn main() -> Int {
-    var values = read lines(int)
-    values.len()
-}
+var values = read lines(int)
+out(values.len())
 ```
 
 ```console
@@ -92,9 +90,8 @@ $ praxis run count-lines.px --input count-lines.in
 6
 ```
 
-A file whose top level has statements uses those statements as the program
-instead, and that generated entry returns `Unit` — which is why `out(...)` at
-the top level does not also echo the last `out`'s argument as a result line.
+That `6` is the `out` call and nothing else — which is why `out(...)` at the top
+level never echoes its argument twice.
 [A file is a program](../language/program-structure.md) has the rule in full.
 
 ### `--input FILE`

@@ -1,10 +1,8 @@
 // The four shapes, read off the template's own parts: no capture is Unit, one
 // anonymous capture is that value, two or more are a tuple, and named captures
 // are an anonymous record.
-fn main() {
-    out(parse("hello", `hello`))
-    out(parse("42", `{int}`))
-    out(parse("1,2", `{int},{int}`))
-    out(parse("1,2,x", `{int},{int},{word}`))
-    out(parse("x=1", `{name:word}={v:int}`))
-}
+out(parse("hello", `hello`))
+out(parse("42", `{int}`))
+out(parse("1,2", `{int},{int}`))
+out(parse("1,2,x", `{int},{int},{word}`))
+out(parse("x=1", `{name:word}={v:int}`))

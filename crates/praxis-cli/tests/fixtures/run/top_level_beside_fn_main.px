@@ -1,6 +1,6 @@
-// REP-19: a file with both runs its top-level statements. `main` is then an
-// ordinary function — it runs because the top level calls it, once, and not
-// because the host singles it out.
+// A declared `main` is an ordinary function (ADR-154). It runs here because the
+// top level calls it, once — the host does not single the name out, and would
+// have nothing to run in this file if the call were removed.
 out(1)
 
 fn main() {

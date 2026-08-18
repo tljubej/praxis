@@ -4,6 +4,4 @@ fn steps(n: Int) -> Vec[Int] {
     v
 }
 
-fn main() -> Int {
-    dijkstra(0, steps, |a, b| -1).len()
-}
+out(dijkstra(0, steps, |a, b| -1).len())

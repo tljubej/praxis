@@ -1,5 +1,3 @@
 // A literal with no whitespace run written in front of it consumes none: the
 // cursor must already be sitting on it, so `x:` does not skip an indent.
-fn main() -> Int {
-    (read `x:{a:int}`).a
-}
+out((read `x:{a:int}`).a)

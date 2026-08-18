@@ -4,11 +4,9 @@
 //   "..#.\n#...\n\n^v<>\n"
 // → parses as { map: Grid[Char], moves: Vec[Char] }.
 // Acceptance: "Parse grid plus folded command stream."
-fn main() -> Int {
-    var data = read sections(
-        map: grid(char),
-        moves: chars(one_of("^v<>"), skip: whitespace),
-    );
-    // map is 2x2... actually 2 rows x 4 cols; moves has 4 chars.
-    data.map.height() + data.moves.len()
-}
+var data = read sections(
+    map: grid(char),
+    moves: chars(one_of("^v<>"), skip: whitespace),
+);
+// map is 2x2... actually 2 rows x 4 cols; moves has 4 chars.
+out(data.map.height() + data.moves.len())

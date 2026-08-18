@@ -10,7 +10,5 @@
 // Reference state: PASSES at the pre-S20 base b2184c8, fails at e68ac0c (the
 // round-two repair). A regression fixture for a defect this branch introduced
 // and closed, not a gate for an audit finding.
-fn main() -> Int {
-    var v = read ws(int)
-    v.len() * 10 + v.get(2)
-}
+var v = read ws(int)
+out(v.len() * 10 + v.get(2))

@@ -1,29 +1,27 @@
 // Six of the eight combinators that need the whole sequence before they
 // answer. `chunks` and `windows` are above, with the groups they build.
-fn main() {
-    var v = [3, 1, 4, 1, 5, 9, 2, 6, 5]
+var v = [3, 1, 4, 1, 5, 9, 2, 6, 5]
 
-    out(v.sorted())
-    out(v.unique())
-    out(v.reversed())
-    out(v.frequencies())
-    out(["a", "b", "c"].join(", "))
+out(v.sorted())
+out(v.unique())
+out(v.reversed())
+out(v.frequencies())
+out(["a", "b", "c"].join(", "))
 
-    // A countdown is a reversed range: `5..0` is empty, not descending.
-    out((0..5).reversed())
+// A countdown is a reversed range: `5..0` is empty, not descending.
+out((0..5).reversed())
 
-    // A chain ends at a barrier and begins again from its result.
-    out(v.filter(|x| x > 2).sorted().take(3))
+// A chain ends at a barrier and begins again from its result.
+out(v.filter(|x| x > 2).sorted().take(3))
 
-    // A pair is not orderable, so a Counter orders by an extracted key.
-    var tally = ["the", "cat", "the", "dog", "the", "cat"].frequencies()
-    out(tally.to_vec().sorted_by_key(|p| 0 - p.1))
+// A pair is not orderable, so a Counter orders by an extracted key.
+var tally = ["the", "cat", "the", "dog", "the", "cat"].frequencies()
+out(tally.to_vec().sorted_by_key(|p| 0 - p.1))
 
-    // A barrier takes any source, not only a Vec.
-    var names = Set()
-    names.insert("bb")
-    names.insert("a")
-    names.insert("ccc")
-    out(names.sorted())
-    out(names.sorted_by_key(|t| t.len()))
-}
+// A barrier takes any source, not only a Vec.
+var names = Set()
+names.insert("bb")
+names.insert("a")
+names.insert("ccc")
+out(names.sorted())
+out(names.sorted_by_key(|t| t.len()))

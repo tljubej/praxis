@@ -4,30 +4,28 @@
 //
 // `1.0 / x` is the observation, because `==` cannot be: IEEE-754 says
 // `-0.0 == 0.0`, so equality is blind to exactly the bit this is about.
-fn main() {
-    // The value, computed. This was already right.
-    var computed = -1.0 * 0.0
-    out(computed)
-    out(1.0 / computed)
+// The value, computed. This was already right.
+var computed = -1.0 * 0.0
+out(computed)
+out(1.0 / computed)
 
-    // The value, written. `-0.0` used to evaluate to `+0.0`, because a Float
-    // negation was lowered as `0.0 - x` and `0.0 - 0.0` is `+0.0`. So the two
-    // lines above printed `-0.0` / `-inf` and the two below printed `0.0` /
-    // `inf`: the rendering did not read back as the Float it named.
-    out(-0.0)
-    out(1.0 / (-0.0))
+// The value, written. `-0.0` used to evaluate to `+0.0`, because a Float
+// negation was lowered as `0.0 - x` and `0.0 - 0.0` is `+0.0`. So the two
+// lines above printed `-0.0` / `-inf` and the two below printed `0.0` /
+// `inf`: the rendering did not read back as the Float it named.
+out(-0.0)
+out(1.0 / (-0.0))
 
-    // Negation through a binding, which is the same lowering and the shape a
-    // constant-folding "fix" in the lexer would leave broken.
-    var zero = 0.0
-    out(-zero)
-    out(1.0 / (-zero))
+// Negation through a binding, which is the same lowering and the shape a
+// constant-folding "fix" in the lexer would leave broken.
+var zero = 0.0
+out(-zero)
+out(1.0 / (-zero))
 
-    // The other zero is still the other zero, and negation is an involution.
-    out(1.0 / 0.0)
-    out(1.0 / (-(-0.0)))
+// The other zero is still the other zero, and negation is an involution.
+out(1.0 / 0.0)
+out(1.0 / (-(-0.0)))
 
-    // Nothing about ordinary values changed.
-    out(-2.5)
-    out(0.0 - 2.5)
-}
+// Nothing about ordinary values changed.
+out(-2.5)
+out(0.0 - 2.5)

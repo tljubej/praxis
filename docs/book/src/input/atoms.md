@@ -21,16 +21,14 @@ There are ten of them and the list is closed.
 ```praxis
 // All ten atomic parsers, once each, against text chosen so the value is
 // visible. `text` and `rest` are in `atom-text-rest.px`.
-fn main() {
-    out(parse("-42", int))
-    out(parse("007", uint))
-    out(parse("-2.5e3", float))
-    out(parse("255", byte))
-    out(parse("é", char))
-    out(parse("7", digit))
-    out(parse("a-b:c d", word))
-    out(parse("count_2 = 3", identifier))
-}
+out(parse("-42", int))
+out(parse("007", uint))
+out(parse("-2.5e3", float))
+out(parse("255", byte))
+out(parse("é", char))
+out(parse("7", digit))
+out(parse("a-b:c d", word))
+out(parse("count_2 = 3", identifier))
 ```
 
 ```text
@@ -64,13 +62,11 @@ whitespace is part of a text.
 // Which atomics skip leading spaces and tabs, and which do not. The numeric
 // and word-shaped ones do; `char`, `text` and `rest` read the byte at the
 // cursor, because a space is a character and leading space is part of a text.
-fn main() {
-    out(parse("   42", int))
-    out(parse("   9", digit))
-    out(parse("   hi", word))
-    out(parse("   x", char) == parse(" ", char))
-    out(parse("   ab", rest))
-}
+out(parse("   42", int))
+out(parse("   9", digit))
+out(parse("   hi", word))
+out(parse("   x", char) == parse(" ", char))
+out(parse("   ab", rest))
 ```
 
 ```text
@@ -110,11 +106,9 @@ are digits after the `.`, then an exponent only if it is complete. So a trailing
 // `float`'s run takes an optional sign, digits, a fraction only when there are
 // digits after the `.`, and an exponent only when it is complete. So `1.` is a
 // `1` and a literal dot, and `1e` is a `1` and a literal `e`.
-fn main() {
-    out(parse("+4", float))
-    out(parse("1.", `{v:float}{tail:rest}`))
-    out(parse("1e", `{v:float}{tail:rest}`))
-}
+out(parse("+4", float))
+out(parse("1.", `{v:float}{tail:rest}`))
+out(parse("1e", `{v:float}{tail:rest}`))
 ```
 
 ```text
@@ -144,11 +138,9 @@ anything else a template might use as punctuation.
 // `word` stops on a space, a tab, a comma, CR or LF, and on nothing else. It
 // runs straight through `-` and `:`, which is what makes `-to-` templates work
 // — the literal that follows the capture is what stops it there.
-fn main() {
-    out(parse("a-b:c d", word))
-    out(parse("seed-to-soil map:", `{source:word}-to-{destination:word} map:`))
-    out(parse("hello,world", csv(word)))
-}
+out(parse("a-b:c d", word))
+out(parse("seed-to-soil map:", `{source:word}-to-{destination:word} map:`))
+out(parse("hello,world", csv(word)))
 ```
 
 ```text
@@ -184,12 +176,10 @@ ones.
 // `text` and `rest` are one parser: both take the whole region they are given.
 // What makes a `text` capture stop early is the bound a template puts on
 // *every* capture, so `rest` in the same position stops in the same place.
-fn main() {
-    out(parse("prefoopost", `pre{body:text}post`))
-    out(parse("prefoopost", `pre{body:rest}post`))
-    out(parse("a b\nc\n", text) == parse("a b\nc\n", rest))
-    out(parse("Card 1: 41 48 83", `Card {id:int}: {body:rest}`))
-}
+out(parse("prefoopost", `pre{body:text}post`))
+out(parse("prefoopost", `pre{body:rest}post`))
+out(parse("a b\nc\n", text) == parse("a b\nc\n", rest))
+out(parse("Card 1: 41 48 83", `Card {id:int}: {body:rest}`))
 ```
 
 ```text
@@ -218,9 +208,7 @@ was looking at and the name of the parser that was looking. There is no
 ```praxis
 // `uint` refuses a leading `-`. Every atomic fails the same way: a mismatch
 // naming the byte offset it looked at and the parser that looked.
-fn main() {
-    out(read uint)
-}
+out(read uint)
 ```
 
 ```text
@@ -229,7 +217,7 @@ error: program faulted: input parse mismatch
        actual: -5⏎
 
 Backtrace:
-#0   main
+#0   <entry>
 
   temps:
     <tmp#1> = "-5\n"

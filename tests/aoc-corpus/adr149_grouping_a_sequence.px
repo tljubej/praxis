@@ -12,91 +12,89 @@
 // runs of three" are two of the most common things a puzzle asks, and neither
 // had a spelling that was not an index and a bound.
 
-fn main() {
-    var v = [1, 2, 3, 4, 5]
+var v = [1, 2, 3, 4, 5]
 
-    // A chunking is a partition: every element once, in order, and a length the
-    // size does not divide leaves a **short last chunk** rather than dropping
-    // the tail or padding it.
-    out(v.chunks(2))
-    out(v.chunks(5))
-    // Wider than the sequence is one short chunk, not a fault and not one chunk
-    // per element.
-    out(v.chunks(9))
+// A chunking is a partition: every element once, in order, and a length the
+// size does not divide leaves a **short last chunk** rather than dropping
+// the tail or padding it.
+out(v.chunks(2))
+out(v.chunks(5))
+// Wider than the sequence is one short chunk, not a fault and not one chunk
+// per element.
+out(v.chunks(9))
 
-    // A window slides by one and keeps only the runs that **fit**, which is the
-    // one place the two differ. `[1, 2, 3, 4, 5].windows(9)` is `[]`: "which runs
-    // of nine are there" is a good question about a sequence of five, and its
-    // answer is none.
-    out(v.windows(2))
-    out(v.windows(5))
-    out(v.windows(9))
+// A window slides by one and keeps only the runs that **fit**, which is the
+// one place the two differ. `[1, 2, 3, 4, 5].windows(9)` is `[]`: "which runs
+// of nine are there" is a good question about a sequence of five, and its
+// answer is none.
+out(v.windows(2))
+out(v.windows(5))
+out(v.windows(9))
 
-    // Not shown because it exits 1: `v.chunks(0)` and `v.windows(0 - 1)` fault
-    // with `size or extent out of range`. A run of zero elements is not a short
-    // run — chunking a non-empty sequence into them has no finite answer — and a
-    // negative one names nothing. That is the whole of what either refuses.
+// Not shown because it exits 1: `v.chunks(0)` and `v.windows(0 - 1)` fault
+// with `size or extent out of range`. A run of zero elements is not a short
+// run — chunking a non-empty sequence into them has no finite answer — and a
+// negative one names nothing. That is the whole of what either refuses.
 
-    // An empty receiver is an empty answer at any size, and the empty answer is
-    // still a `Vec[Vec[Int]]` rather than an unlabelled `Vec` — which is the
-    // decision, and is invisible until something reads the label.
-    var none = Vec[Int]()
-    out(none.chunks(2))
-    out(none.chunks(2).count())
+// An empty receiver is an empty answer at any size, and the empty answer is
+// still a `Vec[Vec[Int]]` rather than an unlabelled `Vec` — which is the
+// decision, and is invisible until something reads the label.
+var none = Vec[Int]()
+out(none.chunks(2))
+out(none.chunks(2).count())
 
-    // The generic receiver, so the same two rows serve every iterable a `for`
-    // walks (ADR-127 decision 1). A `Range` and a `Text` are walked in place; a
-    // `Set` and a `Map` are snapshotted through their own accessors first.
-    out((0..6).chunks(3))
-    out("abcd".windows(2))
+// The generic receiver, so the same two rows serve every iterable a `for`
+// walks (ADR-127 decision 1). A `Range` and a `Text` are walked in place; a
+// `Set` and a `Map` are snapshotted through their own accessors first.
+out((0..6).chunks(3))
+out("abcd".windows(2))
 
-    var s = Set()
-    s.insert(3)
-    s.insert(1)
-    s.insert(2)
-    out(s.chunks(2))
+var s = Set()
+s.insert(3)
+s.insert(1)
+s.insert(2)
+out(s.chunks(2))
 
-    var m = Map()
-    m["a"] = 1
-    m["b"] = 2
-    out(m.chunks(1))
+var m = Map()
+m["a"] = 1
+m["b"] = 2
+out(m.chunks(1))
 
-    // A barrier ends a fused chain and starts a new one, so a stage in front
-    // groups what **survived** and a stage behind consumes the groups — which
-    // only works because each group is a sequence in its own right.
-    out(v.filter(|n| n % 2 == 1).chunks(2))
-    out(v.windows(2).map(|w| w.sum()))
-    out(v.chunks(2).map(|c| c.count()).max())
+// A barrier ends a fused chain and starts a new one, so a stage in front
+// groups what **survived** and a stage behind consumes the groups — which
+// only works because each group is a sequence in its own right.
+out(v.filter(|n| n % 2 == 1).chunks(2))
+out(v.windows(2).map(|w| w.sum()))
+out(v.chunks(2).map(|c| c.count()).max())
 
-    // Neither reads a descriptor callback, so like `reversed` they carry no
-    // bound on the element: a `Vec` of closures groups where `sorted()` is
-    // `Y006`.
-    var fs = Vec()
-    fs.push(|x| x + 1)
-    fs.push(|x| x + 2)
-    fs.push(|x| x + 3)
-    out(fs.windows(2).count())
+// Neither reads a descriptor callback, so like `reversed` they carry no
+// bound on the element: a `Vec` of closures groups where `sorted()` is
+// `Y006`.
+var fs = Vec()
+fs.push(|x| x + 1)
+fs.push(|x| x + 2)
+fs.push(|x| x + 3)
+out(fs.windows(2).count())
 
-    // Groups **share** their elements rather than copying them, which is the
-    // language's reference semantics and not a rule of these rows: the `2` in
-    // the first window and the `2` in the second are one object.
-    var a = Vec[Int]()
-    var b = Vec[Int]()
-    var outer = Vec()
-    outer.push(a)
-    outer.push(b)
-    var w = outer.windows(2)
-    w[0][1].push(9)
-    out(b)
+// Groups **share** their elements rather than copying them, which is the
+// language's reference semantics and not a rule of these rows: the `2` in
+// the first window and the `2` in the second are one object.
+var a = Vec[Int]()
+var b = Vec[Int]()
+var outer = Vec()
+outer.push(a)
+outer.push(b)
+var w = outer.windows(2)
+w[0][1].push(9)
+out(b)
 
-    // ...and what the two are for. Counting where a sequence increases used to
-    // be an index and a bound; it is a window and a predicate.
-    var depths = [199, 200, 208, 210, 200, 207, 240, 269, 260, 263]
-    out(depths.windows(2).count(|p| p[1] > p[0]))
-    // The same question over a sliding sum of three, which is the second half of
-    // that puzzle and the reason `windows` slides rather than partitions.
-    var sums = depths.windows(3).map(|t| t.sum())
-    out(sums.windows(2).count(|p| p[1] > p[0]))
-    // And the partitioning half: a batch at a time.
-    out(depths.chunks(4).map(|batch| batch.count()))
-}
+// ...and what the two are for. Counting where a sequence increases used to
+// be an index and a bound; it is a window and a predicate.
+var depths = [199, 200, 208, 210, 200, 207, 240, 269, 260, 263]
+out(depths.windows(2).count(|p| p[1] > p[0]))
+// The same question over a sliding sum of three, which is the second half of
+// that puzzle and the reason `windows` slides rather than partitions.
+var sums = depths.windows(3).map(|t| t.sum())
+out(sums.windows(2).count(|p| p[1] > p[0]))
+// And the partitioning half: a batch at a time.
+out(depths.chunks(4).map(|batch| batch.count()))

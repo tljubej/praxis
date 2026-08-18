@@ -1,12 +1,10 @@
 // All ten atomic parsers, once each, against text chosen so the value is
 // visible. `text` and `rest` are in `atom-text-rest.px`.
-fn main() {
-    out(parse("-42", int))
-    out(parse("007", uint))
-    out(parse("-2.5e3", float))
-    out(parse("255", byte))
-    out(parse("é", char))
-    out(parse("7", digit))
-    out(parse("a-b:c d", word))
-    out(parse("count_2 = 3", identifier))
-}
+out(parse("-42", int))
+out(parse("007", uint))
+out(parse("-2.5e3", float))
+out(parse("255", byte))
+out(parse("é", char))
+out(parse("7", digit))
+out(parse("a-b:c d", word))
+out(parse("count_2 = 3", identifier))

@@ -581,37 +581,31 @@ fn run_pass_recursive_fibonacci() {
 }
 
 // ===========================================================================
-// `out(...)` and `Unit`-returning `main` (§16.1, §4.3).
+// `out(...)`, and a program's want of an answer value (§16.1, §4.3).
 //
 // `out` is `(T) -> Unit`: it writes its argument once and returns `Unit`. A
-// `Unit`-returning `main` has no answer value, so the host prints nothing for
-// it (no trailing result line) — the program's output is whatever `out` wrote.
+// program has no answer value at all — the entry point holding a file's
+// top-level statements is `Unit` (ADR-067) — so the host prints no trailing
+// result line and a program's output is exactly what `out` wrote.
 // ===========================================================================
 
 #[test]
-fn unit_main_out_prints_argument_once() {
+fn out_prints_its_argument_once() {
     // `out("kurac")` must write "kurac" exactly once; no second line from the
-    // host printing `main`'s (Unit) result.
-    assert_passes("unit_main_out.px", "kurac");
+    // host echoing it as the program's result.
+    assert_passes("out_prints_once.px", "kurac");
 }
 
 #[test]
-fn unit_main_empty_prints_nothing() {
-    // A `Unit`-returning `main` with no `out` produces empty stdout — not a
+fn a_program_with_no_out_prints_nothing() {
+    // Statements that bind and never print produce empty stdout — not a
     // spurious "0" or "Unit" result line.
-    let (code, stdout, stderr) = run_fixture("unit_main_empty.px");
+    let (code, stdout, stderr) = run_fixture("prints_nothing.px");
     assert_eq!(code, 0, "should exit 0\nstdout: {stdout}\nstderr: {stderr}");
     assert_eq!(
         stdout, "",
-        "empty Unit main should print nothing, got {stdout:?}"
+        "a program with no `out` prints nothing, got {stdout:?}"
     );
-}
-
-#[test]
-fn no_return_type_main_defaults_to_unit() {
-    // `fn main()` with no declared return type defaults to `Unit`, so `out`
-    // writes once and nothing else is printed.
-    assert_passes("no_return_type_main.px", "hi");
 }
 
 #[test]
@@ -670,7 +664,7 @@ fn m10ws4_noninteractive_renders_backtrace_and_locals() {
     assert!(stderr.contains("program faulted: index out of bounds"));
     assert!(stderr.contains("Backtrace:"), "backtrace header present");
     assert!(stderr.contains("#0"), "backtrace numbers frames");
-    assert!(stderr.contains("main"), "frame name shown");
+    assert!(stderr.contains("<entry>"), "frame name shown");
     // The named local `xs` with its Vec value renders, in the `locals:` section
     // with a type column: `xs: <type> = [11, 22]`.
     assert!(
@@ -753,7 +747,7 @@ fn m10ws5_repl_bt_and_locals_and_quit() {
     assert_eq!(code, 1, "faulted run exits 1 after REPL quits");
     assert!(out.contains("Praxis crash>"), "REPL prompt shown: {out}");
     assert!(out.contains("#0"), "bt ran: {out}");
-    assert!(out.contains("main"), "frame name shown: {out}");
+    assert!(out.contains("<entry>"), "frame name shown: {out}");
     // The named local `xs: <type> = [11, 22]` renders in the `locals:` section.
     assert!(
         out.contains("xs:") && out.contains("[11, 22]"),
@@ -998,11 +992,11 @@ fn m10ws5_repl_help_lists_commands() {
 
 #[test]
 fn m10b_ws3_source_renders_faulting_function_text() {
-    // `source` on the faulting `main` frame prints the function's source lines
-    // (the whole `fn main … { … }` extent) with a caret.
+    // `source` on the faulting `<entry>` frame prints the entry point's source
+    // lines (the file's whole extent) with a caret.
     let (_code, out) = run_repl_with_cmds("debug_backtrace.px", "source\nquit\n");
     assert!(
-        out.contains("main:"),
+        out.contains("<entry>:"),
         "source shows the frame header: {out}"
     );
     assert!(
@@ -1023,8 +1017,8 @@ fn m10b_ws3_source_help_lists_command() {
 // ===========================================================================
 // `p EXPR` / `type EXPR` read-only JIT evaluator (§9.5).
 //
-// The fixture `debug_backtrace.px` has `xs = [11, 22]` in the faulting `main`
-// frame. `p EXPR` synthesizes `fn __p_expr(xs: Vec[Int]) { EXPR }`, type-checks
+// The fixture `debug_backtrace.px` has `xs = [11, 22]` in the faulting
+// `<entry>` frame. `p EXPR` synthesizes `fn __p_expr(xs: Vec[Int]) { EXPR }`, type-checks
 // against the snapshot local, purity-gates, JITs, and calls with the snapshot's
 // `xs` GcRef. `type EXPR` reports the inferred type without JIT.
 // ===========================================================================
@@ -1297,7 +1291,7 @@ fn m10b_ws6_restart_refaults_deterministically() {
 /// **ADR-087's §9.7 half.** A `restart` against empty input must see the *same*
 /// empty input — which means the same zero-length buffer, not no buffer.
 ///
-/// `DebugSession::rerun_main` re-installs the session's input whatever its
+/// `DebugSession::rerun` re-installs the session's input whatever its
 /// length. §9.7 promises a restart is the same run, so the restarted parse must
 /// fail the same way and the REPL's `input` must have the same context to
 /// report.
@@ -1335,7 +1329,7 @@ fn m10b_ws6_reload_after_edit_changes_result() {
     let src_path = dir.join("m10b_ws6_reload.px");
     {
         let mut f = std::fs::File::create(&src_path).unwrap();
-        f.write_all(b"fn main() -> Int { 1 / 0 }").unwrap();
+        f.write_all(b"out(1 / 0)").unwrap();
     }
     // Start the REPL against the faulting version.
     use std::process::Stdio;
@@ -1374,7 +1368,7 @@ fn m10b_ws6_reload_after_edit_changes_result() {
     // Now safe to rewrite: the child has read the original faulting source.
     {
         let mut f = std::fs::File::create(&src_path).unwrap();
-        f.write_all(b"fn main() -> Int { 42 }").unwrap();
+        f.write_all(b"out(42)").unwrap();
     }
     stdin.write_all(b"reload\nquit\n").unwrap();
     drop(stdin);
@@ -1407,7 +1401,7 @@ fn m10b_ws6_reload_on_malformed_source_keeps_session() {
     let src_path = dir.join("m10b_ws6_reload_bad.px");
     {
         let mut f = std::fs::File::create(&src_path).unwrap();
-        f.write_all(b"fn main() -> Int { 1 / 0 }").unwrap();
+        f.write_all(b"out(1 / 0)").unwrap();
     }
     use std::process::Stdio;
     let mut child = Command::new(bin_path())
@@ -1442,7 +1436,7 @@ fn m10b_ws6_reload_on_malformed_source_keeps_session() {
     // Rewrite to malformed source (unbalanced).
     {
         let mut f = std::fs::File::create(&src_path).unwrap();
-        f.write_all(b"fn main() -> Int {").unwrap();
+        f.write_all(b"out(1 / 0").unwrap();
     }
     stdin.write_all(b"reload\nbt\nquit\n").unwrap();
     drop(stdin);
@@ -1485,33 +1479,37 @@ fn a_top_level_statement_runs_in_the_order_it_is_written() {
     assert_passes("top_level_calls_a_declared_fn.px", "1\n4\n6");
 }
 
-/// `fn main` is an ordinary function when the file has top-level statements, and
-/// the entry point when it does not (ADR-067).
+/// `fn main` is an ordinary function, and a file's top-level statements are the
+/// only entry point (ADR-154).
 ///
-/// The fallback is what keeps every program written in the `fn main` convention
-/// working — the whole corpus, and every end-to-end test in this file. The design
-/// doc never mentions a `main`.
+/// The design doc never mentions a `main`, and neither does the host: the name
+/// is not special, so a program that wants one run calls it.
 #[test]
-fn a_declared_main_is_the_entry_point_only_when_nothing_else_is() {
-    // No top-level statements: `main` runs — both a `Unit`-returning one, whose
-    // output is its `out(…)` calls, and an `Int`-returning one, whose answer the
-    // host prints.
-    assert_passes("unit_main_out.px", "kurac");
-    assert_passes("constant.px", "42");
-
-    // Both: the top level runs, and `main` runs because the top level calls it.
-    // Once — a rule that ran the top level *and then* called `main` would print
-    // `2` twice.
+fn a_declared_main_is_an_ordinary_function() {
+    // A file with both runs its top-level statements, and `main` runs because
+    // the top level calls it. Once — a rule that ran the top level *and then*
+    // called `main` would print `2` twice.
     assert_passes("top_level_beside_fn_main.px", "1\n2\n3");
 
-    // Neither: the file declares a function and never calls it, so there is
-    // nothing to run. The message names both spellings, because either one would
-    // have made it a program.
-    let (code, stdout, stderr) = run_fixture("no_statements_and_no_main.px");
+    // A file whose whole program sits inside a `fn main` has nothing to run.
+    // That is the one mistake worth naming, so the message names both fixes.
+    let (code, stdout, stderr) = run_fixture("only_fn_main.px");
     assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stderr.contains("no statements to run") && stderr.contains("`main`"),
-        "the error names both ways to have an entry point: {stderr}"
+        stderr.contains("no statements to run")
+            && stderr.contains("call it with `main()`")
+            && stderr.contains("move its body to the top level"),
+        "the error names both ways out of it: {stderr}"
+    );
+
+    // A file that declares something else and never calls it is the same case
+    // with no `main` to point at, so it gets the first line alone.
+    let (code, stdout, stderr) = run_fixture("no_statements_and_no_main.px");
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stderr.contains("no statements to run"), "{stderr}");
+    assert!(
+        !stderr.contains("`fn main`"),
+        "a file with no `main` is not told about one: {stderr}"
     );
 }
 
@@ -1739,22 +1737,20 @@ fn a_hole_renders_the_value_end_to_end() {
     let src = dir.join("interp.px");
     std::fs::write(
         &src,
-        "fn main() {\n\
-         \x20   var part2 = 42\n\
-         \x20   out(\"Part 2: {part2}\")\n\
-         \x20   var a = 3\n\
-         \x20   var b = 4\n\
-         \x20   out(\"{a} + {b} = {a + b}\")\n\
-         \x20   var v = [1, 2, 3]\n\
-         \x20   out(\"v = {v}\")\n\
-         \x20   out(v)\n\
-         \x20   var m = Map[Text, Int]()\n\
-         \x20   m[\"k\"] = 9\n\
-         \x20   out(\"m = {m[\"k\"]}, len = {v.len()}\")\n\
-         \x20   out(\"literal braces: \\{ and \\}\")\n\
-         \x20   var f = |n: Int| \"a is {a}, n is {n}\"\n\
-         \x20   out(f(7))\n\
-         }\n",
+        "var part2 = 42\n\
+         out(\"Part 2: {part2}\")\n\
+         var a = 3\n\
+         var b = 4\n\
+         out(\"{a} + {b} = {a + b}\")\n\
+         var v = [1, 2, 3]\n\
+         out(\"v = {v}\")\n\
+         out(v)\n\
+         var m = Map[Text, Int]()\n\
+         m[\"k\"] = 9\n\
+         out(\"m = {m[\"k\"]}, len = {v.len()}\")\n\
+         out(\"literal braces: \\{ and \\}\")\n\
+         var f = |n: Int| \"a is {a}, n is {n}\"\n\
+         out(f(7))\n",
     )
     .expect("write the source");
 
@@ -1791,11 +1787,9 @@ fn a_hole_renders_an_int_and_plus_still_refuses_one() {
     let src = dir.join("interp-plus.px");
     std::fs::write(
         &src,
-        "fn main() {\n\
-         \x20   var n = 3\n\
-         \x20   out(\"n = {n}\")\n\
-         \x20   out(\"n = \" + n)\n\
-         }\n",
+        "var n = 3\n\
+         out(\"n = {n}\")\n\
+         out(\"n = \" + n)\n",
     )
     .expect("write the source");
 
@@ -1855,28 +1849,26 @@ fn a_nan_key_deduplicates_or_not_depending_on_whether_its_slot_was_promoted() {
     let src = dir.join("nan-keys.px");
     std::fs::write(
         &src,
-        "fn main() {\n\
-         \x20   var zero = 0.0\n\
-         \x20   var nan = zero / zero\n\
-         \x20   var s = Set()\n\
-         \x20   s.insert(nan)\n\
-         \x20   s.insert(nan)\n\
-         \x20   out(s.len())\n\
-         \x20   var t = Set()\n\
-         \x20   t.insert(0.0 / 0.0)\n\
-         \x20   t.insert(0.0 / 0.0)\n\
-         \x20   out(t.len())\n\
-         \x20   var x = zero / zero\n\
-         \x20   var i = 0\n\
-         \x20   while i < 3 {\n\
-         \x20       x = x + 0.0\n\
-         \x20       i = i + 1\n\
-         \x20   }\n\
-         \x20   var u = Set()\n\
-         \x20   u.insert(x)\n\
-         \x20   u.insert(x)\n\
-         \x20   out(u.len())\n\
-         }\n",
+        "var zero = 0.0\n\
+         var nan = zero / zero\n\
+         var s = Set()\n\
+         s.insert(nan)\n\
+         s.insert(nan)\n\
+         out(s.len())\n\
+         var t = Set()\n\
+         t.insert(0.0 / 0.0)\n\
+         t.insert(0.0 / 0.0)\n\
+         out(t.len())\n\
+         var x = zero / zero\n\
+         var i = 0\n\
+         while i < 3 {\n\
+         \x20   x = x + 0.0\n\
+         \x20   i = i + 1\n\
+         }\n\
+         var u = Set()\n\
+         u.insert(x)\n\
+         u.insert(x)\n\
+         out(u.len())\n",
     )
     .expect("write the source");
 

@@ -1,7 +1,7 @@
 error: program faulted: an argument this algorithm has no answer for
 
 Backtrace:
-#0   main
+#0   <entry>
 
   temps:
     <tmp#1: Int> @ "0" = 0
@@ -9,3 +9,4 @@ Backtrace:
     <tmp#3: (Int, Int) -> Int> @ "|a, b| -1" = <closure:0>
     <tmp#4: Map[Int, Int]> @ "dijkstra(0, steps, |a, b| -1)" = <uninit>
     <tmp#5: Int> @ "dijkstra(0, steps, |a, b| -1).len()" = <uninit>
+    <tmp#6: Unit> @ "out(dijkstra(0, steps, |a, b| -1).len())" = <uninit>

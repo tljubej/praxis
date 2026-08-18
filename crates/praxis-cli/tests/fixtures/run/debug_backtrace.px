@@ -1,6 +1,4 @@
-fn main() -> Int {
-  var xs = Vec()
-  xs.push(11)
-  xs.push(22)
-  xs.get(99)
-}
+var xs = Vec()
+xs.push(11)
+xs.push(22)
+out(xs.get(99))

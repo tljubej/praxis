@@ -1,7 +1,7 @@
 error[Y110]: no method `collect` on type `Vec[Int]` taking 0 argument(s)
 
-  no-collect.px:4:26
-  4 |     out(v.map(|x| x * 2).collect())
-    |                          ^^^^^^^ no method `collect` on type `Vec[Int]` taking 0 argument(s)
+  no-collect.px:3:22
+  3 | out(v.map(|x| x * 2).collect())
+    |                      ^^^^^^^ no method `collect` on type `Vec[Int]` taking 0 argument(s)
 
 praxis: 1 error(s)

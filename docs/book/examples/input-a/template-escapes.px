@@ -1,7 +1,5 @@
 // Backticks and backslashes take ordinary escapes; a quote inside literal text
 // is just a quote, because a string literal is only a thing inside a capture.
-fn main() {
-    out(parse("a`b 3", `a\`b {x:int}`))
-    out(parse("a\\b 4", `a\\b {x:int}`))
-    out(parse("He said \"hi\" 5", `He said "hi" {x:int}`))
-}
+out(parse("a`b 3", `a\`b {x:int}`))
+out(parse("a\\b 4", `a\\b {x:int}`))
+out(parse("He said \"hi\" 5", `He said "hi" {x:int}`))

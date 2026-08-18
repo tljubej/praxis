@@ -1,5 +1,3 @@
 // Named and anonymous captures may not be mixed in one template: the shape
 // would have to be a record and a tuple at once.
-fn main() {
-    out(read lines(`{x:int},{int}`))
-}
+out(read lines(`{x:int},{int}`))

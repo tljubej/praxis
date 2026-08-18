@@ -2,7 +2,5 @@
 // nothing to parse, so it faults — and the fault must say where and what it
 // wanted (§7.11). `reads_lines_of_int.px` is the other half of the pair, where
 // empty input has an answer (`[]`) rather than a mismatch.
-fn main() {
-    var n = read int
-    out(n)
-}
+var n = read int
+out(n)

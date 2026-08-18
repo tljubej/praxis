@@ -1,7 +1,5 @@
 // `\s*` and `\s+` match line endings too, where a plain space run does not.
 // A plain run is horizontal whitespace; the two escapes are all whitespace,
 // and these two lines are where that difference shows.
-fn main() {
-    out(parse("1\n2", `{a:int}\s+{b:int}`))
-    out(parse("1\n2", `{a:int}\s*{b:int}`))
-}
+out(parse("1\n2", `{a:int}\s+{b:int}`))
+out(parse("1\n2", `{a:int}\s*{b:int}`))

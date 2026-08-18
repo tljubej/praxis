@@ -12,7 +12,7 @@
 // expected output at all — a `HashMap`'s own order is randomized per process.
 //
 // Each walk is its own function so the digits it concatenates are its own; one
-// `main` holding all ten runs past the shadow-frame's slot cap.
+// entry point holding all ten runs past the shadow-frame's slot cap.
 //
 // Input (on stdin): a small character grid.
 // Output: one line per iterable, then the grid's cell count.
@@ -36,69 +36,66 @@ fn pair_digits(c) {
     acc
 }
 
-fn main() {
-    // A Vec, a Deque and a Range are the three that always worked; they are here
-    // so a regression in the in-place plan fails alongside the snapshot ones.
-    var v = Vec()
-    v.push(1)
-    v.push(2)
-    v.push(3)
-    out(digits(v))
+// A Vec, a Deque and a Range are the three that always worked; they are here
+// so a regression in the in-place plan fails alongside the snapshot ones.
+var v = Vec()
+v.push(1)
+v.push(2)
+v.push(3)
+out(digits(v))
 
-    var d = Deque()
-    d.push_back(2)
-    d.push_front(1)
-    out(digits(d))
+var d = Deque()
+d.push_back(2)
+d.push_front(1)
+out(digits(d))
 
-    out(digits(1..4))
+out(digits(1..4))
 
-    // A Set: inserted out of order, walked in order.
-    var s = Set()
-    s.insert(3)
-    s.insert(1)
-    s.insert(2)
-    out(digits(s))
+// A Set: inserted out of order, walked in order.
+var s = Set()
+s.insert(3)
+s.insert(1)
+s.insert(2)
+out(digits(s))
 
-    // A BitSet's members are bit positions rather than objects, so the snapshot
-    // boxes each one.
-    var b = BitSet()
-    b.insert(5)
-    b.insert(1)
-    out(digits(b))
+// A BitSet's members are bit positions rather than objects, so the snapshot
+// boxes each one.
+var b = BitSet()
+b.insert(5)
+b.insert(1)
+out(digits(b))
 
-    // The heaps walk in pop order without being drained: the length afterwards
-    // says so.
-    var lo = MinHeap()
-    lo.push(3)
-    lo.push(1)
-    lo.push(2)
-    out(digits(lo) * 10 + lo.len())
+// The heaps walk in pop order without being drained: the length afterwards
+// says so.
+var lo = MinHeap()
+lo.push(3)
+lo.push(1)
+lo.push(2)
+out(digits(lo) * 10 + lo.len())
 
-    var hi = MaxHeap()
-    hi.push(1)
-    hi.push(3)
-    hi.push(2)
-    out(digits(hi))
+var hi = MaxHeap()
+hi.push(1)
+hi.push(3)
+hi.push(2)
+out(digits(hi))
 
-    // A keyed collection yields the (key, value) pair, and both halves are read
-    // through the tuple element syntax REP-08 added.
-    var m = Map()
-    m.insert(1, 4)
-    m.insert(2, 5)
-    out(pair_digits(m))
+// A keyed collection yields the (key, value) pair, and both halves are read
+// through the tuple element syntax REP-08 added.
+var m = Map()
+m.insert(1, 4)
+m.insert(2, 5)
+out(pair_digits(m))
 
-    var c = Counter()
-    c.inc(7)
-    c.inc(7)
-    c.inc(9)
-    out(pair_digits(c))
+var c = Counter()
+c.inc(7)
+c.inc(7)
+c.inc(9)
+out(pair_digits(c))
 
-    // A Grid yields its cells row-major. A `Grid()` is 0×0, so this one is read.
-    var g = read grid(char)
-    var cells = 0
-    for cell in g {
-        cells = cells + 1
-    }
-    out(cells)
+// A Grid yields its cells row-major. A `Grid()` is 0×0, so this one is read.
+var g = read grid(char)
+var cells = 0
+for cell in g {
+    cells = cells + 1
 }
-main()
+out(cells)

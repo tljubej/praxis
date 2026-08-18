@@ -1,6 +1,4 @@
 // Input-parser fixture: the §7.6 nested example.
 // read sections(lines(csv(int))) → Vec[Vec[Vec[Int]]]
-fn main() -> Int {
-    var groups = read sections(lines(csv(int)));
-    groups.get(0).len()
-}
+var groups = read sections(lines(csv(int)));
+out(groups.get(0).len())

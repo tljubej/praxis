@@ -1,7 +1,7 @@
 error: program faulted: index out of bounds
 
 Backtrace:
-#0   main
+#0   <entry>
 
   locals:
     seen: Set[Int] = {3}

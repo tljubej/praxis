@@ -19,134 +19,132 @@
 // numbered. The output is byte-identical to the six-function form's, which is
 // what says the merge is a merge and not a rewrite.
 
-fn main() {
-    // The five sequence-shaped receivers, plus the two nullary ones.
-    var s = Set()
-    s.insert(3)
-    s.insert(1)
-    s.insert(2)
-    // A `Set` has no member accessor in the language at all — `praxis_set_items`
-    // was reachable only from `for` — so this is the first spelling that reads
-    // one. The order is `maps::ordered_members`', which is deterministic and
-    // seed-independent: `s.map(f)` answers the same `Vec` on every run.
-    out(s.map(|x| x * 2).sum())
-    out(s.sorted())
+// The five sequence-shaped receivers, plus the two nullary ones.
+var s = Set()
+s.insert(3)
+s.insert(1)
+s.insert(2)
+// A `Set` has no member accessor in the language at all — `praxis_set_items`
+// was reachable only from `for` — so this is the first spelling that reads
+// one. The order is `maps::ordered_members`', which is deterministic and
+// seed-independent: `s.map(f)` answers the same `Vec` on every run.
+out(s.map(|x| x * 2).sum())
+out(s.sorted())
 
-    var d = Deque()
-    d.push_back(10)
-    d.push_front(20)
-    out(d.map(|x| x + 1).sum())
+var d = Deque()
+d.push_back(10)
+d.push_front(20)
+out(d.map(|x| x + 1).sum())
 
-    var heap = MinHeap()
-    heap.push(5)
-    heap.push(2)
-    // A heap's backing array is heap-ordered only at its root, which is why
-    // reading one through `praxis_vec_get` was a silently wrong answer and why
-    // `IterPlan` exists. The pipeline takes the same snapshot a `for` does.
-    out(heap.count())
+var heap = MinHeap()
+heap.push(5)
+heap.push(2)
+// A heap's backing array is heap-ordered only at its root, which is why
+// reading one through `praxis_vec_get` was a silently wrong answer and why
+// `IterPlan` exists. The pipeline takes the same snapshot a `for` does.
+out(heap.count())
 
-    var bits = BitSet()
-    bits.insert(1)
-    bits.insert(4)
-    out(bits.map(|n| n * n).sum())
+var bits = BitSet()
+bits.insert(1)
+bits.insert(4)
+out(bits.map(|n| n * n).sum())
 
-    out((0..10).filter(|x| x % 2 == 0).map(|x| x * 2).sum())
+out((0..10).filter(|x| x % 2 == 0).map(|x| x * 2).sum())
 
-    // `Text` is the one iterable scalar, and it yields the `Char` that `t[i]`
-    // already answers.
-    out("hello".count(|c| c == "l"[0]))
-    out("hello".filter(|c| c != "l"[0]).count())
+// `Text` is the one iterable scalar, and it yields the `Char` that `t[i]`
+// already answers.
+out("hello".count(|c| c == "l"[0]))
+out("hello".filter(|c| c != "l"[0]).count())
 
-    // A `Map` and a `Counter` yield **pairs**, from two index-aligned snapshots the
-    // loop joins into the `(K, V)` tuple the item type names.
-    var m = Map()
-    m["a"] = 1
-    m["b"] = 2
-    out(m.count())
-    out(m.map(|kv| kv.1).sum())
+// A `Map` and a `Counter` yield **pairs**, from two index-aligned snapshots the
+// loop joins into the `(K, V)` tuple the item type names.
+var m = Map()
+m["a"] = 1
+m["b"] = 2
+out(m.count())
+out(m.map(|kv| kv.1).sum())
 
-    var tally = ["the", "cat", "the", "dog", "the", "cat"].frequencies()
-    out(tally.filter(|p| p.1 > 1).count())
+var tally = ["the", "cat", "the", "dog", "the", "cat"].frequencies()
+out(tally.filter(|p| p.1 > 1).count())
 
-    // **A pipeline's currency is `Vec`.** Every streaming stage answers one,
-    // whatever the receiver was, and a program that wants a collection back says
-    // which one. One sentence answers "what does `filter` return" for all ten
-    // receivers, and it is answerable without knowing which receiver you are on.
-    var s = Set()
-    s.insert(3)
-    s.insert(1)
-    s.insert(2)
-    out(s.filter(|x| x > 1))
-    out(s.filter(|x| x > 1).to_set().len())
-    // A fused sink, not a barrier: `v.map(f).to_set()` is one loop and no
-    // intermediate `Vec`.
-    out([1, 2, 3].map(|x| x % 2).to_set().len())
+// **A pipeline's currency is `Vec`.** Every streaming stage answers one,
+// whatever the receiver was, and a program that wants a collection back says
+// which one. One sentence answers "what does `filter` return" for all ten
+// receivers, and it is answerable without knowing which receiver you are on.
+var s = Set()
+s.insert(3)
+s.insert(1)
+s.insert(2)
+out(s.filter(|x| x > 1))
+out(s.filter(|x| x > 1).to_set().len())
+// A fused sink, not a barrier: `v.map(f).to_set()` is one loop and no
+// intermediate `Vec`.
+out([1, 2, 3].map(|x| x % 2).to_set().len())
 
-    // `to_vec` is the only route out of a keyed collection: `keys()` and `values()`
-    // answer two aligned halves and nothing joins them. `to_map` is the route back
-    // in, and it says "a pair" in its receiver pattern rather than in prose — so
-    // `[1, 2].to_map()` is a type error at the method name and not a row that
-    // resolves and then faults.
-    var m = Map()
-    m["a"] = 1
-    m["b"] = 2
-    out(m.to_vec())
+// `to_vec` is the only route out of a keyed collection: `keys()` and `values()`
+// answer two aligned halves and nothing joins them. `to_map` is the route back
+// in, and it says "a pair" in its receiver pattern rather than in prose — so
+// `[1, 2].to_map()` is a type error at the method name and not a row that
+// resolves and then faults.
+var m = Map()
+m["a"] = 1
+m["b"] = 2
+out(m.to_vec())
 
-    var doubled = m.map(|kv| (kv.0, kv.1 * 10)).to_map()
-    out(doubled["b"])
+var doubled = m.map(|kv| (kv.0, kv.1 * 10)).to_map()
+out(doubled["b"])
 
-    // The four whose only cost was a table entry apiece. Leaving them out is
-    // what would have made `deque.filter(p)` answer a `Vec` with no way back.
-    out([3, 1, 2].to_deque().pop_front())
-    out([3, 1, 2].to_min_heap().pop())
-    out([3, 1, 2].to_max_heap().pop())
-    out([1, 4].to_bitset().contains(4))
+// The four whose only cost was a table entry apiece. Leaving them out is
+// what would have made `deque.filter(p)` answer a `Vec` with no way back.
+out([3, 1, 2].to_deque().pop_front())
+out([3, 1, 2].to_min_heap().pop())
+out([3, 1, 2].to_max_heap().pop())
+out([1, 4].to_bitset().contains(4))
 
-    // `to_vec` on a `Vec` receiver is the identity and answers the **same
-    // reference**, not a copy — the second half of ADR-126 decision 2 kept.
-    var v = [1]
-    var same = v.to_vec()
-    same.push(2)
-    out(v.len())
+// `to_vec` on a `Vec` receiver is the identity and answers the **same
+// reference**, not a copy — the second half of ADR-126 decision 2 kept.
+var v = [1]
+var same = v.to_vec()
+same.push(2)
+out(v.len())
 
-    // **A keyed collection cannot order its own items.** No composite is orderable
-    // (ADR-045), so the moment a pipeline's item is a pair — the moment its source
-    // is a `Map` or a `Counter` — `sorted` is unavailable and "the two most common
-    // words" has no spelling. The closure extracts an orderable key from an item
-    // that is not.
-    var tally = ["the", "cat", "the", "dog", "the", "cat"].frequencies()
-    var top = tally.to_vec().sorted_by_key(|p| 0 - p.1).take(2)
-    out(top)
-    out(top.to_counter()["the"])
+// **A keyed collection cannot order its own items.** No composite is orderable
+// (ADR-045), so the moment a pipeline's item is a pair — the moment its source
+// is a `Map` or a `Counter` — `sorted` is unavailable and "the two most common
+// words" has no spelling. The closure extracts an orderable key from an item
+// that is not.
+var tally = ["the", "cat", "the", "dog", "the", "cat"].frequencies()
+var top = tally.to_vec().sorted_by_key(|p| 0 - p.1).take(2)
+out(top)
+out(top.to_counter()["the"])
 
-    // The `Ord` bound moved to the extracted key, so the elements need no order
-    // of their own — and the receiver is a `Set`, which a barrier could not take
-    // before decision 3.
-    var names = Set()
-    names.insert("bb")
-    names.insert("a")
-    names.insert("ccc")
-    out(names.sorted_by_key(|t| t.len()))
+// The `Ord` bound moved to the extracted key, so the elements need no order
+// of their own — and the receiver is a `Set`, which a barrier could not take
+// before decision 3.
+var names = Set()
+names.insert("bb")
+names.insert("a")
+names.insert("ccc")
+out(names.sorted_by_key(|t| t.len()))
 
-    // The two barriers added after this program was written, over the same
-    // spread of receivers. `reversed` reads no descriptor callback (ADR-145), so
-    // it is the barrier with no bound on its element; `join` bounds its item to
-    // `Text` and answers a scalar (ADR-144).
-    out(v.reversed())
-    out(s.reversed())
-    out((0..5).reversed())
-    out("abc".reversed())
-    out(names.join("-"))
-    out(["a", "b", "c"].join(", "))
-    out(tally.keys().join("|"))
-    out([1, 2, 3].map(|n| n.to_text()).join("+"))
+// The two barriers added after this program was written, over the same
+// spread of receivers. `reversed` reads no descriptor callback (ADR-145), so
+// it is the barrier with no bound on its element; `join` bounds its item to
+// `Text` and answers a scalar (ADR-144).
+out(v.reversed())
+out(s.reversed())
+out((0..5).reversed())
+out("abc".reversed())
+out(names.join("-"))
+out(["a", "b", "c"].join(", "))
+out(tally.keys().join("|"))
+out([1, 2, 3].map(|n| n.to_text()).join("+"))
 
-    // A countdown, which before `reversed` was a `while` and a decrement.
-    var down = 0
-    for y in (0..5).reversed() { down = down * 10 + y }
-    out(down)
+// A countdown, which before `reversed` was a `while` and a decrement.
+var down = 0
+for y in (0..5).reversed() { down = down * 10 + y }
+out(down)
 
-    // `Vec[Char]` is the one sequence that becomes a `Text` under a different
-    // name, because `join` could not carry a second item bound (ADR-144).
-    out("héllo".to_vec().to_text())
-}
+// `Vec[Char]` is the one sequence that becomes a `Text` under a different
+// name, because `join` could not carry a second item bound (ADR-144).
+out("héllo".to_vec().to_text())

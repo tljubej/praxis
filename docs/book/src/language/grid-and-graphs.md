@@ -576,17 +576,15 @@ fn steps(v: Vec[Int]) -> Vec[Vec[Int]] {
     Vec()
 }
 
-fn main() -> Int {
-    bfs(Vec(), steps).len()
-}
+out(bfs(Vec(), steps).len())
 ```
 
 ```console
 $ praxis check unstable-state.px
 error[Y014]: a value of type `Vec[Int]` can change after it is stored, so it cannot be used as a key
 
-  unstable-state.px:9:5
-  9 |     bfs(Vec(), steps).len()
+  unstable-state.px:8:5
+  8 | out(bfs(Vec(), steps).len())
     |     ^^^^^^^^^^^^^^^^^ a value of type `Vec[Int]` can change after it is stored, so it cannot be used as a key
 
 help: use a value that cannot change — a number, `Text`, or a tuple of those
@@ -608,17 +606,15 @@ fn steps(n: Int) -> Set[Int] {
     Set()
 }
 
-fn main() -> Int {
-    bfs(0, steps).len()
-}
+out(bfs(0, steps).len())
 ```
 
 ```console
 $ praxis check neighbours-must-be-a-vec.px
 error[Y001]: expected (Int, (Int) -> Vec[Int]) -> Vec[Int], found (Int, (Int) -> Set[Int]) -> ?T
 
-  neighbours-must-be-a-vec.px:8:5
-  8 |     bfs(0, steps).len()
+  neighbours-must-be-a-vec.px:7:5
+  7 | out(bfs(0, steps).len())
     |     ^^^^^^^^^^^^^ expected (Int, (Int) -> Vec[Int]) -> Vec[Int], found (Int, (Int) -> Set[Int]) -> ?T
 
 praxis: 1 error(s)
@@ -638,16 +634,14 @@ fn steps(n: Int) -> Vec[Int] {
     v
 }
 
-fn main() -> Int {
-    dijkstra(0, steps, |a, b| -1).len()
-}
+out(dijkstra(0, steps, |a, b| -1).len())
 ```
 
 ```text
 error: program faulted: an argument this algorithm has no answer for
 
 Backtrace:
-#0   main
+#0   <entry>
 
   temps:
     <tmp#1: Int> @ "0" = 0
@@ -655,6 +649,7 @@ Backtrace:
     <tmp#3: (Int, Int) -> Int> @ "|a, b| -1" = <closure:0>
     <tmp#4: Map[Int, Int]> @ "dijkstra(0, steps, |a, b| -1)" = <uninit>
     <tmp#5: Int> @ "dijkstra(0, steps, |a, b| -1).len()" = <uninit>
+    <tmp#6: Unit> @ "out(dijkstra(0, steps, |a, b| -1).len())" = <uninit>
 ```
 
 The full list of stops:

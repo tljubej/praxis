@@ -1,10 +1,8 @@
 // A multi-capture template's value is an ordinary tuple, all the way into the
 // collection that holds it: it renders and compares like one built by hand.
-fn main() {
-    var pairs = read lines(`{int},{int}`)
-    var same = Vec()
-    same.push((1, 2))
-    same.push((3, 4))
-    out(pairs)
-    out(pairs == same)
-}
+var pairs = read lines(`{int},{int}`)
+var same = Vec()
+same.push((1, 2))
+same.push((3, 4))
+out(pairs)
+out(pairs == same)

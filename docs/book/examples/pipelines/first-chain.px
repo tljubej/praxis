@@ -1,22 +1,20 @@
 // The shape of every pipeline: a source, some stages, and a sink.
-fn main() {
-    var readings = [3, -1, 4, 1, -5, 9, 2, 6]
+var readings = [3, -1, 4, 1, -5, 9, 2, 6]
 
-    // A sink ends the chain and answers a scalar.
-    out(readings.filter(|x| x > 0).map(|x| x * x).sum())
+// A sink ends the chain and answers a scalar.
+out(readings.filter(|x| x > 0).map(|x| x * x).sum())
 
-    // The same chain, one stage per line. A leading `.` continues the
-    // expression across the newline that would otherwise end the statement.
-    var answer = readings
-        .filter(|x| x > 0)
-        .map(|x| x * x)
-        .sum()
-    out(answer)
+// The same chain, one stage per line. A leading `.` continues the
+// expression across the newline that would otherwise end the statement.
+var answer = readings
+    .filter(|x| x > 0)
+    .map(|x| x * x)
+    .sum()
+out(answer)
 
-    // No sink: the chain still ends, and what it ends as is a Vec.
-    out(readings.filter(|x| x > 0).map(|x| x * x))
+// No sink: the chain still ends, and what it ends as is a Vec.
+out(readings.filter(|x| x > 0).map(|x| x * x))
 
-    // `count` has two arities: every element, or the matching ones.
-    out(readings.count())
-    out(readings.count(|x| x < 0))
-}
+// `count` has two arities: every element, or the matching ones.
+out(readings.count())
+out(readings.count(|x| x < 0))

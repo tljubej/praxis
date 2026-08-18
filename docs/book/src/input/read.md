@@ -8,17 +8,15 @@ sublanguage, and everything after it is ordinary Praxis.
 ```praxis
 // One `read` at the top, ordinary code underneath. The parser expression is
 // broken across lines because whitespace outside the backticks is not input.
-fn main() {
-    var segments = read lines(
-        `{x1:int},{y1:int} -> {x2:int},{y2:int}`
-    )
-    var total = 0
-    for s in segments {
-        total = total + abs(s.x2 - s.x1) + abs(s.y2 - s.y1)
-    }
-    out(segments.len())
-    out(total)
+var segments = read lines(
+    `{x1:int},{y1:int} -> {x2:int},{y2:int}`
+)
+var total = 0
+for s in segments {
+    total = total + abs(s.x2 - s.x1) + abs(s.y2 - s.y1)
 }
+out(segments.len())
+out(total)
 ```
 
 Given
@@ -83,12 +81,10 @@ from its first byte, so a second one is not a continuation of the first.
 ```praxis
 // `read` is not a consuming stream. Both expressions parse the same buffer
 // from its first byte, so the second one still sees all six bytes.
-fn main() {
-    var numbers = read lines(int)
-    var whole = read rest
-    out(numbers)
-    out(whole.len())
-}
+var numbers = read lines(int)
+var whole = read rest
+out(numbers)
+out(whole.len())
 ```
 
 Over `1\n2\n3\n`:
@@ -145,10 +141,8 @@ terminal all produce a zero-length buffer, and the parser runs against it.
 ```praxis
 // Empty input is input. `read-empty.in` is a zero-byte file, and
 // `lines` over nothing is an empty Vec — an answer, not a fault.
-fn main() {
-    out(read lines(int))
-    out((read rest).len())
-}
+out(read lines(int))
+out((read rest).len())
 ```
 
 ```text
@@ -163,9 +157,7 @@ offset zero — which is a sentence you can act on:
 ```praxis
 // The other half of the rule: a program that requires content still gets a
 // fault over empty input, and the fault says where it looked and what for.
-fn main() {
-    out(read int)
-}
+out(read int)
 ```
 
 ```text
@@ -173,7 +165,7 @@ error: program faulted: input parse mismatch
        at input offset 0..0: expected int
 
 Backtrace:
-#0   main
+#0   <entry>
 
   temps:
     <tmp#1> = ""
@@ -193,11 +185,9 @@ expression, which is not something an ordinary call could take.
 ```praxis
 // `parse(text, PARSER)` runs the same sublanguage against a `Text` you already
 // have. Nothing is trimmed off the root, so `parse(t, rest)` is the identity.
-fn main() {
-    var sample = "1,2,3"
-    out(parse(sample, csv(int)))
-    out(parse("ab\ncd\n", rest) == "ab\ncd\n")
-}
+var sample = "1,2,3"
+out(parse(sample, csv(int)))
+out(parse("ab\ncd\n", rest) == "ab\ncd\n")
 ```
 
 ```text

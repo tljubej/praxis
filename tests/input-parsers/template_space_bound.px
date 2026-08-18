@@ -6,11 +6,9 @@
 // template literal can match" does not exempt it. Without the bound, `text`
 // swallows the whole line and the space run reports "expected whitespace" at
 // the end of it.
-fn main() -> Int {
-    var rows = read lines(`{name:text} {v:int}`);
-    var total = 0;
-    for row in rows {
-        total = total + row.v;
-    }
-    total
+var rows = read lines(`{name:text} {v:int}`);
+var total = 0;
+for row in rows {
+    total = total + row.v;
 }
+out(total)

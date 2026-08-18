@@ -36,6 +36,12 @@ a `fn main`, and that is this ADR's decision.
 
 ## Decision 1: the top level is the program, and `fn main` is the fallback
 
+> **Superseded by [ADR-154](./154-a-program-is-its-top-level-statements-and-nothing-else.md).**
+> The fallback is gone: the top level is the *only* entry point, and a declared
+> `fn main` is an ordinary function. The corpus this decision was protecting has
+> since been written in §3.2's own style, which is the condition the last
+> paragraph of this section names. Decisions 2, 3 and 4 below still hold.
+
 A file with at least one top-level statement gets a generated entry function
 holding them all, in source order, and that is what the host runs. A file with
 **no** top-level statements falls back to a declared `fn main`. A file with
@@ -95,6 +101,11 @@ Being a `Unit` function is also what keeps `out(…)` at top level from printing
 twice. The host prints an entry point's *answer* only when it is non-`Unit`, and
 a file has no value: every top-level statement runs for effect and the tail is
 Unit. `out(overlaps(segments, false))` is a statement, not a result.
+
+> **Amended by [ADR-154](./154-a-program-is-its-top-level-statements-and-nothing-else.md).**
+> There is no answer line at all now. With the `fn main` fallback gone the entry
+> point is always `Unit`, so the host prints nothing of its own and a program
+> reports what it printed.
 
 ## Decision 4: the statements move, the declarations stay
 

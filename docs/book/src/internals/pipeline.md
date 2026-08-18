@@ -135,8 +135,8 @@ Backtrace:
 The three `<tmp#N>` lines are MIR slots, not source variables: lowering
 materializes every intermediate node of an expression tree into its own local,
 and the debugger prints each with the expression that produced it. `<entry>` is
-the rule and `fn main` is the fallback — a file with no top-level statements runs
-`main` instead.
+the generated function holding the file's top-level statements, and it is the
+only entry point there is.
 
 Monomorphization sits between typed HIR and MIR: each polymorphic function is
 cloned once per distinct set of concrete type arguments at its call sites, so MIR

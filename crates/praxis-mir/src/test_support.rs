@@ -148,18 +148,19 @@ fn lower_src_through(src: &str, stage: Stage) -> Lowered {
 
 impl Lowered {
     /// The function the host would execute: the synthetic holder of the file's
-    /// top-level statements, or a declared `fn main`.
+    /// top-level statements.
     ///
     /// Asks [`praxis_hir::entry_point`], the same question `run` and the
     /// debugger's reload ask, so a benchmark program's entry point here is the
-    /// one that actually runs.
+    /// one that actually runs — which is why a program written for this helper
+    /// puts its body at the top level and not inside a `fn main` (ADR-154).
     ///
     /// # Panics
-    /// When the module has neither.
+    /// When the module has no top-level statements.
     #[must_use]
     pub fn entry(&self) -> &Function {
         let name = praxis_hir::entry_point(|n| self.funcs.iter().any(|f| f.name == n))
-            .expect("the module has no entry point: no top-level statements and no `fn main`");
+            .expect("the module has no entry point: no top-level statements");
         self.function(name)
     }
 
@@ -699,10 +700,14 @@ mod tests {
         assert_eq!(lowered.entry().name, praxis_hir::ENTRY_NAME);
     }
 
+    /// A `fn main` is an ordinary function (ADR-154), so a file that is nothing
+    /// but declarations has no entry point at all — including when one of them
+    /// is spelled `main`.
     #[test]
-    fn a_file_of_declarations_alone_has_main_as_its_entry_point() {
+    #[should_panic(expected = "no entry point")]
+    fn a_file_of_declarations_alone_has_no_entry_point() {
         let lowered = lower_src_to_mir("fn main() -> Int { 41 + 1 }");
-        assert_eq!(lowered.entry().name, "main");
+        let _ = lowered.entry();
     }
 
     /// Monomorphization drops the generic original and the JIT compiles the

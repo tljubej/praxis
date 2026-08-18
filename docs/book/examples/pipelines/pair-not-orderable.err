@@ -1,7 +1,7 @@
 error[Y006]: values of type `(Text, Int)` cannot be ordered
 
-  pair-not-orderable.px:5:20
-  5 |     out(m.to_vec().sorted())
-    |                    ^^^^^^ values of type `(Text, Int)` cannot be ordered
+  pair-not-orderable.px:4:16
+  4 | out(m.to_vec().sorted())
+    |                ^^^^^^ values of type `(Text, Int)` cannot be ordered
 
 praxis: 1 error(s)

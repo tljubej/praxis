@@ -1,7 +1,7 @@
 error[Y023]: a backtick template is a parser expression; write `read` before it, or pass it to `parse(text, ...)`
 
-  template-value-position.px:5:13
-  5 |     var t = `n = {int}`
-    |             ^^^^^^^^^^^ a backtick template is a parser expression; write `read` before it, or pass it to `parse(text, ...)`
+  template-value-position.px:4:9
+  4 | var t = `n = {int}`
+    |         ^^^^^^^^^^^ a backtick template is a parser expression; write `read` before it, or pass it to `parse(text, ...)`
 
 praxis: 1 error(s)

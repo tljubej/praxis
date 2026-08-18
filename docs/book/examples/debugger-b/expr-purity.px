@@ -1,9 +1,7 @@
 // The purity gate has to have something to refuse, so this frame holds a
 // mutable collection, and the session below asks it to mutate.
-fn main() {
-    var seen = Set()
-    seen.insert(3)
-    var queue = [1, 2, 3]
-    var steps = 0
-    out(queue[7])
-}
+var seen = Set()
+seen.insert(3)
+var queue = [1, 2, 3]
+var steps = 0
+out(queue[7])

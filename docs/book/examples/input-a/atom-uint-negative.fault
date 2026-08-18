@@ -3,7 +3,7 @@ error: program faulted: input parse mismatch
        actual: -5⏎
 
 Backtrace:
-#0   main
+#0   <entry>
 
   temps:
     <tmp#1> = "-5\n"

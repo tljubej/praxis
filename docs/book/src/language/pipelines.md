@@ -14,27 +14,25 @@ it **materializes on its own** — a chain that stops without a sink is already 
 
 ```praxis
 // The shape of every pipeline: a source, some stages, and a sink.
-fn main() {
-    var readings = [3, -1, 4, 1, -5, 9, 2, 6]
+var readings = [3, -1, 4, 1, -5, 9, 2, 6]
 
-    // A sink ends the chain and answers a scalar.
-    out(readings.filter(|x| x > 0).map(|x| x * x).sum())
+// A sink ends the chain and answers a scalar.
+out(readings.filter(|x| x > 0).map(|x| x * x).sum())
 
-    // The same chain, one stage per line. A leading `.` continues the
-    // expression across the newline that would otherwise end the statement.
-    var answer = readings
-        .filter(|x| x > 0)
-        .map(|x| x * x)
-        .sum()
-    out(answer)
+// The same chain, one stage per line. A leading `.` continues the
+// expression across the newline that would otherwise end the statement.
+var answer = readings
+    .filter(|x| x > 0)
+    .map(|x| x * x)
+    .sum()
+out(answer)
 
-    // No sink: the chain still ends, and what it ends as is a Vec.
-    out(readings.filter(|x| x > 0).map(|x| x * x))
+// No sink: the chain still ends, and what it ends as is a Vec.
+out(readings.filter(|x| x > 0).map(|x| x * x))
 
-    // `count` has two arities: every element, or the matching ones.
-    out(readings.count())
-    out(readings.count(|x| x < 0))
-}
+// `count` has two arities: every element, or the matching ones.
+out(readings.count())
+out(readings.count(|x| x < 0))
 ```
 
 ```text
@@ -65,24 +63,22 @@ what the loop's variable would bind. There are ten of them, one short of the
 
 ```praxis
 // A pipeline's item is the `for` loop's variable. The same source, twice.
-fn main() {
-    var m = Map()
-    m["a"] = 1
-    m["b"] = 2
+var m = Map()
+m["a"] = 1
+m["b"] = 2
 
-    var loop_total = 0
-    for kv in m {
-        loop_total = loop_total + kv.1
-    }
-    out(loop_total)
-    out(m.map(|kv| kv.1).sum())
-
-    // Same order, too. Both walks read the same deterministic snapshot.
-    for kv in m {
-        out(kv.0)
-    }
-    out(m.map(|kv| kv.0))
+var loop_total = 0
+for kv in m {
+    loop_total = loop_total + kv.1
 }
+out(loop_total)
+out(m.map(|kv| kv.1).sum())
+
+// Same order, too. Both walks read the same deterministic snapshot.
+for kv in m {
+    out(kv.0)
+}
+out(m.map(|kv| kv.0))
 ```
 
 ```text
@@ -101,55 +97,53 @@ Here is one chain over each of the ten:
 
 ```praxis
 // One chain over each of the ten things a pipeline can start from.
-fn main() {
-    // Vec[T] and Deque[T] yield T.
-    out([3, 1, 2].map(|x| x * 10).sum())
+// Vec[T] and Deque[T] yield T.
+out([3, 1, 2].map(|x| x * 10).sum())
 
-    var d = Deque()
-    d.push_back(10)
-    d.push_front(20)
-    out(d.to_vec())
+var d = Deque()
+d.push_back(10)
+d.push_front(20)
+out(d.to_vec())
 
-    // Set[T], MinHeap[T] and MaxHeap[T] yield T, from a snapshot in a
-    // deterministic order.
-    var s = Set()
-    s.insert(3)
-    s.insert(1)
-    s.insert(2)
-    out(s.filter(|x| x > 1).sorted())
+// Set[T], MinHeap[T] and MaxHeap[T] yield T, from a snapshot in a
+// deterministic order.
+var s = Set()
+s.insert(3)
+s.insert(1)
+s.insert(2)
+out(s.filter(|x| x > 1).sorted())
 
-    var lo = MinHeap()
-    lo.push(5)
-    lo.push(2)
-    out(lo.sum())
+var lo = MinHeap()
+lo.push(5)
+lo.push(2)
+out(lo.sum())
 
-    var hi = MaxHeap()
-    hi.push(5)
-    hi.push(2)
-    out(hi.max())
+var hi = MaxHeap()
+hi.push(5)
+hi.push(2)
+out(hi.max())
 
-    // Range and BitSet yield Int.
-    out((1..6).map(|n| n * n).sum())
+// Range and BitSet yield Int.
+out((1..6).map(|n| n * n).sum())
 
-    var bits = BitSet()
-    bits.insert(2)
-    bits.insert(5)
-    out(bits.to_vec())
+var bits = BitSet()
+bits.insert(2)
+bits.insert(5)
+out(bits.to_vec())
 
-    // Text yields Char — the same value `t[i]` answers.
-    out("mississippi".count(|c| c == "s"[0]))
-    out("hello".filter(|c| c != "l"[0]).to_vec())
+// Text yields Char — the same value `t[i]` answers.
+out("mississippi".count(|c| c == "s"[0]))
+out("hello".filter(|c| c != "l"[0]).to_vec())
 
-    // Map[K, V] yields (K, V), and Counter[T] yields (T, Int).
-    var m = Map()
-    m["a"] = 1
-    m["b"] = 2
-    out(m.map(|kv| kv.1).sum())
-    out(m.to_vec())
+// Map[K, V] yields (K, V), and Counter[T] yields (T, Int).
+var m = Map()
+m["a"] = 1
+m["b"] = 2
+out(m.map(|kv| kv.1).sum())
+out(m.to_vec())
 
-    var tally = ["the", "cat", "the", "dog", "the"].frequencies()
-    out(tally.filter(|(word, n)| n > 1).map(|(word, n)| word))
-}
+var tally = ["the", "cat", "the", "dog", "the"].frequencies()
+out(tally.filter(|(word, n)| n > 1).map(|(word, n)| word))
 ```
 
 ```text
@@ -258,24 +252,22 @@ only the runs that fit, so a sequence shorter than the size answers `[]`.
 
 ```praxis
 // The two barriers that answer a sequence of sequences.
-fn main() {
-    var v = [1, 2, 3, 4, 5]
+var v = [1, 2, 3, 4, 5]
 
-    // A chunking partitions: every element once, and a short last chunk.
-    out(v.chunks(2))
-    // A window slides by one and keeps only the runs that fit.
-    out(v.windows(2))
-    // Larger than the sequence: one short chunk, and no windows at all.
-    out(v.chunks(9))
-    out(v.windows(9))
+// A chunking partitions: every element once, and a short last chunk.
+out(v.chunks(2))
+// A window slides by one and keeps only the runs that fit.
+out(v.windows(2))
+// Larger than the sequence: one short chunk, and no windows at all.
+out(v.chunks(9))
+out(v.windows(9))
 
-    // What they are for: "compare each element with its neighbour".
-    out(v.windows(2).count(|p| p[1] > p[0]))
+// What they are for: "compare each element with its neighbour".
+out(v.windows(2).count(|p| p[1] > p[0]))
 
-    // A group is a sequence in its own right, so the chain continues on it.
-    out(v.windows(2).map(|p| p.sum()))
-    out(v.chunks(2).map(|c| c.count()))
-}
+// A group is a sequence in its own right, so the chain continues on it.
+out(v.windows(2).map(|p| p.sum()))
+out(v.chunks(2).map(|c| c.count()))
 ```
 
 ```text
@@ -304,17 +296,15 @@ answers one short chunk and `windows` answers none.
 
 ```praxis
 // A run of zero elements is not a short run, so there is no sequence of them.
-fn main() {
-    var v = [1, 2, 3]
-    out(v.chunks(0))
-}
+var v = [1, 2, 3]
+out(v.chunks(0))
 ```
 
 ```text
 error: program faulted: size or extent out of range
 
 Backtrace:
-#0   main
+#0   <entry>
 
   locals:
     v: Vec[Int] = [1, 2, 3]
@@ -348,26 +338,24 @@ that is what `take`, `skip`, `enumerate`, `zip` and `position` count.
 ```praxis
 // Every stage that asks "which element is this?" counts its own input, not
 // the source's.
-fn main() {
-    var v = [1, 2, 3, 4, 5, 6, 7, 8]
-    var evens = |x| x % 2 == 0
+var v = [1, 2, 3, 4, 5, 6, 7, 8]
+var evens = |x| x % 2 == 0
 
-    // The first two survivors, not the survivors among the first two.
-    out(v.filter(evens).take(2))
-    out(v.filter(evens).skip(1))
+// The first two survivors, not the survivors among the first two.
+out(v.filter(evens).take(2))
+out(v.filter(evens).skip(1))
 
-    // 0, 1, 2, 3 — the numbering the filter handed on.
-    out(v.filter(evens).enumerate())
+// 0, 1, 2, 3 — the numbering the filter handed on.
+out(v.filter(evens).enumerate())
 
-    // Paired with the argument's 0th, 1st, 2nd element.
-    out(v.filter(evens).zip(["a", "b", "c"]))
+// Paired with the argument's 0th, 1st, 2nd element.
+out(v.filter(evens).zip(["a", "b", "c"]))
 
-    // The index among the evens: 6 is the third one.
-    out(v.filter(evens).position(|x| x == 6))
+// The index among the evens: 6 is the third one.
+out(v.filter(evens).position(|x| x == 6))
 
-    // A splice flattens, and the count keeps running across it.
-    out(v.take(3).flat_map(|x| [x, x * 10]).enumerate())
-}
+// A splice flattens, and the count keeps running across it.
+out(v.take(3).flat_map(|x| [x, x * 10]).enumerate())
 ```
 
 ```text
@@ -400,31 +388,29 @@ struct Run {
     count: Int
 }
 
-fn main() {
-    var xs = [3, 9, 4, 1, 12, 7]
+var xs = [3, 9, 4, 1, 12, 7]
 
-    // A record accumulator: three answers from one pass.
-    var r = xs.fold(Run { best: 0, total: 0, count: 0 }, |acc, x| Run {
-        best: max(acc.best, x),
-        total: acc.total + x,
-        count: acc.count + 1,
-    })
-    out(r.best)
-    out(r.total)
-    out(r.count)
+// A record accumulator: three answers from one pass.
+var r = xs.fold(Run { best: 0, total: 0, count: 0 }, |acc, x| Run {
+    best: max(acc.best, x),
+    total: acc.total + x,
+    count: acc.count + 1,
+})
+out(r.best)
+out(r.total)
+out(r.count)
 
-    // A Vec accumulator: a running total, one entry per element. A collection
-    // is a reference, so the closure hands the same one back each step.
-    var running = xs.fold([0], |acc, x| {
-        acc.push(acc[acc.len() - 1] + x)
-        acc
-    })
-    out(running)
+// A Vec accumulator: a running total, one entry per element. A collection
+// is a reference, so the closure hands the same one back each step.
+var running = xs.fold([0], |acc, x| {
+    acc.push(acc[acc.len() - 1] + x)
+    acc
+})
+out(running)
 
-    // `reduce` is `fold` seeded with the first element, so it has no answer
-    // for an empty sequence and faults instead of inventing one.
-    out(xs.reduce(|a, b| max(a, b)))
-}
+// `reduce` is `fold` seeded with the first element, so it has no answer
+// for an empty sequence and faults instead of inventing one.
+out(xs.reduce(|a, b| max(a, b)))
 ```
 
 ```text
@@ -446,29 +432,27 @@ the first element starts it.
 
 ```praxis
 // `find` answers the element, `position` answers the index, and a miss is None.
-fn main() {
-    var words = ["alpha", "beta", "gamma"]
+var words = ["alpha", "beta", "gamma"]
 
-    match words.find(|w| w.len() == 4) {
-        Some(w) => out("found " + w)
-        None => out("nothing that long")
-    }
-
-    match words.position(|w| w.len() == 4) {
-        Some(i) => out(i)
-        None => out(-1)
-    }
-
-    // The sentinel problem an Option removes: -1 is a perfectly ordinary
-    // element and a perfectly ordinary index.
-    var v = [10, -1, 30]
-    out(v.find(|x| x < 0))
-    out(v.find(|x| x > 100))
-
-    // `any` and `all` stop as soon as the answer is decided.
-    out(v.any(|x| x < 0))
-    out(v.all(|x| x < 0))
+match words.find(|w| w.len() == 4) {
+    Some(w) => out("found " + w)
+    None => out("nothing that long")
 }
+
+match words.position(|w| w.len() == 4) {
+    Some(i) => out(i)
+    None => out(-1)
+}
+
+// The sentinel problem an Option removes: -1 is a perfectly ordinary
+// element and a perfectly ordinary index.
+var v = [10, -1, 30]
+out(v.find(|x| x < 0))
+out(v.find(|x| x > 100))
+
+// `any` and `all` stop as soon as the answer is decided.
+out(v.any(|x| x < 0))
+out(v.all(|x| x < 0))
 ```
 
 ```text
@@ -491,18 +475,16 @@ Most sinks have a right answer for an empty source, and give it:
 
 ```praxis
 // The sinks that have a right answer for an empty sequence.
-fn main() {
-    var scores: Vec[Int] = []
-    out(scores.sum())
-    out(scores.product())
-    out(scores.count())
-    out(scores.any(|x| x > 0))
-    out(scores.all(|x| x > 0))
-    out(scores.find(|x| x > 0))
-    out(scores.position(|x| x > 0))
-    out(scores.fold(100, |acc, x| acc + x))
-    out(scores.map(|x| x * 2))
-}
+var scores: Vec[Int] = []
+out(scores.sum())
+out(scores.product())
+out(scores.count())
+out(scores.any(|x| x > 0))
+out(scores.all(|x| x > 0))
+out(scores.find(|x| x > 0))
+out(scores.position(|x| x > 0))
+out(scores.fold(100, |acc, x| acc + x))
+out(scores.map(|x| x * 2))
 ```
 
 ```text
@@ -527,17 +509,15 @@ minimum.
 
 ```praxis
 // An empty `min` has no answer, and the fault says so.
-fn main() {
-    var scores: Vec[Int] = []
-    out(scores.min())
-}
+var scores: Vec[Int] = []
+out(scores.min())
 ```
 
 ```text
 error: program faulted: empty collection
 
 Backtrace:
-#0   main
+#0   <entry>
 
   locals:
     scores: Vec[Int] = []
@@ -560,41 +540,39 @@ one:
 
 ```praxis
 // A pipeline's currency is Vec. To get a collection back, name it.
-fn main() {
-    var s = Set()
-    s.insert(3)
-    s.insert(1)
-    s.insert(2)
+var s = Set()
+s.insert(3)
+s.insert(1)
+s.insert(2)
 
-    out(s.filter(|x| x > 1))
-    out(s.filter(|x| x > 1).to_set().len())
+out(s.filter(|x| x > 1))
+out(s.filter(|x| x > 1).to_set().len())
 
-    // to_vec is the route out of a keyed collection: keys() and values()
-    // answer two aligned halves and nothing joins them.
-    var m = Map()
-    m["a"] = 1
-    m["b"] = 2
-    out(m.to_vec())
+// to_vec is the route out of a keyed collection: keys() and values()
+// answer two aligned halves and nothing joins them.
+var m = Map()
+m["a"] = 1
+m["b"] = 2
+out(m.to_vec())
 
-    // ...and to_map is the route back in.
-    var scaled = m.map(|kv| (kv.0, kv.1 * 10)).to_map()
-    out(scaled["b"])
+// ...and to_map is the route back in.
+var scaled = m.map(|kv| (kv.0, kv.1 * 10)).to_map()
+out(scaled["b"])
 
-    // The rest of the set, one per collection that has a constructor.
-    out([1, 2, 3].map(|x| x % 2).to_set().len())
-    out([3, 1, 2].to_deque().pop_front())
-    out([3, 1, 2].to_min_heap().pop())
-    out([3, 1, 2].to_max_heap().pop())
-    out([1, 4].to_bitset().contains(4))
-    out(["a", "b", "a"].frequencies().to_vec().to_counter()["a"])
+// The rest of the set, one per collection that has a constructor.
+out([1, 2, 3].map(|x| x % 2).to_set().len())
+out([3, 1, 2].to_deque().pop_front())
+out([3, 1, 2].to_min_heap().pop())
+out([3, 1, 2].to_max_heap().pop())
+out([1, 4].to_bitset().contains(4))
+out(["a", "b", "a"].frequencies().to_vec().to_counter()["a"])
 
-    // On a Vec receiver, to_vec is the identity — the same reference, not a
-    // copy.
-    var v = [1]
-    var same = v.to_vec()
-    same.push(2)
-    out(v.len())
-}
+// On a Vec receiver, to_vec is the identity — the same reference, not a
+// copy.
+var v = [1]
+var same = v.to_vec()
+same.push(2)
+out(v.len())
 ```
 
 ```text
@@ -630,33 +608,31 @@ carry one.
 ```praxis
 // Six of the eight combinators that need the whole sequence before they
 // answer. `chunks` and `windows` are above, with the groups they build.
-fn main() {
-    var v = [3, 1, 4, 1, 5, 9, 2, 6, 5]
+var v = [3, 1, 4, 1, 5, 9, 2, 6, 5]
 
-    out(v.sorted())
-    out(v.unique())
-    out(v.reversed())
-    out(v.frequencies())
-    out(["a", "b", "c"].join(", "))
+out(v.sorted())
+out(v.unique())
+out(v.reversed())
+out(v.frequencies())
+out(["a", "b", "c"].join(", "))
 
-    // A countdown is a reversed range: `5..0` is empty, not descending.
-    out((0..5).reversed())
+// A countdown is a reversed range: `5..0` is empty, not descending.
+out((0..5).reversed())
 
-    // A chain ends at a barrier and begins again from its result.
-    out(v.filter(|x| x > 2).sorted().take(3))
+// A chain ends at a barrier and begins again from its result.
+out(v.filter(|x| x > 2).sorted().take(3))
 
-    // A pair is not orderable, so a Counter orders by an extracted key.
-    var tally = ["the", "cat", "the", "dog", "the", "cat"].frequencies()
-    out(tally.to_vec().sorted_by_key(|p| 0 - p.1))
+// A pair is not orderable, so a Counter orders by an extracted key.
+var tally = ["the", "cat", "the", "dog", "the", "cat"].frequencies()
+out(tally.to_vec().sorted_by_key(|p| 0 - p.1))
 
-    // A barrier takes any source, not only a Vec.
-    var names = Set()
-    names.insert("bb")
-    names.insert("a")
-    names.insert("ccc")
-    out(names.sorted())
-    out(names.sorted_by_key(|t| t.len()))
-}
+// A barrier takes any source, not only a Vec.
+var names = Set()
+names.insert("bb")
+names.insert("a")
+names.insert("ccc")
+out(names.sorted())
+out(names.sorted_by_key(|t| t.len()))
 ```
 
 ```text
@@ -678,19 +654,17 @@ moment its source is a `Map` or a `Counter` — `sorted` is unavailable:
 
 ```praxis
 // A pipeline whose item is a pair has no `sorted`.
-fn main() {
-    var m = Map()
-    m["a"] = 1
-    out(m.to_vec().sorted())
-}
+var m = Map()
+m["a"] = 1
+out(m.to_vec().sorted())
 ```
 
 ```text
 error[Y006]: values of type `(Text, Int)` cannot be ordered
 
-  pair-not-orderable.px:5:20
-  5 |     out(m.to_vec().sorted())
-    |                    ^^^^^^ values of type `(Text, Int)` cannot be ordered
+  pair-not-orderable.px:4:16
+  4 | out(m.to_vec().sorted())
+    |                ^^^^^^ values of type `(Text, Int)` cannot be ordered
 
 praxis: 1 error(s)
 ```
@@ -719,12 +693,10 @@ fn seen(x) {
     x * 2
 }
 
-fn main() {
-    var v = [1, 2, 3]
-    var mapped = v.map(|x| seen(x))
-    out("--- the map is already finished ---")
-    out(mapped)
-}
+var v = [1, 2, 3]
+var mapped = v.map(|x| seen(x))
+out("--- the map is already finished ---")
+out(mapped)
 ```
 
 ```text
@@ -741,18 +713,16 @@ write it. The method does not exist:
 
 ```praxis
 // `collect` is not a method. A chain materializes without being told to.
-fn main() {
-    var v = [1, 2, 3]
-    out(v.map(|x| x * 2).collect())
-}
+var v = [1, 2, 3]
+out(v.map(|x| x * 2).collect())
 ```
 
 ```text
 error[Y110]: no method `collect` on type `Vec[Int]` taking 0 argument(s)
 
-  no-collect.px:4:26
-  4 |     out(v.map(|x| x * 2).collect())
-    |                          ^^^^^^^ no method `collect` on type `Vec[Int]` taking 0 argument(s)
+  no-collect.px:3:22
+  3 | out(v.map(|x| x * 2).collect())
+    |                      ^^^^^^^ no method `collect` on type `Vec[Int]` taking 0 argument(s)
 
 praxis: 1 error(s)
 ```
@@ -775,17 +745,15 @@ fn seen(x) {
     x
 }
 
-fn main() {
-    var v = [1, 2, 3, 4, 5]
+var v = [1, 2, 3, 4, 5]
 
-    // `any` answers as soon as it can, and the map behind it stops with it.
-    out(v.map(|x| seen(x)).any(|x| x > 1))
-    out("---")
+// `any` answers as soon as it can, and the map behind it stops with it.
+out(v.map(|x| seen(x)).any(|x| x > 1))
+out("---")
 
-    // `take` stops when it meets the element after the last one it keeps, so
-    // the stage in front of it runs once more than it keeps.
-    out(v.map(|x| seen(x)).take(2))
-}
+// `take` stops when it meets the element after the last one it keeps, so
+// the stage in front of it runs once more than it keeps.
+out(v.map(|x| seen(x)).take(2))
 ```
 
 ```text

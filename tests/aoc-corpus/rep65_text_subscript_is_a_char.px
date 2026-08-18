@@ -10,22 +10,20 @@
 // a runtime-only fix prints `d` while the catalog still says `Int`. The
 // annotation below is what catches that half (`Y001 expected Char, found Int`),
 // and `100.to_char() == b[4]` catches the mirror case.
-fn main() {
-    var b = "sddddd"
-    var c: Char = b[4]
-    out(c)
-    out(b[4] == b[3])
-    out(b[4].to_int())
-    out(100.to_char() == b[4])
+var b = "sddddd"
+var c: Char = b[4]
+out(c)
+out(b[4] == b[3])
+out(b[4].to_int())
+out(100.to_char() == b[4])
 
-    // Indexing counts Unicode scalar values, not bytes: `é` is one scalar and
-    // two UTF-8 bytes, so a byte index would answer `0xC3`.
-    out("héllo"[1])
-    out("héllo"[1].to_int())
+// Indexing counts Unicode scalar values, not bytes: `é` is one scalar and
+// two UTF-8 bytes, so a byte index would answer `0xC3`.
+out("héllo"[1])
+out("héllo"[1].to_int())
 
-    // What this unlocks. `"#"[0]` names a particular character out of a text —
-    // and it is the reason a `Grid[Char]` cell can be compared to one at all.
-    // (A character the program *chooses* is now a literal, `'#'`, per ADR-141;
-    // this file is about the subscript, so it keeps the subscript.)
-    out("#"[0])
-}
+// What this unlocks. `"#"[0]` names a particular character out of a text —
+// and it is the reason a `Grid[Char]` cell can be compared to one at all.
+// (A character the program *chooses* is now a literal, `'#'`, per ADR-141;
+// this file is about the subscript, so it keeps the subscript.)
+out("#"[0])

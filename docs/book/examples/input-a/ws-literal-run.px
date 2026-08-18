@@ -1,8 +1,6 @@
 // A whitespace run at either end of a template literal is a policy the input
 // must satisfy, and the policy consumes it. `a` starts after the space,
 // however many spaces the input wrote there.
-fn main() {
-    out(parse("x: hello", `x: {a:rest}`))
-    out(parse("x:   hello", `x: {a:rest}`))
-    out(parse("1 -> 2", `{a:int} -> {b:int}`))
-}
+out(parse("x: hello", `x: {a:rest}`))
+out(parse("x:   hello", `x: {a:rest}`))
+out(parse("1 -> 2", `{a:int} -> {b:int}`))

@@ -1,10 +1,8 @@
 // The same rule, the other child: `char` reads a space, so the trailing run is
 // a cell and the trailing line of spaces is a row. `grid` complains about the
 // data, not about a file convention.
-fn main() {
-    out(parse("ab\ncd\n  \n", grid(char)).height())
-    out(parse("  \n  \n", grid(char)).width())
-    out(parse("ab\ncd\n  \n", lines(rest)).len())
-    out(parse("1 2\n3 4\n  \n", lines(ws(int))))
-    out(parse("1 2\n3 4\n  \n", matrix(int)))
-}
+out(parse("ab\ncd\n  \n", grid(char)).height())
+out(parse("  \n  \n", grid(char)).width())
+out(parse("ab\ncd\n  \n", lines(rest)).len())
+out(parse("1 2\n3 4\n  \n", lines(ws(int))))
+out(parse("1 2\n3 4\n  \n", matrix(int)))

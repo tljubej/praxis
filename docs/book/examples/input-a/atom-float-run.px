@@ -1,8 +1,6 @@
 // `float`'s run takes an optional sign, digits, a fraction only when there are
 // digits after the `.`, and an exponent only when it is complete. So `1.` is a
 // `1` and a literal dot, and `1e` is a `1` and a literal `e`.
-fn main() {
-    out(parse("+4", float))
-    out(parse("1.", `{v:float}{tail:rest}`))
-    out(parse("1e", `{v:float}{tail:rest}`))
-}
+out(parse("+4", float))
+out(parse("1.", `{v:float}{tail:rest}`))
+out(parse("1e", `{v:float}{tail:rest}`))

@@ -1,6 +1,6 @@
-//! The `praxis run` command: load a `.px` file, run the full pipeline
-//! (parse → analyze → typed HIR → MIR → Cranelift JIT → execute), and print the
-//! result of the program's `main` function.
+//! The `praxis run` command: load a `.px` file and run the full pipeline
+//! (parse → analyze → typed HIR → MIR → Cranelift JIT → execute) over its
+//! top-level statements, which are the program (ADR-154).
 //!
 //! Exit codes are [`crate::exit_code`]'s closed set: `OK` when the program ran
 //! to completion with no fault, `FAILED` for a language error (parse / type /
@@ -17,7 +17,6 @@ use praxis_hir::{TypedItem, analyze_root, lower, mono::monomorphize};
 use praxis_mir::{annotate, lower_module, verify};
 use praxis_runtime::{Runtime, RuntimeContext};
 use praxis_source::diagnostic::sort_by_position;
-use praxis_typeck::TypeData;
 
 use crate::breakpoint_host;
 use crate::debug_mode::DebugMode;
@@ -85,28 +84,39 @@ pub fn run(
         return Ok(exit_code::FAILED);
     }
 
-    // Which function the host calls, and its declared return type — both read
-    // before monomorphization consumes the module.
+    // Which function the host calls, read before monomorphization consumes the
+    // module.
     //
-    // A file's top-level statements are its program (ADR-067), so `<entry>` is
-    // the answer when the file has any. It always returns `Unit`, which is also
-    // the rule that keeps `out(…)` at top level from printing twice: a
-    // `Unit`-returning entry has no answer value to print, so the host prints a
-    // result only for the `fn main` fallback and only when it is non-`Unit`.
-    let entry_name = praxis_hir::entry_point(|name| {
+    // A file's top-level statements are its program (ADR-154), and `<entry>` is
+    // the whole answer: a file with none has nothing to run and there is no
+    // second spelling to fall back to.
+    //
+    // Asked here rather than after the JIT, because "nothing to run" is
+    // knowable from the module and compiling declarations nobody is going to
+    // call buys the report nothing.
+    let Some(entry_name) = praxis_hir::entry_point(|name| {
         module
             .items
             .iter()
             .any(|item| matches!(item, TypedItem::Fn(f) if f.name == name))
-    });
-    let main_return_type = entry_name
-        .and_then(|name| {
-            module.items.iter().find_map(|item| match item {
-                TypedItem::Fn(f) if f.name == name => Some(f.return_type),
-                _ => None,
-            })
-        })
-        .unwrap_or_else(|| analysis.db.unit());
+    }) else {
+        eprintln!("error: no statements to run");
+        // A file whose whole program sits inside a `fn main` is the one way to
+        // get here worth naming: it is the shape other languages ask for, it
+        // type-checks, and the fix is one line either way.
+        if module
+            .items
+            .iter()
+            .any(|item| matches!(item, TypedItem::Fn(f) if f.name == "main"))
+        {
+            eprintln!(
+                "note: this file declares `fn main`, but a Praxis program is its \
+                 top-level statements — call it with `main()`, or move its body \
+                 to the top level"
+            );
+        }
+        return Ok(exit_code::FAILED);
+    };
 
     // Monomorphization (§13.6): instantiate every polymorphic callee per
     // call site, between typed HIR and MIR. Produces a module of monomorphic
@@ -140,15 +150,15 @@ pub fn run(
         }
     };
 
-    let main_id = match entry_name.and_then(|name| ids.get(name)) {
-        Some(id) => *id,
-        None => {
-            eprintln!("error: no statements to run and no `main` function");
-            return Ok(exit_code::FAILED);
-        }
+    // The entry point was found in the module above and every item of that
+    // module is compiled, so a miss here is a compiler bug rather than a
+    // program error — reported as one, like the MIR verifier's above.
+    let Some(entry_id) = ids.get(entry_name).copied() else {
+        eprintln!("internal error: the entry point `{entry_name}` was not compiled");
+        return Ok(exit_code::FAILED);
     };
 
-    // Execute. `main` takes no GcRef params beyond the hidden context.
+    // Execute. The entry point takes no GcRef params beyond the hidden context.
     let mut runtime = Runtime::new();
     let mut ctx = runtime.context();
 
@@ -204,12 +214,15 @@ pub fn run(
         .unwrap_or_default();
     breakpoint_host::install(&analysis.db, &text, &source_name, debug, color);
 
-    // SAFETY: `entry` was just finalized for `main_id`; the JIT outlives the
-    // call. `main` declares no parameters, so the entry takes the context and
+    // SAFETY: `entry` was just finalized for `entry_id`; the JIT outlives the
+    // call. The entry point declares no parameters, so it takes the context and
     // nothing else — the shape `abi_signature` emitted for it.
-    let entry: praxis_debugger::session::MainEntry =
-        unsafe { std::mem::transmute(jit.entry(main_id)) };
-    let result = unsafe { entry(&mut ctx as *mut RuntimeContext) };
+    let entry: praxis_debugger::session::EntryPoint =
+        unsafe { std::mem::transmute(jit.entry(entry_id)) };
+    // The entry point is `Unit` (ADR-067 decision 3), so what comes back is
+    // dropped: a file is not an expression and has no answer to print. That is
+    // also what keeps `out(…)` at the top level from printing twice.
+    let _ = unsafe { entry(&mut ctx as *mut RuntimeContext) };
 
     // The run is over, so no later stop has a program to stop. Disarming here
     // rather than only on the fault path means the crash debugger's `restart`
@@ -248,12 +261,12 @@ pub fn run(
                 // `DebugSession`, so `p EXPR`/`source`/`restart`/`reload` can
                 // reach the Jit/Runtime/TypeDb/source/input. The snapshot was
                 // taken out of `runtime` above, so the two are decoupled.
-                // SAFETY: `main_entry` was just transmuted from a finalized
-                // JIT entry for `main_id`; the `jit` outlives the REPL (it
+                // SAFETY: `entry_fn` was just transmuted from a finalized
+                // JIT entry for `entry_id`; the `jit` outlives the REPL (it
                 // moves into the session and is dropped with it).
                 let session = praxis_debugger::session::DebugSession {
                     jit,
-                    main_entry: entry,
+                    entry_fn: entry,
                     runtime,
                     analysis,
                     source_text: text.clone(),
@@ -328,23 +341,10 @@ pub fn run(
         return Ok(exit_code::FAILED);
     }
 
-    // Print the result value through its descriptor (§11.4) — but only when
-    // `main` returns a non-`Unit` type. A `Unit`-returning `main` has no answer
-    // value (its output is whatever `out(...)` wrote), so printing a result
-    // line would only echo spurious noise like the last `out` argument.
-    let main_returns_unit = matches!(
-        analysis.db.data(analysis.db.follow(main_return_type)),
-        TypeData::Unit
-    );
-    if !main_returns_unit {
-        let mut out = String::new();
-        result.format(&mut out);
-        println!("{out}");
-    }
-    // The run is over and `result` has been rendered: drop the heap, then
-    // reclaim the arenas its objects pointed into — the JIT generation (F13)
-    // and the parser plans. `Runtime::teardown` mints the proof both demand, so
-    // this cannot be written the other way round (hazard H15).
+    // The run is over: drop the heap, then reclaim the arenas its objects
+    // pointed into — the JIT generation (F13) and the parser plans.
+    // `Runtime::teardown` mints the proof both demand, so this cannot be
+    // written the other way round (hazard H15).
     let proof = runtime.teardown();
     praxis_runtime::retire_parser_plans(&proof);
     jit.retire(proof);

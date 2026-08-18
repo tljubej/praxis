@@ -23,8 +23,8 @@ real compile path. Each takes `1`, `all`, or a comma-separated list of function
 names, and each dump is headed by its instruction count per block:
 
 ```console
-$ PRAXIS_DUMP_CLIF='<entry>' praxis run loop.px    # Cranelift IR
-$ PRAXIS_DUMP_VCODE=main praxis run loop.px        # machine-level listing
+$ PRAXIS_DUMP_CLIF='<entry>' praxis run loop.px    # Cranelift IR, one function
+$ PRAXIS_DUMP_VCODE=all praxis run loop.px         # machine-level listing, all of them
 ```
 
 They are permanent rather than debug scaffolding, because an instruction count

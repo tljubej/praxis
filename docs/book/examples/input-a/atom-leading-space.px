@@ -1,10 +1,8 @@
 // Which atomics skip leading spaces and tabs, and which do not. The numeric
 // and word-shaped ones do; `char`, `text` and `rest` read the byte at the
 // cursor, because a space is a character and leading space is part of a text.
-fn main() {
-    out(parse("   42", int))
-    out(parse("   9", digit))
-    out(parse("   hi", word))
-    out(parse("   x", char) == parse(" ", char))
-    out(parse("   ab", rest))
-}
+out(parse("   42", int))
+out(parse("   9", digit))
+out(parse("   hi", word))
+out(parse("   x", char) == parse(" ", char))
+out(parse("   ab", rest))

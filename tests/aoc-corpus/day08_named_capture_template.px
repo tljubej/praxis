@@ -5,7 +5,5 @@
 //
 // Input: "1,2\n3,4\n5,6\n"  →  parses as Vec[{x:Int,y:Int}] of length 3.
 // Usage: praxis run day08_named_capture_template.px --input day08.txt
-fn main() -> Int {
-    var points = read lines(`{x:int},{y:int}`);
-    points.len()
-}
+var points = read lines(`{x:int},{y:int}`);
+out(points.len())

@@ -18,9 +18,7 @@
 // `(3, 4, beta)`; rendering the collection reads the tag and printed `Unit`.
 // If line 2 ever starts changing with line 1, the fix has moved from the tag
 // to the value and something else is wrong.
-fn main() -> Int {
-    var groups = read sections(lines(`{int},{int},{text}`));
-    out(groups);
-    out(groups.get(0).get(1));
-    groups.len()
-}
+var groups = read sections(lines(`{int},{int},{text}`));
+out(groups);
+out(groups.get(0).get(1));
+out(groups.len())

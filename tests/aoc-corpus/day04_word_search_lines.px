@@ -8,24 +8,22 @@
 //
 // Input (on stdin): lines of letters.
 // Output: (characters that are `X` or `M`) * 10 + (lines starting with `M`).
-fn main() -> Int {
-    var lines = read lines(word)
-    // A list literal of the characters we are looking for. `"X"[0]` is how a
-    // program names a character (§4.13); there is no character literal.
-    var targets = ["X"[0], "M"[0]]
-    var hits = 0
-    for line in lines {
-        for c in line {
-            for t in targets {
-                if c == t { hits = hits + 1 }
-            }
+var lines = read lines(word)
+// A list literal of the characters we are looking for. `"X"[0]` is how a
+// program names a character (§4.13); there is no character literal.
+var targets = ["X"[0], "M"[0]]
+var hits = 0
+for line in lines {
+    for c in line {
+        for t in targets {
+            if c == t { hits = hits + 1 }
         }
     }
-    var starts = 0
-    for line in lines {
-        if line.len() > 0 {
-            if line[0] == "M"[0] { starts = starts + 1 }
-        }
-    }
-    hits * 10 + starts
 }
+var starts = 0
+for line in lines {
+    if line.len() > 0 {
+        if line[0] == "M"[0] { starts = starts + 1 }
+    }
+}
+out(hits * 10 + starts)

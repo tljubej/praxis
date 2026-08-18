@@ -30,29 +30,15 @@ a `var` may not — a declaration is visible everywhere in the file, a binding
 only after the statement that introduces it. (A `struct` and an `enum` are
 declarations too, and are visible everywhere on the same terms.)
 
-## `fn main` is the fallback
+A program has no answer value. Every top-level statement runs for effect, the
+generated entry function is `Unit`, and what a program reports is whatever it
+printed with `out` — which is also what keeps `out(x)` at the top level from
+printing twice.
 
-A file with **no** top-level statements falls back to a declared `fn main`:
+## There is no `main`
 
-```praxis
-fn main() {
-    out("main ran")
-    41 + 1
-}
-```
-
-```text
-main ran
-42
-```
-
-Note the `42`. When the entry point produces a value, `praxis run` prints it.
-A file's top level never does: every top-level statement runs for effect, so
-the generated entry function is `Unit` and has no answer to report. That is what
-keeps `out(x)` at the top level from printing twice.
-
-The two spellings are alternatives, not layers. If a file has both, the top
-level wins and `main` is an ordinary function nobody called:
+`main` is not a name the language knows. A `fn main` is an ordinary function,
+and nothing calls it for you:
 
 ```praxis
 fn main() {
@@ -66,8 +52,22 @@ out("the top level ran")
 the top level ran
 ```
 
-Write `main()` yourself if you want it run. A file with neither — only
-declarations — has no entry point, and `praxis run` says so:
+Write `main()` yourself if you want it run. A file that declares one and never
+calls it has no program at all — and because that is the shape other languages
+ask for, `praxis run` names both ways out of it:
+
+```praxis
+fn main() {
+    out("main ran")
+}
+```
+
+```text
+error: no statements to run
+note: this file declares `fn main`, but a Praxis program is its top-level statements — call it with `main()`, or move its body to the top level
+```
+
+A file of declarations that never mentions `main` gets the first line alone:
 
 ```praxis
 fn helper(n) {
@@ -76,10 +76,10 @@ fn helper(n) {
 ```
 
 ```text
-error: no statements to run and no `main` function
+error: no statements to run
 ```
 
-`praxis check` accepts that file and exits 0. Having nothing to run is not a
+`praxis check` accepts both files and exits 0. Having nothing to run is not a
 type error; it is discovered by the thing that wanted to run it.
 
 ## A function does not see the bindings around it

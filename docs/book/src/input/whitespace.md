@@ -35,11 +35,9 @@ spaces would be unusable.
 // A run of ordinary spaces in a template matches one or more spaces or tabs.
 // That is the flexible rule column-aligned puzzle input needs: one space in
 // the template accepts any horizontal run in the input, but not none.
-fn main() {
-    out(parse("1 2", `{a:int} {b:int}`))
-    out(parse("1     2", `{a:int} {b:int}`))
-    out(parse("1\t2", `{a:int} {b:int}`))
-}
+out(parse("1 2", `{a:int} {b:int}`))
+out(parse("1     2", `{a:int} {b:int}`))
+out(parse("1\t2", `{a:int} {b:int}`))
 ```
 
 ```text
@@ -54,10 +52,8 @@ space:
 ```praxis
 // A space run requires a space. A template written ` -> ` does not match
 // `1->2`, and the mismatch names the position where the run was expected.
-fn main() -> Int {
-    var pair = read `{a:int} -> {b:int}`
-    pair.a + pair.b
-}
+var pair = read `{a:int} -> {b:int}`
+out(pair.a + pair.b)
 ```
 
 ```text
@@ -66,7 +62,7 @@ error: program faulted: input parse mismatch
        actual: 1->2⏎
 
 Backtrace:
-#0   main
+#0   <entry>
 
   locals:
     pair: { a: Int, b: Int } = <uninit>
@@ -74,6 +70,7 @@ Backtrace:
     <tmp#1> = "1->2\n"
     <tmp#2: Int> = 1
     <tmp#7: Int> @ "pair.a + pair.b" = <uninit>
+    <tmp#8: Unit> @ "out(pair.a + pair.b)" = <uninit>
 ```
 
 The other direction is the same rule. A literal with *no* run written in front of
@@ -82,9 +79,7 @@ it consumes nothing before matching: the cursor must already be sitting on it.
 ```praxis
 // A literal with no whitespace run written in front of it consumes none: the
 // cursor must already be sitting on it, so `x:` does not skip an indent.
-fn main() -> Int {
-    (read `x:{a:int}`).a
-}
+out((read `x:{a:int}`).a)
 ```
 
 Over ` x:1`:
@@ -95,11 +90,12 @@ error: program faulted: input parse mismatch
        actual:  x:1⏎
 
 Backtrace:
-#0   main
+#0   <entry>
 
   temps:
     <tmp#1> = " x:1\n"
     <tmp#2: Int> = 1
+    <tmp#5: Unit> @ "out((read `x:{a:int}`).a)" = <uninit>
 ```
 
 That does *not* mean a bare `,` refuses every space near it, and the reason is
@@ -109,10 +105,8 @@ worth having straight before the second half of this chapter:
 // A bare `,` consumes no whitespace of its own, and this still matches: the
 // capture's region ends at the comma, `int` reads `1` and leaves the space
 // behind, and whitespace a child declined is nobody's.
-fn main() {
-    out(parse("1 ,2", `{a:int},{b:int}`))
-    out(parse("1, 2", `{a:int},{b:int}`))
-}
+out(parse("1 ,2", `{a:int},{b:int}`))
+out(parse("1, 2", `{a:int},{b:int}`))
 ```
 
 ```text
@@ -134,11 +128,9 @@ inherits. It is a requirement on the input, and satisfying it consumes the run.
 // A whitespace run at either end of a template literal is a policy the input
 // must satisfy, and the policy consumes it. `a` starts after the space,
 // however many spaces the input wrote there.
-fn main() {
-    out(parse("x: hello", `x: {a:rest}`))
-    out(parse("x:   hello", `x: {a:rest}`))
-    out(parse("1 -> 2", `{a:int} -> {b:int}`))
-}
+out(parse("x: hello", `x: {a:rest}`))
+out(parse("x:   hello", `x: {a:rest}`))
+out(parse("1 -> 2", `{a:int} -> {b:int}`))
 ```
 
 ```text
@@ -154,10 +146,8 @@ like the run at its start, so the mirror image of the fault above is a fault too
 ```praxis
 // The mirror of `ws-space-required.px`: a run at the *end* of a literal is a
 // policy too, so a template written `-> ` does not match `1->2` either.
-fn main() -> Int {
-    var pair = read `{a:int}-> {b:int}`
-    pair.a + pair.b
-}
+var pair = read `{a:int}-> {b:int}`
+out(pair.a + pair.b)
 ```
 
 ```text
@@ -166,7 +156,7 @@ error: program faulted: input parse mismatch
        actual: 1->2⏎
 
 Backtrace:
-#0   main
+#0   <entry>
 
   locals:
     pair: { a: Int, b: Int } = <uninit>
@@ -174,6 +164,7 @@ Backtrace:
     <tmp#1> = "1->2\n"
     <tmp#2: Int> = 1
     <tmp#7: Int> @ "pair.a + pair.b" = <uninit>
+    <tmp#8: Unit> @ "out(pair.a + pair.b)" = <uninit>
 ```
 
 Note the offsets: `1..1` for the leading spelling and `3..3` for the trailing
@@ -187,14 +178,12 @@ one. Each names the byte where the run was looked for.
 ```praxis
 // A template's whitespace escapes: `\s*` zero or more, `\s+` one or more,
 // `\x20` exactly one space, `\t` exactly one tab, `\n` one line ending.
-fn main() {
-    out(parse("1  ,2", `{a:int}\s*,{b:int}`))
-    out(parse("1,2", `{a:int}\s*,{b:int}`))
-    out(parse("1  ,2", `{a:int}\s+,{b:int}`))
-    out(parse("1  2", `{a:int}\x20{b:rest}`))
-    out(parse("1  2", `{a:int} {b:rest}`))
-    out(parse("1\t2", `{a:int}\t{b:rest}`))
-}
+out(parse("1  ,2", `{a:int}\s*,{b:int}`))
+out(parse("1,2", `{a:int}\s*,{b:int}`))
+out(parse("1  ,2", `{a:int}\s+,{b:int}`))
+out(parse("1  2", `{a:int}\x20{b:rest}`))
+out(parse("1  2", `{a:int} {b:rest}`))
+out(parse("1\t2", `{a:int}\t{b:rest}`))
 ```
 
 ```text
@@ -218,10 +207,8 @@ endings.
 // `\s*` and `\s+` match line endings too, where a plain space run does not.
 // A plain run is horizontal whitespace; the two escapes are all whitespace,
 // and these two lines are where that difference shows.
-fn main() {
-    out(parse("1\n2", `{a:int}\s+{b:int}`))
-    out(parse("1\n2", `{a:int}\s*{b:int}`))
-}
+out(parse("1\n2", `{a:int}\s+{b:int}`))
+out(parse("1\n2", `{a:int}\s*{b:int}`))
 ```
 
 ```text
@@ -244,10 +231,8 @@ What that leading run does *not* do is decide where the capture ends.
 // A capture is offered the bytes at the cursor, its own leading whitespace
 // included — the child decides. What the leading run does *not* do is bound
 // the capture, or `{a:text}` would stop at byte 0 on an indented line.
-fn main() {
-    out(parse("  foo 3", `{a:text} {v:int}`))
-    out(parse("  foo 3", `{a:word} {v:int}`))
-}
+out(parse("  foo 3", `{a:text} {v:int}`))
+out(parse("  foo 3", `{a:word} {v:int}`))
 ```
 
 ```text
@@ -282,11 +267,9 @@ not trimmed; only the split is.
 // Trailing whitespace belongs to nobody when no parser reads it — at the end
 // of a line, of a region, or of the file. `int` makes nothing of a space or of
 // a line of spaces, so both are padding rather than data or a mismatch.
-fn main() {
-    out(parse("1 \n2 \n", lines(int)))
-    out(parse("1 2 3\n\n", ws(int)))
-    out(parse("1\n2\n  \n", lines(int)))
-}
+out(parse("1 \n2 \n", lines(int)))
+out(parse("1 2 3\n\n", ws(int)))
+out(parse("1\n2\n  \n", lines(int)))
 ```
 
 ```text
@@ -317,13 +300,11 @@ convention.
 // The same rule, the other child: `char` reads a space, so the trailing run is
 // a cell and the trailing line of spaces is a row. `grid` complains about the
 // data, not about a file convention.
-fn main() {
-    out(parse("ab\ncd\n  \n", grid(char)).height())
-    out(parse("  \n  \n", grid(char)).width())
-    out(parse("ab\ncd\n  \n", lines(rest)).len())
-    out(parse("1 2\n3 4\n  \n", lines(ws(int))))
-    out(parse("1 2\n3 4\n  \n", matrix(int)))
-}
+out(parse("ab\ncd\n  \n", grid(char)).height())
+out(parse("  \n  \n", grid(char)).width())
+out(parse("ab\ncd\n  \n", lines(rest)).len())
+out(parse("1 2\n3 4\n  \n", lines(ws(int))))
+out(parse("1 2\n3 4\n  \n", matrix(int)))
 ```
 
 ```text
@@ -355,9 +336,7 @@ shape of the input, and no constructor skips one.
 ```praxis
 // Only a *trailing* run is forgiven. An interior blank line is structure: it
 // is a zero-element line, and `lines(int)` says so where it stands.
-fn main() -> Int {
-    (read lines(int)).len()
-}
+out((read lines(int)).len())
 ```
 
 Over `1\n  \n2\n`:
@@ -368,12 +347,13 @@ error: program faulted: input parse mismatch
        actual: 1⏎  ⏎2⏎
 
 Backtrace:
-#0   main
+#0   <entry>
 
   temps:
     <tmp#1> = "1\n  \n2\n"
     <tmp#2: Int> = 1
     <tmp#4: Int> @ "(read lines(int)).len()" = <uninit>
+    <tmp#5: Unit> @ "out((read lines(int)).len())" = <uninit>
 ```
 
 Offset 4 is the end of the blank line, not its start: `int` skipped the two
@@ -406,9 +386,7 @@ diagnostic:
 // A parser position is absolute. The mismatch is on the second line of the
 // second section — what `word` left of it — and the offset it reports counts
 // from the first byte of the input, not from the start of that line.
-fn main() -> Int {
-    (read sections(lines(word))).len()
-}
+out((read sections(lines(word))).len())
 ```
 
 Over
@@ -429,12 +407,13 @@ error: program faulted: input parse mismatch
        actual: alpha⏎beta⏎⏎gamma⏎has space⏎
 
 Backtrace:
-#0   main
+#0   <entry>
 
   temps:
     <tmp#1> = "alpha\nbeta\n\ngamma\nhas space\n"
     <tmp#2: Int> = 1
     <tmp#4: Int> @ "(read sections(lines(word))).len()" = <uninit>
+    <tmp#5: Unit> @ "out((read sections(lines(word))).len())" = <uninit>
 ```
 
 `21..27` is ` space` counted from the first byte of the file, two levels of

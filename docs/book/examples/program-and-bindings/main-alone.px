@@ -1,4 +1,3 @@
 fn main() {
     out("main ran")
-    41 + 1
 }

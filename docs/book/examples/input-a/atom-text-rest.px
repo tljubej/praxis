@@ -1,9 +1,7 @@
 // `text` and `rest` are one parser: both take the whole region they are given.
 // What makes a `text` capture stop early is the bound a template puts on
 // *every* capture, so `rest` in the same position stops in the same place.
-fn main() {
-    out(parse("prefoopost", `pre{body:text}post`))
-    out(parse("prefoopost", `pre{body:rest}post`))
-    out(parse("a b\nc\n", text) == parse("a b\nc\n", rest))
-    out(parse("Card 1: 41 48 83", `Card {id:int}: {body:rest}`))
-}
+out(parse("prefoopost", `pre{body:text}post`))
+out(parse("prefoopost", `pre{body:rest}post`))
+out(parse("a b\nc\n", text) == parse("a b\nc\n", rest))
+out(parse("Card 1: 41 48 83", `Card {id:int}: {body:rest}`))

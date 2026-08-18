@@ -1,1 +1,1 @@
-fn main() -> Float { 16.0.sqrt() + 5.to_float() }
+out(16.0.sqrt() + 5.to_float())

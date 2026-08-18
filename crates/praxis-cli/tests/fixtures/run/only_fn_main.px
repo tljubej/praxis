@@ -1,0 +1,5 @@
+// A file whose whole program sits inside a `fn main` has nothing to run: the
+// host does not single the name out (ADR-154).
+fn main() {
+    out("main ran")
+}

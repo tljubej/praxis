@@ -5,12 +5,10 @@
 //   "Monkey 0:\n10\n20\n\nMonkey 1:\n30\n40\n"
 // → parses as Vec[{ id: Int, items: Vec[Int] }].
 // Acceptance: "Parse repeated labeled blocks."
-fn main() -> Int {
-    var monkeys = read sections(block(
-        `Monkey {id:int}:`,
-        items: lines(int),
-    ));
-    var m0 = monkeys.get(0);
-    var m1 = monkeys.get(1);
-    m0.id + m0.items.len() + m1.id + m1.items.len()
-}
+var monkeys = read sections(block(
+    `Monkey {id:int}:`,
+    items: lines(int),
+));
+var m0 = monkeys.get(0);
+var m1 = monkeys.get(1);
+out(m0.id + m0.items.len() + m1.id + m1.items.len())

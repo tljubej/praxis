@@ -6912,13 +6912,16 @@ mod tests {
             .unwrap_or_else(|| panic!("no function named `{name}`; this program has {names:?}"))
     }
 
-    /// The program's entry point, lowered: `<entry>` when the file has
-    /// top-level statements and `main` otherwise, which is the rule both hosts
-    /// that execute a module ask (`praxis_hir::entry_point`).
+    /// The program's entry point, lowered: `<entry>`, the synthetic holder of
+    /// the file's top-level statements, which is the rule every host that
+    /// executes a module asks (`praxis_hir::entry_point`). A `src` written for
+    /// this helper puts its body at the top level; one that wraps it in a
+    /// `fn main` has no entry point at all (ADR-154), and
+    /// `lowered_function_named` is the way to ask for a declared function.
     fn lowered_function(src: &str) -> codegen::ir::Function {
         let mut all = lowered_functions(src);
         let name = praxis_hir::entry_point(|n| all.contains_key(n))
-            .expect("the program has neither top-level statements nor a `main`");
+            .expect("the program has no top-level statements");
         all.remove(name).expect("`entry_point` just found it")
     }
 

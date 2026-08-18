@@ -4,8 +4,7 @@ No binding, parameter, return type or expression in Praxis needs a type
 annotation. Every one of them has a static type all the same; the compiler works
 them out from what the program does with the values. A complete solution can be
 written without the word `Int` appearing in it — across the corpus in
-`tests/aoc-corpus/` the commonest annotation is `fn main() -> Int`, and several
-programs have none. Only a `struct` field and an `enum` payload must say what
+`tests/aoc-corpus/`, 28 of the 36 programs carry no annotation at all. Only a `struct` field and an `enum` payload must say what
 they hold, because a declaration is where a type is *stated* rather than
 deduced.
 

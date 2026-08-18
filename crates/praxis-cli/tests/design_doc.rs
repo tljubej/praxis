@@ -12,8 +12,8 @@
 //! # What "clean" means for a fence
 //!
 //! §4.9's fence declares a function and nothing else, so `praxis run` has nothing
-//! to execute and says so: `no statements to run and no `main` function`. That is
-//! not a compile failure and it is not what this asserts about. What it asserts is
+//! to execute and says so: `no statements to run`. That is not a compile failure
+//! and it is not what this asserts about. What it asserts is
 //! that **no language diagnostic** — no `P0xx`, `N0xx`, `Y0xx` or `Y1xx` — comes
 //! out of either command. Those are the codes that mean the program is wrong.
 

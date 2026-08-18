@@ -10,9 +10,7 @@
 // A generic identity — monomorphized to `id__Int` by the WS8 pass.
 fn id(x) { x }
 
-fn main() -> Int {
-    var offset = 10
-    // A closure capturing `offset` (immutable capture, WS7a).
-    var bump = |n| n + offset
-    id(bump(32))
-}
+var offset = 10
+// A closure capturing `offset` (immutable capture, WS7a).
+var bump = |n| n + offset
+out(id(bump(32)))

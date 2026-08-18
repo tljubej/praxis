@@ -1,8 +1,8 @@
 # Your first program
 
 A Praxis program is one file with a `.px` extension. It has no imports, no
-`main` you are obliged to write and no module declaration — the top-level
-statements in the file *are* the program.
+`main` and no module declaration — the top-level statements in the file *are*
+the program.
 
 ```praxis
 out("Hello, Praxis!")
@@ -215,7 +215,7 @@ from ever being assigned — which is how you find the instruction that failed.
 The three commands you will use are `run`, `check` and — through your editor —
 `lsp`; [The command line](cli.md) is the complete surface, including the exit
 codes. [A file is a program](../language/program-structure.md) explains what the
-top level really is and when you would write `fn main` instead. And [The `read`
+top level really is, and why a `fn main` is just another function. And [The `read`
 expression](../input/read.md) is the part of Praxis that most repays reading
 early: `lines(int)` is the simplest shape it has, and the puzzle input you are
 about to paste in is probably not that shape.

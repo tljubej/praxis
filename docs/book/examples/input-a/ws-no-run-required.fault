@@ -3,8 +3,9 @@ error: program faulted: input parse mismatch
        actual:  x:1⏎
 
 Backtrace:
-#0   main
+#0   <entry>
 
   temps:
     <tmp#1> = " x:1\n"
     <tmp#2: Int> = 1
+    <tmp#5: Unit> @ "out((read `x:{a:int}`).a)" = <uninit>

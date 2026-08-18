@@ -12,8 +12,6 @@
 // Reference state: PASSES at the pre-S20 base b2184c8 (which answers 322 for a
 // different reason), fails at 9458fd5 with 221. A regression fixture for a
 // defect this branch introduced and closed, not a gate for an audit finding.
-fn main() -> Int {
-    var g = read grid(char);
-    var middle = g.get(1, 0);
-    g.width() * 100 + g.height() * 10 + g.find_all(middle).len()
-}
+var g = read grid(char);
+var middle = g.get(1, 0);
+out(g.width() * 100 + g.height() * 10 + g.find_all(middle).len())

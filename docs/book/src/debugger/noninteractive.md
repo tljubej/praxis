@@ -135,30 +135,28 @@ first, and counts the rest. It is a glance, not a dump.
 
 ```praxis
 // Fourteen bindings; the noninteractive render shows twelve and counts the rest.
-fn main() {
-    var alpha = 1
-    var bravo = 2
-    var charlie = 3
-    var delta = 4
-    var echo = 5
-    var foxtrot = 6
-    var golf = 7
-    var hotel = 8
-    var india = 9
-    var juliett = 10
-    var kilo = 11
-    var lima = 12
-    var mike = 13
-    var november = 14
-    out(alpha / (mike - 13))
-}
+var alpha = 1
+var bravo = 2
+var charlie = 3
+var delta = 4
+var echo = 5
+var foxtrot = 6
+var golf = 7
+var hotel = 8
+var india = 9
+var juliett = 10
+var kilo = 11
+var lima = 12
+var mike = 13
+var november = 14
+out(alpha / (mike - 13))
 ```
 
 ```text
 error: program faulted: division by zero
 
 Backtrace:
-#0   main
+#0   <entry>
 
   locals:
     alpha: Int = 1

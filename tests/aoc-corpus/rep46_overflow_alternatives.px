@@ -14,38 +14,36 @@
 // Every line below is at a boundary where the ordinary operator faults. Two
 // small numbers would exercise the same wrappers and prove only that a name
 // resolves.
-fn main() {
-    var max = 9223372036854775807
-    // `9223372036854775808` is not an Int literal, and unary minus binds after
-    // the literal, so Int::MIN is spelled as a subtraction.
-    var min = -9223372036854775807 - 1
-    // 2^62, whose product with 4 is exactly 2^64 — i.e. 0 when it wraps.
-    var big = 4611686018427387904
+var max = 9223372036854775807
+// `9223372036854775808` is not an Int literal, and unary minus binds after
+// the literal, so Int::MIN is spelled as a subtraction.
+var min = -9223372036854775807 - 1
+// 2^62, whose product with 4 is exactly 2^64 — i.e. 0 when it wraps.
+var big = 4611686018427387904
 
-    out(max.wrapping_add(1) == min)
-    out(max.saturating_add(1) == max)
-    out(min.wrapping_sub(1) == max)
-    out(min.saturating_sub(1) == min)
-    out(big.wrapping_mul(4))
-    out(big.saturating_mul(4) == max)
+out(max.wrapping_add(1) == min)
+out(max.saturating_add(1) == max)
+out(min.wrapping_sub(1) == max)
+out(min.saturating_sub(1) == min)
+out(big.wrapping_mul(4))
+out(big.saturating_mul(4) == max)
 
-    // `checked_*` answers a real Option[Int] (§4.7, ADR-076), so the miss is
-    // matched rather than sentinelled.
-    match max.checked_add(1) {
-        Some(n) => out(n)
-        None => out(-1)
-    }
-    match min.checked_sub(1) {
-        Some(n) => out(n)
-        None => out(-2)
-    }
-    match big.checked_mul(4) {
-        Some(n) => out(n)
-        None => out(-3)
-    }
-    // …and each answers Some where the result fits.
-    match 6.checked_mul(7) {
-        Some(n) => out(n)
-        None => out(0)
-    }
+// `checked_*` answers a real Option[Int] (§4.7, ADR-076), so the miss is
+// matched rather than sentinelled.
+match max.checked_add(1) {
+    Some(n) => out(n)
+    None => out(-1)
+}
+match min.checked_sub(1) {
+    Some(n) => out(n)
+    None => out(-2)
+}
+match big.checked_mul(4) {
+    Some(n) => out(n)
+    None => out(-3)
+}
+// …and each answers Some where the result fits.
+match 6.checked_mul(7) {
+    Some(n) => out(n)
+    None => out(0)
 }

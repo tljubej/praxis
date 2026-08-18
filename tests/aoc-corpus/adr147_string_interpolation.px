@@ -43,51 +43,49 @@ fn make_stamp(origin: Text, unit: Text) -> (Int) -> Text {
     |n: Int| "{origin}+{n}{unit}"
 }
 
-fn main() {
-    // 1. A hole renders what `out` renders — the same characters, for types
-    //    with no `to_text()` row at all.
-    var depths = [12, 40, 7, 118]
-    var sites = Map[Text, Int]()
-    sites["trench"] = 118
-    sites["shelf"] = 12
-    var grid = Grid(3, 2, '.')
-    grid[1, 0] = '#'
-    var cells = [Wall, Marked(3)]
-    var reading = Reading { site: "trench", depth: 118 }
-    var span = (7, 118)
+// 1. A hole renders what `out` renders — the same characters, for types
+//    with no `to_text()` row at all.
+var depths = [12, 40, 7, 118]
+var sites = Map[Text, Int]()
+sites["trench"] = 118
+sites["shelf"] = 12
+var grid = Grid(3, 2, '.')
+grid[1, 0] = '#'
+var cells = [Wall, Marked(3)]
+var reading = Reading { site: "trench", depth: 118 }
+var span = (7, 118)
 
-    out("{depths}")
-    out(depths)
-    out("{sites}")
-    out(sites)
-    out("{grid}")
-    out(grid)
-    out("{cells}")
-    out(cells)
-    out("{reading}")
-    out(reading)
-    out("{span}")
-    out(span)
+out("{depths}")
+out(depths)
+out("{sites}")
+out(sites)
+out("{grid}")
+out(grid)
+out("{cells}")
+out(cells)
+out("{reading}")
+out(reading)
+out("{span}")
+out(span)
 
-    // 2. The labelled line handover 31 asked for, now one call for a `Vec`.
-    out(labelled("depths", depths))
-    out(summary(reading, span, depths, sites))
+// 2. The labelled line handover 31 asked for, now one call for a `Vec`.
+out(labelled("depths", depths))
+out(summary(reading, span, depths, sites))
 
-    // 3. Source order: a hole with an effect runs where it is written.
-    var seen = Vec[Int]()
-    var order = "{bump(seen, 1)}{bump(seen, 2)}{bump(seen, 3)}"
-    out("order {order}, seen {seen}")
+// 3. Source order: a hole with an effect runs where it is written.
+var seen = Vec[Int]()
+var order = "{bump(seen, 1)}{bump(seen, 2)}{bump(seen, 3)}"
+out("order {order}, seen {seen}")
 
-    // 4. The capture, through a closure returned from a function — so the
-    //    environment has to be filled at the allocation site, not read from a
-    //    frame that is gone by the time it is called.
-    var stamp = make_stamp("base", "m")
-    out(stamp(0))
-    out(stamp(40))
+// 4. The capture, through a closure returned from a function — so the
+//    environment has to be filled at the allocation site, not read from a
+//    frame that is gone by the time it is called.
+var stamp = make_stamp("base", "m")
+out(stamp(0))
+out(stamp(40))
 
-    // 5. A literal brace, and a `}` that closes nothing.
-    out("a hole is \{expr\}, and a bare } is just a brace")
-}
+// 5. A literal brace, and a `}` that closes nothing.
+out("a hole is \{expr\}, and a bare } is just a brace")
 
 fn bump(v: Vec[Int], n: Int) -> Int {
     v.push(n)

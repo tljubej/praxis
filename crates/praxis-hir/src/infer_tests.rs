@@ -6224,13 +6224,14 @@ fn a_files_top_level_statements_become_one_generated_item() {
         crate::ENTRY_NAME
     );
 
-    // `entry_point`'s rule, at the level it lives: the generated item wins, a
-    // declared `main` is the fallback, and a file with neither has none.
+    // `entry_point`'s rule, at the level it lives: the generated item is the
+    // only entry point, and a declared `main` is not one (ADR-154) — a file
+    // that has one and no top-level statements has nothing to run.
     assert_eq!(
         crate::entry_point(|n| n == crate::ENTRY_NAME || n == "main"),
         Some(crate::ENTRY_NAME)
     );
-    assert_eq!(crate::entry_point(|n| n == "main"), Some("main"));
+    assert_eq!(crate::entry_point(|n| n == "main"), None);
     assert_eq!(crate::entry_point(|_| false), None);
 }
 

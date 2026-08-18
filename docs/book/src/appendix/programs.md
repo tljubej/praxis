@@ -23,8 +23,8 @@ three lines of output are `len`, `sum`, and a
 [pipeline](../language/pipelines.md) that zips the vector with itself offset by
 one and counts the pairs that increase.
 
-This program has no `fn main`, and it needs none: a file is a program and its
-top-level statements run in order
+This program has no `fn main`, and there is none to write: a file is a program
+and its top-level statements run in order
 ([A file is a program](../language/program-structure.md)).
 
 ```praxis

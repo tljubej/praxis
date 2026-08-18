@@ -150,9 +150,10 @@ function that faulted; the last frame is the program's entry point.
 #2   <entry>
 ```
 
-`<entry>` is the name of a file's top-level statements. A file whose whole
-program is inside `fn main()` shows `main` there instead — the entry point is
-the top-level statements when a file has any, and `main` when it has none.
+`<entry>` is the name of a file's top-level statements, and it is the last frame
+of every backtrace: a program *is* its top-level statements, so the outermost
+frame is always the generated one. It is not a name a program can spell, which is
+how you can tell the frame is not yours.
 
 There is no line number in the backtrace. The equivalent is the `source`
 command, which prints the selected frame's function with a caret under the

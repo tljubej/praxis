@@ -21,37 +21,35 @@
 //     go wrong if the greedy capture crossed its line even without faulting.
 //   * the totals cross all four blocks, so a window that is right for the first
 //     monkey and wrong for a later one cannot hide.
-fn main() {
-    var monkeys = read sections(
-        block(
-            `Monkey {id:int}:`,
-            `  Starting items: {items:csv(int)}`,
-            `  Operation: new = old {operator:char} {operand:word}`,
-            `  Test: divisible by {divisor:int}`,
-            `    If true: throw to monkey {if_true:int}`,
-            `    If false: throw to monkey {if_false:int}`,
-        )
+var monkeys = read sections(
+    block(
+        `Monkey {id:int}:`,
+        `  Starting items: {items:csv(int)}`,
+        `  Operation: new = old {operator:char} {operand:word}`,
+        `  Test: divisible by {divisor:int}`,
+        `    If true: throw to monkey {if_true:int}`,
+        `    If false: throw to monkey {if_false:int}`,
     )
+)
 
-    var m0 = monkeys.get(0)
-    var m1 = monkeys.get(1)
-    var m2 = monkeys.get(2)
-    var m3 = monkeys.get(3)
+var m0 = monkeys.get(0)
+var m1 = monkeys.get(1)
+var m2 = monkeys.get(2)
+var m3 = monkeys.get(3)
 
-    out(monkeys.len())
-    out(m0.id)
+out(monkeys.len())
+out(m0.id)
 
-    // The greedy capture stopped at the end of its own line.
-    out(m0.items.len())
-    out(m0.items.get(1))
-    out(m1.items.len())
-    out(m3.items.len())
-    out(m0.items.len() + m1.items.len() + m2.items.len() + m3.items.len())
+// The greedy capture stopped at the end of its own line.
+out(m0.items.len())
+out(m0.items.get(1))
+out(m1.items.len())
+out(m3.items.len())
+out(m0.items.len() + m1.items.len() + m2.items.len() + m3.items.len())
 
-    // ...and the five lines after it still parsed.
-    out(m2.operator)
-    out(m2.operand)
-    out(m0.divisor + m1.divisor + m2.divisor + m3.divisor)
-    out(m3.if_true)
-    out(m0.if_false)
-}
+// ...and the five lines after it still parsed.
+out(m2.operator)
+out(m2.operand)
+out(m0.divisor + m1.divisor + m2.divisor + m3.divisor)
+out(m3.if_true)
+out(m0.if_false)

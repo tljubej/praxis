@@ -6,13 +6,11 @@
 // bytes. REP-20's first round derived a policy from the leading run only and
 // stripped the trailing one out of the text, so it was represented nowhere:
 // `body` came back as `" 41 48 83"` and this program printed 0.
-fn main() -> Int {
-    var rows = read lines(`Card {id:int}: {body:rest}`);
-    var total = 0;
-    for row in rows {
-        if row.body == "41 48 83" {
-            total = total + row.id;
-        }
+var rows = read lines(`Card {id:int}: {body:rest}`);
+var total = 0;
+for row in rows {
+    if row.body == "41 48 83" {
+        total = total + row.id;
     }
-    total
 }
+out(total)

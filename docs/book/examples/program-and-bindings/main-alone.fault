@@ -1,0 +1,2 @@
+error: no statements to run
+note: this file declares `fn main`, but a Praxis program is its top-level statements — call it with `main()`, or move its body to the top level

@@ -19,12 +19,10 @@
 // spellings agreed with each other and with nothing. Comparing a parser-built
 // Vec against a codegen-built one is the point: it gates ADR-042's two
 // descriptor producers answering the same tag for the same type.
-fn main() -> Int {
-    var pairs = read lines(`{int},{int}`);
-    out(pairs);
-    var same = Vec();
-    same.push((1, 2));
-    same.push((3, 4));
-    out(pairs == same);
-    pairs.len()
-}
+var pairs = read lines(`{int},{int}`);
+out(pairs);
+var same = Vec();
+same.push((1, 2));
+same.push((3, 4));
+out(pairs == same);
+out(pairs.len())

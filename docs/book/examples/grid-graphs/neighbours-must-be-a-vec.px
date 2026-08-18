@@ -4,6 +4,4 @@ fn steps(n: Int) -> Set[Int] {
     Set()
 }
 
-fn main() -> Int {
-    bfs(0, steps).len()
-}
+out(bfs(0, steps).len())

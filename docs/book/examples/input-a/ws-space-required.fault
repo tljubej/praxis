@@ -3,7 +3,7 @@ error: program faulted: input parse mismatch
        actual: 1->2⏎
 
 Backtrace:
-#0   main
+#0   <entry>
 
   locals:
     pair: { a: Int, b: Int } = <uninit>
@@ -11,3 +11,4 @@ Backtrace:
     <tmp#1> = "1->2\n"
     <tmp#2: Int> = 1
     <tmp#7: Int> @ "pair.a + pair.b" = <uninit>
+    <tmp#8: Unit> @ "out(pair.a + pair.b)" = <uninit>

@@ -3,9 +3,10 @@ error: program faulted: input parse mismatch
        actual: 1⏎  ⏎2⏎
 
 Backtrace:
-#0   main
+#0   <entry>
 
   temps:
     <tmp#1> = "1\n  \n2\n"
     <tmp#2: Int> = 1
     <tmp#4: Int> @ "(read lines(int)).len()" = <uninit>
+    <tmp#5: Unit> @ "out((read lines(int)).len())" = <uninit>

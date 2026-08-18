@@ -7,7 +7,5 @@
 // Reference state: PASSES at the pre-S20 base b2184c8, fails at 9458fd5. The
 // defect was introduced and closed inside this branch — a regression fixture,
 // not a gate for an audit finding.
-fn main() -> Int {
-    var v = read sep(" -> ", word);
-    v.len()
-}
+var v = read sep(" -> ", word);
+out(v.len())

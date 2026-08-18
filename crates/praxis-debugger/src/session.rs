@@ -22,11 +22,11 @@ use praxis_codegen_cranelift::{Generation, Jit};
 use praxis_hir::Analysis;
 use praxis_runtime::Runtime;
 
-/// The type-erased entry pointer for `main`: `unsafe extern "C"
+/// The type-erased pointer to the program's entry point: `unsafe extern "C"
 /// fn(*mut RuntimeContext) -> GcRef`, which is what codegen emits for a
 /// zero-parameter function. Cached so `restart` can re-call without
 /// re-resolving the `FuncId`.
-pub type MainEntry =
+pub type EntryPoint =
     unsafe extern "C" fn(*mut praxis_runtime::RuntimeContext) -> praxis_runtime::GcRef;
 
 /// Everything the crash REPL needs to evaluate expressions, render context,
@@ -38,12 +38,12 @@ pub type MainEntry =
 /// so the two are decoupled — the snapshot is a root set the GC walks, the
 /// `Runtime` is the heap that root set refers into.
 pub struct DebugSession {
-    /// The compiled JIT module + the `main` entry pointer. Kept alive for the
-    /// whole REPL session so `p EXPR` can compile synthetic functions into a
-    /// fresh `Jit` and `restart` can re-call `main`. `reload` swaps this.
+    /// The compiled JIT module + the entry pointer. Kept alive for the whole
+    /// REPL session so `p EXPR` can compile synthetic functions into a fresh
+    /// `Jit` and `restart` can re-call the program. `reload` swaps this.
     pub jit: Jit,
-    /// The transmuted `main` entry, ready to call. Recomputed by `reload`.
-    pub main_entry: MainEntry,
+    /// The transmuted entry point, ready to call. Recomputed by `reload`.
+    pub entry_fn: EntryPoint,
     /// The heap + fault/snapshot/parse-detail slots. `p EXPR` hosts its
     /// synthetic call here; `restart`/`reload` re-run `main` against it. The
     /// snapshot the REPL inspects refers into this heap (non-moving GC keeps
@@ -81,8 +81,9 @@ impl DebugSession {
     /// buffer and calls `main`.
     ///
     /// # Safety
-    /// `main_entry` must be a finalized JIT entry for `main` in `self.jit`.
-    pub unsafe fn rerun_main(&mut self) -> praxis_runtime::GcRef {
+    /// `entry_fn` must be a finalized JIT entry for the entry point in
+    /// `self.jit`.
+    pub unsafe fn rerun(&mut self) -> praxis_runtime::GcRef {
         use praxis_runtime::RuntimeContext;
         // The runtime's fault/snapshot/parse-detail slots are owned by it; the
         // context view we take below aliases them. We must clear the snapshot
@@ -102,17 +103,17 @@ impl DebugSession {
         // sees empty input rather than the original stdin. That is a property of
         // an exhausted stdin, not of this line.
         ctx.input_source = self.runtime.alloc_text(&self.input_text);
-        // SAFETY: caller guarantees main_entry is a finalized entry in self.jit.
-        unsafe { (self.main_entry)(&mut ctx as *mut RuntimeContext) }
+        // SAFETY: caller guarantees entry_fn is a finalized entry in self.jit.
+        unsafe { (self.entry_fn)(&mut ctx as *mut RuntimeContext) }
     }
 
     /// `restart` (§9.7): rerun the *same* compiled code with the same input.
     /// Returns the result `GcRef` (or the Unit sentinel on fault). The caller
     /// takes the new snapshot and resets the frame cursor. No recompilation.
     pub fn restart(&mut self) -> praxis_runtime::GcRef {
-        // SAFETY: main_entry is a finalized entry in self.jit (set at session
+        // SAFETY: entry_fn is a finalized entry in self.jit (set at session
         // construction or the last successful reload).
-        unsafe { self.rerun_main() }
+        unsafe { self.rerun() }
     }
 
     /// Tear the session down in the one order that is sound: heap first, then
@@ -142,7 +143,7 @@ impl DebugSession {
     }
 
     /// `reload` (§9.7): re-read the source from `source_path`, recompile, and
-    /// on success swap in the new `Jit`/analysis/`main_entry` then rerun with
+    /// on success swap in the new `Jit`/analysis/`entry_fn` then rerun with
     /// the same input. On failure (diagnostics or compile error), leaves the
     /// current session intact and returns `Err(diagnostics)`. Per §9.7, old
     /// JIT code and snapshots are discarded only after the new compilation
@@ -182,20 +183,18 @@ impl DebugSession {
         let ids = new_jit
             .compile(&funcs, &mut analysis.db)
             .map_err(|e| format!("JIT compile failed: {e}"))?;
-        // The same entry-point rule the CLI's `run` uses (ADR-067): a file's
-        // top-level statements are its program, and `fn main` is the fallback
-        // for a file with none.
-        let main_id = *praxis_hir::entry_point(|name| ids.contains_key(name))
+        // The same entry-point rule the CLI's `run` uses (ADR-154): a file's
+        // top-level statements are its program, and they are the only entry
+        // point — an edit that leaves the file with none has nothing to rerun.
+        let entry_id = *praxis_hir::entry_point(|name| ids.contains_key(name))
             .and_then(|name| ids.get(name))
-            .ok_or_else(|| {
-                "no statements to run and no `main` function in reloaded source".to_string()
-            })?;
-        // SAFETY: main_id is a finalized entry in new_jit.
-        let new_entry: MainEntry = unsafe { std::mem::transmute(new_jit.entry(main_id)) };
+            .ok_or_else(|| "no statements to run in reloaded source".to_string())?;
+        // SAFETY: entry_id is a finalized entry in new_jit.
+        let new_entry: EntryPoint = unsafe { std::mem::transmute(new_jit.entry(entry_id)) };
         // 3. Compilation succeeded — swap in the new state (§9.7: discard old
         // JIT + snapshots only after success). The old self.jit drops here.
         self.jit = new_jit;
-        self.main_entry = new_entry;
+        self.entry_fn = new_entry;
         self.analysis = analysis;
         self.source_text = text;
         // 4. Rerun with the same input.

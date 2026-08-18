@@ -1,5 +1,3 @@
 // Only a *trailing* run is forgiven. An interior blank line is structure: it
 // is a zero-element line, and `lines(int)` says so where it stands.
-fn main() -> Int {
-    (read lines(int)).len()
-}
+out((read lines(int)).len())

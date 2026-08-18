@@ -2,7 +2,7 @@ error: program faulted: input parse mismatch
        at input offset 0..0: expected int
 
 Backtrace:
-#0   main
+#0   <entry>
 
   temps:
     <tmp#1> = ""
