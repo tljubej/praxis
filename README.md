@@ -117,15 +117,16 @@ captured state, then fix the file and `reload` without re-entering your input.
 ## Getting started
 
 You need a stable Rust toolchain and nothing else — code generation is
-Cranelift, so there is no LLVM to install. From a checkout:
+Cranelift, so there is no LLVM to install.
 
 ```console
-$ cargo install --path crates/praxis-cli
+$ cargo install praxis-cli
 ```
 
-That builds in release mode and puts the `praxis` binary in `~/.cargo/bin`;
-`cargo build --release -p praxis-cli` leaves it at `target/release/praxis`
-instead. There are three commands:
+That builds in release mode and puts the `praxis` binary in `~/.cargo/bin`.
+From a checkout it is `cargo install --path crates/praxis-cli` instead, and
+`cargo build --release -p praxis-cli` leaves the binary at
+`target/release/praxis` without installing it. There are three commands:
 
 ```text
 praxis run day05.px < input.txt        # compile and run, input on stdin
@@ -157,6 +158,13 @@ praxis lsp                             # the language server, for your editor
 - To work on the compiler itself: `just ci` is the whole quality gate, and
   [`docs/technical-design.md`](docs/technical-design.md) is the design
   document.
+- To cut a release: `just set-version X.Y.Z`, then `just publish-plan` to see
+  the order and what is already on crates.io, `just publish-dry` to build all
+  fifteen crates from the tarballs they would ship, and `just publish` to
+  upload. The order is computed from the dependency graph and an interrupted
+  run is resumed by running it again;
+  [ADR-155](docs/decisions/155-a-release-is-a-resumable-walk-of-a-computed-order.md)
+  is why it works that way.
 
 ## Authorship
 

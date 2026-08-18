@@ -1,9 +1,9 @@
 # Installing Praxis
 
-Praxis is built from source. There are no binary releases, no package-manager
-recipe and no installer: you need a checkout of the repository and a Rust
-toolchain, and at the end of it you have a `praxis` binary that JIT-compiles
-`.px` files.
+Praxis is built from source. There are no binary releases and no installer:
+you need a Rust toolchain, and at the end of it you have a `praxis` binary that
+JIT-compiles `.px` files. `cargo` will fetch and build it for you, or you can
+build it from a checkout.
 
 ## What you need
 
@@ -22,6 +22,23 @@ dependencies impose — and anything newer on the stable channel is fine.
 
 Nothing else is required to build the compiler. Praxis links Cranelift for code
 generation, so there is no LLVM to install.
+
+## Installing from crates.io
+
+The compiler is published as fifteen crates and the binary lives in
+`praxis-cli`, which depends on the other fourteen:
+
+```console
+$ cargo install praxis-cli
+```
+
+That builds in release mode and puts `praxis` in `~/.cargo/bin` — worth having
+on your `PATH`, because the VS Code extension looks for it there by default.
+The crate is `praxis-cli` and the binary is `praxis`; the bare name `praxis` on
+crates.io belongs to an unrelated project.
+
+Everything below is for building from a checkout instead, which is what you
+want if you are working on the compiler itself.
 
 ## Building the compiler
 
@@ -44,14 +61,15 @@ which matters while you are working on the compiler itself. Use the release
 binary for anything you care about the running time of: the code generator and
 the GC heap are ordinary Rust, and an unoptimized build of them is unoptimized.
 
-To put `praxis` on your `PATH` — worth doing, because the VS Code extension
-looks for it there by default:
+To put the binary you just built on your `PATH`, install from the checkout
+rather than from the registry:
 
 ```console
 $ cargo install --path crates/praxis-cli
 ```
 
-That builds in release mode and copies the binary into `~/.cargo/bin`.
+That builds in release mode and copies the binary into `~/.cargo/bin`,
+overwriting whatever `cargo install praxis-cli` put there.
 
 ## The `just` runner
 
@@ -76,6 +94,8 @@ The recipes are small, and `just` with no arguments lists them:
 | `just book-verify` | re-runs every example in the book against this compiler |
 | `just ci` | `fmt-check`, `clippy`, `test`, then the book's examples |
 | `just asan` | the whole suite under AddressSanitizer, on a nightly toolchain |
+| `just publish-plan` | the crates.io publish order, and what is already up |
+| `just publish-dry` | packages every crate and builds it from its own tarball |
 
 `just ci` is the gate, and the point of it is that it is the *only* gate: the
 hosted CI job checks out the tree, installs the toolchain, installs `just`, and

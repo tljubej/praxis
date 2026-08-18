@@ -66,6 +66,56 @@ ci: fmt-check clippy test book-binary book-verify
 asan:
     ./scripts/asan.sh
 
+# --- Releasing ----------------------------------------------------------------
+#
+# The workspace publishes fifteen crates to crates.io, in an order that is
+# computed rather than written down, and `scripts/publish.sh` is the whole of
+# the policy — these recipes only name its three modes. See
+# docs/decisions/155-a-release-is-a-resumable-walk-of-a-computed-order.md.
+
+# Show the publish order and what is already on crates.io. Reads only.
+publish-plan:
+    ./scripts/publish.sh --plan
+
+# The rehearsal: every crate packaged, then compiled from the tarball it would
+# ship rather than from the tree it was written in.
+#
+# Not part of `ci`. It is a second full compile of the workspace from fifteen
+# extracted tarballs, and `ci` is already long enough that adding it would make
+# the gate one people skip. Run it before a release instead.
+#
+# It uses the normal `target/`, and a stale `target/package/` from an
+# interrupted earlier run has been seen to fail it with errors that describe
+# code no longer in the tree. `rm -rf target/package` is the fix, and a failure
+# here that names a symbol you cannot find anywhere is that, not a real defect.
+#
+# Package and verify all fifteen crates without uploading (not in `ci`).
+publish-dry:
+    ./scripts/publish.sh --dry-run
+
+# The real upload. **Irreversible** — a version can be yanked but never deleted,
+# and a name is never freed.
+#
+# Expect the first release to take about two hours: crates.io meters new crate
+# *names* at one per ten minutes after a burst of five, and fifteen names spend
+# most of that waiting. The script sleeps through it and skips whatever is
+# already up, so an interrupted run is resumed by running it again. Later
+# releases pay the new-version limit instead, which is one per minute.
+#
+# Publish to crates.io. Irreversible; needs `cargo login` first.
+publish:
+    ./scripts/publish.sh
+
+# The release number appears sixteen times in the root manifest, because cargo
+# cannot inherit a version into a dependency specification and a published crate
+# may not depend on a bare path. Moving fifteen of them and forgetting the
+# sixteenth is not a build error — only a permanently wrong manifest on the
+# registry. Commit the result.
+#
+# Set the workspace version (all sixteen places it appears).
+set-version version:
+    ./scripts/set-version.sh {{version}}
+
 # --- The book -----------------------------------------------------------------
 #
 # `docs/book` is an mdBook. Its examples are not decoration: every code block

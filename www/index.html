@@ -742,18 +742,18 @@ you read    fn foo(a: Int, b: Int)</pre>
 
 <!-- ═══ start ══════════════════════════════════════════════════════════════ -->
 <section class="wrap" id="start">
-  <div class="rule"><span class="rule-label">start</span><i class="rule-line"></i><span class="rule-note">a stable Rust toolchain and just</span></div>
+  <div class="rule"><span class="rule-label">start</span><i class="rule-line"></i><span class="rule-note">a stable Rust toolchain, and nothing else</span></div>
 
-  <h2>Build it, then solve something.</h2>
+  <h2>Install it, then solve something.</h2>
 
   <div class="steps" style="margin-top:1.6rem">
     <div>
-      <h3>Build</h3>
-      <p style="font-size:.93rem">The one dependency outside cargo is the <code>just</code> command runner.</p>
-      <pre class="sh"><span class="p">$</span> cargo install just
-<span class="p">$</span> just build
-<span class="c"># the whole gate CI runs — rustfmt, clippy,
-# tests, and every book example re-run</span>
+      <h3>Install</h3>
+      <p style="font-size:.93rem">Code generation is Cranelift, so there is no LLVM to install.</p>
+      <pre class="sh"><span class="p">$</span> cargo install praxis-cli
+<span class="c"># from a checkout instead — `just` is the
+# command runner the quality gate uses</span>
+<span class="p">$</span> cargo install just
 <span class="p">$</span> just ci</pre>
     </div>
     <div>

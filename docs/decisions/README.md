@@ -187,3 +187,4 @@ verifier rule only. Its decision must not claim the elision.
 - [ADR-152: A brace a block cannot explain is a record, and a shape has one field order](./152-a-brace-a-block-cannot-explain-is-a-record-and-a-shape-has-one-field-order.md)
 - [ADR-153: A module's code is one reservation, and a host that veneers a far call is not a witness](./153-a-modules-code-is-one-reservation.md)
 - [ADR-154: A program is its top-level statements, and `fn main` is an ordinary function](./154-a-program-is-its-top-level-statements-and-nothing-else.md)
+- [ADR-155: A release is a resumable walk of a computed order, and the version is set by a script because cargo cannot inherit it](./155-a-release-is-a-resumable-walk-of-a-computed-order.md)
