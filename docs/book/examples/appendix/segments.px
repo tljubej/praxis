@@ -1,6 +1,4 @@
-// The design document's representative program (§3.3), verbatim.
-//
-// It is the shape of a whole puzzle in thirty lines: a template read, a
+// segments — the shape of a whole puzzle in thirty lines: a template read, a
 // function over the records it produced, a `Counter` keyed by a tuple, a
 // compound assignment through a subscript, an inclusive range, and two calls
 // printing the two parts. Nothing in it is annotated.

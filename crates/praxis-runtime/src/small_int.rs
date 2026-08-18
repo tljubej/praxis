@@ -41,8 +41,8 @@
 //! from the same [`SMALL_INT_MIN`]. A second spelling of the bounds anywhere
 //! would let the compiler emit a table read for a value the table does not hold.
 
-use crate::heap::InlineInternSite;
 use crate::GcRef;
+use crate::heap::InlineInternSite;
 
 /// The lowest `Int` the runtime interns.
 ///

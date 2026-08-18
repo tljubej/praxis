@@ -13,9 +13,9 @@
 //! that makes the *forward* map total, and the two are inverses only because
 //! both are exhaustive.
 
+use crate::GcRef;
 use crate::collections::nullable;
 use crate::descriptor::{BuiltinTypeId, TypeDescriptor};
-use crate::GcRef;
 
 /// One per-instance type argument a value records.
 ///

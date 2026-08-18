@@ -1,8 +1,7 @@
 # A file is a program
 
 A `.px` file is a whole program. Its top-level statements are what runs, in
-source order, and there is no entry-point ceremony to write around them
-([ADR-067](../../../decisions/067-a-files-top-level-statements-are-its-program.md)).
+source order, and there is no entry-point ceremony to write around them.
 
 ```praxis
 out("first")
@@ -121,8 +120,7 @@ the top level; everything else is a statement.
 ## A newline ends a statement
 
 Statements are separated by newlines or by `;`, and a semicolon is only required
-when two of them share a line
-([ADR-049](../../../decisions/049-the-wildcard-binds-nothing-and-a-newline-ends-a-statement.md)).
+when two of them share a line.
 
 ```praxis
 // A line comment runs to the end of the line.
@@ -254,9 +252,9 @@ The keywords are `var`, `fn`, `if`, `else`, `while`, `for`, `in`, `loop`,
 `false`. That is the whole list. `out`, `panic`, `Vec`, `max` and the rest of
 the prelude are ordinary identifiers that happen to be defined, and so are the
 builtin type names `Int`, `Text`, `Bool`, `Char`, `Float`, `Unit` and
-`Never` — `var max = 5` is legal and shadows the builtin — and since
-[ADR-125](../../../decisions/125-a-binding-is-a-binding-and-the-compiler-decides-its-storage.md)
-so is `let`. See [bindings and shadowing](bindings.md).
+`Never` — `var max = 5` is legal and shadows the builtin — and so is `let`,
+which is an ordinary identifier rather than a keyword. See [bindings and
+shadowing](bindings.md).
 
 ## Reading input
 

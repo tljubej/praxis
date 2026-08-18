@@ -113,10 +113,10 @@ fn call_signature(snapshot: &Snapshot, list: &SyntaxNode, offset: u32) -> Option
 
 /// The parameter type strings of a function scheme, or an empty list when the
 /// scheme is not a function (a `Vec` constructor, say).
-fn function_params(db: &praxis_types::TypeDb, scheme: &praxis_types::Scheme) -> Vec<String> {
+fn function_params(db: &praxis_typeck::TypeDb, scheme: &praxis_typeck::Scheme) -> Vec<String> {
     let body = db.follow(scheme.body());
     match db.data(body) {
-        praxis_types::data::TypeData::Func { params, .. } => {
+        praxis_typeck::data::TypeData::Func { params, .. } => {
             params.iter().map(|p| db.render(db.follow(*p))).collect()
         }
         _ => Vec::new(),
@@ -226,7 +226,7 @@ pub fn constructor_signatures(ctor: Constructor) -> Vec<(String, Vec<String>)> {
     match ctor.arg_shape() {
         ArgShape::Positional(1) => vec![one(&["parser"], result)],
         ArgShape::Positional(n) => {
-            let args: Vec<&str> = std::iter::repeat("parser").take(n).collect();
+            let args: Vec<&str> = std::iter::repeat_n("parser", n).collect();
             vec![one(&args, result)]
         }
         ArgShape::StringThenParser => vec![one(&["\"separator\"", "parser"], result)],

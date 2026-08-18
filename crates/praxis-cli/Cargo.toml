@@ -2,9 +2,15 @@
 name = "praxis-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The `praxis` command-line entry point."
+homepage.workspace = true
+description = "The `praxis` command-line tool: run, check and debug Praxis programs."
+keywords.workspace = true
+categories = ["command-line-utilities", "compilers", "development-tools"]
+readme = "README.md"
 
 [[bin]]
 name = "praxis"
@@ -16,14 +22,14 @@ praxis-syntax.workspace = true
 praxis-parser.workspace = true
 praxis-ast.workspace = true
 praxis-hir.workspace = true
-praxis-types.workspace = true
+praxis-typeck.workspace = true
 praxis-mir.workspace = true
 praxis-runtime.workspace = true
 praxis-debugger.workspace = true
 praxis-stdlib.workspace = true
 praxis-codegen-cranelift.workspace = true
-# The shared front-end query layer (§14.2, ADR-097). `praxis check` calls it, so
-# the CLI and the editor cannot disagree about what a file says.
+# The shared front-end query layer. `praxis check` calls it, so the CLI and the
+# editor cannot disagree about what a file says.
 praxis-lsp.workspace = true
 anyhow.workspace = true
 clap.workspace = true

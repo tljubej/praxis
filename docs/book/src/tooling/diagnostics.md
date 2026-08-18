@@ -2,14 +2,14 @@
 
 Every problem the Praxis compiler reports carries a code: a category letter and
 a three-digit number, such as `Y001` or `I013`. The code is a permanent,
-user-facing identifier. It is allocated once, in
-[ADR-051](../../../decisions/051-the-diagnostic-code-allocation.md), and written
-in exactly one place in the compiler — a closed enum whose `code()` method is
-the only expression in the tree that pairs a category with a number. A number
-nobody registered has no route into a diagnostic.
+user-facing identifier. It is allocated once and written in exactly one place in
+the compiler — a closed enum whose `code()` method is the only expression in the
+tree that pairs a category with a number. A number nobody registered has no
+route into a diagnostic, and a number spent once is never reissued: re-spending
+one is how an old message and a new one come to answer to the same name.
 
 This chapter is the complete index. Every code below can be produced by the
-compiler as it stands; nothing is reserved for later.
+compiler; nothing is reserved for later.
 
 ## What a diagnostic looks like
 
@@ -35,7 +35,7 @@ praxis: 1 error(s)
 Five parts, and only the last two are optional:
 
 - **The severity and the code.** Always `error`. The compiler emits no warnings
-  and no notes today — every diagnostic in this chapter is fatal to the run.
+  and no notes — every diagnostic in this chapter is fatal to the run.
 - **The location**, as `file:line:column`, one-based.
 - **The snippet**, with a caret run under the primary span.
 - **Related spans**, when inference connects two distant expressions. They render
@@ -94,11 +94,10 @@ praxis: 3 error(s)
 | `R0xx` | Runtime | Declared, and has no members. Run-time failures are [faults](../debugger/faults.md), not diagnostics: they carry a fault kind, not a code |
 
 The numbers inside a category are not contiguous and are not meant to be.
-`Y09x` is internal errors, `Y11x` member errors and `Y12x` match errors — a
-split the codes that shipped first already implied. `Y009` is **retired**: it
-reported an assignment to a binding that could not be written, and the language
-no longer has one. The number is not reissued, because re-spending a code is how
-an old message and a new one come to answer to the same name.
+`Y09x` is internal errors, `Y11x` member errors and `Y12x` match errors, and the
+gaps between those blocks are what keeps them blocks. `Y009` is **retired**: it
+reported an assignment to a binding that cannot be written, and Praxis has no
+such binding. Its number stays spent.
 
 ## Lex — `T0xx`
 
@@ -107,8 +106,8 @@ an old message and a new one come to answer to the same name.
 | `T001` | ``unterminated block comment`` | A `/*` with no matching `*/` before end of file. |
 | `T002` | ``unterminated backtick template`` | A backtick template with no closing backtick. Nested templates count, so a `` ` `` inside a capture body does not close the outer one. |
 | `T003` | ``unexpected character in source`` | A byte the lexer cannot classify. It becomes an `ERROR` token and lexing continues. |
-| `T004` | ``unterminated text literal`` | A `"` string with no closing quote on its line. Also what an interpolated literal earns when a hole never closes — string interpolation added **no** lex code, because the lexer splits a literal into fragments only after proving it closes, so a malformed one reports exactly what it always did (ADR-147). |
-| `T005` | ``invalid escape in text literal`` / ``invalid escape in character literal`` | A `\` followed by a character that is not a recognized escape. One code, two messages: `"…"` and `'…'` share an escape table (ADR-141), which since ADR-147 holds `\{` and `\}` as well. Every fragment of an interpolated literal is validated on the same terms as a whole one; a `\` inside a *hole* is not an escape at all, because a hole holds expression tokens. |
+| `T004` | ``unterminated text literal`` | A `"` string with no closing quote on its line. Also what an interpolated literal earns when a hole never closes. Interpolation adds **no** lex code: the lexer pre-scans a literal and splits it into fragments only once it has proved the literal closes on its line with every hole balanced, so one that does not close is a single text token and this code, holes or no holes. |
+| `T005` | ``invalid escape in text literal`` / ``invalid escape in character literal`` | A `\` followed by a character that is not a recognized escape. One code, two messages: `"…"` and `'…'` read one escape table, which holds `\{` and `\}` as well — a language with two escape tables has two answers to what `\n` is, and the second answer is always found somewhere worse. Every fragment of an interpolated literal is validated on the same terms as a whole one; a `\` inside a *hole* is not an escape at all, because a hole holds expression tokens. |
 | `T006` | ``unterminated character literal`` | A `'` with no closing quote before the end of its line. |
 | `T007` | ``a character literal holds exactly one character`` / ``empty character literal: `''` names no character`` | A `'…'` whose body is not exactly one Unicode scalar. Two messages under one code; the too-long form offers a machine-applicable rewrite to a text literal. |
 
@@ -158,9 +157,9 @@ an old message and a new one come to answer to the same name.
 | `Y017` | `` a `break` carrying a value needs a `loop`; a `{while\|for}` produces `Unit` `` | A `break` with a value out of a `while` or `for`. Only `loop` is an expression loop; the other two also leave by their condition failing, and there is no value to supply on that path. |
 | `Y018` | `` `{name}` is generic, so it has no single function value; write `\|x\| {name}(x)` to fix its type arguments at the call `` | A generic `fn` used as a value. Monomorphization is driven by call sites and a bare value has none; a closure body *is* a call site. |
 | `Y019` | `` values of type `{ty}` have no element `{n}` — only a tuple does ``, `` a tuple of {arity} elements has no element `{n}` — its elements are `0` to `{arity-1}` `` | A `.n` element access on a non-tuple, or past the end of a tuple. One code, two messages: the arity is the useful thing to say when there is one. |
-| `Y020` | `` values of type `{ty}` cannot be indexed with {n} index(es) ``, `` … cannot be assigned through {n} index(es) ``, `` … cannot be updated with `{min=\|max=}` through {n} index(es) `` | A subscript a type does not have, in any of three directions. The wrong *arity* on a receiver that does index is here too: `grid[x]` where §6.4 spells it `grid[x, y]`. Three messages because the sets differ — a `Text` reads through `t[0]` and has no element store, and a `Counter` has a store but no updating store. |
+| `Y020` | `` values of type `{ty}` cannot be indexed with {n} index(es) ``, `` … cannot be assigned through {n} index(es) ``, `` … cannot be updated with `{min=\|max=}` through {n} index(es) `` | A subscript a type does not have, in any of three directions. The wrong *arity* on a receiver that does index is here too: `grid[x]` where a grid is written `grid[x, y]`. Three messages because the sets differ — a `Text` reads through `t[0]` and has no element store, and a `Counter` has a store but no updating store. |
 | `Y021` | ``the left side of an assignment must be a name, a field, or an index`` | An assignment whose left side is not a place at all: `f() = 1`, `a + b[0] = 1`. A field is a place, so `p.x = 1` is fine. |
-| `Y022` | `` `{name}` is {a builtin\|an enum constructor}, so it has no function value; {call it: `{name}()`\|write `\|x\| {name}(x)` to call it} `` | A prelude builtin or an enum constructor named without being called. `Y018`'s neighbour, one symbol kind over: a monomorphic `fn` at least *has* a value, and these have none, so `out(pi)` used to print `Unit` and `var h = abs` then `h(-3)` printed nothing at all. Which remedy the message names depends on the arity. |
+| `Y022` | `` `{name}` is {a builtin\|an enum constructor}, so it has no function value; {call it: `{name}()`\|write `\|x\| {name}(x)` to call it} `` | A prelude builtin or an enum constructor named without being called. `Y018`'s neighbour, one symbol kind over: a monomorphic `fn` at least *has* a value, and these have none, so `out(pi)` and `var h = abs` name something there is nothing to hold. Which remedy the message names depends on the arity. |
 | `Y023` | `` a backtick template is a parser expression; write `read` before it, or pass it to `parse(text, ...)` `` | A backtick template written where a value is expected. The parser sublanguage is entered at `read` or `parse(text, …)` and nowhere else. |
 | `Y024` | ``this function takes {expected} argument(s), but {found} were given`` | A call whose argument count does not match. A name in Praxis has exactly one signature — no overloading, no default parameters — so a count mismatch is never a candidate for some other signature. |
 
@@ -208,14 +207,14 @@ is built. See [The `read` expression](../input/read.md).
 
 | Code | Message | What it means |
 |---|---|---|
-| `I000` | ``malformed parser expression``, ``malformed parser constructor call``, `` malformed `repeated(...)` tail (§7.5) `` | The lowerer could not read the parser expression at all — the tree it was handed is not one a parser can be built from. |
+| `I000` | ``malformed parser expression``, ``malformed parser constructor call``, `` malformed `repeated(...)` tail `` | The lowerer could not read the parser expression at all — the tree it was handed is not one a parser can be built from. |
 | `I001` | ``a tuple type needs at least 2 elements, got {n}``, `` `{ctor}` takes {want} type argument(s), got {got} ``, `` duplicate record field `{name}` ``, `` duplicate enum variant `{name}` ``, ``too many parser plans registered in one process (limit {n})`` | A parser AST that could not be turned into a type or into a runnable plan. |
-| `I010` | `` unknown atomic parser `{name}` `` | A word in atomic position that names no §7.4 atomic. Carries a *did you mean* fix. |
-| `I011` | `` `{name}` at byte {n} is not a capture name: a capture name is an identifier (§4.1) `` | The text before the `:` in a `{…}` capture is not an identifier. |
-| `I012` | `` unknown parser `{name}` at byte {n}: no atomic or constructor is spelled that way (§7.4, §7.5) `` | The capture kind after the `:` in a `{…}` names neither an atomic nor a constructor. Carries a *did you mean* fix. |
-| `I013` | `` unknown parser constructor `{name}` (§7.5) ``, `` unknown parser constructor `{name}` at byte {n} (§7.5) `` | A call in parser position whose head names no §7.5 constructor. The span is the constructor's name, not the whole call, because a fix replaces what the report underlines. Carries a *did you mean* fix. |
-| `I014` | `` `{ctor}` argument {n} is {what}, but {wanted} ``, `` `{ctor}` has an argument that is not a parser expression (§7.5) ``, `` `{name}:` takes a parser, not a literal value ``, `` `{name}:` needs a value (§7.5) ``, ``a parser constructor's literal argument must be a text literal``, `` `{ctor}` does not take {what} (§7.5) ``, `` `grid`'s ragged form is written `grid(P, ragged, fill: value)` — `ragged` and `fill:` come together or not at all (§7.5) `` | A constructor argument that is the wrong kind of thing, or one the constructor does not take. Checked against §7.5's own shape table before the parser is built. |
-| `I020` | ``named and anonymous captures may not be mixed in one template (§7.3)`` | One template with both `{n:int}` and `{int}`. |
+| `I010` | `` unknown atomic parser `{name}` `` | A word in atomic position that names no [atomic parser](../input/atoms.md). Carries a *did you mean* fix. |
+| `I011` | `` `{name}` at byte {n} is not a capture name: a capture name is an identifier `` | The text before the `:` in a `{…}` capture is not an identifier. |
+| `I012` | `` unknown parser `{name}` at byte {n}: no atomic or constructor is spelled that way `` | The capture kind after the `:` in a `{…}` names neither an atomic nor a constructor. Carries a *did you mean* fix. |
+| `I013` | `` unknown parser constructor `{name}` ``, `` unknown parser constructor `{name}` at byte {n} `` | A call in parser position whose head names no [constructor](../input/structural.md). The span is the constructor's name, not the whole call, because a fix replaces what the report underlines. Carries a *did you mean* fix. |
+| `I014` | `` `{ctor}` argument {n} is {what}, but {wanted} ``, `` `{ctor}` has an argument that is not a parser expression ``, `` `{name}:` takes a parser, not a literal value ``, `` `{name}:` needs a value ``, ``a parser constructor's literal argument must be a text literal``, `` `{ctor}` does not take {what} ``, `` `grid`'s ragged form is written `grid(P, ragged, fill: value)` — `ragged` and `fill:` come together or not at all `` | A constructor argument that is the wrong kind of thing, or one the constructor does not take. Every call is checked against the constructor's own argument shape before a parser is built. |
+| `I020` | ``named and anonymous captures may not be mixed in one template`` | One template with both `{n:int}` and `{int}`. |
 | `I021` | `` duplicate capture name `{name}` in template `` | One capture name used twice in a template. |
 | `I022` | `` `{ctor}` expects {expected}, got {n} ``, `` `repeated` expects 1 argument, got {n} `` | A constructor called with the wrong number of arguments. |
 | `I023` | `` `sep` needs a non-empty separator: an empty one never advances `` | An empty separator, which cannot move a cursor. |
@@ -223,7 +222,7 @@ is built. See [The `read` expression](../input/read.md).
 | `I025` | `` named `sections` requires at least one field ``, `` `choice` requires at least one case `` | A `sections` or `choice` with nothing in it. |
 | `I026` | `` a positional `block` item returning a scalar must be named `` | A positional `block` item whose parser returns a scalar. There is no field name to give it. A template is exempt: a no-capture template contributes no field and still consumes input. |
 | `I027` | `` duplicate choice case `{name}` `` | A `choice` declaring one case name twice. |
-| `I028` | `` `repeated(...)` is only the final named argument of a `sections` call (§7.5) ``, `` `sections` takes at most one `repeated(...)` tail (§7.5) ``, `` a `repeated(...)` tail may appear only as the final named argument (§7.5): it consumes every remaining section, so nothing can follow it `` | A `repeated(…)` somewhere it cannot go. It consumes every remaining section, so nothing can follow it, and there can be only one. |
+| `I028` | `` `repeated(...)` is only the final named argument of a `sections` call ``, `` `sections` takes at most one `repeated(...)` tail ``, `` a `repeated(...)` tail may appear only as the final named argument: it consumes every remaining section, so nothing can follow it `` | A `repeated(…)` somewhere it cannot go. It consumes every remaining section, so nothing can follow it, and there can be only one. |
 | `I030` | ``invalid escape `{seq}` at byte {n}``, ``unterminated capture starting at byte {n}``, ``empty capture `{}` at byte {n}``, ``malformed capture body at byte {n}: {detail}``, ``{what} nesting is deeper than {limit} at byte {n}`` | A backtick template the scanner could not read. The byte offset is into the template's own text. |
 
 An input mistake is reported against the template or the call that contains it:
@@ -234,11 +233,11 @@ out(moves.len())
 ```
 
 ```text
-error[I020]: named and anonymous captures may not be mixed in one template (§7.3)
+error[I020]: named and anonymous captures may not be mixed in one template
 
   input-mistake.px:1:24
   1 | var moves = read lines(`move {count:int} from {int} to {target:int}`)
-    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ named and anonymous captures may not be mixed in one template (§7.3)
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ named and anonymous captures may not be mixed in one template
 
 praxis: 1 error(s)
 ```
@@ -253,10 +252,12 @@ they carry a fault kind rather than a code, and they open the
 they share one query layer, so a diagnostic in one and not the other is not
 representable.
 
-That is the whole answer now. It was not always: for a while four codes were
-raised while the program was being **lowered**, and neither `praxis check` nor
-the language server lowers, so a file could check clean and refuse to run. This
-one did.
+`praxis run` adds nothing to that set. **Every diagnostic a well-formed program
+can earn is decided during analysis**, so `praxis check` exiting 0 is a claim
+about your program rather than about which passes happened to run. The sharpest
+case is a pattern in a binding position, because deciding it needs the
+scrutinee's type and the variant's payload — the sort of question a compiler is
+tempted to leave until it is building code:
 
 ```praxis
 enum Shape { Circle(Int), Square(Int) }
@@ -267,8 +268,8 @@ for Circle(r) in shapes {
 }
 ```
 
-`praxis check` exited 0 on it, and `praxis run` printed this and exited 1
-without running a line of it. Both print it now:
+`praxis check` reports it and exits 1, and `praxis run` refuses it with the same
+text at the same span before executing a line of it:
 
 ```text
 error[Y125]: a `for` binding must match every item, and a variant pattern does not
@@ -280,22 +281,17 @@ error[Y125]: a `for` binding must match every item, and a variant pattern does n
 praxis: 1 error(s)
 ```
 
-`Y120` and `Y122` were the first two moved ([ADR-130]); `Y013`, `Y124` and
-`Y125` followed ([ADR-133]). The one code left in lowering is `Y099`, and it is
-not an exception to the rule: it says inference recorded no type for a node
-lowering reached, which is a compiler bug rather than a mistake in your program.
-No program you can write earns it.
-
-[ADR-130]: ../../../decisions/130-a-matchs-coverage-is-analysis-answer-and-the-pattern-is-built-once.md
-[ADR-133]: ../../../decisions/133-every-diagnostic-a-well-formed-program-can-earn-is-analysiss.md
+The one code raised past analysis is `Y099`, and it is not an exception to the
+rule: it says inference recorded no type for a node lowering reached, which is a
+compiler bug rather than a mistake in your program. No program you can write
+earns it.
 
 ## Adding a code
 
-A code is allocated by amending
-[ADR-051](../../../decisions/051-the-diagnostic-code-allocation.md) and then
-adding a variant to `DiagCode` in `praxis-source`. `DiagnosticCode::new` is
-crate-private, so there is no way to construct an unregistered number, and
-`DiagCode::code()`'s exhaustive match is the single place a `(category, number)`
-pair is written. Attaching a `Suggestion` with a `replacement` where the mistake
-is detected is all it takes for the new code to have a quick fix in the editor —
-there is no table in the language server to update.
+A code is allocated by adding a variant to `DiagCode` in `praxis-source`.
+`DiagnosticCode::new` is crate-private, so there is no way to construct an
+unregistered number, and `DiagCode::code()`'s exhaustive match is the single
+place a `(category, number)` pair is written. Attaching a `Suggestion` with a
+`replacement` where the mistake is detected is all it takes for the new code to
+have a quick fix in the editor — there is no table in the language server to
+update.

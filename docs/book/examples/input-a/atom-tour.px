@@ -1,4 +1,4 @@
-// Every atomic parser §7.4 has, once each, against text chosen so the value is
+// All ten atomic parsers, once each, against text chosen so the value is
 // visible. `text` and `rest` are in `atom-text-rest.px`.
 fn main() {
     out(parse("-42", int))

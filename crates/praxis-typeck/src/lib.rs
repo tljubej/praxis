@@ -28,11 +28,11 @@ pub use data::{
 };
 pub use db::{Slot, TypeDb};
 pub use error::TypeCtorError;
-pub use fold::{fold, FoldMemo, TypeFolder};
+pub use fold::{FoldMemo, TypeFolder, fold};
 pub use generalize::Scheme;
 pub use key::TypeKey;
 pub use type_id::{Type, VarId};
-// Re-export the shared vocabulary so consumers reach it through `praxis_types`
+// Re-export the shared vocabulary so consumers reach it through `praxis_typeck`
 // without depending on `praxis-stdlib` themselves. `ScalarType`/`CollectionCtor`
 // live in `praxis-stdlib`'s `type_pattern` module; surface them from our root.
 pub use praxis_stdlib::type_pattern::{CollectionCtor, ScalarType};

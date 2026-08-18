@@ -14,8 +14,8 @@
 //! `praxis check` prints and what the editor underlines is unrepresentable
 //! rather than merely unlikely.
 
-use praxis_lsp::query::Snapshot;
 use praxis_lsp::Revision;
+use praxis_lsp::query::Snapshot;
 
 use crate::color_mode::ColorMode;
 use crate::{diagnostic_render, exit_code, source_file};

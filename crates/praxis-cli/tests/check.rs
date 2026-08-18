@@ -132,31 +132,29 @@ fn missing_file_exits_two() {
     );
 }
 
-/// The stubbed commands must not pretend to succeed.
+/// **The command surface is `run`, `check` and `lsp`, and nothing else.**
 ///
-/// `lsp` is not in this list: the server is real, and `tests/lsp.rs` drives a
-/// scripted JSON-RPC session against the same binary. `watch` is not here
-/// because it takes a file argument and is covered where the run tests live.
+/// A name the CLI does not have is rejected by clap — exit 2, and a message
+/// that names it — rather than accepted and quietly doing nothing. `watch` and
+/// `repl` are the two names a reader of an older write-up is likeliest to try,
+/// so they are the two this pins.
 #[test]
-fn unimplemented_commands_exit_two() {
-    // One entry today. Kept as a list because `watch` joins it the moment it
-    // takes an argument-free form, and because the shape says "these commands",
-    // not "this command".
-    #[allow(clippy::single_element_loop)]
-    for cmd in ["repl"] {
+fn a_subcommand_the_cli_does_not_have_is_rejected() {
+    for args in [vec!["watch", "prog.px"], vec!["repl"]] {
         let output = Command::new(bin_path())
-            .arg(cmd)
+            .args(&args)
             .output()
             .expect("failed to run praxis");
         let code = output
             .status
             .code()
             .expect("process was terminated by signal");
-        assert_eq!(code, 2, "`praxis {cmd}` should exit 2");
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let invocation = args.join(" ");
+        assert_eq!(code, 2, "`praxis {invocation}` should exit 2: {stderr}");
         assert!(
-            stderr.contains("not implemented"),
-            "`praxis {cmd}` should report it is not implemented, got: {stderr}"
+            stderr.contains("unrecognized subcommand"),
+            "`praxis {invocation}` should say the subcommand is unrecognized, got: {stderr}"
         );
     }
 }
@@ -263,8 +261,6 @@ fn no_help_page_leaks_an_implementation_marker() {
         vec!["--help"],
         vec!["run", "--help"],
         vec!["check", "--help"],
-        vec!["watch", "--help"],
-        vec!["repl", "--help"],
         vec!["lsp", "--help"],
     ] {
         let out = Command::new(bin_path())
@@ -280,29 +276,6 @@ fn no_help_page_leaks_an_implementation_marker() {
                 args.join(" ")
             );
         }
-    }
-}
-
-/// …and the stub commands do not name a milestone either.
-///
-/// A number in "planned for Milestone N" goes stale the moment the milestone
-/// passes, and neither `watch` nor `repl` has a scheduled one, so the honest
-/// message names no number at all.
-#[test]
-fn a_stub_command_does_not_name_a_milestone() {
-    for args in [vec!["repl"], vec!["watch", "prog.px"]] {
-        let out = Command::new(bin_path())
-            .args(&args)
-            .output()
-            .expect("failed to run praxis");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert_eq!(out.status.code(), Some(2), "{stderr}");
-        assert!(stderr.contains("not implemented"), "{stderr}");
-        assert!(
-            !stderr.contains("Milestone"),
-            "`praxis {}` names a milestone: {stderr}",
-            args.join(" ")
-        );
     }
 }
 

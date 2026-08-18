@@ -2,8 +2,7 @@
 
 `var` is the language's one binding form. It introduces a name, that name may be
 reassigned, and the type it was inferred at is the type it keeps. There is no
-second keyword and no immutable binding class
-([ADR-125](../../../decisions/125-a-binding-is-a-binding-and-the-compiler-decides-its-storage.md)).
+second keyword and no immutable binding class.
 
 ```praxis
 var score = 0
@@ -33,10 +32,9 @@ the line that disagrees with you rather than the line after it.
 
 ## `let` does not exist
 
-Every older document about this language mentions `let`. It was removed: the
-distinction it drew is now inferred rather than declared, and the word was not
-even reserved on the way out, so it is an ordinary identifier the compiler has
-never heard of.
+`let` is not a keyword. The distinction it would draw is inferred rather than
+declared, and the word is not reserved either, so it is an ordinary identifier
+the compiler has never heard of.
 
 ```praxis
 let x = 5
@@ -55,11 +53,10 @@ help: replace it with `var`
 ```
 
 `N009` is its own code, and the reason is the fix. `let` is not a misspelling of
-anything — it is a word this language used to have — so the near-miss search
-that answers `totl` with `total` has nothing useful to say about it. It used to
-be asked anyway, and its answer was `did you mean `Set`?`: the budget is one
-edit for a three-letter name, and `Set` is one edit away. The rule is right in
-general; the question was the wrong one to ask.
+anything, so the near-miss search that answers `totl` with `total` has nothing
+useful to say about it: the budget is one edit for a three-letter name, and the
+name one edit away is `Set`. The rule is right in general and wrong for this
+word, so this word is answered before the search runs.
 
 That is the first of four errors from those two lines: `let` and `x` run
 together with no separator (`P002`), and `x` is then never declared, so both
@@ -342,10 +339,9 @@ out(values)
 
 ## Places: fields and elements
 
-An assignment target may be a name, a field, or an index
-([ADR-124](../../../decisions/124-a-field-and-a-sequence-element-are-places.md)).
-A field or element store writes into an object; it is the second kind of write
-above, not a rebinding.
+An assignment target may be a name, a field, or an index. A field or element
+store writes into an object; it is the second kind of write above, not a
+rebinding.
 
 ```praxis
 struct Point { x: Int, y: Int }

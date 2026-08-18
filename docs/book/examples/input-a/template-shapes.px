@@ -1,6 +1,6 @@
-// §7.3's four shapes, read off the template's own parts (ADR-092): no capture
-// is Unit, one anonymous capture is that value, two or more are a tuple, and
-// named captures are an anonymous record.
+// The four shapes, read off the template's own parts: no capture is Unit, one
+// anonymous capture is that value, two or more are a tuple, and named captures
+// are an anonymous record.
 fn main() {
     out(parse("hello", `hello`))
     out(parse("42", `{int}`))

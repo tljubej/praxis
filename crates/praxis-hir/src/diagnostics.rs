@@ -513,7 +513,7 @@ pub(crate) fn unknown_field(at: FileSpan, name: &str, ty: &str) -> Diagnostic {
 /// type arguments, e.g. `Map[Int]` or `Vec[Int, Text]`.
 ///
 /// The arity is declared by
-/// [`CollectionCtor::arity`](praxis_types::CollectionCtor::arity) and checked
+/// [`CollectionCtor::arity`](praxis_typeck::CollectionCtor::arity) and checked
 /// against it here. Unchecked, a wrong-arity annotation interns a type that can
 /// never unify with anything, and the user sees a downstream `Y001` naming a
 /// type they did not write; this names the mistake where it was made.

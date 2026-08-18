@@ -29,10 +29,10 @@
 //! runtime wrapper reports overflow / division-by-zero.
 
 #![allow(dead_code)] // Some variants/fields are consumed only by the Cranelift
-                     // backend (praxis-codegen-cranelift).
+// backend (praxis-codegen-cranelift).
 
 use praxis_stdlib::abi::RuntimeSymbol;
-use praxis_types::Type;
+use praxis_typeck::Type;
 
 use crate::annot::{DebugSlots, RootSlots};
 
@@ -129,7 +129,7 @@ pub enum LocalDebugKind {
 /// The static language type of a MIR slot — or the explicit statement that
 /// lowering does not have one.
 ///
-/// `praxis_types::Type` is an index into the [`TypeDb`](praxis_types::TypeDb)
+/// `praxis_typeck::Type` is an index into the [`TypeDb`](praxis_typeck::TypeDb)
 /// arena, so *every* integer is a valid handle: a `Type(0)` "unknown" sentinel
 /// would silently denote whichever type happened to be interned first, and feed
 /// that type into descriptor resolution, schema construction and debug metadata.
@@ -278,8 +278,7 @@ impl ScalarKind {
     /// (`AllocByte` must be `AllocatesAndFaults`: it has to reject a value
     /// outside `0..=255`, exactly as `praxis_alloc_char` rejects a non-scalar
     /// code point) and then replacing these two arms with them.
-    pub const BYTE_HAS_NO_WRAPPER: &'static str =
-        "ScalarKind::Byte has no boxing wrapper: the ABI manifest has no \
+    pub const BYTE_HAS_NO_WRAPPER: &'static str = "ScalarKind::Byte has no boxing wrapper: the ABI manifest has no \
          `praxis_alloc_byte`/`praxis_byte_load` row, and `Int`'s wrappers are \
          the wrong width and the wrong descriptor. Wire the two rows before \
          emitting a `Byte` scalar.";
@@ -941,7 +940,7 @@ pub enum AllocKind {
     /// construction (ADR-146) are `init`'s runtime operands, because they are
     /// arbitrary expressions.
     Collection {
-        ctor: praxis_types::CollectionCtor,
+        ctor: praxis_typeck::CollectionCtor,
         args: Vec<MirType>,
         init: CollectionInit,
     },
@@ -1098,8 +1097,8 @@ impl AllocKind {
 /// backend refuses to lower emits no call at all.
 #[inline]
 #[must_use]
-pub const fn collection_new_symbol(ctor: praxis_types::CollectionCtor) -> Option<RuntimeSymbol> {
-    use praxis_types::CollectionCtor as C;
+pub const fn collection_new_symbol(ctor: praxis_typeck::CollectionCtor) -> Option<RuntimeSymbol> {
+    use praxis_typeck::CollectionCtor as C;
     match ctor {
         C::Vec => Some(RuntimeSymbol::VecNew),
         C::Deque => Some(RuntimeSymbol::DequeNew),

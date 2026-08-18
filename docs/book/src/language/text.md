@@ -72,8 +72,10 @@ praxis: 3 error(s)
 ```
 
 `"ab" * 3` is repetition in some languages. It is not a spelling here, which
-keeps it free to mean that later. The reasoning for both halves is
-[ADR-085](../../../decisions/085-text-concatenation-is-plus-and-nothing-else-is.md).
+keeps it free to mean that later. The refusal to stringify is the load-bearing
+half: a language whose `+` renders its other operand has no error left to
+report, and `1 + 2` in the middle of a longer expression starts depending on
+what its neighbours are.
 
 The conversion the second error asks for is written, and it is written
 explicitly:
@@ -84,9 +86,9 @@ out("count: " + (3).to_text())
 
 `Int`, `Float` and `Char` each have a `to_text()`, and each answers exactly the
 characters `out` writes — the method and the printer share one renderer, so they
-cannot disagree
-([ADR-143](../../../decisions/143-the-to-text-family-is-int-float-and-char.md)).
-`Bool` has none, and there is no universal `T.to_text()`.
+cannot disagree. `Bool` has none, and there is no universal `T.to_text()`: a
+conversion defined on every type is the coercion `+` refuses, arriving under a
+method name.
 
 For a labelled line you usually want the next section instead.
 
@@ -161,9 +163,8 @@ is rather than as string.
 This does **not** change what `+` does. `"n = " + n` is still `Y001`, and
 deliberately so: a hole is a rendering site the program wrote, where `+`
 coercing its operand would render values nobody asked to render. The two rules
-are complements, and
-[ADR-147](../../../decisions/147-a-hole-renders-anything-because-the-program-wrote-the-hole.md)
-is where they are reconciled.
+are complements: a hole has no neighbours to depend on, and exists for no
+purpose but to render what it names. An operator has both.
 
 ## Indexing answers a `Char`
 
@@ -268,8 +269,7 @@ Backtrace:
 A `Char` is not an arithmetic type: `c - 48` does not compile. `c.to_int() - 48`
 does, and that round trip is why `to_int()` exists at all. There is deliberately
 no `is_digit`, `is_alpha`, `to_upper` or `to_lower` — `to_int()` expresses every
-one of them, and inventing four rows to save a comparison was refused
-([ADR-086](../../../decisions/086-a-text-subscript-answers-a-char.md)).
+one of them, and four rows that save a comparison are still four rows.
 
 ## A `Text` is iterable
 
@@ -301,9 +301,10 @@ out(line.map(|c| c.to_int()).sum())
 444
 ```
 
-Both the list literal and the iterable `Text` arrived together in
-[ADR-099](../../../decisions/099-a-list-literal-is-a-vec-and-a-text-is-iterable.md),
-which is also where the `Char` item type is argued for.
+The item type is the decision here, not merely that the loop is accepted. A
+one-character `Text` would have served and is not what you get: `t[i]` answers a
+`Char`, so the loop binds a `Char`, and a program that indexes and a program that
+iterates compare against the same thing.
 
 ## The methods
 
@@ -326,8 +327,7 @@ authoritative list.
 ### The two routes back into a `Text`
 
 Those rows go the other way — a `Text` taken apart — and there are two that put
-one back together
-([ADR-144](../../../decisions/144-a-sequence-of-text-joins-and-a-sequence-of-char-becomes-one.md)):
+one back together:
 
 | Written | Answers |
 |---|---|
@@ -360,8 +360,7 @@ order, and it is the order a `Set[Text]` walks in as well as the order
 A `Text` has two representations and the language never says which one you have.
 A literal, a concatenation and the whole of the program's input are **owned**
 payloads. Every capture the input parser hands back is a **slice** — a view into
-the buffer it was parsed from, one level deep, with no copy
-([ADR-022](../../../decisions/022-source-slice-text.md)). Parsing a hundred
+the buffer it was parsed from, one level deep, with no copy. Parsing a hundred
 thousand fields therefore allocates a hundred thousand views and copies nothing.
 
 What that buys, and what it does not, is visible only as complexity. An owned
@@ -380,8 +379,7 @@ Rows two and four are the honest residual, and neither the `for` nor the
 subscript escapes it: there is no random access into a variable-width encoding
 without a wider representation, and Praxis does not build one. A text with one
 non-ASCII character in it costs O(n) per character to walk, whichever spelling
-you use. The measurements and the three rejected alternatives are in
-[ADR-115](../../../decisions/115-a-text-counts-itself-once-and-the-count-is-the-licence.md).
+you use.
 
 Concatenation always allocates a fresh owned payload, because a new `Text` has
 no single owner to point into. Building a long string with `+=` in a loop is

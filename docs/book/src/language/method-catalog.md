@@ -8,8 +8,7 @@ a record carries fields but no methods. This chapter is that table.
 The closedness is load-bearing rather than a limitation the compiler tolerates.
 Because the catalog is the complete method universe, a name it does not carry at
 that arity can never resolve against *any* receiver — so `fn f(x) { x.nope() }`
-is refused at `check` time, before anything has said what `x` is
-([ADR-093](../../../decisions/093-a-method-that-cannot-resolve-is-reported-at-check.md)).
+is refused at `check` time, before anything has said what `x` is.
 
 ## How to read these tables
 
@@ -358,8 +357,7 @@ false
 clearing a bit that was never in range is not a question the set has to answer.
 `contains` is the one row in the catalog that lowers to a dedicated
 scalar-producing instruction rather than a call, which is why it is not a
-safepoint
-([ADR-118](../../../decisions/118-a-vecs-three-words-are-the-compilers-to-read.md)).
+safepoint.
 
 ## `Grid[T]`
 
@@ -441,10 +439,9 @@ and `rotate_right` answer copies and leave the receiver alone.
 
 **A `Grid` is deliberately not a pipeline receiver.** `for cell in g` walks it
 in row-major order, but `g.map(f)` is a `Y110`: a grid enters a pipeline through
-`cells()` or `positions()`, which already answer `Vec`s. The exclusion is what
-leaves the name `map` free for a future shape-preserving `Grid[T] -> Grid[U]`
-row
-([ADR-127](../../../decisions/127-a-pipelines-source-is-the-for-loops-and-a-collection-converts-by-naming-what-it-becomes.md)).
+`cells()` or `positions()`, which already answer `Vec`s. A grid's shape is part
+of its value, and a stage that flattened it would be answering about something
+else.
 
 ## The pipeline
 
@@ -537,17 +534,14 @@ can change after it is stored`.
 **barriers**: each needs the whole sequence before it can answer anything, so
 each is a call into the runtime rather than a stage the compiler folds into the
 loop. `reversed` is the clearest case of the definition — it cannot answer its
-first element until it has seen the last
-([ADR-145](../../../decisions/145-a-reversal-needs-the-whole-sequence-so-it-is-a-barrier.md)).
-Being a barrier is invisible from a program except in what it costs — the other
-stages are fused into a single pass over the source
-([ADR-126](../../../decisions/126-a-pipeline-materializes-and-collect-named-a-step-it-takes-anyway.md)),
-which is also what the "Faults" column is measuring here: a fused stage has no
-wrapper of its own to fault, while `sorted` and `sorted_by_key` do — and
-`sorted_by_key`'s also propagates whatever the key closure raised. `reversed` is
-the barrier that does *not* fault, and the two facts are the same fact: it reads
-no descriptor callback, which is also why its Requires column is empty where its
-neighbours' are not.
+first element until it has seen the last. Being a barrier is invisible from a
+program except in what it costs — the other stages are fused into a single pass
+over the source, which is also what the "Faults" column is measuring here: a
+fused stage has no wrapper of its own to fault, while `sorted` and
+`sorted_by_key` do — and `sorted_by_key`'s also propagates whatever the key
+closure raised. `reversed` is the barrier that does *not* fault, and the two
+facts are the same fact: it reads no descriptor callback, which is also why its
+Requires column is empty where its neighbours' are not.
 
 `join` is in the sinks table below rather than here, because it answers a
 `Text` rather than a sequence.
@@ -721,12 +715,10 @@ a, b, c
 ### What the Requires column refuses
 
 A tuple can be a key but cannot be ordered — no composite in this language can,
-because ordering goes through one scalar comparison
-([ADR-045](../../../decisions/045-ordering-semantics-and-the-compare-callback.md)).
-That is a statement about `<` and `sorted()`, not about a container: a
-`Map[(Int, Int), V]` still walks and prints its keys element-wise, because it has
-to walk them in *some* reproducible order
-([ADR-138](../../../decisions/138-a-container-orders-by-the-value-and-not-by-its-printing.md)).
+because ordering goes through one scalar comparison. That is a statement about
+`<` and `sorted()`, not about a container: a `Map[(Int, Int), V]` still walks and
+prints its keys element-wise, because it has to walk them in *some* reproducible
+order.
 A record behaves exactly the same way: a fine key, not orderable. A `Vec` is
 neither one nor the other: not orderable, for the same composite reason, and not
 a key, because it can change after it has been stored. Below, the tuple fails the
@@ -819,12 +811,11 @@ and `Int.to_char` are the round trip out of and back into a character, and they
 are `Int` and `Char` rows rather than `Text` ones.
 
 `int()` and `float()` trim the text and then read **exactly what the input
-parser's `int` and `float` atomics read** ([§7.4](../input/atoms.md)), over the
-whole of what is left. They share the parser's own scanner, so `t.int()` and
+parser's [`int` and `float` atomics](../input/atoms.md) read**, over the whole of
+what is left. They share the parser's own scanner, so `t.int()` and
 `parse(t, int)` cannot disagree about what a number is. Anything the run does not
 cover is `None` — `"1 2"`, `"12abc"`, `"1."` — because a text that is not a
-number is absence rather than a fault
-([ADR-136](../../../decisions/136-a-text-becomes-a-number-through-an-option.md)).
+number is absence rather than a fault.
 
 Two answers surprise people, and both follow from that rule:
 
@@ -833,15 +824,14 @@ Two answers surprise people, and both follow from that rule:
 - `"inf".float()` and `"nan".float()` are `None`. `Float` has those values —
   `1.0 / 0.0` is one, and `to_text()` prints them — but no text spells one.
 
-A value past `Int`'s range is `None` too. The [input parser](../input/reading.md)
+A value past `Int`'s range is `None` too. The [input parser](../input/read.md)
 is the other way to get a number out of text, and the one to reach for when the
 text came from input in the first place: it reports where the parse broke instead
 of answering `None`.
 
 There is no `split`, no `chars` and no `to_upper`: all three are `Y110`. `for ch
 in text` is how a `Text` is walked, and the pipeline rows above apply to it
-directly
-([ADR-099](../../../decisions/099-a-list-literal-is-a-vec-and-a-text-is-iterable.md)).
+directly.
 
 ### `Int`
 
@@ -941,20 +931,16 @@ Integer arithmetic is checked by default, and the nine `wrapping_`/`saturating_`
 The `to_text` family is `Int`, `Float` and `Char`, and it is closed at three:
 `Bool` has no row and there is no universal `T.to_text()`. Each of the three
 answers exactly the characters `out` writes — the method and the printer share
-one renderer per scalar, so they cannot drift apart
-([ADR-143](../../../decisions/143-the-to-text-family-is-int-float-and-char.md)).
-A labelled line does not need any of them: `"n = {n}"` renders a value of *any*
-type through the same printer, which is what closed the question these three
-rows left open
-([ADR-147](../../../decisions/147-a-hole-renders-anything-because-the-program-wrote-the-hole.md)).
+one renderer per scalar, so they cannot drift apart. A labelled line does not
+need any of them: `"n = {n}"` renders a value of *any* type through the same
+printer.
 
 ## Subscripts
 
 `m[key]`, `v[i] = x` and `grid[x, y]` are catalog rows too, dispatched on the
 receiver's shape and the index count exactly as a method call is. Their names —
 `[]`, `[]=`, `[]min=`, `[]max=` — are not identifiers, so no program can call
-them by name; the subscript grammar is their only caller
-([ADR-064](../../../decisions/064-a-subscript-is-a-catalog-row.md)).
+them by name; the subscript grammar is their only caller.
 
 Six receivers read. Five of the six also store: every one but `Text`, which is
 immutable.

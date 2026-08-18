@@ -100,7 +100,7 @@ pub fn child<N: AstNode>(parent: &SyntaxNode) -> Option<N> {
 }
 
 /// All children of `parent` whose kind is `N::KIND`, in order.
-pub fn children<N: AstNode>(parent: &SyntaxNode) -> impl Iterator<Item = N> {
+pub fn children<N: AstNode>(parent: &SyntaxNode) -> impl Iterator<Item = N> + use<N> {
     parent.children().filter_map(N::cast)
 }
 

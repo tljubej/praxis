@@ -750,7 +750,8 @@ mod tests {
             if let Some(previous) = by_id.insert(descriptor.id(), descriptor.name) {
                 panic!(
                     "built-in descriptors {previous} and {} share {:?}; descriptor IDs are runtime type identity",
-                    descriptor.name, descriptor.id()
+                    descriptor.name,
+                    descriptor.id()
                 );
             }
         }

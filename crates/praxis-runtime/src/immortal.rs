@@ -19,11 +19,11 @@
 //! module's job is only that the tables are minted here, once, like every other
 //! immortal.
 
+use crate::GcRef;
 use crate::heap::Heap;
-use crate::scalars::{BoolPayload, BOOL_PAYLOAD, CHAR_PAYLOAD, INT_PAYLOAD, UNIT_PAYLOAD};
+use crate::scalars::{BOOL_PAYLOAD, BoolPayload, CHAR_PAYLOAD, INT_PAYLOAD, UNIT_PAYLOAD};
 use crate::small_char::{self, SMALL_CHAR_COUNT, SMALL_CHAR_MAX};
 use crate::small_int::{self, SMALL_INT_COUNT, SMALL_INT_MAX, SMALL_INT_MIN};
-use crate::GcRef;
 
 /// Proof that an [`Heap::alloc_immortal`] call comes from this module.
 ///
@@ -130,11 +130,7 @@ impl Immortals {
     /// The immortal `Bool` for a Rust `bool`.
     #[inline]
     pub fn bool_(&self, b: bool) -> GcRef {
-        if b {
-            self.true_
-        } else {
-            self.false_
-        }
+        if b { self.true_ } else { self.false_ }
     }
 
     /// The interned `Int` for `value`, or `None` when `value` is outside

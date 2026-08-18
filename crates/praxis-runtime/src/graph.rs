@@ -38,9 +38,9 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
+use crate::GcRef;
 use crate::context::FaultKind;
 use crate::dynamic_key::DynamicKey;
-use crate::GcRef;
 
 /// A walk stopped before it had an answer, because a fault is pending.
 ///

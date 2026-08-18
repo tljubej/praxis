@@ -67,8 +67,8 @@
 //! module through one function over one buffer, so `parse(t, rest)` is the
 //! identity on `t` (ADR-078).
 
-use crate::text::{text_bytes, text_root, TextPayload};
 use crate::GcRef;
+use crate::text::{TextPayload, text_bytes, text_root};
 
 /// An absolute byte offset into one [`Input`].
 ///

@@ -1,4 +1,5 @@
-//! §19.11's acceptance criteria, as gates over the query layer.
+//! Hover, completion, signature help, definition and semantic tokens, as
+//! gates over the query layer.
 //!
 //! Each assertion here names the thing an implementation could get *plausibly*
 //! wrong and still pass a weaker test: hover on an inner constructor answering
@@ -112,7 +113,7 @@ fn a_diagnostic_carries_its_notes_as_related_information() {
 }
 
 // ---------------------------------------------------------------------------
-// Hover (§19.11 criterion 3)
+// Hover
 // ---------------------------------------------------------------------------
 
 /// **Criterion 3, twice.** Hovering `read`'s body shows the synthesized result
@@ -181,7 +182,7 @@ fn hover_on_a_capture_type_answers_that_capture() {
 }
 
 // ---------------------------------------------------------------------------
-// Completion (§19.11 criterion 2)
+// Completion
 // ---------------------------------------------------------------------------
 
 /// **Criterion 2 exactly.** `grid.` offers the grid methods, each with its
@@ -302,7 +303,7 @@ fn typing_set_dot_offers_the_pipeline_and_a_grid_still_does_not() {
         );
     }
 
-    // **§19.11's acceptance criterion still holds**, and it holds for the reason
+    // **The rule still holds**, and it holds for the reason
     // the decision gives rather than by accident: `Grid` is out of
     // `PIPELINE_RECEIVERS`, so no pipeline row matches it.
     let grid_src = "fn main() -> Unit {\n  var grid = read grid(char)\n  grid.\n}\n";
@@ -618,7 +619,7 @@ fn document_symbols_list_the_top_level_declarations() {
 }
 
 // ---------------------------------------------------------------------------
-// Semantic tokens (§19.11 criterion 4)
+// Semantic tokens
 // ---------------------------------------------------------------------------
 
 /// **Criterion 4.** Over `` read lines(`{name:word} {n:int}`) `` the four

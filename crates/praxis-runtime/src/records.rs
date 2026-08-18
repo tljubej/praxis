@@ -17,8 +17,8 @@
 
 use std::fmt::Write as _;
 
-use crate::descriptor::{BuiltinTypeId, DynamicHasher, FormatSink, Tracer, TypeDescriptor};
 use crate::GcRef;
+use crate::descriptor::{BuiltinTypeId, DynamicHasher, FormatSink, Tracer, TypeDescriptor};
 
 /// One field of a record shape: its source name plus the descriptor for the
 /// values stored at that field. The descriptor pointer is `const` data shared
@@ -169,7 +169,9 @@ unsafe fn record_format(payload: *const u8, out: &mut FormatSink<'_>) {
         let _ = out.write_str(field.name);
         let _ = out.write_str(": ");
         let elem_desc = unsafe { &*field.descriptor };
-        (elem_desc.format)(item.payload::<u8>() as *const u8, out);
+        // SAFETY: the descriptor came from the schema for this slot, so the slot's
+        // payload is the type its `format` expects.
+        unsafe { (elem_desc.format)(item.payload::<u8>() as *const u8, out) };
     }
     let _ = out.write_str(" }");
 }
@@ -202,7 +204,9 @@ unsafe fn record_equals(a: *const u8, b: *const u8) -> bool {
         };
         let xe = x.payload::<u8>() as *const u8;
         let ye = y.payload::<u8>() as *const u8;
-        if !eq(xe, ye) {
+        // SAFETY: both slots were just checked to carry the same descriptor, and it
+        // is the one whose `equals` this is.
+        if !unsafe { eq(xe, ye) } {
             return false;
         }
     }
@@ -234,7 +238,9 @@ unsafe fn record_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
             return;
         };
         let elem_payload = item.payload::<u8>() as *const u8;
-        hash_field(elem_payload, hasher);
+        // SAFETY: the descriptor came from the schema for this slot, so the slot's
+        // payload is the type its `hash` expects.
+        unsafe { hash_field(elem_payload, hasher) };
     }
 }
 

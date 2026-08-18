@@ -147,8 +147,8 @@ fn the_handshake_completes_and_advertises_the_implemented_capabilities() {
     assert_eq!(caps["renameProvider"]["prepareProvider"], true);
 
     // …and **no more**. Advertising a capability the server does not implement
-    // makes the editor stop offering its own fallback — there is no formatter,
-    // so a client must keep whatever it would do by itself.
+    // makes the editor stop offering its own fallback — Praxis has no
+    // formatter, so a client must keep whatever it would do by itself.
     for absent in [
         "documentFormattingProvider",
         "documentRangeFormattingProvider",
@@ -237,16 +237,16 @@ fn an_edit_changes_what_the_server_answers() {
 
 /// The navigation and edit requests over the wire, against the real binary.
 ///
-/// The query layer has its own gates (`praxis-lsp/tests/m12.rs`); what this adds
+/// The query layer has its own gates (`praxis-lsp/tests/editor_actions.rs`); what this adds
 /// is that each method is **routed and serialized** — a handler the loop does not
 /// dispatch answers `MethodNotFound`, and a response shape a client cannot read
 /// is invisible to a test that calls the function directly.
 #[test]
-fn the_m12_requests_answer_over_the_wire() {
+fn the_editor_action_requests_answer_over_the_wire() {
     let mut session = Session::start();
     initialize(&mut session);
 
-    let uri = "file:///m12.px";
+    let uri = "file:///editor-actions.px";
     session.send(&serde_json::json!({
         "jsonrpc": "2.0",
         "method": "textDocument/didOpen",

@@ -2,7 +2,7 @@
 //!
 //! Walks the name-resolved tree and assigns a [`Type`] to every expression and
 //! a [`Scheme`] to every binding. Uses the level-based let-generalization from
-//! `praxis-types` (ADR-008):
+//! `praxis-typeck` (ADR-008):
 //!
 //! - A `var` RHS is inferred at an inner level and **generalized** at the outer
 //!   level (so `var id = |x| x` becomes `forall T. (T) -> T`), under the two
@@ -23,14 +23,14 @@ use praxis_ast::{
     MethodCallExpr, Param, PathExpr, RecordLitExpr, ReturnExpr, SourceFile, UnaryExpr, VarStmt,
     WhileExpr,
 };
-use praxis_source::{diagnostic::sort_by_position, Diagnostic, FileId, FileSpan};
+use praxis_source::{Diagnostic, FileId, FileSpan, diagnostic::sort_by_position};
 use praxis_syntax::{
-    span_bridge::{range_to_span, span_to_range},
     SyntaxKind,
+    span_bridge::{range_to_span, span_to_range},
 };
-use praxis_types::{
-    unify::UnifyError, CapKind, Capability, CollectionArgs, CollectionCtor, Constraint, Level,
-    ScalarType, Scheme, Type, TypeDb,
+use praxis_typeck::{
+    CapKind, Capability, CollectionArgs, CollectionCtor, Constraint, Level, ScalarType, Scheme,
+    Type, TypeDb, unify::UnifyError,
 };
 use rowan::TextRange;
 
@@ -546,7 +546,7 @@ impl Inferer {
     fn resolve_deferred_field(&mut self, c: &Constraint, name: &str, ty: Type) {
         let receiver = self.db.follow(c.var_type());
         let field = match self.db.data(receiver) {
-            praxis_types::TypeData::Record { def, args } => {
+            praxis_typeck::TypeData::Record { def, args } => {
                 let (def, args) = (*def, args.to_vec());
                 self.db.record_field_of(def, &args, name).map(|(_, t)| t)
             }
@@ -625,7 +625,7 @@ impl Inferer {
             };
             match bound {
                 praxis_stdlib::Bound::Is(scalar) => {
-                    // `praxis_types::ScalarType` *is* the pattern language's
+                    // `praxis_typeck::ScalarType` *is* the pattern language's
                     // scalar (re-exported), so there is nothing to translate.
                     let want = self.db.scalar(scalar);
                     self.unify_at(want, ty, at);
@@ -709,7 +709,7 @@ impl Inferer {
     /// program pins it — which is the common shape, since `var m = Map()` mints
     /// two variables and the first `insert` is what says what they are.
     fn require_collection_invariants(&mut self, t: Type, at: TextRange) {
-        use praxis_types::{data::TypeData, CollectionCtor};
+        use praxis_typeck::{CollectionCtor, data::TypeData};
         let resolved = self.db.follow(t);
         let Some((ctor, args)) = (match self.db.data(resolved) {
             TypeData::Collection { ctor, args } => Some((*ctor, args.to_vec())),
@@ -744,7 +744,7 @@ impl Inferer {
     /// the row's result, the iterator's item, or the field's type with the
     /// variable the call site is holding. That unification is the only thing
     /// that can resolve the receiver of the *next* link, and the next link is
-    /// not in the batch [`praxis_types::TypeDb::take_dischargeable`] already
+    /// not in the batch [`praxis_typeck::TypeDb::take_dischargeable`] already
     /// handed back. Draining a single batch would therefore resolve `t[i]` and
     /// drop `t[i][j]` on the floor — `check` silent, and MIR meeting a method
     /// call with no catalog entry. The loop decides only *when* a constraint is
@@ -959,7 +959,7 @@ impl Inferer {
     fn hint_for(&self, expected: Type, found: Type, context: &str) -> Option<String> {
         let found_data = self.db.data(self.db.follow(found));
         let expected_data = self.db.data(self.db.follow(expected));
-        use praxis_types::TypeData;
+        use praxis_typeck::TypeData;
         match (expected_data, found_data) {
             (_, TypeData::Unit) => {
                 // The expected type's rendered name (e.g. "Int") for the hint.
@@ -969,8 +969,8 @@ impl Inferer {
                 ))
             }
             (
-                TypeData::Scalar(praxis_types::ScalarType::Int),
-                TypeData::Scalar(praxis_types::ScalarType::Text),
+                TypeData::Scalar(praxis_typeck::ScalarType::Int),
+                TypeData::Scalar(praxis_typeck::ScalarType::Text),
                 // `Text.int()` (ADR-136) answers an `Option[Int]` — a text that
                 // is not a number is absence, not a fault (§4.7) — so the help
                 // says how to get the `Int` out rather than implying the call is
@@ -1202,10 +1202,10 @@ impl Inferer {
             self.infer_assign(&assign);
         } else if let Some(assign) = praxis_ast::PlaceAssignStmt::cast(node.clone()) {
             self.infer_place_assign(&assign);
-        } else if let Some(expr) = ExprStmt::cast(node.clone()) {
-            if let Some(e) = expr.expr() {
-                self.infer_expr(&e);
-            }
+        } else if let Some(expr) = ExprStmt::cast(node.clone())
+            && let Some(e) = expr.expr()
+        {
+            self.infer_expr(&e);
         }
     }
 
@@ -1229,13 +1229,13 @@ impl Inferer {
         // The scheme body is either a Func returning the enum type (payload
         // variant) or the enum type itself (zero-payload variant).
         let result_ty = match self.db.data(self.db.follow(body)) {
-            praxis_types::TypeData::Func { result, .. } => *result,
-            praxis_types::TypeData::Enum { .. } => body,
+            praxis_typeck::TypeData::Func { result, .. } => *result,
+            praxis_typeck::TypeData::Enum { .. } => body,
             _ => return None,
         };
         let enum_ty = self.db.follow(result_ty);
         let (def_id, args) = match self.db.data(enum_ty) {
-            praxis_types::TypeData::Enum { def, args } => (*def, args.clone()),
+            praxis_typeck::TypeData::Enum { def, args } => (*def, args.clone()),
             _ => return None,
         };
         let idx = self.db.enum_def(def_id).variant(name)?;
@@ -1412,11 +1412,11 @@ impl Inferer {
         // disagree. Point a real mismatch at the offending tail expression
         // (e.g. the trailing `out(...)`) rather than the whole `fn`, falling
         // back to the block's range, then the whole item.
-        if let Some(b) = body_ty {
-            if let Err(e) = self.db.join(result_ty, b) {
-                let at = tail_range.unwrap_or_else(|| item.syntax().text_range());
-                self.diag_unify_hinted(self.file_span(at), e, "the function body");
-            }
+        if let Some(b) = body_ty
+            && let Err(e) = self.db.join(result_ty, b)
+        {
+            let at = tail_range.unwrap_or_else(|| item.syntax().text_range());
+            self.diag_unify_hinted(self.file_span(at), e, "the function body");
         }
         self.db.exit_level(prev);
         // Check the requirements this body's own uses settled, *before*
@@ -1431,10 +1431,10 @@ impl Inferer {
         // open for the signatures declared after this one, and generalizing
         // against it would quantify nothing.
         let scheme = self.db.generalize_at(placeholder, self.decl_site);
-        if let Some(id) = fn_symbol {
-            if let Some(sym) = self.names.get_mut(id) {
-                sym.scheme = Some(scheme);
-            }
+        if let Some(id) = fn_symbol
+            && let Some(sym) = self.names.get_mut(id)
+        {
+            sym.scheme = Some(scheme);
         }
     }
 
@@ -1575,10 +1575,10 @@ impl Inferer {
     /// parameter, a pattern name — funnels through here, so a rule added to it
     /// reaches all of them rather than whichever copy it was written into.
     fn attach_scheme_at(&mut self, range: TextRange, scheme: Scheme) {
-        if let Some(&id) = self.decls.get(&range) {
-            if let Some(sym) = self.names.get_mut(id) {
-                sym.scheme = Some(scheme);
-            }
+        if let Some(&id) = self.decls.get(&range)
+            && let Some(sym) = self.names.get_mut(id)
+        {
+            sym.scheme = Some(scheme);
         }
     }
 
@@ -1606,7 +1606,7 @@ impl Inferer {
     /// costs nothing: what is read off the list is the *name* a binder gets, and
     /// two schemes that both quantify one variable both name it.
     fn name_enclosing_binders(&mut self) {
-        let owners: Vec<Vec<praxis_types::VarId>> = self
+        let owners: Vec<Vec<praxis_typeck::VarId>> = self
             .names
             .all()
             .iter()
@@ -1774,7 +1774,7 @@ impl Inferer {
         // Read the expected Func's params/result (after following). If it is not
         // a Func, or the param count differs, defer to the bottom-up path.
         let (exp_params, exp_result) = match self.db.data(self.db.follow(expected)) {
-            praxis_types::TypeData::Func { params, result } => (params.clone(), *result),
+            praxis_typeck::TypeData::Func { params, result } => (params.clone(), *result),
             _ => return self.infer_closure(c),
         };
         let closure_params: Vec<_> = c.params().collect();
@@ -1852,25 +1852,24 @@ impl Inferer {
         // A head that is not a `struct`, reported before the type is consulted,
         // so an `enum`, a `fn`, a builtin and a binding all answer the same way
         // and all of them stop here.
-        if let Some(resolved) = resolved_head {
-            if let Some(sym) = self.names.get(resolved.symbol) {
-                if sym.kind != SymbolKind::Struct {
-                    let at = r
-                        .name()
-                        .and_then(|p| p.name())
-                        .map(|tok| tok.text_range())
-                        .unwrap_or_else(|| r.syntax().text_range());
-                    let kind = describe_binding(sym.kind);
-                    let name = sym.name.clone();
-                    self.diagnostics
-                        .push(crate::diagnostics::not_a_record_literal_head(
-                            self.file_span(at),
-                            &name,
-                            kind,
-                        ));
-                    return self.infer_record_lit_fields_only(r);
-                }
-            }
+        if let Some(resolved) = resolved_head
+            && let Some(sym) = self.names.get(resolved.symbol)
+            && sym.kind != SymbolKind::Struct
+        {
+            let at = r
+                .name()
+                .and_then(|p| p.name())
+                .map(|tok| tok.text_range())
+                .unwrap_or_else(|| r.syntax().text_range());
+            let kind = describe_binding(sym.kind);
+            let name = sym.name.clone();
+            self.diagnostics
+                .push(crate::diagnostics::not_a_record_literal_head(
+                    self.file_span(at),
+                    &name,
+                    kind,
+                ));
+            return self.infer_record_lit_fields_only(r);
         }
         let Some(struct_ty) = struct_ty else {
             // Unknown struct: infer each field for diagnostics, return a fresh var.
@@ -1880,7 +1879,7 @@ impl Inferer {
         // whose type is not a record is a declaration that failed to register
         // (`N006`); it has been reported and there is nothing here to check.
         let (def_id, def_args) = match self.db.data(self.db.follow(struct_ty)) {
-            praxis_types::TypeData::Record { def, args } => (*def, args.clone()),
+            praxis_typeck::TypeData::Record { def, args } => (*def, args.clone()),
             _ => return struct_ty,
         };
         // A record literal is **exact**: every declared field exactly once, and
@@ -1980,7 +1979,7 @@ impl Inferer {
     ///
     /// The type is registered here rather than looked up: an anonymous record's
     /// identity is its field set, so a literal writing one *is* a definition of
-    /// it. Every literal mints its own def and [`unify`](praxis_types::unify)
+    /// it. Every literal mints its own def and [`unify`](praxis_typeck::unify)
     /// links two with matching field names into one — the same way the input
     /// parser's derived records establish identity, and for the same reason
     /// (ADR-025): going through unification is what makes the field *types* get
@@ -1990,7 +1989,7 @@ impl Inferer {
     /// to be missing a field of, none to have an unknown field of, and none to
     /// disagree with about a type. **Duplicate field names are still refused** —
     /// `{ x: 1, x: 2 }` names one slot twice whatever the type turns out to be,
-    /// and a [`FieldSet`](praxis_types::FieldSet) is the one thing that cannot
+    /// and a [`FieldSet`](praxis_typeck::FieldSet) is the one thing that cannot
     /// hold it.
     ///
     /// Field order is kept as written. §5.6 makes it irrelevant to *identity* —
@@ -2021,7 +2020,7 @@ impl Inferer {
         }
         // The duplicate check above is what makes this infallible: `FieldSet`
         // rejects a repeated name and there is no other way to build one.
-        match praxis_types::FieldSet::from_pairs(fields) {
+        match praxis_typeck::FieldSet::from_pairs(fields) {
             Ok(field_set) => self.db.record(None, field_set),
             Err(_) => self.db.fresh_var(),
         }
@@ -2058,7 +2057,7 @@ impl Inferer {
         };
         let fname = field_tok.text().to_string();
         let resolved = self.db.follow(receiver_ty);
-        if let praxis_types::TypeData::Record { def, args } = self.db.data(resolved) {
+        if let praxis_typeck::TypeData::Record { def, args } = self.db.data(resolved) {
             let (def, args) = (*def, args.clone());
             if let Some((_, ty)) = self.db.record_field_of(def, &args, &fname) {
                 return ty;
@@ -2092,7 +2091,7 @@ impl Inferer {
         let index = t.index().unwrap_or(usize::MAX);
         let resolved = self.db.follow(receiver_ty);
         match self.db.data(resolved) {
-            praxis_types::TypeData::Tuple(els) => {
+            praxis_typeck::TypeData::Tuple(els) => {
                 let (arity, element) = (els.len(), els.get(index).copied());
                 match element {
                     Some(el) => el,
@@ -2108,7 +2107,7 @@ impl Inferer {
                 }
             }
             // Optimistic: inference has not said what this is yet.
-            praxis_types::TypeData::Var(_) => self.db.fresh_var(),
+            praxis_typeck::TypeData::Var(_) => self.db.fresh_var(),
             _ => {
                 let rendered = self.db.render(resolved);
                 self.diagnostics.push(crate::diagnostics::not_a_tuple(
@@ -2386,7 +2385,7 @@ impl Inferer {
             PatternKind::Tuple => {
                 let subs: Vec<_> = pat.sub_patterns().collect();
                 let elems: Vec<Type> = subs.iter().map(|_| self.db.fresh_var()).collect();
-                match praxis_types::TupleElems::new(elems.clone()) {
+                match praxis_typeck::TupleElems::new(elems.clone()) {
                     Ok(te) => {
                         let tuple_ty = self.db.tuple(te);
                         self.unify_at(expected, tuple_ty, pat.syntax().text_range());
@@ -2437,7 +2436,7 @@ impl Inferer {
             .unwrap_or_else(|| pat.syntax().text_range());
         let resolved = self.db.follow(expected);
         let scrutinee_enum = match self.db.data(resolved) {
-            praxis_types::TypeData::Enum { def, args } => Some((*def, args.clone())),
+            praxis_typeck::TypeData::Enum { def, args } => Some((*def, args.clone())),
             _ => None,
         };
         let found = match scrutinee_enum {
@@ -2565,12 +2564,12 @@ impl Inferer {
             return;
         };
         let (def_id, def_args) = match self.db.data(self.db.follow(head_ty)) {
-            praxis_types::TypeData::Record { def, args } => (*def, args.clone()),
+            praxis_typeck::TypeData::Record { def, args } => (*def, args.clone()),
             // A headless pattern whose scrutinee is still open: the fields it
             // names do not determine a record, so there is no honest type to
             // bind them at. See this function's doc comment for why silence
             // here is wrong. Name the record, or annotate the value.
-            praxis_types::TypeData::Var(_) if rname.is_none() => {
+            praxis_typeck::TypeData::Var(_) if rname.is_none() => {
                 self.diagnostics.push(crate::diagnostics::not_a_pattern(
                     at,
                     "`{ … }` cannot tell which record it matches here; \
@@ -2826,7 +2825,7 @@ impl Inferer {
     /// The kind is what makes this answerable: a `var` bound to a closure also
     /// has a `Func` scheme, and a generalized one at that, so the scheme alone
     /// cannot tell a declaration from a binding that holds a value.
-    fn is_generic_fn(&self, symbol: SymbolId, scheme: &praxis_types::Scheme) -> bool {
+    fn is_generic_fn(&self, symbol: SymbolId, scheme: &praxis_typeck::Scheme) -> bool {
         self.names.get(symbol).map(|s| s.kind) == Some(SymbolKind::Fn)
             && !scheme.binders().is_empty()
     }
@@ -2854,7 +2853,7 @@ impl Inferer {
         };
         let resolved = self.db.follow(ty);
         match self.db.data(resolved) {
-            praxis_types::TypeData::Func { params, .. } => Some((what, params.len())),
+            praxis_typeck::TypeData::Func { params, .. } => Some((what, params.len())),
             _ => None,
         }
     }
@@ -3142,12 +3141,12 @@ impl Inferer {
         let unit = self.db.unit();
         let mut pending: Option<(Type, TextRange)> = None;
         for child in block.stmts() {
-            if let Some(expr_stmt) = ExprStmt::cast(child.clone()) {
-                if let Some(e) = expr_stmt.expr() {
-                    let ty = self.infer_expr(&e);
-                    pending = Some((ty, e.syntax().text_range()));
-                    continue;
-                }
+            if let Some(expr_stmt) = ExprStmt::cast(child.clone())
+                && let Some(e) = expr_stmt.expr()
+            {
+                let ty = self.infer_expr(&e);
+                pending = Some((ty, e.syntax().text_range()));
+                continue;
             }
             self.infer_top_stmt(&child);
             pending = None;
@@ -3472,105 +3471,100 @@ impl Inferer {
         // (which pins a fresh closure param to a Func and checks the arity), and
         // return `result`. The lowered callee_expr carries this Func type, so the
         // HIR lowerer reads its result type for the call's type.
-        if c.callee().is_none() {
-            if let Some(callee_expr) = c.callee_expr() {
-                let callee_ty = self.infer_expr(&callee_expr);
-                let result = self.db.fresh_var();
-                let expected = self.db.func(arg_types, result);
-                self.unify_at(callee_ty, expected, c.syntax().text_range());
-                return result;
-            }
+        if c.callee().is_none()
+            && let Some(callee_expr) = c.callee_expr()
+        {
+            let callee_ty = self.infer_expr(&callee_expr);
+            let result = self.db.fresh_var();
+            let expected = self.db.func(arg_types, result);
+            self.unify_at(callee_ty, expected, c.syntax().text_range());
+            return result;
         }
         // Resolve the callee to a function scheme and instantiate it.
-        if let Some(callee) = c.callee() {
-            if let Some(name_tok) = callee.name() {
-                let range = name_tok.text_range();
-                if let Some(resolved) = self.refs.get(&range).copied() {
-                    let scheme = self
-                        .names
-                        .get(resolved.symbol)
-                        .and_then(|s| s.scheme.clone());
-                    if let Some(scheme) = scheme {
-                        // Instantiating **at the call site**: a requirement the
-                        // callee's scheme carries is re-emitted against this
-                        // call's types, and a failure is reported here rather
-                        // than inside the generic body — where the very same
-                        // expression is correct for every other instantiation.
-                        let site = self.file_span(c.syntax().text_range());
-                        // A collection constructor's argument *count* selects
-                        // its shape (ADR-146): `Vec(n, fill)` and `Grid(w, h,
-                        // fill)` are built here rather than instantiated,
-                        // because the seeded scheme is the empty form and stays
-                        // that way. Every other callee, and every nullary
-                        // construction, takes the instantiation below.
-                        let callee_ty = match self.sized_ctor_type(resolved.symbol, arg_types.len())
-                        {
-                            Some(ty) => ty,
-                            None => self.db.instantiate_at(&scheme, site),
-                        };
-                        // The callee name is a `PATH_EXPR` that nothing
-                        // evaluates, and this instantiation is its type. It is
-                        // deliberately *not* also written to `ref_types`: hover
-                        // over a callee shows the binding's generalized scheme,
-                        // which is what `hover_over_out_shows_polymorphic_scheme`
-                        // pins, and a per-use entry would displace it.
-                        self.record_node_type(callee.syntax(), callee_ty);
-                        let result = self.db.fresh_var();
-                        // Snapshot the concrete arg types before they are moved
-                        // into the expected Func type — this is the call site's
-                        // monomorphization witness (§13.6).
-                        let arg_types_snapshot = arg_types.clone();
-                        // A graph helper's first argument is the state the walk
-                        // starts from, and the requirement below is about its
-                        // type. Read before the witness is moved.
-                        let state_arg = arg_types_snapshot.first().copied();
-                        // Written type arguments constrain what this call
-                        // constructs: `Counter[(Int, Int)]()` says the key type
-                        // here, where inference would otherwise wait for a use
-                        // to pin it. Applied to the *instantiated* callee, so
-                        // the constraint lands on this call site's variables and
-                        // not on the ctor's scheme.
-                        self.apply_written_type_args(c, callee_ty);
-                        let expected = self.db.func(arg_types, result);
-                        self.unify_at(callee_ty, expected, c.syntax().text_range());
-                        // Record the witness: the callee symbol + the concrete
-                        // arg types. After unification these pin the callee's
-                        // quantified vars, so the mono pass can instantiate the
-                        // scheme with them. (Captured even for monomorphic
-                        // callees — cheap, and keeps the mono pass uniform.)
-                        self.call_sites.insert(
-                            range,
-                            crate::CallSite {
-                                callee: resolved.symbol,
-                                arg_types: arg_types_snapshot,
-                                // The result is a witness too: a callee whose
-                                // quantified variable appears only in its result
-                                // (`fn empty() { Vec() }`) has nothing to
-                                // specialize from otherwise.
-                                result,
-                            },
-                        );
-                        // A graph helper's state type has to be a `Set` element
-                        // and a `Map` key, because the walk remembers where it
-                        // has been (ADR-060).
-                        self.require_graph_state(
-                            resolved.symbol,
-                            state_arg,
-                            c.syntax().text_range(),
-                        );
-                        // For the common builtin `out(x)`, the scheme is
-                        // forall T. (T) -> Unit, so the result unifies to Unit.
-                        if self.is_builtin(resolved.symbol, "out") {
-                            return self.db.unit();
-                        }
-                        if self.is_builtin(resolved.symbol, "panic") {
-                            return self.db.never();
-                        }
-                        return result;
+        if let Some(callee) = c.callee()
+            && let Some(name_tok) = callee.name()
+        {
+            let range = name_tok.text_range();
+            if let Some(resolved) = self.refs.get(&range).copied() {
+                let scheme = self
+                    .names
+                    .get(resolved.symbol)
+                    .and_then(|s| s.scheme.clone());
+                if let Some(scheme) = scheme {
+                    // Instantiating **at the call site**: a requirement the
+                    // callee's scheme carries is re-emitted against this
+                    // call's types, and a failure is reported here rather
+                    // than inside the generic body — where the very same
+                    // expression is correct for every other instantiation.
+                    let site = self.file_span(c.syntax().text_range());
+                    // A collection constructor's argument *count* selects
+                    // its shape (ADR-146): `Vec(n, fill)` and `Grid(w, h,
+                    // fill)` are built here rather than instantiated,
+                    // because the seeded scheme is the empty form and stays
+                    // that way. Every other callee, and every nullary
+                    // construction, takes the instantiation below.
+                    let callee_ty = match self.sized_ctor_type(resolved.symbol, arg_types.len()) {
+                        Some(ty) => ty,
+                        None => self.db.instantiate_at(&scheme, site),
+                    };
+                    // The callee name is a `PATH_EXPR` that nothing
+                    // evaluates, and this instantiation is its type. It is
+                    // deliberately *not* also written to `ref_types`: hover
+                    // over a callee shows the binding's generalized scheme,
+                    // which is what `hover_over_out_shows_polymorphic_scheme`
+                    // pins, and a per-use entry would displace it.
+                    self.record_node_type(callee.syntax(), callee_ty);
+                    let result = self.db.fresh_var();
+                    // Snapshot the concrete arg types before they are moved
+                    // into the expected Func type — this is the call site's
+                    // monomorphization witness (§13.6).
+                    let arg_types_snapshot = arg_types.clone();
+                    // A graph helper's first argument is the state the walk
+                    // starts from, and the requirement below is about its
+                    // type. Read before the witness is moved.
+                    let state_arg = arg_types_snapshot.first().copied();
+                    // Written type arguments constrain what this call
+                    // constructs: `Counter[(Int, Int)]()` says the key type
+                    // here, where inference would otherwise wait for a use
+                    // to pin it. Applied to the *instantiated* callee, so
+                    // the constraint lands on this call site's variables and
+                    // not on the ctor's scheme.
+                    self.apply_written_type_args(c, callee_ty);
+                    let expected = self.db.func(arg_types, result);
+                    self.unify_at(callee_ty, expected, c.syntax().text_range());
+                    // Record the witness: the callee symbol + the concrete
+                    // arg types. After unification these pin the callee's
+                    // quantified vars, so the mono pass can instantiate the
+                    // scheme with them. (Captured even for monomorphic
+                    // callees — cheap, and keeps the mono pass uniform.)
+                    self.call_sites.insert(
+                        range,
+                        crate::CallSite {
+                            callee: resolved.symbol,
+                            arg_types: arg_types_snapshot,
+                            // The result is a witness too: a callee whose
+                            // quantified variable appears only in its result
+                            // (`fn empty() { Vec() }`) has nothing to
+                            // specialize from otherwise.
+                            result,
+                        },
+                    );
+                    // A graph helper's state type has to be a `Set` element
+                    // and a `Map` key, because the walk remembers where it
+                    // has been (ADR-060).
+                    self.require_graph_state(resolved.symbol, state_arg, c.syntax().text_range());
+                    // For the common builtin `out(x)`, the scheme is
+                    // forall T. (T) -> Unit, so the result unifies to Unit.
+                    if self.is_builtin(resolved.symbol, "out") {
+                        return self.db.unit();
                     }
-                    // Builtin with no scheme yet (shouldn't happen for out/panic,
-                    // but be defensive): fall through to a fresh var.
+                    if self.is_builtin(resolved.symbol, "panic") {
+                        return self.db.never();
+                    }
+                    return result;
                 }
+                // Builtin with no scheme yet (shouldn't happen for out/panic,
+                // but be defensive): fall through to a fresh var.
             }
         }
         self.db.fresh_var()
@@ -3599,17 +3593,17 @@ impl Inferer {
         // The constructed type is the callee's *result*: `Counter` is
         // `forall T. () -> Counter[T]`, and the arguments belong to the `Counter[T]`.
         let constructed = match self.db.data(self.db.follow(callee_ty)) {
-            praxis_types::TypeData::Func { result, .. } => *result,
+            praxis_typeck::TypeData::Func { result, .. } => *result,
             // A callee that is not a function has already been reported (or will
             // be by the unification below); saying so again here is the cascade
             // every other report in this function avoids.
             _ => return,
         };
         let (name, params) = match self.db.data(self.db.follow(constructed)) {
-            praxis_types::TypeData::Collection { ctor, args } => {
+            praxis_typeck::TypeData::Collection { ctor, args } => {
                 (ctor.name().to_string(), args.clone())
             }
-            praxis_types::TypeData::Enum { def, args } => {
+            praxis_typeck::TypeData::Enum { def, args } => {
                 let name = self.db.enum_def(*def).name.clone();
                 (
                     name.unwrap_or_else(|| "this type".to_string()),
@@ -4001,7 +3995,7 @@ fn operand_is_float_literal(operand: &Option<Expr>) -> bool {
 fn is_float_scalar(db: &TypeDb, t: Type) -> bool {
     matches!(
         db.data(db.follow(t)),
-        praxis_types::TypeData::Scalar(ScalarType::Float)
+        praxis_typeck::TypeData::Scalar(ScalarType::Float)
     )
 }
 
@@ -4009,7 +4003,7 @@ fn is_float_scalar(db: &TypeDb, t: Type) -> bool {
 fn is_text_scalar(db: &TypeDb, t: Type) -> bool {
     matches!(
         db.data(db.follow(t)),
-        praxis_types::TypeData::Scalar(ScalarType::Text)
+        praxis_typeck::TypeData::Scalar(ScalarType::Text)
     )
 }
 

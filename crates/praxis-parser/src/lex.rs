@@ -1255,9 +1255,11 @@ error[T003]: unexpected character in source
     /// see.
     #[test]
     fn same_line_tokens_report_no_newline() {
-        assert!(newline_flags("var a = 1 var b = 2")
-            .iter()
-            .all(|(_, newline)| !newline));
+        assert!(
+            newline_flags("var a = 1 var b = 2")
+                .iter()
+                .all(|(_, newline)| !newline)
+        );
     }
 
     /// The fact belongs to the whole trivia run, not to its last token: a

@@ -219,8 +219,7 @@ fn validate_template(parts: &[TemplatePart], span: Span, errs: &mut Vec<Validati
         errs.push(ValidationError {
             span,
             code: DiagCode::MixedCaptureNaming,
-            message: "named and anonymous captures may not be mixed in one template (§7.3)"
-                .to_string(),
+            message: "named and anonymous captures may not be mixed in one template".to_string(),
         });
     }
 
@@ -450,7 +449,7 @@ pub fn check_call(ctor: Constructor, args: &[ArgKind], span: Span) -> Vec<Valida
                     code: DiagCode::InvalidConstructorArgument,
                     message:
                         "`grid`'s ragged form is written `grid(P, ragged, fill: value)` — `ragged` \
-                         and `fill:` come together or not at all (§7.5)"
+                         and `fill:` come together or not at all"
                             .to_string(),
                 });
             }
@@ -620,22 +619,26 @@ mod tests {
         let named = |n: &str| ArgKind::Named(n.to_string());
 
         // The two constructors §7.5 gives a keyword argument.
-        assert!(check_call(
-            Constructor::Chars,
-            &[ArgKind::Parser, kw("skip")],
-            Span::at(0)
-        )
-        .is_empty());
-        assert!(check_call(
-            Constructor::Grid,
-            &[
-                ArgKind::Parser,
-                ArgKind::Flag("ragged".to_string()),
-                kw("fill")
-            ],
-            Span::at(0)
-        )
-        .is_empty());
+        assert!(
+            check_call(
+                Constructor::Chars,
+                &[ArgKind::Parser, kw("skip")],
+                Span::at(0)
+            )
+            .is_empty()
+        );
+        assert!(
+            check_call(
+                Constructor::Grid,
+                &[
+                    ArgKind::Parser,
+                    ArgKind::Flag("ragged".to_string()),
+                    kw("fill")
+                ],
+                Span::at(0)
+            )
+            .is_empty()
+        );
 
         // Everywhere else — including the *other* constructor's keyword.
         for (ctor, args) in [
@@ -655,18 +658,22 @@ mod tests {
         }
 
         // The same shape with a named *parser* there is fine.
-        assert!(check_call(
-            Constructor::Block,
-            &[ArgKind::Parser, named("fill")],
-            Span::at(0)
-        )
-        .is_empty());
-        assert!(check_call(
-            Constructor::Sections,
-            &[named("rules"), named("fill")],
-            Span::at(0)
-        )
-        .is_empty());
+        assert!(
+            check_call(
+                Constructor::Block,
+                &[ArgKind::Parser, named("fill")],
+                Span::at(0)
+            )
+            .is_empty()
+        );
+        assert!(
+            check_call(
+                Constructor::Sections,
+                &[named("rules"), named("fill")],
+                Span::at(0)
+            )
+            .is_empty()
+        );
     }
 
     /// **A keyword argument's *value* is part of its shape.**
@@ -682,7 +689,7 @@ mod tests {
     /// which is the point of asserting it here rather than at either one.
     #[test]
     fn a_keyword_argument_with_no_value_is_not_a_shape() {
-        use crate::call::{build_call, CallArg};
+        use crate::call::{CallArg, build_call};
 
         let grid = |fill: &str| {
             build_call(
@@ -836,16 +843,22 @@ mod tests {
 
         // No parser at all, and a count where the parser belongs.
         assert!(ok(&[]).iter().any(|e| e.code == DiagCode::ConstructorArity));
-        assert!(ok(&[ArgKind::Int])
-            .iter()
-            .any(|e| e.code == DiagCode::InvalidConstructorArgument));
+        assert!(
+            ok(&[ArgKind::Int])
+                .iter()
+                .any(|e| e.code == DiagCode::InvalidConstructorArgument)
+        );
         // A second parser is not a count — this is the diagnostic a
         // non-literal `repeated(P, n)` earns.
-        assert!(ok(&[ArgKind::Parser, ArgKind::Parser])
-            .iter()
-            .any(|e| e.code == DiagCode::InvalidConstructorArgument));
-        assert!(ok(&[ArgKind::Parser, ArgKind::Int, ArgKind::Int])
-            .iter()
-            .any(|e| e.code == DiagCode::ConstructorArity));
+        assert!(
+            ok(&[ArgKind::Parser, ArgKind::Parser])
+                .iter()
+                .any(|e| e.code == DiagCode::InvalidConstructorArgument)
+        );
+        assert!(
+            ok(&[ArgKind::Parser, ArgKind::Int, ArgKind::Int])
+                .iter()
+                .any(|e| e.code == DiagCode::ConstructorArity)
+        );
     }
 }

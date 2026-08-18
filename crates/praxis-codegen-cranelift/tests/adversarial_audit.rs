@@ -11,7 +11,7 @@ use praxis_hir::{analyze_root, lower, mono::monomorphize};
 use praxis_mir::{annotate, lower_module};
 use praxis_parser::parse;
 use praxis_runtime::{
-    collections::VecPayload, tuples::TuplePayload, GcRef, Runtime, RuntimeContext,
+    GcRef, Runtime, RuntimeContext, collections::VecPayload, tuples::TuplePayload,
 };
 use praxis_source::SourceMap;
 
@@ -649,8 +649,7 @@ fn a_grid_of_char_is_positional_so_a_space_is_a_cell() {
 /// file alike.
 #[test]
 fn a_grid_row_may_end_in_horizontal_whitespace() {
-    let src =
-        "fn main() -> Int {\n  var g = read grid(int)\n  g.width() * 100 + g.height() * 10 + g[1, 1]\n}\n";
+    let src = "fn main() -> Int {\n  var g = read grid(int)\n  g.width() * 100 + g.height() * 10 + g[1, 1]\n}\n";
     let (runtime, result) = run_main_with_input(src, "12 34 \n56 78 \n");
     assert!(!runtime.has_pending_fault(), "fault: {:?}", runtime.fault());
     assert_eq!(result.as_int(), 2 * 100 + 2 * 10 + 78);

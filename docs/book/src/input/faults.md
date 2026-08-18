@@ -360,11 +360,10 @@ waiting on is what failed. Everything bound *before* the `read` is live and
 readable — `p limit` answers `25` — which is often enough to tell whether the
 parser is wrong or the input is.
 
-`parser expression: <unknown parser>` is not a defect in your program. The
-design document reserves a parser-expression source span on every parse failure,
-so that the debugger can underline the `lines(int)` that failed; the runtime
-does not populate it, so the command reports the expectation and says the span
-is unavailable. The full command list is in [inspecting the input
+`parser expression: <unknown parser>` is not a defect in your program. A parse
+fault carries what the failing parser expected, not the source text of the
+parser that raised it, so `parser` answers with the expectation and reports the
+expression itself as unknown. The full command list is in [inspecting the input
 parser](../debugger/parser.md).
 
 ## Compile-time errors
@@ -390,11 +389,11 @@ $ praxis check f-err-shape.px --color never
 ```
 
 ```text
-error[I013]: unknown parser constructor `frobnicate` (§7.5)
+error[I013]: unknown parser constructor `frobnicate`
 
   f-err-shape.px:3:14
   3 | var a = read frobnicate(int)
-    |              ^^^^^^^^^^ unknown parser constructor `frobnicate` (§7.5)
+    |              ^^^^^^^^^^ unknown parser constructor `frobnicate`
 
 error[I022]: `optional` expects 1 argument, got 2
 
@@ -420,11 +419,11 @@ error[I014]: `sep` argument 1 is a parser, but the separator must be a string li
   6 | var d = read sep(int, int)
     |              ^^^^^^^^^^^^^ `sep` argument 1 is a parser, but the separator must be a string literal
 
-error[I014]: `skip: wihtespace` is not a skip policy — `none` (skips nothing), `whitespace` (skips spaces and tabs) or `newlines` (skips spaces, tabs and line endings) (§7.5)
+error[I014]: `skip: wihtespace` is not a skip policy — `none` (skips nothing), `whitespace` (skips spaces and tabs) or `newlines` (skips spaces, tabs and line endings)
 
   f-err-shape.px:7:14
   7 | var e = read chars(digit, skip: wihtespace)
-    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `skip: wihtespace` is not a skip policy — `none` (skips nothing), `whitespace` (skips spaces and tabs) or `newlines` (skips spaces, tabs and line endings) (§7.5)
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `skip: wihtespace` is not a skip policy — `none` (skips nothing), `whitespace` (skips spaces and tabs) or `newlines` (skips spaces, tabs and line endings)
 
 praxis: 6 error(s)
 ```
@@ -452,17 +451,17 @@ $ praxis check f-err-marker.px --color never
 ```
 
 ```text
-error[I028]: an unbounded `repeated(...)` tail may appear only as the final named argument (§7.5): it consumes every remaining section, so nothing can follow it — write `repeated(P, N)` for a group of N sections, which can
+error[I028]: an unbounded `repeated(...)` tail may appear only as the final named argument: it consumes every remaining section, so nothing can follow it — write `repeated(P, N)` for a group of N sections, which can
 
   f-err-marker.px:5:14
   5 | var a = read sections(boards: repeated(matrix(int)), draws: csv(int))
-    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ an unbounded `repeated(...)` tail may appear only as the final named argument (§7.5): it consumes every remaining section, so nothing can follow it — write `repeated(P, N)` for a group of N sections, which can
+    |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ an unbounded `repeated(...)` tail may appear only as the final named argument: it consumes every remaining section, so nothing can follow it — write `repeated(P, N)` for a group of N sections, which can
 
-error[I028]: `repeated(...)` is only a named argument of a `sections` call (§7.5)
+error[I028]: `repeated(...)` is only a named argument of a `sections` call
 
   f-err-marker.px:6:14
   6 | var b = read repeated(int)
-    |              ^^^^^^^^^^^^^ `repeated(...)` is only a named argument of a `sections` call (§7.5)
+    |              ^^^^^^^^^^^^^ `repeated(...)` is only a named argument of a `sections` call
 
 error[I023]: `sep` needs a non-empty separator: an empty one never advances
 
@@ -470,11 +469,11 @@ error[I023]: `sep` needs a non-empty separator: an empty one never advances
   7 | var c = read sep("", int)
     |              ^^^^^^^^^^^^ `sep` needs a non-empty separator: an empty one never advances
 
-error[I014]: `grid`'s ragged form is written `grid(P, ragged, fill: value)` — `ragged` and `fill:` come together or not at all (§7.5)
+error[I014]: `grid`'s ragged form is written `grid(P, ragged, fill: value)` — `ragged` and `fill:` come together or not at all
 
   f-err-marker.px:8:14
   8 | var d = read grid(char, fill: ".")
-    |              ^^^^^^^^^^^^^^^^^^^^^ `grid`'s ragged form is written `grid(P, ragged, fill: value)` — `ragged` and `fill:` come together or not at all (§7.5)
+    |              ^^^^^^^^^^^^^^^^^^^^^ `grid`'s ragged form is written `grid(P, ragged, fill: value)` — `ragged` and `fill:` come together or not at all
 
 praxis: 4 error(s)
 ```
@@ -483,9 +482,9 @@ Two of those refuse something meaningless rather than something misspelled. An
 empty separator never advances a cursor, so `sep("", P)` would loop forever, and
 it is refused where it is written rather than discovered at run time; an empty
 `fill:` is refused by the same rule, because a pad of no characters pads
-nothing. And `grid(char, fill: ".")` without `ragged` is not a shorthand: it
-used to *become* the ragged parser on the strength of the `fill:` alone, which
-is a different parser than the one written.
+nothing. And `grid(char, fill: ".")` without `ragged` is not a shorthand for the
+ragged form: a `fill:` on its own would quietly build a different parser from
+the one written, so the shape requires the two words together.
 
 ### Templates and block items
 
@@ -503,11 +502,11 @@ $ praxis check f-err-template.px --color never
 ```
 
 ```text
-error[I020]: named and anonymous captures may not be mixed in one template (§7.3)
+error[I020]: named and anonymous captures may not be mixed in one template
 
   f-err-template.px:4:20
   4 | var a = read lines(`{x:int},{int}`)
-    |                    ^^^^^^^^^^^^^^^ named and anonymous captures may not be mixed in one template (§7.3)
+    |                    ^^^^^^^^^^^^^^^ named and anonymous captures may not be mixed in one template
 
 error[I021]: duplicate capture name `x` in template
 

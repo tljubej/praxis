@@ -43,8 +43,8 @@
 
 use praxis_ast::AstNode;
 use praxis_source::{Diagnostic, FileId, FileSpan, Span};
-use praxis_syntax::{span_bridge::range_to_span, SyntaxKind};
-use praxis_types::{data::TypeData, EnumDefId, RecordDefId, ScalarType, Type, TypeDb};
+use praxis_syntax::{SyntaxKind, span_bridge::range_to_span};
+use praxis_typeck::{EnumDefId, RecordDefId, ScalarType, Type, TypeDb, data::TypeData};
 use rowan::NodeOrToken;
 
 use crate::diagnostics::{non_exhaustive, unreachable_arm};
@@ -1048,7 +1048,7 @@ mod tests {
 
     /// The two-variant `Tile` enum most enum tests here match on.
     fn tile_enum(db: &mut TypeDb) -> Type {
-        let variants = praxis_types::VariantSet::from_pairs(vec![
+        let variants = praxis_typeck::VariantSet::from_pairs(vec![
             ("Empty".into(), Vec::new()),
             ("Wall".into(), Vec::new()),
         ])
@@ -1058,7 +1058,7 @@ mod tests {
 
     /// `enum Flag { On, Off }` — the payload the nested tests recurse into.
     fn flag_enum(db: &mut TypeDb) -> Type {
-        let variants = praxis_types::VariantSet::from_pairs(vec![
+        let variants = praxis_typeck::VariantSet::from_pairs(vec![
             ("On".into(), Vec::new()),
             ("Off".into(), Vec::new()),
         ])
@@ -1069,14 +1069,14 @@ mod tests {
     /// `enum Wrapped { Wrap(Flag) }` — one variant, so a top-level check would
     /// call every match on it exhaustive.
     fn wrapped_enum(db: &mut TypeDb, flag: Type) -> Type {
-        let variants = praxis_types::VariantSet::from_pairs(vec![("Wrap".into(), vec![flag])])
+        let variants = praxis_typeck::VariantSet::from_pairs(vec![("Wrap".into(), vec![flag])])
             .expect("distinct variant names");
         db.enum_(Some("Wrapped".into()), variants)
     }
 
     /// The `EnumDefId` behind an enum type, so a test's patterns name the def
     /// its scrutinee really has rather than a forged index.
-    fn enum_def_of(db: &TypeDb, ty: Type) -> praxis_types::EnumDefId {
+    fn enum_def_of(db: &TypeDb, ty: Type) -> praxis_typeck::EnumDefId {
         match db.data(db.follow(ty)) {
             TypeData::Enum { def, .. } => *def,
             other => panic!("not an enum: {other:?}"),
@@ -1084,7 +1084,7 @@ mod tests {
     }
 
     fn variant(
-        def: praxis_types::EnumDefId,
+        def: praxis_typeck::EnumDefId,
         idx: u32,
         subpatterns: Vec<TypedPattern>,
         ty: Type,

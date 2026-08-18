@@ -1,4 +1,4 @@
-// A call copies the reference, never the object (§10.3). `xs` and `v` name
+// A call copies the reference, never the object. `xs` and `v` name
 // one Vec, so a push through either is visible through both.
 fn push_two(xs: Vec[Int]) {
     xs.push(1)

@@ -1,21 +1,21 @@
 # The command line
 
-`praxis` has three commands that do something — `run`, `check` and `lsp` — and
-one global flag, `--color`. The only other flags are `run`'s `--input` and
-`--debug`, and `lsp`'s `--stdio`.
+`praxis` has three commands — `run`, `check` and `lsp` — and one global flag,
+`--color`. The only other flags are `run`'s `--input` and `--debug`, and `lsp`'s
+`--stdio`.
 
 ```console
 $ praxis --help
-Praxis is a small, statically typed, garbage-collected language for Advent of Code-style puzzle solving. See praxis_technical_design.md.
+Praxis is a small, statically typed, garbage-collected language for Advent of Code-style puzzle solving.
+
+Homepage: https://github.com/tljubej/praxis
 
 Usage: praxis [OPTIONS] <COMMAND>
 
 Commands:
-  run    Parse, type-check, JIT-compile, and run the program. (Milestone 4+)
+  run    Parse, type-check, JIT-compile, and run the program
   check  Run the front end (lex + parse + type-check) without executing
-  watch  Keep the program and input alive, recompile on source changes. (Later milestone)
-  repl   Start an ordinary interactive REPL session. (Later milestone)
-  lsp    Start the language server over stdio (§15, M11). Speaks JSON-RPC LSP on stdin/stdout; not meant to be run by hand
+  lsp    Start the language server over stdio. Speaks JSON-RPC LSP on stdin/stdout; not meant to be run by hand
   help   Print this message or the help of the given subcommand(s)
 
 Options:
@@ -30,9 +30,6 @@ Options:
   -V, --version
           Print version
 ```
-
-`watch` and `repl` are listed there and are not implemented. See the end of this
-chapter.
 
 ## `praxis run`
 
@@ -135,8 +132,8 @@ An I/O error on either path is reported and exits `2`. It is never laundered
 into empty input: a truncated read would otherwise produce a confidently wrong
 answer. An empty *file*, on the other hand, is input — a zero-byte `--input` is
 passed through as the empty text, and what a parser makes of that is the
-parser's business
-([ADR-087](../../../decisions/087-empty-input-is-input-and-no-input-is-a-host-state.md)).
+parser's business. `read lines(int)` over nothing is `[]`; a parser that needs
+content faults at offset `0..0` and says what it expected to find there.
 
 ### `--debug auto|always|never`
 
@@ -197,10 +194,12 @@ $ echo $?
 ```
 
 `check` and the language server are not two implementations of the front end.
-`praxis check` routes through the same query layer the LSP server answers from
-([ADR-097](../../../decisions/097-the-shared-query-layer-lives-in-praxis-lsp.md)),
+`praxis check` routes through the same query layer the LSP server answers from,
 so a divergence between what the command line prints and what your editor
-underlines is unrepresentable rather than merely unlikely.
+underlines is unrepresentable rather than merely unlikely. The sort order, the
+decision to analyze a tree that already has parse errors, and the set of
+diagnostics that reaches you are settled once, inside the query, and both
+consumers read them from there.
 
 `run` performs the same analysis before it compiles anything, so a file `check`
 rejects is a file `run` refuses, with the same text. The reverse does not hold,
@@ -230,9 +229,13 @@ exiting `2` on an argument the convention says is harmless — before a byte of
 protocol was spoken — which every client reports as "the server crashed" rather
 than as a bad flag.
 
-The server is one synchronous loop with no async runtime
-([ADR-095](../../../decisions/095-the-language-server-is-a-synchronous-stdio-loop.md)).
-[Editor support](../tooling/editors.md) lists what it serves.
+The server is one synchronous loop with no async runtime. Its working set is a
+single file and the front end answers in single-digit milliseconds, so there is
+nothing for a second thread to do: the loop owns the document store and the
+query cache outright, and holds no lock, because there is no other thread that
+could want one. A `$/cancelRequest` drops a request still sitting in the queue;
+one already being served runs to completion. [Editor
+support](../tooling/editors.md) lists what it serves.
 
 ## `--color auto|always|never`
 
@@ -252,42 +255,13 @@ transcript. `auto` already does the right thing when you redirect — the ANSI
 codes are omitted because stderr is not a terminal — so `never` is for the case
 where stderr *is* a terminal and you want plain text anyway.
 
-## `watch` and `repl`
-
-Both are in the command surface and neither is implemented. They are honest
-about it rather than silently doing nothing:
-
-```console
-$ praxis watch sonar.px
-error: `praxis watch` `sonar.px` is not implemented yet (planned for Milestone 0)
-$ echo $?
-2
-```
-
-```console
-$ praxis repl
-error: `praxis repl` is not implemented yet (planned for Milestone 0)
-$ echo $?
-2
-```
-
-The milestone number in that message is a placeholder and means nothing; the
-part to read is "is not implemented yet". `watch` is meant to keep the process
-and the input buffer alive and recompile on source change; `repl` is meant to be
-an ordinary interactive session, as distinct from the stateful crash debugger,
-which *is* implemented. Until then, re-running `praxis run` is the iteration
-loop, and it is fast because there is no linker in it.
-
-The VS Code extension's `Praxis: Watch File` command runs `praxis watch` and so
-prints exactly the message above.
-
 ## Exit codes
 
 | code | meaning |
 |---|---|
 | `0` | success — the program ran to completion, or `check` found no errors |
 | `1` | the file has errors and was not run, **or** it ran and faulted |
-| `2` | usage or I/O — bad flag, unknown subcommand, missing argument, unreadable source or `--input` file, `watch`, `repl` |
+| `2` | usage or I/O — bad flag, unknown subcommand, missing argument, unreadable source or `--input` file |
 
 `1` covers both "did not compile" and "compiled and then died", which are
 distinguishable from the output but not from the status. If you need to tell

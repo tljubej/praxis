@@ -21,6 +21,5 @@ pub const OK: i32 = 0;
 pub const FAILED: i32 = 1;
 
 /// The CLI could not start the job: a source or `--input` file that cannot be
-/// read, or a command that is not implemented yet. Never a verdict on the
-/// program, because none of it ran.
+/// read. Never a verdict on the program, because none of it ran.
 pub const USAGE: i32 = 2;

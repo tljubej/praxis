@@ -22,8 +22,7 @@ Two things are going on in it.
 ## Named and anonymous captures
 
 A capture is `{name:parser}` or just `{parser}`. Which one you write decides the
-shape of the result, and the rule is read off the template's own parts
-([ADR-092](../../../decisions/092-a-templates-shape-is-read-from-its-parts.md)).
+shape of the result, and the rule is read off the template's own parts.
 
 | template | result |
 |---|---|
@@ -33,9 +32,9 @@ shape of the result, and the rule is read off the template's own parts
 | named captures | an anonymous record with those field names |
 
 ```praxis
-// §7.3's four shapes, read off the template's own parts (ADR-092): no capture
-// is Unit, one anonymous capture is that value, two or more are a tuple, and
-// named captures are an anonymous record.
+// The four shapes, read off the template's own parts: no capture is Unit, one
+// anonymous capture is that value, two or more are a tuple, and named captures
+// are an anonymous record.
 fn main() {
     out(parse("hello", `hello`))
     out(parse("42", `{int}`))
@@ -96,11 +95,11 @@ fn main() {
 ```
 
 ```text
-error[I020]: named and anonymous captures may not be mixed in one template (§7.3)
+error[I020]: named and anonymous captures may not be mixed in one template
 
   template-mixed-captures.px:4:20
   4 |     out(read lines(`{x:int},{int}`))
-    |                    ^^^^^^^^^^^^^^^ named and anonymous captures may not be mixed in one template (§7.3)
+    |                    ^^^^^^^^^^^^^^^ named and anonymous captures may not be mixed in one template
 
 praxis: 1 error(s)
 ```
@@ -111,15 +110,13 @@ have two fields called `x`.
 ## A capture body is a parser expression
 
 The `:` in `{name:parser}` is followed by a **whole parser expression**, not
-just an atomic name
-([ADR-072](../../../decisions/072-a-template-capture-body-is-a-parser-expression.md)).
-Constructor calls, string arguments, and templates of their own all go inside
-the braces.
+just an atomic name. Constructor calls, string arguments, and templates of their
+own all go inside the braces.
 
 ```praxis
-// A capture body is a whole parser expression (ADR-072), not just an atomic
-// name: a constructor call, a call with a string argument, a `}` inside that
-// string, and a template of its own all sit inside `{...}`.
+// A capture body is a whole parser expression, not just an atomic name: a
+// constructor call, a call with a string argument, a `}` inside that string,
+// and a template of its own all sit inside `{...}`.
 fn main() {
     out(parse("Monkey 0: 79, 98", `Monkey {id:int}: {items:csv(int)}`))
     out(parse("a-b-c", `{parts:sep("-", word)}`))
@@ -157,10 +154,8 @@ becoming an `int`.
 
 A capture does not take everything it could. It is handed a **region** that ends
 where the run of literal parts after it can first match, and it must fill that
-region
-([ADR-079](../../../decisions/079-a-grid-cell-is-what-its-cell-parser-reads.md)).
-"Earliest" is what makes `text` non-greedy, and it applies to every capture, not
-only the `text` ones.
+region. "Earliest" is what makes `text` non-greedy, and it applies to every
+capture, not only the `text` ones.
 
 The bound is the earliest position at which the **whole run of literal parts up
 to the next capture** can match. A run that can match the empty string —
@@ -169,8 +164,8 @@ rest of its region.
 
 ```praxis
 // Every capture is bounded by the run of literal parts that follows it, and
-// the bound is the earliest place that whole run can match (ADR-079). A run
-// that can match nothing — `\s*`, or nothing at all — is no bound.
+// the bound is the earliest place that whole run can match. A run that can
+// match nothing — `\s*`, or nothing at all — is no bound.
 fn main() {
     out(parse("x y bar", `{a:text} bar`))
     out(parse("x y bar", `{a:text}\s+bar`))
@@ -190,8 +185,9 @@ Read those four in order:
 
 1. `{a:text} bar` stops `a` at the space before `bar`, not at the first space.
    The bound is where the *run* matches, and the run is a space and then `bar`.
-2. `{a:text}\s+bar` is the same policy spelled differently and reads the same
-   input the same way. The two spellings used to disagree; they do not now.
+2. `{a:text}\s+bar` is the explicit spelling of the same policy and bounds `a`
+   in the same place. What decides the bound is that the run must match
+   something, not which way it was written.
 3. `{a:text}\s*bar` bounds `a` at `x`, because the earliest place the whole run
    can start is right after it: `\s*` eats the two spaces and `bar` lands. The
    spaces belong to the policy, not to `a`.
@@ -209,15 +205,14 @@ not the template's. What the leading run does *not* do is bound the capture; see
 
 ## A template ends at the line it opens on
 
-A raw newline may not appear inside a template
-([ADR-094](../../../decisions/094-a-template-ends-at-the-line-it-opens-on.md)).
-`\n` is how a template matches a line ending, and it is the only way — which is
-also how a template reaches a second line.
+A raw newline may not appear inside a template. `\n` is how a template matches a
+line ending, and it is the only way — which is also how a template reaches a
+second line.
 
 ```praxis
-// A template ends at the line it opens on (ADR-094), so `\n` is the only way
-// it matches a line ending — and the only way one reaches a second line. The
-// escape matches CRLF as well; a raw newline never did.
+// A template ends at the line it opens on, so `\n` is the only way it matches
+// a line ending — and the only way one reaches a second line. The escape
+// matches CRLF as well as LF.
 fn main() {
     out(parse("1\n2\n", `{a:int}\n{b:int}`))
     out(parse("1\r\n2\n", `{a:int}\n{b:int}`))
@@ -229,9 +224,11 @@ fn main() {
 { a: 1, b: 2 }
 ```
 
-The escape matches CRLF as well as LF. A raw newline in a template never did —
-it was whitespace but not a space, so it fell through to literal text and matched
-LF only. The rule removes that trap; the replacement is one character longer.
+The escape matches CRLF as well as LF, which is the other half of the reason for
+the rule. A raw newline is whitespace but not a space, so it would match none of
+the whitespace policies and fall through to literal text — an LF-only match,
+silently hostile to a CRLF file. `\n` costs one character more and is right on
+both.
 
 It also bounds the report when a template is left open. The run cannot outlive
 its line, so an unterminated backtick names one line instead of the rest of the
@@ -263,11 +260,10 @@ swallowed by the token, so the parser and the type checker never see the damage.
 
 Backticks mean "parser expression" and nothing else. A template outside `read`
 and `parse` has nothing to read from, so it is a diagnostic rather than a `Text`
-that happens to contain braces
-([ADR-084](../../../decisions/084-a-template-is-a-parser-expression-everywhere-or-nowhere.md)).
+that happens to contain braces.
 
 ```praxis
-// A backtick template is a parser expression everywhere or nowhere (ADR-084).
+// A backtick template is a parser expression everywhere or nowhere.
 // Outside `read` and `parse` it has nothing to read from, so it is an error
 // rather than a `Text` that happens to contain braces.
 fn main() {
@@ -286,12 +282,12 @@ error[Y023]: a backtick template is a parser expression; write `read` before it,
 praxis: 1 error(s)
 ```
 
-This used to type-check and print `n = {int}` — a program that asked to parse an
-integer printing the word `{int}`. The message names the fix, because the fix is
-always the same word.
+The alternative is a program that asked to parse an integer printing the word
+`{int}`, and type-checking while it did. The message names the fix, because the
+fix is always the same word.
 
 A backtick is never a way to build text. `"..."` is the text literal, and the
-braces in it are §8.1's [interpolation](../language/text.md#interpolation--renders-a-value)
+braces in it are [interpolation](../language/text.md#interpolation--renders-a-value)
 — `"n = {n}"` renders `n`. The two mechanisms share nothing but the character:
 a template's `{name:parser}` names a capture in the input-parser DSL, while a
 literal's `{expr}` is an ordinary Praxis expression rendered into text.

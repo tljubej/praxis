@@ -1,3 +1,4 @@
 # Clippy policy. Shared by `just clippy` and CI (`just ci`).
-# `msrv` keeps MSRV-aware lints honest against the declared `rust-version`.
-msrv = "1.80"
+# `msrv` must equal `Cargo.toml`'s `rust-version`. When the two disagree this file
+# wins, and every MSRV-aware lint above the lower number is silently skipped.
+msrv = "1.88"

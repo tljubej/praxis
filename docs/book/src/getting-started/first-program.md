@@ -57,8 +57,8 @@ out(increase)
 ```
 
 Three things are worth naming before we run it. `var` is the only binding form,
-and every binding is assignable; there is no `let`
-([ADR-125](../../../decisions/125-a-binding-is-a-binding-and-the-compiler-decides-its-storage.md)).
+and every binding is assignable; there is no `let`, and no `mut` either — a
+parameter, a `for` variable and a name bound by a pattern are all writable too.
 `read lines(int)` is an input parser, not a library call — `lines(int)` is a
 shape the compiler understands, and the type of `depths` is derived from it as
 `Vec[Int]` rather than declared. And `1..depths.length()` is a half-open range,

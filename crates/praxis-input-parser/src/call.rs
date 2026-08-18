@@ -11,7 +11,7 @@ use crate::ast::{
     BlockItem, Constructor, InvalidRepeatCount, ParserAst, RepeatCount, SectionItem, Separator,
     SkipPolicy,
 };
-use crate::validate::{check_call, ArgKind, ValidationError};
+use crate::validate::{ArgKind, ValidationError, check_call};
 use praxis_source::{DiagCode, Span};
 
 /// One argument of a constructor call, as written (§7.5).
@@ -91,8 +91,7 @@ pub fn build_call(
         return Err(vec![ValidationError {
             span,
             code: DiagCode::MisplacedRepeatedTail,
-            message: "`repeated(...)` is only a named argument of a `sections` call (§7.5)"
-                .to_string(),
+            message: "`repeated(...)` is only a named argument of a `sections` call".to_string(),
         }]);
     }
 
@@ -106,7 +105,7 @@ pub fn build_call(
         vec![ValidationError {
             span,
             code: DiagCode::InvalidConstructorArgument,
-            message: format!("`{}` {what} (§7.5)", ctor.keyword()),
+            message: format!("`{}` {what}", ctor.keyword()),
         }]
     };
     // **A `_ => {}` arm in a builder is how an argument disappears** (IP-07).
@@ -119,7 +118,7 @@ pub fn build_call(
             span,
             code: DiagCode::InvalidConstructorArgument,
             message: format!(
-                "`{}` does not take {} (§7.5)",
+                "`{}` does not take {}",
                 ctor.keyword(),
                 arg.kind().describe()
             ),
@@ -222,7 +221,7 @@ pub fn build_call(
                                 // Each one states what it skips.
                                 message: format!(
                                     "`skip: {value}` is not a skip policy — `none` (skips {}), \
-                                     `whitespace` (skips {}) or `newlines` (skips {}) (§7.5)",
+                                     `whitespace` (skips {}) or `newlines` (skips {})",
                                     SkipPolicy::None.skips(),
                                     SkipPolicy::Whitespace.skips(),
                                     SkipPolicy::Newlines.skips(),
@@ -268,7 +267,7 @@ pub fn build_call(
                                 span,
                                 code: DiagCode::InvalidConstructorArgument,
                                 message: "`fill:` needs a value to pad a short row with — an \
-                                          empty one fills nothing (§7.5)"
+                                          empty one fills nothing"
                                     .to_string(),
                             }]);
                         }
@@ -359,22 +358,22 @@ pub fn build_repeated_tail(
         Some(CallArg::Parser(parser)) => parser,
         Some(other) => {
             return Err(bad(format!(
-                "`repeated`'s first argument must be a parser, but it is {} (§7.5)",
+                "`repeated`'s first argument must be a parser, but it is {}",
                 other.kind().describe()
-            )))
+            )));
         }
         // `check_call` has already reported the empty list.
-        None => return Err(bad("`repeated` needs a parser (§7.5)".to_string())),
+        None => return Err(bad("`repeated` needs a parser".to_string())),
     };
     let count = match args.next() {
         None => None,
         Some(CallArg::Int(n)) => Some(RepeatCount::new(n).map_err(|why| {
             bad(match why {
                 InvalidRepeatCount::NotPositive => "`repeated`'s count must be at least 1 — a \
-                                                   group of no sections parses nothing (§7.5)"
+                                                   group of no sections parses nothing"
                     .to_string(),
                 InvalidRepeatCount::TooLarge => {
-                    "`repeated`'s count must fit in 32 bits (§7.5)".to_string()
+                    "`repeated`'s count must fit in 32 bits".to_string()
                 }
             })
         })?),
@@ -382,9 +381,9 @@ pub fn build_repeated_tail(
             return Err(bad(format!(
                 "`repeated`'s count must be a whole-number literal, but it is {} — the parser \
                  plan is built when the program is compiled, so the count cannot be a parser or \
-                 a variable (§7.5)",
+                 a variable",
                 other.kind().describe()
-            )))
+            )));
         }
     };
     Ok(CallArg::RepeatedTail {
@@ -426,21 +425,20 @@ fn build_sections_named(args: Vec<CallArg>, span: Span) -> Result<ParserAst, Vec
         return Err(vec![ValidationError {
             span,
             code: DiagCode::MisplacedRepeatedTail,
-            message: "`sections` takes at most one unbounded `repeated(...)` tail (§7.5)"
-                .to_string(),
+            message: "`sections` takes at most one unbounded `repeated(...)` tail".to_string(),
         }]);
     }
-    if let Some(&at) = unbounded.first() {
-        if at != args.len() - 1 {
-            return Err(vec![ValidationError {
-                span,
-                code: DiagCode::MisplacedRepeatedTail,
-                message: "an unbounded `repeated(...)` tail may appear only as the final named \
-                          argument (§7.5): it consumes every remaining section, so nothing can \
+    if let Some(&at) = unbounded.first()
+        && at != args.len() - 1
+    {
+        return Err(vec![ValidationError {
+            span,
+            code: DiagCode::MisplacedRepeatedTail,
+            message: "an unbounded `repeated(...)` tail may appear only as the final named \
+                          argument: it consumes every remaining section, so nothing can \
                           follow it — write `repeated(P, N)` for a group of N sections, which can"
-                    .to_string(),
-            }]);
-        }
+                .to_string(),
+        }]);
     }
 
     let mut fields: Vec<SectionItem> = Vec::new();
@@ -471,11 +469,8 @@ fn build_sections_named(args: Vec<CallArg>, span: Span) -> Result<ParserAst, Vec
                 return Err(vec![ValidationError {
                     span,
                     code: DiagCode::InvalidConstructorArgument,
-                    message: format!(
-                        "`sections` does not take {} (§7.5)",
-                        other.kind().describe()
-                    ),
-                }])
+                    message: format!("`sections` does not take {}", other.kind().describe()),
+                }]);
             }
         }
     }

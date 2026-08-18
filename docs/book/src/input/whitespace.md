@@ -9,9 +9,8 @@ and applies it everywhere:
 
 There is one question — *does the parser offered these bytes read them?* — so
 there is one answer, and the half of the machinery that can ask it is the half
-that decides
-([ADR-078](../../../decisions/078-a-parser-position-is-absolute-and-a-region-only-narrows.md)).
-No constructor has a trailing-newline special case, and none may grow one.
+that decides. No constructor has a trailing-newline special case, and none may
+grow one.
 
 Inside a template the question is different, because there whitespace is
 something you wrote on purpose. That half comes first.
@@ -186,7 +185,7 @@ one. Each names the byte where the run was looked for.
 `\n` matches a line ending.
 
 ```praxis
-// The escapes §7.2 gives a template: `\s*` zero or more, `\s+` one or more,
+// A template's whitespace escapes: `\s*` zero or more, `\s+` one or more,
 // `\x20` exactly one space, `\t` exactly one tab, `\n` one line ending.
 fn main() {
     out(parse("1  ,2", `{a:int}\s*,{b:int}`))
@@ -217,8 +216,8 @@ endings.
 
 ```praxis
 // `\s*` and `\s+` match line endings too, where a plain space run does not.
-// §7.2 says "spaces or tabs" for all three; the compiler is broader for the
-// two escapes, and this is what it actually accepts.
+// A plain run is horizontal whitespace; the two escapes are all whitespace,
+// and these two lines are where that difference shows.
 fn main() {
     out(parse("1\n2", `{a:int}\s+{b:int}`))
     out(parse("1\n2", `{a:int}\s*{b:int}`))
@@ -404,9 +403,9 @@ That is invisible until something goes wrong, and then it is the whole
 diagnostic:
 
 ```praxis
-// A parser position is absolute (ADR-078). The mismatch is on the second line
-// of the second section — what `word` left of it — and the offset it reports
-// counts from the first byte of the input, not from the start of that line.
+// A parser position is absolute. The mismatch is on the second line of the
+// second section — what `word` left of it — and the offset it reports counts
+// from the first byte of the input, not from the start of that line.
 fn main() -> Int {
     (read sections(lines(word))).len()
 }
@@ -469,6 +468,5 @@ end of its region and bounds its children exactly has already inherited the
 rule; a construct that splits lines drops a trailing blank line only when its
 parser made nothing of it. Anything that forgives whitespace per constructor is
 fixing this in the wrong place, N times, and will end up disagreeing with
-itself — which is exactly how `csv` and `matrix` each became the one constructor
-that behaved differently from all the others, twice, before the rule was stated
-once.
+itself. One constructor forgiving a run the others do not is the exact shape
+this rule exists to prevent.

@@ -111,8 +111,8 @@ const FLAG_IMMORTAL: u8 = 1;
 
 const _: () = {
     assert!(PAGE_SIZE.is_power_of_two());
-    assert!(MIN_BLOCK % BLOCK_GRANULE == 0);
-    assert!(MAX_BLOCK % BLOCK_GRANULE == 0);
+    assert!(MIN_BLOCK.is_multiple_of(BLOCK_GRANULE));
+    assert!(MAX_BLOCK.is_multiple_of(BLOCK_GRANULE));
     assert!(MAX_BLOCK >= MIN_BLOCK);
     assert!(NUM_CLASSES < CLASS_LARGE as usize);
 };

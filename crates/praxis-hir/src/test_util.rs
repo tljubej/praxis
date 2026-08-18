@@ -9,11 +9,11 @@
 #![cfg(test)]
 
 use praxis_ast::{AstNode, SourceFile};
-use praxis_parser::{parse, ParseOutput};
+use praxis_parser::{ParseOutput, parse};
 use praxis_source::FileId;
 use praxis_test_support::single_file;
 
-use crate::{analyze_root, Analysis, TypedFn, TypedItem, TypedModule};
+use crate::{Analysis, TypedFn, TypedItem, TypedModule, analyze_root};
 
 /// The name every fixture is interned under. Nothing asserts on it.
 const TEST_FILE: &str = "test.px";

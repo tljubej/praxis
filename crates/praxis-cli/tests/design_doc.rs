@@ -3,7 +3,7 @@
 //! # Why this file exists
 //!
 //! A fence is never retyped here. It is **extracted from
-//! `praxis_technical_design.md` at test time**, byte for byte, and driven through
+//! `docs/technical-design.md` at test time**, byte for byte, and driven through
 //! the same two commands a reader would type. A test that quotes the doc can
 //! drift from it; a test that reads it cannot. A paraphrase is a different
 //! program — it can hold a call site the fence lacks, and then agree with the
@@ -33,7 +33,7 @@ fn fence_after(doc: &str, heading: &str) -> String {
     lines
         .by_ref()
         .find(|l| l.trim() == heading)
-        .unwrap_or_else(|| panic!("`{heading}` is not a heading in praxis_technical_design.md"));
+        .unwrap_or_else(|| panic!("`{heading}` is not a heading in docs/technical-design.md"));
     let mut opened = false;
     let mut body = String::new();
     for line in lines.by_ref() {
@@ -72,8 +72,8 @@ fn codes(text: &str) -> Vec<String> {
 #[test]
 fn section_4_9s_function_example_checks_and_runs() {
     let root = workspace_root();
-    let doc = std::fs::read_to_string(root.join("praxis_technical_design.md"))
-        .expect("praxis_technical_design.md at the workspace root");
+    let doc = std::fs::read_to_string(root.join("docs/technical-design.md"))
+        .expect("docs/technical-design.md under the workspace root");
     let fence = fence_after(&doc, "### 4.9 Functions");
     // The fence this test is about, and a guard against extracting some other
     // one: `manhattan` is §4.9's opening example.
@@ -118,8 +118,8 @@ fn section_4_9s_function_example_checks_and_runs() {
 #[test]
 fn section_7_7s_repeated_labeled_blocks_example_runs() {
     let root = workspace_root();
-    let doc = std::fs::read_to_string(root.join("praxis_technical_design.md"))
-        .expect("praxis_technical_design.md at the workspace root");
+    let doc = std::fs::read_to_string(root.join("docs/technical-design.md"))
+        .expect("docs/technical-design.md under the workspace root");
     let fence = fence_after(&doc, "### 7.7 Repeated labeled blocks");
     // A guard against extracting some other fence.
     assert!(
@@ -191,8 +191,8 @@ fn section_7_7s_repeated_labeled_blocks_example_runs() {
 #[test]
 fn every_praxis_fence_in_the_design_doc_parses() {
     let root = workspace_root();
-    let doc = std::fs::read_to_string(root.join("praxis_technical_design.md"))
-        .expect("praxis_technical_design.md at the workspace root");
+    let doc = std::fs::read_to_string(root.join("docs/technical-design.md"))
+        .expect("docs/technical-design.md under the workspace root");
 
     let tmp = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let mut fences = 0;
@@ -225,7 +225,7 @@ fn every_praxis_fence_in_the_design_doc_parses() {
             .collect();
         if !parse_errors.is_empty() {
             failures.push(format!(
-                "praxis_technical_design.md:{}: {parse_errors:?}\n{body}",
+                "docs/technical-design.md:{}: {parse_errors:?}\n{body}",
                 i + 1
             ));
         }
@@ -256,8 +256,8 @@ fn every_praxis_fence_in_the_design_doc_parses() {
 #[test]
 fn appendix_ds_demo_checks_runs_and_prints_its_answer() {
     let root = workspace_root();
-    let doc = std::fs::read_to_string(root.join("praxis_technical_design.md"))
-        .expect("praxis_technical_design.md at the workspace root");
+    let doc = std::fs::read_to_string(root.join("docs/technical-design.md"))
+        .expect("docs/technical-design.md under the workspace root");
     let fence = fence_after(&doc, "## Appendix D: First end-to-end demo target");
     // A guard against extracting some other fence, and against Appendix D being
     // edited into something that no longer exercises the barriers.

@@ -264,14 +264,14 @@ mod tests {
     use super::*;
     use praxis_hir::{BinOp, Lit, TypedExpr};
     use praxis_stdlib::Purity;
-    use praxis_types::TypeData;
+    use praxis_typeck::TypeData;
 
     /// Build a minimal `TypeDb` + helpers to mint typed exprs for the walk.
-    fn mk_db() -> praxis_types::TypeDb {
-        praxis_types::TypeDb::new()
+    fn mk_db() -> praxis_typeck::TypeDb {
+        praxis_typeck::TypeDb::new()
     }
 
-    fn lit_int(db: &mut praxis_types::TypeDb) -> TypedExpr {
+    fn lit_int(db: &mut praxis_typeck::TypeDb) -> TypedExpr {
         TypedExpr::Lit {
             value: Lit::Int(1),
             ty: db.int(),
@@ -279,7 +279,7 @@ mod tests {
         }
     }
 
-    fn bin_int(db: &mut praxis_types::TypeDb, lhs: TypedExpr, rhs: TypedExpr) -> TypedExpr {
+    fn bin_int(db: &mut praxis_typeck::TypeDb, lhs: TypedExpr, rhs: TypedExpr) -> TypedExpr {
         TypedExpr::Bin {
             op: BinOp::Add,
             lhs: Box::new(lhs),
@@ -378,12 +378,14 @@ mod tests {
         };
         assert!(assert_read_only(&list).is_ok());
         // The empty one too.
-        assert!(assert_read_only(&TypedExpr::ListLit {
-            elements: vec![],
-            ty: vec_int,
-            span: (0, 0),
-        })
-        .is_ok());
+        assert!(
+            assert_read_only(&TypedExpr::ListLit {
+                elements: vec![],
+                ty: vec_int,
+                span: (0, 0),
+            })
+            .is_ok()
+        );
 
         // …and an element that mutates is still rejected, by the recursion.
         let receiver = TypedExpr::Path {

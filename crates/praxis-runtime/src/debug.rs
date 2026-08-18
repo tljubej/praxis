@@ -74,12 +74,12 @@
 //! scan, the crash snapshot's root set, or the debugger's `p EXPR` bindings —
 //! can reach a header through one. See [`DebugSlotKind`].
 
+use crate::MAX_RECURSION_DEPTH;
 use crate::context::{DebugLocal, RuntimeContext};
 use crate::gc::GcRef;
 use crate::shadow_stack::{
-    SlotStack, SlotStackHeader, MAX_DEBUG_VALUE_SLOTS, MAX_LIVE_SLOTS, MAX_SHADOW_SLOTS,
+    MAX_DEBUG_VALUE_SLOTS, MAX_LIVE_SLOTS, MAX_SHADOW_SLOTS, SlotStack, SlotStackHeader,
 };
-use crate::MAX_RECURSION_DEPTH;
 
 /// How a local appears in the crash debugger (§9.4 `locals`). Mirrors
 /// [`praxis_mir::ir::LocalDebugKind`], flattened to a `u8` for the FFI
@@ -364,7 +364,7 @@ pub struct DebugLocalMeta {
     /// The local's static type descriptor (§9.3). The backend embeds the
     /// `'static TypeDescriptor` resolved from the MIR local's `Type`.
     pub descriptor: *const crate::TypeDescriptor,
-    /// The full static `Type` id (`praxis_types::Type(u32)` handle). Lets the
+    /// The full static `Type` id (`praxis_typeck::Type(u32)` handle). Lets the
     /// debugger reconstruct the exact local type (incl. collection element
     /// types / record shapes) the runtime `descriptor` alone loses.
     pub type_id: u32,
@@ -446,7 +446,7 @@ const _: () = {
         RECLAIMED_WORD != 0,
         "zero is already `None` — the other state"
     );
-    assert!(RECLAIMED_WORD % std::mem::align_of::<crate::GcHeader>() != 0);
+    assert!(!RECLAIMED_WORD.is_multiple_of(std::mem::align_of::<crate::GcHeader>()));
 };
 
 impl DebugLocalMeta {

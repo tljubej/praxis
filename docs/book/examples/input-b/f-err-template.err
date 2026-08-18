@@ -1,8 +1,8 @@
-error[I020]: named and anonymous captures may not be mixed in one template (§7.3)
+error[I020]: named and anonymous captures may not be mixed in one template
 
   f-err-template.px:4:20
   4 | var a = read lines(`{x:int},{int}`)
-    |                    ^^^^^^^^^^^^^^^ named and anonymous captures may not be mixed in one template (§7.3)
+    |                    ^^^^^^^^^^^^^^^ named and anonymous captures may not be mixed in one template
 
 error[I021]: duplicate capture name `x` in template
 

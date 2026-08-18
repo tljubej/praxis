@@ -22,7 +22,7 @@
 use lsp_types::{SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensLegend};
 use praxis_hir::SymbolKind;
 use praxis_source::Span;
-use praxis_syntax::{span_bridge::range_to_span, SyntaxKind, SyntaxToken};
+use praxis_syntax::{SyntaxKind, SyntaxToken, span_bridge::range_to_span};
 use rowan::NodeOrToken;
 
 use crate::navigation::symbol_for_range;
@@ -140,10 +140,10 @@ pub fn classify(snapshot: &Snapshot) -> Vec<ClassifiedToken> {
         if token.span.end().to_u32() <= token.span.start().to_u32() {
             continue;
         }
-        if let Some(last) = out.last() {
-            if last.span.end().to_u32() > token.span.start().to_u32() {
-                continue;
-            }
+        if let Some(last) = out.last()
+            && last.span.end().to_u32() > token.span.start().to_u32()
+        {
+            continue;
         }
         out.push(token);
     }

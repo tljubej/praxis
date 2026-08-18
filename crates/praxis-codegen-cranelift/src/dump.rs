@@ -469,7 +469,7 @@ fn vcode_block_counts(vcode: &str) -> (Vec<(String, usize)>, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cranelift::prelude::{types, AbiParam, InstBuilder, Signature};
+    use cranelift::prelude::{AbiParam, InstBuilder, Signature, types};
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
     use cranelift_jit::{JITBuilder, JITModule};
     use cranelift_module::Module;

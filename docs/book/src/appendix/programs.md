@@ -11,10 +11,9 @@ Run any of them:
 $ praxis run docs/book/examples/appendix/depths.px --input docs/book/examples/appendix/depths.in
 ```
 
-The first four are puzzle-sized. The fifth is the design document's own
-representative program, reproduced verbatim. The sixth is a breadth-first search
-written twice, and the seventh is a bytecode interpreter that retires 1.15
-million instructions on the input shown.
+The first four are puzzle-sized. The fifth is a whole puzzle in thirty lines.
+The sixth is a breadth-first search written twice, and the seventh is a bytecode
+interpreter that retires 1.15 million instructions on the input shown.
 
 ## `depths.px` — one integer per line
 
@@ -77,11 +76,10 @@ The other structural shape every puzzle set contains: groups separated by blank
 lines. `sections(lines(int))` nests two structural parsers, and the nesting *is*
 the type — `Vec[Vec[Int]]`, one inner vector per group.
 
-`sorted_by_key(|t| 0 - t)` is how this program writes a descending sort. Since
-[ADR-145](../../../decisions/145-a-reversal-needs-the-whole-sequence-so-it-is-a-barrier.md)
-there is a second spelling, `sorted().reversed()`, and the example keeps the
-first: negating the key is one pass over the group where sorting and then
-reversing is two.
+`sorted_by_key(|t| 0 - t)` is how this program writes a descending sort. There
+is a second spelling, `sorted().reversed()`, and the example keeps the first:
+negating the key is one pass over the group where sorting and then reversing is
+two.
 
 ```praxis
 // A sections day: blank-line-separated groups of integers.
@@ -277,25 +275,22 @@ Explained in [Templates and captures](../input/templates.md),
 [Functions and closures](../language/functions.md) and
 [Collections](../language/collections.md).
 
-## `segments.px` — the design document's representative program
+## `segments.px` — a whole puzzle in thirty lines
 
-Section 3.3 of `praxis_technical_design.md` opens with a single program meant
-to show what a whole puzzle looks like. It is reproduced here **verbatim**,
-top-level statements and all, because it runs verbatim: the template read, the
-function over the records it produced, `Counter[(Int, Int)]()` with an explicit
-type argument, `counts[point] += 1` storing through a subscript, `0..=distance`,
-the trailing comma in the `max(…)` call, and two `out` calls at file scope.
+What a finished puzzle solution looks like at full size, top-level statements
+and all: the template read, a function over the records it produced,
+`Counter[(Int, Int)]()` with an explicit type argument, `counts[point] += 1`
+storing through a subscript, `0..=distance`, a trailing comma in the `max(…)`
+call, and two `out` calls at file scope.
 
 The one type argument is not forced by anything: `Counter()` on its own infers
 `(Int, Int)` from `counts[point] += 1` and prints the same two answers. It is
-here because §3.3 writes it, and it is the only shape a type argument has — a
+written out because this is the only shape a type argument has — a
 compiler-owned constructor name, a bracket list, and then the call. Nothing else
 in the program is annotated.
 
 ```praxis
-// The design document's representative program (§3.3), verbatim.
-//
-// It is the shape of a whole puzzle in thirty lines: a template read, a
+// segments — the shape of a whole puzzle in thirty lines: a template read, a
 // function over the records it produced, a `Counter` keyed by a tuple, a
 // compound assignment through a subscript, an inclusive range, and two calls
 // printing the two parts. Nothing in it is annotated.
@@ -379,14 +374,9 @@ A cell is a `(Int, Int)` tuple. That is what lets it be a `Set` member and a
 `Map` key: a key has to be hashable *and* unable to change after it is stored,
 and a tuple of scalars is both. A `Vec` is not: a `Vec[Int]` key is `Y014` — "a
 value of type `Vec[Int]` can change after it is stored, so it cannot be used as
-a key"
-([ADR-057](../../../decisions/057-a-capability-requirement-rides-on-the-scheme-that-quantified-it.md)).
-Hashable is not orderable: a tuple has no `<`
-([ADR-045](../../../decisions/045-ordering-semantics-and-the-compare-callback.md))
-— though the collections above still walk and print their tuple keys
-element-wise, because a container needs a reproducible order whatever the source
-language permits
-([ADR-138](../../../decisions/138-a-container-orders-by-the-value-and-not-by-its-printing.md)).
+a key". Hashable is not orderable: a tuple has no `<` — though the collections
+above still walk and print their tuple keys element-wise, because a container
+needs a reproducible order whatever the source language permits.
 
 `bfs_distance` answers `Option[Int]`, so the third line of output is `Some(22)`
 and not `22`: a goal that cannot be reached has no distance.
@@ -641,8 +631,7 @@ Output:
 The enum's variants are separated by line breaks rather than commas. Either
 works: a comma **or** a line break separates the members of a `struct` or `enum`
 body, and a trailing comma closes the list either way — the same rule that
-separates statements and match arms
-([ADR-049](../../../decisions/049-the-wildcard-binds-nothing-and-a-newline-ends-a-statement.md)).
+separates statements and match arms.
 
 Explained in [Enums and Option](../language/enums.md),
 [Pattern matching](../language/pattern-matching.md) and

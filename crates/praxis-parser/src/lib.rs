@@ -4,13 +4,12 @@
 //!   plus `T0xx` diagnostics.
 //! - [`parse`] runs the lexer and then a recursive-descent + Pratt parser
 //!   (ADR-004) over the grammar, producing a rowan-backed lossless tree
-//!   (ADR-003) plus `P0xx` diagnostics. The tree retains trivia so the
-//!   formatter, LSP, and code actions can use it (§13.1).
+//!   (ADR-003) plus `P0xx` diagnostics. The tree retains trivia, so the LSP and
+//!   its code actions can rewrite a span without disturbing the comments and
+//!   whitespace around it.
 
-pub mod fmt;
 pub mod lex;
 pub mod parse;
 
-pub use fmt::{format_node, format_source};
-pub use lex::{lex, LexOutput};
-pub use parse::{parse, ParseOutput, TYPE_CONSTRUCTOR_NAMES};
+pub use lex::{LexOutput, lex};
+pub use parse::{ParseOutput, TYPE_CONSTRUCTOR_NAMES, parse};

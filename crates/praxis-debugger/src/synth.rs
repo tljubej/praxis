@@ -4,7 +4,7 @@
 //! and running the ordinary pipeline over it, so every parameter annotation has
 //! to be something the *type grammar* can parse and the synthetic module can
 //! resolve. A program's locals routinely have neither, and
-//! [`TypeDb::render`](praxis_types::TypeDb::render) does not notice: it answers
+//! [`TypeDb::render`](praxis_typeck::TypeDb::render) does not notice: it answers
 //! "what does this type look like to a human", which is a different question.
 //! It prints a nominal record as the bare name `Foo` — a name the synthetic
 //! module never declares — an anonymous parser-template record as
@@ -36,7 +36,7 @@
 
 use std::collections::HashMap;
 
-use praxis_types::{CollectionCtor, EnumDefId, RecordDefId, ScalarType, Type, TypeData, TypeDb};
+use praxis_typeck::{CollectionCtor, EnumDefId, RecordDefId, ScalarType, Type, TypeData, TypeDb};
 
 /// The prefix every name this module mints carries. It shares `__p_expr`'s
 /// reservation (§9.5): an identifier the language allows but no program is
@@ -154,10 +154,10 @@ impl<'a> Speller<'a> {
     /// writing a type that means something else is worse than declining to
     /// write one.
     fn spell_func(&mut self, params: &[Type], result: Type) -> Option<String> {
-        if let [only] = params {
-            if matches!(self.db.data(self.db.follow(*only)), TypeData::Tuple(_)) {
-                return None;
-            }
+        if let [only] = params
+            && matches!(self.db.data(self.db.follow(*only)), TypeData::Tuple(_))
+        {
+            return None;
         }
         let params = self.spell_all(params)?;
         let result = self.spell(result)?;
@@ -352,7 +352,7 @@ fn spell_scalar(s: ScalarType) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use praxis_types::{CollectionArgs, FieldSet, TupleElems, VariantSet};
+    use praxis_typeck::{CollectionArgs, FieldSet, TupleElems, VariantSet};
 
     /// The round trip that matters: the emitted declarations plus the spelling
     /// have to parse *and* type-check, which is exactly what the synthetic

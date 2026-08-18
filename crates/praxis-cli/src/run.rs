@@ -13,11 +13,11 @@ use std::path::Path;
 
 use praxis_ast::AstNode;
 use praxis_codegen_cranelift::Jit;
-use praxis_hir::{analyze_root, lower, mono::monomorphize, TypedItem};
+use praxis_hir::{TypedItem, analyze_root, lower, mono::monomorphize};
 use praxis_mir::{annotate, lower_module, verify};
 use praxis_runtime::{Runtime, RuntimeContext};
 use praxis_source::diagnostic::sort_by_position;
-use praxis_types::TypeData;
+use praxis_typeck::TypeData;
 
 use crate::breakpoint_host;
 use crate::debug_mode::DebugMode;

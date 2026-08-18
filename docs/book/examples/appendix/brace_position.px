@@ -1,5 +1,4 @@
-// ADR-050 in one program: a record literal is legal wherever the `{` cannot be
-// a block.
+// A record literal is legal wherever the `{` cannot be a block.
 //
 // The four keyword heads — `if` and `while` conditions, `for`'s iterator,
 // `match`'s scrutinee — claim the next `{` as their body, so a bare

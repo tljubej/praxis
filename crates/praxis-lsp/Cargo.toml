@@ -2,19 +2,24 @@
 name = "praxis-lsp"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Language Server Protocol implementation for Praxis."
+keywords = ["lsp", "language-server", "ide", "compiler", "language"]
+categories = ["development-tools", "compilers"]
 
 # ---------------------------------------------------------------------------
 # **This dependency list is a gate, not just a build input.**
 #
-# §19.11's first acceptance criterion is that editing a file updates diagnostics
-# *without running JIT code*. `crates/praxis-lsp/tests/no_jit.rs` reads this
-# manifest and asserts that `praxis-mir`, `praxis-codegen-cranelift` and
-# `praxis-runtime` are absent — so the criterion holds by construction rather
-# than by observing that one code path did not reach them today. Adding any of
-# those three here turns that test red, which is the point.
+# Editing a file updates diagnostics *without running JIT code*.
+# `crates/praxis-lsp/tests/no_jit.rs` reads this manifest and asserts that
+# `praxis-mir`, `praxis-codegen-cranelift` and `praxis-runtime` are absent — so
+# the rule holds by construction rather than by observing that one code path did
+# not reach them today. Adding any of those three here turns that test red,
+# which is the point.
 # ---------------------------------------------------------------------------
 
 [dependencies]
@@ -23,7 +28,7 @@ praxis-syntax.workspace = true
 praxis-parser.workspace = true
 praxis-ast.workspace = true
 praxis-hir.workspace = true
-praxis-types.workspace = true
+praxis-typeck.workspace = true
 praxis-stdlib.workspace = true
 praxis-input-parser.workspace = true
 rowan.workspace = true
@@ -39,8 +44,8 @@ lsp-types.workspace = true
 praxis-input-parser.workspace = true
 proptest.workspace = true
 
-# Doctests are not run (see the justfile and README): rustdoc has to analyze the
-# whole crate before it can find out there are none, and the result is never
-# cached, so `cargo test` paid ~6s per crate for it on every run.
+# Doctests are not run (the justfile says why): rustdoc has to analyze the whole
+# crate before it can find out there are none, and the result is never cached,
+# so `cargo test` pays ~6s per crate for it on every run.
 [lib]
 doctest = false

@@ -19,8 +19,8 @@
 
 use std::fmt::Write as _;
 
-use crate::descriptor::{BuiltinTypeId, FormatSink, Tracer, TypeDescriptor};
 use crate::GcRef;
+use crate::descriptor::{BuiltinTypeId, FormatSink, Tracer, TypeDescriptor};
 
 /// The runtime payload of a `VarCell`: a single `GcRef` slot. `#[repr(C)]` so
 /// the ABI wrappers can read/write it at a known offset.

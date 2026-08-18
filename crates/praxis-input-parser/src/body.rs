@@ -18,9 +18,9 @@
 use praxis_source::Span;
 use praxis_syntax::ident::{ident_run_len, is_ident_continue, is_ident_start};
 
-use crate::ast::{shift_part_spans, AtomicKind, Constructor, ParserAst};
-use crate::call::{build_call, build_repeated_tail, CallArg};
-use crate::scan::{skip_string, Scan, ScanError};
+use crate::ast::{AtomicKind, Constructor, ParserAst, shift_part_spans};
+use crate::call::{CallArg, build_call, build_repeated_tail};
+use crate::scan::{Scan, ScanError, skip_string};
 
 /// Parse a capture body into its [`ParserAst`].
 ///
@@ -117,7 +117,7 @@ fn parse_expr(cur: &mut Scan<'_>, base: usize, depth: usize) -> Result<ParserAst
         if Constructor::from_keyword(name).is_some() {
             return Err(ScanError::MalformedCaptureBody {
                 byte_offset: base + start,
-                message: format!("`{name}` is a constructor and needs arguments (§7.5)"),
+                message: format!("`{name}` is a constructor and needs arguments"),
             });
         }
         // **No `Int` default**: an unrecognized name is an error.
@@ -162,7 +162,7 @@ fn parse_args(
                 return Err(ScanError::MalformedCaptureBody {
                     byte_offset: base + open,
                     message: "unbalanced `(`".to_string(),
-                })
+                });
             }
             Some(')') => {
                 cur.bump();
@@ -249,7 +249,7 @@ fn parse_arg(
             if cur.peek_char() != Some('(') {
                 return Err(ScanError::MalformedCaptureBody {
                     byte_offset: base + at,
-                    message: "`repeated` needs a parser argument (§7.5)".to_string(),
+                    message: "`repeated` needs a parser argument".to_string(),
                 });
             }
             let args = parse_args(cur, base, depth, Constructor::Repeated)?;
@@ -279,19 +279,19 @@ fn parse_arg(
     // which is true and carries none of the fix — no name would have worked.
     // A name that *is* a parser falls through to the shared shape check, which
     // is where a second parser is decided.
-    if ctor == Constructor::Repeated && at >= 1 {
-        if let Some(name) = peek_ident(cur) {
-            if !crate::parser_names().any(|known| known == name) {
-                return Err(ScanError::CallShape(crate::validate::ValidationError {
-                    span: Span::at((base + cur.pos()) as u32),
-                    code: praxis_source::DiagCode::InvalidConstructorArgument,
-                    message: "`repeated`'s count must be a whole-number literal — the parser \
+    if ctor == Constructor::Repeated
+        && at >= 1
+        && let Some(name) = peek_ident(cur)
+        && !crate::parser_names().any(|known| known == name)
+    {
+        return Err(ScanError::CallShape(crate::validate::ValidationError {
+            span: Span::at((base + cur.pos()) as u32),
+            code: praxis_source::DiagCode::InvalidConstructorArgument,
+            message: "`repeated`'s count must be a whole-number literal — the parser \
                               plan is built when the program is compiled, so the count cannot \
-                              be a parser or a variable (§7.5)"
-                        .to_string(),
-                }));
-            }
-        }
+                              be a parser or a variable"
+                .to_string(),
+        }));
     }
 
     Ok(CallArg::Parser(parse_expr(cur, base, depth)?))

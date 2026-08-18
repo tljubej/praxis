@@ -8,7 +8,7 @@
 //! inference) the inferred [`Scheme`].
 
 use praxis_source::{FileSpan, Span};
-use praxis_types::{Scheme, TypeDb, VarId};
+use praxis_typeck::{Scheme, TypeDb, VarId};
 
 /// An opaque, interned identifier for one declaration. Every shadowing
 /// declaration mints a new, distinct id. One value is reserved and names no
@@ -67,10 +67,10 @@ pub enum SymbolKind {
     /// because the name was found.
     BuiltinType,
     /// A `struct Name { … }` declaration (§4.5). A type-name symbol; its
-    /// scheme carries the record's [`Type`](praxis_types::Type) once registered.
+    /// scheme carries the record's [`Type`](praxis_typeck::Type) once registered.
     Struct,
     /// An `enum Name { … }` declaration (§4.6). A type-name symbol; its
-    /// scheme carries the enum's [`Type`](praxis_types::Type) once registered.
+    /// scheme carries the enum's [`Type`](praxis_typeck::Type) once registered.
     Enum,
     /// One variant of an `enum` declaration, as a *constructor* name in scope
     /// (§4.6): `Empty`, `Number(5)`. Its scheme is the constructor's — a `Func`
@@ -150,7 +150,7 @@ pub struct Symbol {
     /// Display only. It is deliberately *not* folded into `scheme`: a parameter
     /// of a generic function is a monotype in that function's body — `c` cannot
     /// be used at two types inside `foo` — and quantifying it here would make
-    /// [`instantiate`](praxis_types::TypeDb::instantiate) hand `c = |…| …` a
+    /// [`instantiate`](praxis_typeck::TypeDb::instantiate) hand `c = |…| …` a
     /// fresh variable instead of constraining the parameter.
     pub enclosing_binders: Vec<VarId>,
 }

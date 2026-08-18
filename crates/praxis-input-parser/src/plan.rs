@@ -449,7 +449,7 @@ pub fn lower_to_plan(ast: &ParserAst, order: &mut dyn FieldOrder) -> CompiledPla
 /// order therefore cannot be a property of the parser that happens to be
 /// building the value; it has to come from whatever knows about *every*
 /// spelling in the program. During a compile that is the
-/// [`TypeDb`](praxis_types::TypeDb), which registered a definition for each.
+/// [`TypeDb`](praxis_typeck::TypeDb), which registered a definition for each.
 ///
 /// The plan stores the answer per record-producing node so the runtime places
 /// fields with an index rather than a name lookup.
@@ -473,7 +473,7 @@ impl FieldOrder for SourceOrder {
     }
 }
 
-impl FieldOrder for praxis_types::TypeDb {
+impl FieldOrder for praxis_typeck::TypeDb {
     fn canonical(&mut self, names: &[&str]) -> Vec<String> {
         self.canonical_field_order(names).to_vec()
     }
@@ -628,7 +628,7 @@ fn lower_node(b: &mut PlanBuilder<'_>, ast: &ParserAst) -> u32 {
     /// name*, not a value; and invoked in body position rather than expanded
     /// into the arms themselves because macros cannot expand to match arms.
     macro_rules! unary {
-        ($node:ident, $child:expr) => {{
+        ($node:ident, $child:expr_2021) => {{
             let c = lower_node(b, $child);
             b.push_node(PlanNode::$node { child: c })
         }};

@@ -199,17 +199,17 @@ impl std::fmt::Display for ScanError {
             ScanError::InvalidCaptureName { byte_offset, name } => write!(
                 f,
                 "`{name}` at byte {byte_offset} is not a capture name: a capture name is an \
-                 identifier (§4.1)"
+                 identifier"
             ),
             ScanError::UnknownCaptureKind { byte_offset, name } => write!(
                 f,
                 "unknown parser `{name}` at byte {byte_offset}: no atomic or constructor is \
-                 spelled that way (§7.4, §7.5)"
+                 spelled that way"
             ),
             ScanError::UnknownConstructor { byte_offset, name } => {
                 write!(
                     f,
-                    "unknown parser constructor `{name}` at byte {byte_offset} (§7.5)"
+                    "unknown parser constructor `{name}` at byte {byte_offset}"
                 )
             }
             ScanError::MalformedCaptureBody {
@@ -1248,7 +1248,7 @@ mod tests {
     /// number and not only the behaviour.
     #[test]
     fn the_two_template_nesting_bounds_are_the_same_number_and_the_message_says_it() {
-        use praxis_syntax::template::{template_end, TemplateEnd};
+        use praxis_syntax::template::{TemplateEnd, template_end};
 
         // The deepest nest the scanner accepts, measured rather than assumed.
         let deepest = (1..=MAX_NESTING + 4)

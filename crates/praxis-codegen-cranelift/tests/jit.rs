@@ -4822,8 +4822,7 @@ fn m9_block_template_that_writes_a_newline_spans_the_lines_it_writes() {
     // instead of `"abcd"` (4) — a wrong answer, not a fault, which is why this
     // test is worth having. With a window of exactly one line the template's own
     // `\n` part has no terminator left inside its window.
-    let src =
-        "fn main() -> Int {\n  var b = read block(`{x:int},{y:int}\\n{z:int}`, `{w:rest}`)\n  \
+    let src = "fn main() -> Int {\n  var b = read block(`{x:int},{y:int}\\n{z:int}`, `{w:rest}`)\n  \
                b.x + b.y + b.z + b.w.len()\n}\n";
     let (rt, result) = run_main_with_input(src, "1,2\n3\nabcd\n");
     assert!(!rt.has_pending_fault(), "fault: {:?}", rt.fault());
@@ -10449,7 +10448,7 @@ fn main() -> Int {
             .iter()
             .find(|(name, _)| name == callee)
             .unwrap_or_else(|| panic!("pass {pass}: no call to {callee} in {:?}", s.calls[2]));
-        let text = &src[at.1 .0 as usize..at.1 .1 as usize];
+        let text = &src[at.1.0 as usize..at.1.1 as usize];
         let expected = if pass % 2 == 0 { "foo(c)" } else { "zoo(c)" };
         assert_eq!(text, expected, "pass {pass} is inside {expected}");
     }

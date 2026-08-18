@@ -6,7 +6,7 @@
 //! span, an orphan span without a file, or a diagnostic without a primary span
 //! cannot be constructed through the public API.
 //!
-//! See `praxis_technical_design.md` §14.1 (`praxis-source` responsibilities)
+//! See `docs/technical-design.md` §14.1 (`praxis-source` responsibilities)
 //! and §8 (diagnostic format).
 
 pub mod diagnostic;
@@ -18,8 +18,8 @@ pub mod style;
 pub mod suggest;
 
 pub use diagnostic::{
-    render_one, DiagCode, Diagnostic, DiagnosticCategory, DiagnosticCode, DiagnosticNote, Renderer,
-    Severity, Suggestion,
+    DiagCode, Diagnostic, DiagnosticCategory, DiagnosticCode, DiagnosticNote, Renderer, Severity,
+    Suggestion, render_one,
 };
 pub use file::{FileId, SourceFile, SourceMap};
 pub use line_map::{LineCol, LineMap};

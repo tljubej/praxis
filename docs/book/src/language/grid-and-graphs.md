@@ -23,9 +23,8 @@ covered in [structural parsers](../input/structural.md).
 
 And from the program itself. `Grid()` is the empty 0×0 grid; `Grid(w, h, fill)`
 is the **working** grid an algorithm allocates for itself — an occupancy board, a
-visited mask, a distance table — with every cell starting as `fill`
-([ADR-146](../../../decisions/146-a-collection-constructors-arity-is-its-shape.md)).
-That is the difference between *using* `Grid[T]` and reimplementing it: a
+visited mask, a distance table — with every cell starting as `fill`. That is
+the difference between *using* `Grid[T]` and reimplementing it: a
 hand-rolled `Vec[Bool]` indexed `y * w + x` has no `contains`, no `neighbors4`,
 and no bounds behaviour at all. There is still no `to_vec`-style `to_grid` on any
 sequence, so a grid is either read or allocated.
@@ -106,20 +105,16 @@ false
 ```
 
 There is no `Char` literal, which is why the wall is written `"#"[0]` — a
-one-character `Text` subscripted at 0
-([ADR-107](../../../decisions/107-a-small-char-is-one-object-and-there-is-no-char-literal.md),
-[ADR-086](../../../decisions/086-a-text-subscript-answers-a-char.md)). See
-[Text and Char](text.md).
+one-character `Text` subscripted at 0. See [Text and Char](text.md).
 
 Note what a grid does *not* have. There is no `len()`: "how many" would have to
-choose between cells and rows, and §6.4's method list does not pick one, so
-`map.len()` is a `Y110` — no such method on `Grid[Char]`. A grid is
-also not one of the ten [pipeline](pipelines.md) receivers, so `map.map(f)` and
-`map.filter(p)` do not resolve either — `map.cells()` is the bridge, and
-`map.cells().filter(p).count()` is one fused loop over a `Vec[T]`
-([ADR-127](../../../decisions/127-a-pipelines-source-is-the-for-loops-and-a-collection-converts-by-naming-what-it-becomes.md)).
-A bare `for` over the grid itself works and yields cells in row-major order,
-which is the case that mattered.
+choose between cells and rows, and the catalog picks neither, so `map.len()` is a
+`Y110` — no such method on `Grid[Char]`. A grid is also not one of the ten
+[pipeline](pipelines.md) receivers, so `map.map(f)` and `map.filter(p)` do not
+resolve either — `map.cells()` is the bridge, and
+`map.cells().filter(p).count()` is one fused loop over a `Vec[T]`. A bare `for`
+over the grid itself works and yields cells in row-major order, which is the
+case that mattered.
 
 ## Positions and neighbours
 
@@ -242,8 +237,7 @@ printing `grid.row(y)` in a loop, as `show` does, is how you look at the shape.
 ## `matrix(P)` is a `Grid[T]`
 
 There is no separate `Matrix` type. `grid` and `matrix` differ only in how each
-cuts a row into cells, and both answer `Grid[T]`
-([ADR-030](../../../decisions/030-matrix-is-grid.md)).
+cuts a row into cells, and both answer `Grid[T]`.
 
 ```praxis
 // The only difference between the two constructors is how a row is cut up.
@@ -329,14 +323,13 @@ That is all of it — eighteen rows, including the two subscript forms.
 | `grid.rotate_left()` | `Grid[T]` | 90° counter-clockwise, a new grid |
 | `grid.rotate_right()` | `Grid[T]` | 90° clockwise, a new grid |
 
-§6.4 of the design document also lists `grid.map(fn)`. It is not implemented:
-`grid.map(f)` is a `Y110`. Map over `grid.cells()` instead, and index back with
-`grid.positions()` if you need to know where each cell was.
+There is no `grid.map(fn)`: `g.map(f)` is a `Y110`. Map over `grid.cells()`
+instead, and index back with `grid.positions()` if you need to know where each
+cell was.
 
 **Drawing the grid back** is how a grid puzzle is debugged, and `out(grid.row(y))`
 is not it — that prints `[., ., |]`. A `Vec[Char]` has a `to_text()`, so the
-line the grid was read from comes back one call later
-([ADR-144](../../../decisions/144-a-sequence-of-text-joins-and-a-sequence-of-char-becomes-one.md)):
+line the grid was read from comes back one call later:
 
 ```praxis
 for y in 0..grid.height() { out(grid.row(y).to_text()) }
@@ -349,8 +342,7 @@ chooses that.
 ## The graph helpers
 
 There is no graph object, no adjacency type and no node type. Every helper takes
-a start **state** and then only **functions of it** — the graph *is* the closure
-([ADR-060](../../../decisions/060-the-graph-helpers-are-closure-driven-walks.md)).
+a start **state** and then only **functions of it**: the graph *is* the closure.
 A state is any value you can put in a `Set`, so an `Int` node id, a `Text`, an
 `(Int, Int)` grid position and a record all work, and the walk never learns
 where they came from.
@@ -492,8 +484,7 @@ and `(0, 2)` — straight down the left edge — while `bfs` takes `(0, 1)` then
 `(1, 0)`.
 
 A closure stored in a variable, as `step` is here, is an ordinary value and can
-be handed to as many helpers as you like. So can a top-level `fn` by name
-([ADR-061](../../../decisions/061-a-fn-name-in-value-position-is-a-closure.md)):
+be handed to as many helpers as you like. So can a top-level `fn` by name:
 `bfs(0, steps)` and `bfs(0, |n| steps(n))` are the same walk. The neighbour
 result is an ordinary `Vec`, so a [pipeline](pipelines.md) is a fine way to
 build it, as `step` does here.

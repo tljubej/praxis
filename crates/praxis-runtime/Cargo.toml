@@ -2,56 +2,63 @@
 name = "praxis-runtime"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "GC ABI types, type descriptors, and runtime context for Praxis"
+homepage.workspace = true
+description = "GC ABI types, type descriptors, and runtime context for Praxis."
+keywords.workspace = true
+categories.workspace = true
 
-# The measurement toggles. Both exist for the same reason and neither is a
-# feature in the ordinary sense: handover 26 §6 requires an A/B's baseline arm to
-# be *this tree with the package's single toggle reverted*, never an earlier
-# commit — ADR-113 records measuring against the wrong baseline giving 14.4%
-# where the right one gave 0.8%. So each toggle lives here, and both arms are
-# buildable from the committed tree.
+# The measurement toggles. Neither is a feature in the ordinary sense: an A/B
+# measurement's baseline arm must be *this tree with the package's single toggle
+# reverted*, never an earlier commit, because every unrelated change in between
+# is otherwise priced into the result — one measurement taken against the wrong
+# baseline reported 14.4% where the right one gave 0.8%. So each toggle lives
+# here, and both arms are buildable from the committed tree.
 #
 # Nothing in the workspace enables either, and `just ci` builds neither.
 [features]
-# ADR-118 part 1 arm A. Off (the default) `ReprCVec` is the pinned `#[repr(C)]`
-# triple generated code reads; on, it is a `#[repr(transparent)]` newtype over
-# `std::Vec` with every caller byte-for-byte identical.
+# Vec payload representation, arm A. Off (the default) `ReprCVec` is the pinned
+# `#[repr(C)]` triple generated code reads; on, it is a `#[repr(transparent)]`
+# newtype over `std::Vec` with every caller byte-for-byte identical.
 #
-# **Retired by ADR-118 part 2, and deliberately in the loud direction.** Part 2
-# emits loads at those displacements, so this arm is no longer a slower build of
-# the same program — it is a miscompile, reading a `std::Vec`'s capacity where
-# the length is wanted. `INLINE_VEC_SITE` and `INLINE_BITSET_SITE` therefore do
-# not exist under the feature, and naming them unconditionally in
+# **Retired, and deliberately in the loud direction.** Generated code now emits
+# loads at those displacements, so this arm is no longer a slower build of the
+# same program — it is a miscompile, reading a `std::Vec`'s capacity where the
+# length is wanted. `INLINE_VEC_SITE` and `INLINE_BITSET_SITE` therefore do not
+# exist under the feature, and naming them unconditionally in
 # `praxis-codegen-cranelift` turns the combination into a build failure:
 #
 #     cargo check -p praxis-cli --features praxis-runtime/std-vec-payload
 #     error[E0425]: cannot find value `INLINE_BITSET_SITE` …
 #
-# `cargo test -p praxis-runtime --features std-vec-payload` still passes: the
-# crate on its own is unaffected, and part 1's measurement (a null result, in
-# its own record) was taken before part 2 landed. What is gone is the *whole
+# `cargo test -p praxis-runtime --features std-vec-payload` still passes: this
+# crate on its own is unaffected, and the arm's own measurement (a null result)
+# was taken before the inline loads landed. What is gone is the *whole
 # workspace* built that way.
 std-vec-payload = []
-# ADR-115 arm A. **It makes the runtime slower on purpose**: the `Text` scalar
-# count is never remembered and `t[i]` never indexes bytes, which is the
-# complexity the tree had before ADR-115 with the representation otherwise
-# identical. Do not enable it anywhere except when staging that arm.
+# Text scalar count, arm A. **It makes the runtime slower on purpose**: the
+# `Text` scalar count is never remembered and `t[i]` never indexes bytes, which
+# is the complexity this tree carried before that count existed, with the
+# representation otherwise identical. Do not enable it anywhere except when
+# staging that arm.
 adr115-arm-a = []
 
 [dependencies]
 praxis-source.workspace = true
 praxis-input-parser.workspace = true
 praxis-stdlib.workspace = true
-# For §4.1's one identifier character class, which §7.4's `identifier` atomic
-# parses with (F3, IP-11). Already an indirect dependency via
-# `praxis-input-parser`; named here because this crate uses it directly, and a
-# second copy of the rule is exactly what F3 exists to prevent.
+# For the language's one identifier character class, which the `identifier`
+# atomic parses with. Already an indirect dependency via `praxis-input-parser`;
+# named here because this crate uses it directly, and one character class with
+# one definition is the whole reason to take it from there rather than restate
+# it.
 praxis-syntax.workspace = true
 
-# Doctests are not run (see the justfile and README): rustdoc has to analyze the
-# whole crate before it can find out there are none, and the result is never
-# cached, so `cargo test` paid ~6s per crate for it on every run.
+# Doctests are not run (the justfile says why): rustdoc has to analyze the whole
+# crate before it can find out there are none, and the result is never cached,
+# so `cargo test` pays ~6s per crate for it on every run.
 [lib]
 doctest = false

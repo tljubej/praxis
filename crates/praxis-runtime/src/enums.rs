@@ -19,9 +19,9 @@
 
 use std::fmt::Write as _;
 
+use crate::GcRef;
 use crate::descriptor::{BuiltinTypeId, DynamicHasher, FormatSink, Tracer, TypeDescriptor};
 use crate::records::SchemaIdentity;
-use crate::GcRef;
 
 /// One variant of an enum shape: its source name plus the descriptors for its
 /// payload slots, in declaration order. A payload-less variant has an empty
@@ -186,7 +186,9 @@ unsafe fn enum_format(payload: *const u8, out: &mut FormatSink<'_>) {
                     let _ = out.write_str(", ");
                 }
                 let desc = schema.descriptor_at(tag, i, *item);
-                (desc.format)(item.payload::<u8>() as *const u8, out);
+                // SAFETY: the descriptor came from the schema for this slot, so the slot's
+                // payload is the type its `format` expects.
+                unsafe { (desc.format)(item.payload::<u8>() as *const u8, out) };
             }
             let _ = out.write_str(")");
         }
@@ -234,7 +236,9 @@ unsafe fn enum_equals(a: *const u8, b: *const u8) -> bool {
         };
         let xe = x.payload::<u8>() as *const u8;
         let ye = y.payload::<u8>() as *const u8;
-        if !eq(xe, ye) {
+        // SAFETY: both slots were just checked to carry the same descriptor, and it
+        // is the one whose `equals` this is.
+        if !unsafe { eq(xe, ye) } {
             return false;
         }
     }
@@ -283,7 +287,9 @@ unsafe fn enum_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
             return;
         };
         let elem_payload = item.payload::<u8>() as *const u8;
-        hash_item(elem_payload, hasher);
+        // SAFETY: the descriptor came from the schema for this slot, so the slot's
+        // payload is the type its `hash` expects.
+        unsafe { hash_item(elem_payload, hasher) };
     }
 }
 

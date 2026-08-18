@@ -17,11 +17,11 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write as _};
 
+use crate::DynamicHasher;
+use crate::GcRef;
 use crate::collections::nullable;
 use crate::descriptor::{BuiltinTypeId, FormatSink, Tracer, TypeDescriptor};
 use crate::dynamic_key::DynamicKey;
-use crate::DynamicHasher;
-use crate::GcRef;
 
 // ---------------------------------------------------------------------------
 // Deterministic rendering

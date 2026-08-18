@@ -17,11 +17,11 @@
    contradict the screenshot beside it.
 
    The neutrals carry the mark instead. They are a warm charcoal biased a few
-   degrees toward the strut's crimson rather than the blue-black they were, so
-   the page and the logo share a world without the page going red. --accent is
-   the mark itself, spent only on chrome: what you can press, and what counts as
-   ours. It is deliberately close to --fault, so never put the two side by side
-   and never use --accent where a diagnostic could appear. */
+   degrees toward the strut's crimson, so the page and the logo share a world
+   without the page going red. --accent is the mark itself, spent only on
+   chrome: what you can press, and what counts as ours. It is deliberately close
+   to --fault, so never put the two side by side and never use --accent where a
+   diagnostic could appear. */
 :root {
   --ground:   #0F0C0D;
   --panel:    #161214;
@@ -705,7 +705,7 @@ you read    fn foo(a: Int, b: Int)</pre>
 
 <!-- ═══ speed ══════════════════════════════════════════════════════════════ -->
 <section class="wrap" id="speed">
-  <div class="rule"><span class="rule-label">speed</span><i class="rule-line"></i><span class="rule-note">benchmarks/REPORT.md</span></div>
+  <div class="rule"><span class="rule-label">speed</span><i class="rule-line"></i><span class="rule-note">three implementations, byte-identical output</span></div>
 
   <h2>Fast enough that the puzzle is the slow part.</h2>
   <p class="lead" style="max-width:74ch">Eight benchmarks, each written three times — in Praxis, in Rust
@@ -752,7 +752,7 @@ you read    fn foo(a: Int, b: Int)</pre>
       <p style="font-size:.93rem">The one dependency outside cargo is the <code>just</code> command runner.</p>
       <pre class="sh"><span class="p">$</span> cargo install just
 <span class="p">$</span> just build
-<span class="c"># the whole gate CI runs — fmt, clippy,
+<span class="c"># the whole gate CI runs — rustfmt, clippy,
 # tests, and every book example re-run</span>
 <span class="p">$</span> just ci</pre>
     </div>
@@ -766,7 +766,7 @@ you read    fn foo(a: Int, b: Int)</pre>
     </div>
     <div>
       <h3>Read</h3>
-      <p style="font-size:.93rem">The book is <span data-stat="chapters">47</span> chapters, and every one
+      <p style="font-size:.93rem">The book is <span data-stat="chapters">46</span> chapters, and every one
       of its <span data-stat="examples">408</span> examples is re-run and diffed by <code>just ci</code>
       rather than being illustrative.</p>
       <pre class="sh"><span class="p">$</span> just book-serve
@@ -804,8 +804,7 @@ you read    fn foo(a: Int, b: Int)</pre>
 <footer>
   <div class="wrap fin">
     <span>Praxis 0.1.0</span>
-    <span>design decisions in <code>docs/decisions/</code></span>
-    <span>handovers in <code>docs/handovers/</code></span>
+    <span>the book in <code>docs/book/</code></span>
     <span style="margin-left:auto">every terminal on this page is real output, recorded from the binary in this tree</span>
   </div>
 </footer>

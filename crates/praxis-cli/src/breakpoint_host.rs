@@ -49,7 +49,7 @@ thread_local! {
 
 /// The host state a stop is rendered against.
 struct HostState {
-    db: praxis_types::TypeDb,
+    db: praxis_typeck::TypeDb,
     source_text: String,
     source_name: String,
     color: ColorMode,
@@ -66,7 +66,7 @@ struct HostState {
 /// each and print nothing, which is what "never" has to mean for a stop as much
 /// as for a fault.
 pub fn install(
-    db: &praxis_types::TypeDb,
+    db: &praxis_typeck::TypeDb,
     source_text: &str,
     source_name: &str,
     debug: DebugMode,

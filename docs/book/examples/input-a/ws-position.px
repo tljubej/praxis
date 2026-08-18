@@ -1,6 +1,6 @@
-// A parser position is absolute (ADR-078). The mismatch is on the second line
-// of the second section — what `word` left of it — and the offset it reports
-// counts from the first byte of the input, not from the start of that line.
+// A parser position is absolute. The mismatch is on the second line of the
+// second section — what `word` left of it — and the offset it reports counts
+// from the first byte of the input, not from the start of that line.
 fn main() -> Int {
     (read sections(lines(word))).len()
 }

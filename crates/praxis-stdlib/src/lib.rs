@@ -19,12 +19,12 @@ pub mod type_pattern;
 pub use builtins::builtin_catalog;
 pub use capability::CapKind;
 pub use catalog::{MethodCatalog, MethodCatalogError, MethodEntry, MethodLowering, Purity};
-pub use completion::{completion_data, CompletionItem};
+pub use completion::{CompletionItem, completion_data};
 pub use prelude::{
-    graph_helper, numeric_helper, prelude_doc, sized_ctor, type_doc, GraphHelper, GraphParam,
-    GraphResult, NumericHelper, SizedCtor, TypeEntry, BUILTIN_TYPES, GRAPH_HELPERS,
-    NUMERIC_HELPERS, PRELUDE, SIZED_CTORS,
+    BUILTIN_TYPES, GRAPH_HELPERS, GraphHelper, GraphParam, GraphResult, NUMERIC_HELPERS,
+    NumericHelper, PRELUDE, SIZED_CTORS, SizedCtor, TypeEntry, graph_helper, numeric_helper,
+    prelude_doc, sized_ctor, type_doc,
 };
 pub use type_pattern::{
-    is_pipeline_receiver, pattern_matches, Bound, CollectionCtor, TypePattern, PIPELINE_RECEIVERS,
+    Bound, CollectionCtor, PIPELINE_RECEIVERS, TypePattern, is_pipeline_receiver, pattern_matches,
 };

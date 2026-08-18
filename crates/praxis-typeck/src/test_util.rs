@@ -8,7 +8,7 @@
 //! makes every call site noisier.
 //!
 //! These stay here rather than in `praxis-test-support`: that crate does not
-//! depend on `praxis-types`, and nothing outside this crate needs them.
+//! depend on `praxis-typeck`, and nothing outside this crate needs them.
 
 #![cfg(test)]
 

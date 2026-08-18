@@ -22,7 +22,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use praxis_runtime::{NativeScope, Runtime, NATIVE_ROOT_RESERVATION};
+use praxis_runtime::{NATIVE_ROOT_RESERVATION, NativeScope, Runtime};
 
 static ARMED: AtomicBool = AtomicBool::new(false);
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);

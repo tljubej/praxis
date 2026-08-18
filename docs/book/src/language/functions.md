@@ -66,8 +66,7 @@ mutually and recursively. They may not be nested: a `fn` inside a `fn` is
 no optional or default parameters, and no named arguments. A call with the wrong
 count is `Y024: this function takes 2 argument(s), but 1 were given`. Where
 another language would overload, Praxis uses a second name — the method catalog
-does, with `min`/`min_by`, `max`/`max_by` and `find`/`position`
-([ADR-089](../../../decisions/089-a-name-has-one-signature.md)). The prelude's
+does, with `min`/`min_by`, `max`/`max_by` and `find`/`position`. The prelude's
 own `min` and `max` are the two-argument free functions, and there is no
 `min_by` beside them.
 
@@ -166,11 +165,11 @@ A binding declared *after* the function is `N001` rather than `N007`: only `fn`,
 `struct` and `enum` are pre-registered for forward reference, so the name is
 genuinely not in scope and nothing has crossed a boundary.
 
-This used to compile. `fn f() { x }` read a slot the function did not have and
-answered `Unit`; the closure form answered a nine-digit number. Neither was
-reported.
-[ADR-068](../../../decisions/068-a-function-does-not-capture.md) is the fix and
-the argument for reporting rather than for making a `fn` capture.
+The alternative is a `fn` that captures, and it is a worse language: `fn` and
+closure would then differ only in syntax, and every function would acquire a
+hidden environment it did not declare. A `fn` is a function of its parameters
+and nothing else, a closure is the thing that captures, and `N007` is where the
+line is drawn.
 
 ## Closures
 
@@ -255,10 +254,10 @@ the first, with its own symbol and its own type — so `add_base` holds a copy o
 `10` and keeps answering `11`.
 
 That is the whole rule, and it is why shadowing and reassignment, which look
-alike, behave differently here. See
-[bindings and shadowing](bindings.md) for the difference, and
-[ADR-125](../../../decisions/125-a-binding-is-a-binding-and-the-compiler-decides-its-storage.md)
-for why the compiler derives this rather than taking a keyword for it.
+alike, behave differently here. See [bindings and shadowing](bindings.md) for the
+difference. Nothing in the source declares which of the two you get: the compiler
+reads whether anything writes the binding, and a keyword for it would be a second
+statement about the program that has to agree with the first.
 
 A `for` variable is a fresh binding on every step, so closures made on different
 steps hold different bindings rather than sharing one — they do not all end up
@@ -373,8 +372,6 @@ praxis: 1 error(s)
 
 The remedy in the message works because a closure body *is* a call site, and a
 call site is what fixes the type arguments.
-[ADR-061](../../../decisions/061-a-fn-name-in-value-position-is-a-closure.md)
-has the reasoning, including why this used to abort the host process.
 
 ## How a parameter generalizes
 
@@ -488,7 +485,5 @@ praxis: 1 error(s)
 
 `Y001` and not "cannot be iterated": `Vec[Text]` iterates perfectly well, and
 the body is correct for every other instantiation of `total`. What is wrong is
-`t + i`, at this one call.
-[ADR-062](../../../decisions/062-an-iterated-parameter-is-generic-in-the-iterable-and-not-its-element.md)
-is the decision, and [generalization](../types/generalization.md) is the wider
-picture.
+`t + i`, at this one call. [Generalization](../types/generalization.md) is the
+wider picture.

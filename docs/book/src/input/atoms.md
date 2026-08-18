@@ -19,7 +19,7 @@ There are ten of them and the list is closed.
 | `rest` | the region it is given | `Text` |
 
 ```praxis
-// Every atomic parser §7.4 has, once each, against text chosen so the value is
+// All ten atomic parsers, once each, against text chosen so the value is
 // visible. `text` and `rest` are in `atom-text-rest.px`.
 fn main() {
     out(parse("-42", int))
@@ -161,8 +161,7 @@ The second line is the reason the delimiter set stays small. A bare `word` swall
 `seed-to-soil` whole; a `word` capture inside a template stops at the literal
 that follows it, because [every capture is bounded](templates.md#a-capture-is-bounded-by-what-follows-it).
 Growing `word`'s own delimiter set to cover `-` would have broken the bare case
-to fix a case the bound already fixes
-([ADR-079](../../../decisions/079-a-grid-cell-is-what-its-cell-parser-reads.md)).
+to fix a case the bound already fixes.
 
 An empty run is a failure: `word` at a comma reports `expected word` and reads
 nothing.
@@ -176,9 +175,9 @@ identifiers and you want `x2` but not `x-2`.
 ## `text` and `rest`
 
 Both take the region they are given, whole, leading whitespace included. In the
-implementation they are the same parser, and the difference §7.4 describes
-between them lives one level up: a capture is bounded by whatever follows it in
-the template, and that bound applies to **every** capture, not only the `text`
+implementation they are the same parser, and the difference the two names
+suggest lives one level up: a capture is bounded by whatever follows it in the
+template, and that bound applies to **every** capture, not only the `text`
 ones.
 
 ```praxis
@@ -241,10 +240,8 @@ Backtrace:
 The `expected` word is the atomic's own keyword, so the report names the leaf
 that disagreed rather than the constructor that called it. The offset is
 absolute — a byte index into the whole input, not into the line or field the
-atomic was handed
-([ADR-078](../../../decisions/078-a-parser-position-is-absolute-and-a-region-only-narrows.md)).
-[When a parse fails](faults.md) covers the rest of the report and what the crash
-debugger does with it.
+atomic was handed. [When a parse fails](faults.md) covers the rest of the
+report and what the crash debugger does with it.
 
 An atomic that succeeds but does not fill the region it was given is a different
 question, and its answer belongs to whoever computed the region: `lines(int)`

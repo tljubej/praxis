@@ -8,16 +8,16 @@
 
 use praxis_ast::{AstNode, ParserExpr, ParserExprKind, ParserNamedArg};
 use praxis_input_parser::ast::{
-    shift_part_spans, AtomicKind, Constructor, ParserAst, TemplatePart,
+    AtomicKind, Constructor, ParserAst, TemplatePart, shift_part_spans,
 };
 use praxis_input_parser::{
-    build_call, build_repeated_tail, lower_to_plan, register_plan, scan_template, synthesize,
-    synthesize_indexed, validate, CallArg, PlanId, ValidationError,
+    CallArg, PlanId, ValidationError, build_call, build_repeated_tail, lower_to_plan,
+    register_plan, scan_template, synthesize, synthesize_indexed, validate,
 };
 
 use crate::parser_index::ParserIndex;
 use praxis_source::{DiagCode, Diagnostic, FileId, FileSpan, Severity, Span};
-use praxis_types::{Type, TypeDb};
+use praxis_typeck::{Type, TypeDb};
 
 /// The result of converting + validating + synthesizing a parser expression.
 pub struct ParserAnalysis {
@@ -320,7 +320,7 @@ fn convert_constructor_call(
             file,
             name_span,
             DiagCode::UnknownConstructor,
-            format!("unknown parser constructor `{ctor_name}` (§7.5)"),
+            format!("unknown parser constructor `{ctor_name}`"),
         );
         diagnostics.push(suggest_parser_name(
             diag,
@@ -344,7 +344,7 @@ fn convert_constructor_call(
                 file,
                 span,
                 DiagCode::InvalidConstructorArgument,
-                format!("`{ctor_name}` has an argument that is not a parser expression (§7.5)"),
+                format!("`{ctor_name}` has an argument that is not a parser expression"),
             ));
         }
         return None;
@@ -410,11 +410,11 @@ fn extract_call_args(
                     // `lines(ragged)` would be told it had written a
                     // flag where a parser belongs and the word would be
                     // reserved everywhere rather than in `grid`.
-                    if let Some(flag) = flag_arg {
-                        if pe.text().as_deref() == Some(flag) {
-                            args.push(CallArg::Flag(flag.to_string()));
-                            continue;
-                        }
+                    if let Some(flag) = flag_arg
+                        && pe.text().as_deref() == Some(flag)
+                    {
+                        args.push(CallArg::Flag(flag.to_string()));
+                        continue;
                     }
                     // **`repeated(P, n)` is a count that is not a literal, and
                     // that is what the reader needs to be told.** A bare name
@@ -439,7 +439,7 @@ fn extract_call_args(
                             DiagCode::InvalidConstructorArgument,
                             "`repeated`'s count must be a whole-number literal — the parser plan \
                              is built when the program is compiled, so the count cannot be a \
-                             parser or a variable (§7.5)"
+                             parser or a variable"
                                 .to_string(),
                         ));
                         all_converted = false;
@@ -494,7 +494,7 @@ fn extract_call_args(
                                     file,
                                     rowan_span(&arg),
                                     DiagCode::InvalidConstructorArgument,
-                                    format!("`{name}:` needs a value (§7.5)"),
+                                    format!("`{name}:` needs a value"),
                                 ));
                                 all_converted = false;
                                 continue;
@@ -635,7 +635,7 @@ fn repeated_call_args(
             file,
             rowan_span(call.syntax()),
             DiagCode::MalformedParserExpression,
-            "malformed `repeated(...)` tail (§7.5)".to_string(),
+            "malformed `repeated(...)` tail".to_string(),
         ));
         return None;
     };

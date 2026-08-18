@@ -7,8 +7,10 @@ the types are the ones inference derived, the method list is the catalog
 dispatch searches. There is a thin VS Code extension in `editors/vscode/` that
 launches it; any editor with an LSP client can do the same.
 
-There is no formatter. That is not an oversight, and it is covered at the end of
-this chapter.
+Praxis has no formatter. The language server does not advertise
+`documentFormattingProvider`, and it does not advertise the range or on-type
+variants either, so `Format Document` leaves your editor doing whatever it would
+have done by itself.
 
 ## Starting it
 
@@ -28,17 +30,18 @@ and set `praxis.binaryPath` to your `praxis` binary, or put it on `PATH`.
 
 The process is a single synchronous loop on one thread. There is no async
 runtime, no worker pool, and no lock, because the whole working set is one file
-and a `rowan` syntax tree cannot cross a thread anyway
-([ADR-095](../../../decisions/095-the-language-server-is-a-synchronous-stdio-loop.md)).
-A `$/cancelRequest` that arrives while an earlier request is being served drops
-the queued request; a request already running finishes.
+and a `rowan` syntax tree cannot cross a thread anyway: only the green tree is
+shareable, so a worker would have to re-root a cursor before it could answer a
+question about a tree it cannot hold. A `$/cancelRequest` that arrives while an
+earlier request is being served drops the queued request; a request already
+running finishes.
 
 ## What it serves
 
 This is exactly the capability set the server reports at `initialize`. Nothing
-is advertised that is not implemented: an editor that is told the server handles
-something stops offering its own behaviour for it, so a capability claimed and
-not delivered is worse than one that is visibly missing.
+is advertised that the server does not serve: an editor that is told the server
+handles something stops offering its own behaviour for it, so a capability
+claimed and not delivered is worse than one that is visibly missing.
 
 | Request | What you get |
 |---|---|
@@ -59,8 +62,9 @@ Text is synchronized incrementally, and `positionEncoding` is negotiated: the
 server picks UTF-8 when the client offers it and falls back to UTF-16, the
 protocol's default, when it does not. The conversion happens in one module at
 the protocol boundary, so nothing below the language server has an opinion about
-what a UTF-16 code unit is
-([ADR-096](../../../decisions/096-positions-convert-at-the-protocol-boundary.md)).
+what a UTF-16 code unit is; a span is a byte range everywhere else. That is the
+difference between an underline that lands correctly on a line holding an `é`
+and one that lands two columns early.
 
 Everything is scoped to **one file**. `workspace/symbol` is the only query that
 reads the disk, and it parses rather than analyzes.
@@ -69,17 +73,17 @@ reads the disk, and it parses rather than analyzes.
 
 The editor's underlines and `praxis check`'s output come from the same query
 layer. `praxis check` does not have a pipeline of its own: it builds a snapshot,
-asks it for diagnostics, and renders them
-([ADR-097](../../../decisions/097-the-shared-query-layer-lives-in-praxis-lsp.md)).
-So the set, the order and the decision to analyze a tree that already has parse
-errors are stated once and read by both. A diagnostic you can see in the editor
-and not on the command line is not a thing that can happen.
+asks it for diagnostics, and renders them. So the set, the order and the
+decision to analyze a tree that already has parse errors are stated once and
+read by both. A diagnostic you can see in the editor and not on the command line
+is not a thing that can happen.
 
 Reports are published after a 150 ms pause in typing. The debounce is there so a
 half-typed `.` does not flash an error the next keystroke retracts.
 
 Every code the server can publish is listed in
-[Diagnostic codes](diagnostics.md).
+[Diagnostic codes](diagnostics.md). All of them are errors: the compiler emits
+no warnings, so an underline in your editor is never advisory.
 
 ### Hover
 
@@ -110,10 +114,10 @@ Vec[Int]
 input parser result
 ```
 
-A [prelude](../language/prelude.md) name keeps its scheme and gains §16.1's own
-sentence, which for the graph helpers is most of what there is to know — the
-scheme names two type variables and does not say that the closure *is* the
-graph:
+A [prelude](../language/prelude.md) name keeps its scheme and gains the
+prelude's own sentence, which for the graph helpers is most of what there is to
+know — the scheme names two type variables and does not say that the closure
+*is* the graph:
 
 ```text
 bfs: forall T. (T, (T) -> Vec[T]) -> Vec[T]
@@ -159,11 +163,12 @@ restatement of it — so a method the list offers is a method the call will
 resolve. The index operators (`[]`, `[]=`, `[]min=`, `[]max=`) are catalog rows
 too and are excluded, because `grid.[]` is not syntax.
 
-Inside a parser expression you get §7.4's atomics and §7.5's constructors, each
-with its own description as documentation, plus the enclosing constructor's own
-keyword argument (`skip:` for `chars`, `fill:` for `grid`) and `grid`'s `ragged`
-flag. Those come from `Constructor::keyword_arg`, so a constructor added to the
-language is offered without anybody updating a list.
+Inside a parser expression you get the [atomics](../input/atoms.md) and the
+[structural constructors](../input/structural.md), each with its own description
+as documentation, plus the enclosing constructor's own keyword argument (`skip:`
+for `chars`, `fill:` for `grid`) and `grid`'s `ragged` flag. Those come from
+`Constructor::keyword_arg`, so a constructor added to the language is offered
+without anybody updating a list.
 
 The lexical fallback offers what is in scope, and that is mostly the stdlib:
 thirty-one prelude names and seven built-in type names against however many the
@@ -180,9 +185,9 @@ completion inside a template fires on text that is not yet an expression.
 
 Two kinds of callee. An ordinary call or method call answers with the scheme
 inference gave it or the catalog entry dispatch selected; a parser constructor
-answers from §7.5's argument-shape table — so a constructor added to the
-language has a signature without anybody writing one, and the cursor inside
-`read lines(…)` gets back `lines(parser) -> Vec[T]`.
+answers from the constructor table's own argument shapes — so a constructor
+added to the language has a signature without anybody writing one, and the
+cursor inside `read lines(…)` gets back `lines(parser) -> Vec[T]`.
 
 Each of the three carries its documentation, and this is where it is worth the
 most: `clamp`'s parameters render as `Int, Int, Int` and `a_star`'s as four bare
@@ -213,7 +218,7 @@ single-file mode needs.
 
 ### Semantic tokens
 
-Full-document only; deltas are not implemented. The legend has fourteen entries:
+Full-document only. The legend has fourteen entries:
 the ten ordinary ones (`keyword`, `type`, `function`, `method`, `variable`,
 `parameter`, `property`, `enumMember`, `number`, `string`) and four for the
 input parser — `parserConstructor`, `parserTemplateText`, `parserCaptureName`
@@ -270,19 +275,20 @@ editor's, and a second switch would be a second place for the answer to live.
 
 A quick fix is a diagnostic's machine-applicable suggestion, and it is written
 by the pass that found the mistake — not by a table of common errors kept in the
-language server
-([ADR-132](../../../decisions/132-a-code-action-is-a-diagnostics-machine-applicable-suggestion.md)).
-The whole of `code_action.rs` is the twenty lines that turn a suggestion with a
-`replacement` into a `WorkspaceEdit`. It knows nothing about any particular
-diagnostic, and a suggestion with no replacement stays advice: it is already in
-the message as a `help:` line, and an action that changes nothing is a menu
-entry that does nothing.
+language server. Such a table is a second opinion about which constructors exist
+and which variants a match is missing, held by the component least able to test
+it. The whole of `code_action.rs` is the twenty lines that turn a suggestion
+with a `replacement` into a `WorkspaceEdit`. It knows nothing about any
+particular diagnostic, and a suggestion with no replacement stays advice: it is
+already in the message as a `help:` line, and an action that changes nothing is
+a menu entry that does nothing.
 
 The consequence is that every fix the editor offers is one `praxis check` also
-prints. Four families carry one today.
+prints. Four families carry one.
 
 **An unknown parser constructor, atomic or capture kind** — `I013`, `I010`,
-`I012` — against §7.4's and §7.5's two tables searched as one list:
+`I012`. The atomic table and the constructor table are searched as one list,
+because the two are one thing to you: the word after `read` or inside `{…}`.
 
 ```praxis
 var rows = read line(int)
@@ -290,11 +296,11 @@ out(rows.len())
 ```
 
 ```text
-error[I013]: unknown parser constructor `line` (§7.5)
+error[I013]: unknown parser constructor `line`
 
   quick-fix-constructor.px:1:17
   1 | var rows = read line(int)
-    |                 ^^^^ unknown parser constructor `line` (§7.5)
+    |                 ^^^^ unknown parser constructor `line`
 
 help: did you mean `lines`?
       lines
@@ -404,8 +410,7 @@ text that has since changed lands on the wrong bytes.
 A rename is accepted when applying it changes nothing but the spelling. The
 server writes the edit into a copy of the file, analyzes the copy, and requires
 name resolution to come out the same: every reference resolving to the symbol it
-resolved to before, and no diagnostic code's count going up
-([ADR-131](../../../decisions/131-a-rename-is-safe-when-re-resolution-is-unchanged.md)).
+resolved to before, and no diagnostic code's count going up.
 
 The alternative would have been a list of collision kinds, and the argument
 against it is that nobody can be sure they finished the list. Asking the
@@ -454,7 +459,7 @@ one file would rename nothing.
 
 `editors/vscode/` holds a VS Code extension that is intentionally thin. It
 registers `.px`, provides comment/bracket/indent configuration, launches
-`praxis lsp`, ships a TextMate grammar, and exposes four commands. There is no
+`praxis lsp`, ships a TextMate grammar, and exposes three commands. There is no
 parsing and no type logic in TypeScript — everything the editor knows comes from
 the compiler over the protocol, so the two cannot disagree.
 
@@ -462,10 +467,9 @@ the compiler over the protocol, so the two cannot disagree.
 |---|---|
 | `Praxis: Run File` | `praxis run <file>`, with `--input input.txt` appended when that file sits beside the source |
 | `Praxis: Check File` | `praxis check <file>` |
-| `Praxis: Watch File` | `praxis watch <file>` — **not implemented**; the binary says so and exits 2 |
 | `Praxis: Restart Language Server` | Stops and relaunches the server process |
 
-The first three run in an integrated terminal rather than an output channel,
+The first two run in an integrated terminal rather than an output channel,
 because the [crash debugger](../debugger/entering.md) is interactive and an
 output channel cannot answer a prompt. The document is saved first: `praxis`
 reads the file from disk, so running an unsaved buffer would report on code you
@@ -517,18 +521,3 @@ time and asserts that every keyword in the lexer's table, every
 grammar, and that every custom semantic token type maps to a scope the grammar
 emits. That runs in the ordinary Rust test suite, so checking the extension for
 drift needs no Node toolchain.
-
-## There is no formatter
-
-`praxis fmt` does not exist, `documentFormattingProvider` is not advertised, and
-the range and on-type variants are not advertised either. This was a scope
-decision, not an omission: an editor told this server formats would stop
-offering its own behaviour and then do nothing on `Format Document`, which is
-worse than the feature being visibly missing. As things stand, VS Code keeps
-whatever it would have done by itself.
-
-Three other things named in the design document are also not implemented:
-unused-binding warnings (the compiler emits no warnings at all — every
-diagnostic it can produce is an error), semantic token deltas and incremental
-reparse, and multi-file analysis. Rename, references and diagnostics are one
-file; `workspace/symbol` is the only query that looks past it.

@@ -1,9 +1,9 @@
 # The Praxis VS Code extension
 
-Thin by design (§15.4, §20 rule 3): it registers `.px`, launches `praxis lsp`,
-exposes four commands, and ships a TextMate grammar. **No parsing and no type
-logic in TypeScript** — everything the editor knows about a Praxis program comes
-from the compiler over the protocol, so the two cannot disagree.
+Thin by design: it registers `.px`, launches `praxis lsp`, exposes three
+commands, and ships a TextMate grammar. **No parsing and no type logic in
+TypeScript** — everything the editor knows about a Praxis program comes from the
+compiler over the protocol, so the two cannot disagree.
 
 ## What it contributes
 
@@ -13,24 +13,19 @@ from the compiler over the protocol, so the two cannot disagree.
 | Comments, brackets, autoclosing, indentation | `language-configuration.json` |
 | Fallback syntax highlighting | `syntaxes/praxis.tmLanguage.json` |
 | Semantic-token → TextMate scope mapping | `package.json`'s `semanticTokenScopes` |
-| `Praxis: Run File` / `Check File` / `Watch File` / `Restart Language Server` | `src/extension.ts` |
+| `Praxis: Run File` / `Check File` / `Restart Language Server` | `src/extension.ts` |
 | The argv every command builds | `src/argv.ts` |
 
 `praxis.binaryPath` (default `praxis`) points at the local binary; every command
 and the language server invoke that one path. `praxis.trace.server` turns on
 JSON-RPC tracing.
 
-`Praxis: Watch File` runs `praxis watch`, which is **not implemented yet** — the
-command exists so the surface is complete and the binary's own "not implemented"
-message is what the user sees. Hiding the command would be a quieter lie.
-
 ## What arrives without the extension contributing anything
 
 Diagnostics, hover, completion, signature help, go-to-definition, document
-symbols, semantic tokens — and, from M12, **find references, rename, workspace
-symbols, inlay hints and quick fixes**. All of them are server capabilities: the
-extension registers nothing for them, which is what "thin by design" means in
-practice.
+symbols, semantic tokens, find references, rename, workspace symbols, inlay
+hints and quick fixes. All of them are server capabilities: the extension
+registers nothing for them, which is what "thin by design" means in practice.
 
 Two things worth knowing as a user:
 
@@ -39,7 +34,7 @@ Two things worth knowing as a user:
   not pinned one. Accepting a hint (double-click, or *Accept Inlay Hint*) writes
   the annotation into the file where that is legal. `editor.inlayHints.enabled`
   turns them off; the server has no setting of its own.
-- **Formatting is not implemented**, and the server does not advertise it, so
+- **Praxis has no formatter.** The server does not advertise formatting, so
   VS Code keeps whatever it would do by itself on `Format Document`.
 
 ## The two highlighting layers, and why they agree
@@ -80,9 +75,7 @@ and checks four things in `just ci`:
 4. every custom semantic token type in the server's legend has a
    `semanticTokenScopes` entry, and that entry's scope is one the grammar emits.
 
-This adds **no Node toolchain to CI** — `just ci` is the whole gate (ADR-002).
-A `vscode-tmgrammar-test` snapshot suite is worth revisiting at M14, when the
-extension is packaged and a Node step exists anyway.
+This adds **no Node toolchain to CI** — `just ci` is the whole gate.
 
 ## Building it
 

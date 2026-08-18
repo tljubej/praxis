@@ -205,10 +205,9 @@ debugger — the state is the state at the moment of the fault, not a
 reconstruction.
 
 `i: Int = 1` is the loop variable, and it is in `locals:` for the same reason
-`total` is: a `for` variable is a binding, in exactly the sense a `var` is
-([ADR-125](../../../decisions/125-a-binding-is-a-binding-and-the-compiler-decides-its-storage.md)).
-The `locals:` section is every binding the program wrote, whatever syntax
-introduced it.
+`total` is: a `for` variable is a binding, in exactly the sense a `var` is. The
+`locals:` section is every binding the program wrote, whatever syntax introduced
+it.
 
 ### Every binding form, in one frame
 
@@ -254,8 +253,7 @@ The pair the second loop is walking has no row of its own, and that is
 deliberate. Nothing in the source named it — the names are `a` and `b` — so it is
 a compiler temp, and it shows up in the `temps:` section below as
 `<tmp#31: (Int, Int)> @ "pairs" = (4, 5)`, which says what it holds and where it
-came from. A binding is what you wrote a name for
-([ADR-139](../../../decisions/139-a-pattern-name-is-a-name-in-the-frame.md)).
+came from. A binding is what you wrote a name for.
 
 One binding form still reads oddly: a `var` that a closure both captures and
 writes is stored in a cell, and the frame shows the cell as a temp rather than
@@ -266,10 +264,8 @@ the binding's value.
 Nothing about a fault is a stack unwind in the C++ or Rust sense. Each generated
 function's fault epilogue returns normally, and the **innermost** one — the first
 to run, while the whole chain is still linked — deep-copies the entire frame
-chain into a *crash snapshot* before it goes
-([ADR-033](../../../decisions/033-crash-snapshot-rooting.md)). By the time
-control is back in the host, the native frames are gone and the snapshot is
-what you are talking to.
+chain into a *crash snapshot* before it goes. By the time control is back in the
+host, the native frames are gone and the snapshot is what you are talking to.
 
 Two consequences you can see.
 
@@ -285,8 +281,7 @@ still see it; but a collection between that last use and the fault is entitled
 to reclaim the object, because nothing else refers to it. The debug slots are
 the collector's one weak arm: a collection clears the slots whose objects it
 reclaimed, so the snapshot copies `None` rather than a pointer into storage that
-has since been handed to something else
-([ADR-106](../../../decisions/106-the-debug-values-are-the-collectors-one-weak-arm.md)).
+has since been handed to something else.
 
 ```praxis
 var xs = Vec[Int]()
@@ -346,10 +341,10 @@ Praxis crash> quit
 
 `ys` is live and reads back. `xs` reads back as `<uninit>` and is not a name `p`
 will bind, because the two-hundred-element vector it named no longer exists. The
-alternative — and what the tree did before that fix — was to print `xs` as a
-one-element vector holding a number from the *second* loop, because its memory
-block had been reissued. A crash debugger that occasionally invents a plausible
-value is worse than one that occasionally says nothing.
+alternative would be to print `xs` as a one-element vector holding a number from
+the *second* loop, whose memory block it had been reissued into. A crash
+debugger that occasionally invents a plausible value is worse than one that
+occasionally says nothing.
 
 The rule to take away: **a binding you can still see in your source may read as
 `<uninit>` if the program stopped using it long before the fault.** Read it as

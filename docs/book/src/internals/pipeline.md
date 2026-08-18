@@ -18,7 +18,7 @@ compiler, or who wants to know where a particular behaviour is decided.
 | parse | `praxis-parser` (`parse.rs`) | a `rowan` green/red tree, plus `P0xx` |
 | typed AST | `praxis-ast` | typed wrappers over syntax nodes — nothing copied |
 | resolve | `praxis-hir` (`resolve.rs`) | a scope tree, a `SymbolId` per declaration, plus `N0xx` |
-| infer | `praxis-hir` (`infer.rs`), `praxis-types` | a type per expression node, plus `Y0xx` |
+| infer | `praxis-hir` (`infer.rs`), `praxis-typeck` | a type per expression node, plus `Y0xx` |
 | coverage | `praxis-hir` (`exhaustive.rs`) | match exhaustiveness and reachability |
 | typed HIR | `praxis-hir` (`lower.rs`) | a `TypedModule`: every node carries a `Type` |
 | monomorphize | `praxis-hir` (`mono.rs`) | one clone of each generic function per concrete use |
@@ -48,11 +48,9 @@ backtick template is lexed as **one** token, interior and all; the interior is
 re-scanned later by a different crate, and the two agree about where nested
 templates end because they share `praxis-syntax`'s template module.
 
-The parser is recursive descent for statements with a Pratt loop for operators
-([ADR-004](../../../decisions/004-parser-technique.md)), emitting into a
-`rowan::GreenNodeBuilder`
-([ADR-003](../../../decisions/003-lossless-tree-uses-rowan.md)). The tree is
-lossless: `node.to_string()` reproduces the source byte for byte. On an
+The parser is recursive descent for statements with a Pratt loop for operators,
+emitting into a `rowan::GreenNodeBuilder`. The tree is lossless:
+`node.to_string()` reproduces the source byte for byte. On an
 unexpected token the parser reports, wraps the stray token in an error node,
 resynchronizes and continues, so one bad file still yields the rest of its
 diagnostics.
@@ -77,7 +75,7 @@ inlay hints — keys on the symbol and never on the spelling.
 
 Inference is one file of about 3,800 lines (`infer.rs`) and it is where the
 interesting decisions live; see
-[what inference does](../types/model.md). `praxis-types` is the machinery it
+[what inference does](../types/model.md). `praxis-typeck` is the machinery it
 drives rather than the algorithm itself: the interned type arena (`db.rs`),
 unification, generalization by binding level, capability constraints, and
 `pretty.rs`, which is the single place that decides how a type prints.
@@ -85,8 +83,7 @@ unification, generalization by binding level, capability constraints, and
 Match coverage runs **last**, after the whole file is inferred, because a
 scrutinee's type is not final until then. That ordering is what puts a
 non-exhaustive `match` in front of `praxis check` and the editor rather than only
-in front of `praxis run`
-([ADR-130](../../../decisions/130-a-matchs-coverage-is-analysis-answer-and-the-pattern-is-built-once.md)).
+in front of `praxis run`.
 
 `Analysis` is the front end's whole output: the type arena, the symbol table, the
 scope tree, per-reference and per-node types, resolved method calls, the retained
@@ -97,9 +94,9 @@ parser indexes, and every diagnostic.
 The back end needs the type of *every* node, not just of name references, and it
 must not re-run unification to get one. So a separate pass reads the finished
 `Analysis` and rebuilds the program as a typed tree — `TypedModule`, `TypedItem`,
-`TypedStmt`, `TypedExpr` — where each node carries an interned `Type` handle
-([ADR-014](../../../decisions/014-typed-hir-tree-as-lowering-boundary.md)). It
-never unifies; it reads what inference recorded.
+`TypedStmt`, `TypedExpr` — where each node carries an interned `Type` handle.
+That tree is the boundary between the front end and the back end, and it never
+unifies: it reads what inference recorded.
 
 Typed HIR is still structured: `if`, `while`, `for`, `loop`, `match` and closures
 are all nodes. What it removes is name lookup and method resolution — a
@@ -139,22 +136,20 @@ The three `<tmp#N>` lines are MIR slots, not source variables: lowering
 materializes every intermediate node of an expression tree into its own local,
 and the debugger prints each with the expression that produced it. `<entry>` is
 the rule and `fn main` is the fallback — a file with no top-level statements runs
-`main` instead
-([ADR-067](../../../decisions/067-a-files-top-level-statements-are-its-program.md)).
+`main` instead.
 
 Monomorphization sits between typed HIR and MIR: each polymorphic function is
 cloned once per distinct set of concrete type arguments at its call sites, so MIR
 never sees a type variable. You never write a call's type arguments, and there is
 no syntax to: brackets after a name are type arguments only where the name is a
-type, so writing `id[Int]` on a function is reported as a subscript — `Y020`
-([ADR-065](../../../decisions/065-a-type-constructors-brackets-are-type-arguments.md)).
+type, so writing `id[Int]` on a function is reported as a subscript — `Y020`.
 
 ## MIR
 
-MIR is a control-flow graph over **slots**, and it is deliberately not SSA
-([ADR-015](../../../decisions/015-mir-shape-non-ssa-slots.md)). A function is a
-list of `Local`s plus a list of `Block`s; a block is instructions and a
-terminator. Every local is one of two kinds:
+MIR is a control-flow graph over **slots**, and it is deliberately not SSA:
+Cranelift builds the SSA a stage later, and duplicating that work here would buy
+nothing. A function is a list of `Local`s plus a list of `Block`s; a block is
+instructions and a terminator. Every local is one of two kinds:
 
 - `LocalKind::Gc` — holds a uniform `GcRef`. These are the only locals the
   collector ever sees.
@@ -166,22 +161,20 @@ So `a + b` lowers to `ExtractScalar`, `ExtractScalar`, `IntBinOp`, `CheckFault`,
 `Materialize` — and a chain of arithmetic emits a `Materialize` immediately
 followed by an `ExtractScalar` of the same value at every interior node. A
 block-local forwarding pass deletes those cancelling pairs before anything else
-runs, because deleting a `Materialize` deletes a safepoint
-([ADR-120](../../../decisions/120-a-box-with-one-reader-in-its-own-block-is-not-a-box.md)).
+runs, because deleting a `Materialize` deletes a safepoint, and liveness must
+see the safepoints that survive rather than the ones the builder emitted.
 
 This is also where a pipeline chain becomes one loop. The builder recognizes
 `v.map(f).filter(p).sum()` on the typed tree it was handed and emits a single
-fused loop over the source with no intermediate collection
-([ADR-029](../../../decisions/029-pipeline-fusion.md)), and there is no second,
-per-combinator lowerer behind it — a chain the recognizer declines is a compiler
-bug that says so, not a silently wrong answer.
+fused loop over the source with no intermediate collection, and there is no
+second, per-combinator lowerer behind it — a chain the recognizer declines is a
+compiler bug that says so, not a silently wrong answer.
 
 Then `annotate` runs backward-dataflow liveness and records, at every safepoint,
 two sets: what the **collector** must keep alive, and what the **debugger** must
 be able to render. They are deliberately different — the first is minimal so that
 dead values are collectable, the second is over-approximate so that a crash can
-still show you a local the program has finished with
-([ADR-044](../../../decisions/044-two-slot-sets-and-the-mir-verifier.md)).
+still show you a local the program has finished with.
 
 Finally `verify` checks the invariants: no scalar live across a safepoint, no
 `ExtractScalar` whose width contradicts what the slot provably holds, every
@@ -208,23 +201,23 @@ row per `praxis_*` symbol — 184 of them — giving the exact linker name, the
 parameter and return kinds, and whether the wrapper can allocate, can fault, both
 or neither. That last column is what MIR consults to decide whether a call site is
 a safepoint and whether a fault check follows it, so a wrapper's effect is a fact
-in a table rather than a property of the instruction shape
-([ADR-017](../../../decisions/017-runtime-abi-wrappers-and-fault-protocol.md)).
+in a table rather than a property of the instruction shape. Every wrapper in that
+table is `extern "C"`, never panics, and reports a problem by setting a pending
+fault rather than by returning one.
 
 Not everything is a call. The backend compiles at Cranelift's
 `opt_level = "speed"`, and several hot operations are inlined branches: a scalar
-load proves the object's type with one compare
-([ADR-102](../../../decisions/102-a-check-is-a-branch-not-a-call.md)), a small
-`Int` comes from an interned table behind the pacing test
-([ADR-113](../../../decisions/113-an-int-box-is-a-table-read-behind-a-pacing-branch.md)),
-and generated code claims an allocation block inline
-([ADR-119](../../../decisions/119-generated-code-claims-the-block-and-nothing-between-can-collect.md)).
+load proves the object's type with one compare, a small `Int` comes from an
+interned table behind the pacing test, and generated code claims an allocation
+block inline. The proofs are branches rather than calls because the branch
+predicts and the call does not; none of them is elided, because a wrong one is
+a memory-safety bug and not a slow path.
 
 Everything the backend mints for the runtime to read by raw pointer — record and
 tuple schemas, field names, debug metadata — belongs to a `Generation`, an arena
 with interning. Reclaiming one requires proof that the heap has been drained,
 because live objects point into it; a generation that is merely dropped leaks on
-purpose ([ADR-043](../../../decisions/043-generation-arena-and-the-teardown-proof.md)).
+purpose.
 
 ## The `read` sub-pipeline
 
@@ -249,10 +242,11 @@ than a property of the design. See
 
 ## The shared query layer
 
-§14.2 of the design document requires the CLI and the language server to share one
-front-end query API. They do, and it lives in `praxis-lsp` — the crate that needs
-it most, with `praxis-cli` depending on `praxis-lsp` rather than the other way
-round ([ADR-097](../../../decisions/097-the-shared-query-layer-lives-in-praxis-lsp.md)).
+The CLI and the language server run the same front end through one query API. It
+lives in `praxis-lsp` — the crate that needs it most — with `praxis-cli`
+depending on `praxis-lsp` rather than the other way round. Two front ends would
+be two places to teach every new rule, and `praxis check` and the editor would
+be one forgotten edit away from disagreeing about the same file.
 
 `query::Snapshot` is one file at one revision with the front end memoized on it:
 `parse` and `analyze` each run at most once per snapshot, and a test asserts the
@@ -275,14 +269,14 @@ is unrepresentable rather than merely unlikely.
 `praxis run` does **not** route through the snapshot. It calls
 `praxis_parser::parse` and `praxis_hir::analyze_root` directly, because it needs
 the `Analysis` by value to hand to lowering and then to the crash debugger, and it
-re-states the sort. That is the one duplication left of the sequence ADR-097
-consolidated.
+re-states the sort. That is the one place the sequence is written twice.
 
 A `rowan::SyntaxNode` never leaves the query layer. It is `!Send` and it is a
 cursor into thread-local state, so `Snapshot::parse` is crate-private and every
-public answer is owned data or a range — which keeps the option of moving the
-front end onto its own thread a move rather than a rewrite
-([ADR-095](../../../decisions/095-the-language-server-is-a-synchronous-stdio-loop.md)).
+public answer is owned data or a range. The server itself is a synchronous,
+single-threaded stdio loop with no async runtime, and keeping syntax nodes
+crate-private is what makes moving the front end onto its own thread a move
+rather than a rewrite.
 
 ## Reading what the back end emitted
 
@@ -310,45 +304,39 @@ $ PRAXIS_DUMP_SLOTS=all praxis run references-are-copied.px
 width — the colours the interference relation needs — `live` the largest root set
 live at any one safepoint, which equals `rootc` wherever the colouring is optimal,
 and `dbgvis` the largest set the crash debugger must be able to render. The gap
-between `gcloc` and `rootc` is the subject of
-[ADR-128](../../../decisions/128-a-shadow-slot-is-a-live-range-not-a-name.md): a
-slot is a live range, not a name.
+between `gcloc` and `rootc` is the colouring: a shadow slot is a live range and
+not a name, so locals that are never live at the same safepoint share one.
 
 These hooks are in the tree permanently, because an instruction count is a
 deterministic result for a change that removes three instructions from a loop, and
 a wall clock is not.
 
-## Where the design document is out of date
+## The crate graph
 
-The design document's §14 predates several moves, and the compiler is the
-authority. Reading §14.1 today:
+Sixteen crates. The stage table at the top of this chapter names the ones that
+are a stage, and `praxis-source` is the leaf underneath all of them. Five more
+are worth knowing by name:
 
-- **Inference is not in `praxis-types`.** §14.1 assigns "type interning,
-  inference, capability resolution" to that crate. It owns the arena,
-  unification, generalization and constraints; the inference algorithm is
-  `praxis-hir/src/infer.rs` and capability checking is
-  `praxis-hir/src/capability.rs`.
-- **There is a sixteenth crate.** `praxis-repr` is not in §14's workspace listing.
-  It holds the one total, bidirectional bridge between a static `Type` and a
-  runtime `TypeDescriptor`, so that the two directions cannot stop being inverses
-  ([ADR-042](../../../decisions/042-total-type-descriptor-bridge.md)).
-- **The input parser has no lexer of its own.** §14.1 gives it a
-  "parser-expression lexer". The ordinary lexer takes a template as one token and
-  the ordinary parser produces the parser-expression nodes; `praxis-input-parser`
-  re-scans template interiors and parses capture bodies, and depends on neither
-  `praxis-parser` nor `praxis-hir`.
-- **`praxis-lsp` is more than transport.** §14.1 calls it "LSP transport and
-  compiler queries", which is right as far as it goes, but §14.2's "shared
-  compiler database" is this crate too, and the CLI is its consumer.
+- **`praxis-syntax`** owns the `SyntaxKind` vocabulary, the identifier character
+  class, and the one rule for where a template or an interpolated literal ends —
+  which is why the lexer and the input parser agree about where a nested
+  template closes instead of each having an opinion.
+- **`praxis-repr`** holds the one total, bidirectional bridge between a static
+  `Type` and a runtime `TypeDescriptor`. The two directions have to be inverses,
+  and two independently written halves are each locally plausible while failing
+  to compose, so they live in one module with an exhaustive match on each side:
+  a new built-in type is a compile error there until both directions know it.
+- **`praxis-stdlib`** is the single source of truth for what built-in methods
+  exist, what their types are, and how they lower — consumed by inference,
+  lowering, codegen and the language server's completion alike, so that method
+  knowledge is never written down twice.
+- **`praxis-debugger`** is the crash debugger: the snapshot, the command loop,
+  the read-only expression evaluator and the full-screen view.
+- **`praxis-lsp`** is LSP transport *and* the shared query layer above, with the
+  CLI as its consumer.
 
-Elsewhere the pipeline matches §10.1 closely, including the position of
-monomorphization. Two things §10.1 names are not separate stages: there is no
-standalone simplification pass — the one MIR optimization runs inside
-`lower_module`, because it deletes safepoints and must precede liveness — and
-pipeline fusion is part of MIR building rather than a pass over MIR.
-
-Two subcommands in `praxis --help` are placeholders: `praxis watch` and
-`praxis repl` are declared and not implemented. A formatter exists as a library in
-`praxis-parser`
-([ADR-005](../../../decisions/005-formatter-lives-in-praxis-parser.md)) with no
-command and no language-server handler reaching it.
+One direction in that graph is worth stating outright. `praxis-input-parser`
+depends on neither `praxis-parser` nor `praxis-hir`: the ordinary lexer hands it
+a template as a single token and the ordinary parser hands it the
+parser-expression nodes, so the second compiler needs no lexer of its own and
+cannot drift from the first about what a token is.

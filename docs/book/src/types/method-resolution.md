@@ -4,12 +4,10 @@
 **method catalog** — a list of rows, each with a receiver pattern, a name, a
 parameter list and a result — and resolving a call means finding the row whose
 receiver pattern matches the receiver's inferred type and whose name and arity
-match the call
-([ADR-020](../../../decisions/020-method-dispatch-and-collections.md)). There is
-no `impl`, no trait, no extension method, and no user-defined method: a record
-carries fields and nothing else. The rows themselves are
-[the method catalog chapter](../language/method-catalog.md); this one is how a
-call finds its row and what happens when it cannot.
+match the call. There is no `impl`, no trait, no extension method, and no
+user-defined method: a record carries fields and nothing else. The rows
+themselves are [the method catalog chapter](../language/method-catalog.md); this
+one is how a call finds its row and what happens when it cannot.
 
 The same table answers the language server's completion and signature help, so
 what the editor offers on a receiver is exactly what will resolve.
@@ -114,8 +112,8 @@ Most receiver patterns name a constructor: `Vec[T]`, `Map[K, V]`, `Text`. The
 sequence rows do not. Their receiver is written `Iterable[T]`, which stands for
 ten receivers — the nine collections `Vec`, `Deque`, `Set`, `MinHeap`,
 `MaxHeap`, `Range`, `BitSet`, `Map` and `Counter`, plus `Text`, which walks its
-characters — bound to what each of them yields (§5.7). No annotation can name
-it, because it is not a type.
+characters — bound to what each of them yields. No annotation can name it,
+because it is not a type.
 
 It is also the one receiver pattern that is **not unified** with the call site's
 type. Unifying `Iterable[T]` against a `Vec` would pin every other constructor
@@ -148,11 +146,9 @@ One row, four receivers, and a `Vec` out of every one of them — a pipeline's
 currency is `Vec`, whatever it started as.
 
 The ten are not the `for` loop's list. `Grid` is iterable and is deliberately
-not an `Iterable` receiver
-([ADR-127](../../../decisions/127-a-pipelines-source-is-the-for-loops-and-a-collection-converts-by-naming-what-it-becomes.md)
-decision 1): a generic `map` row would claim the name and answer `Vec[U]`, and
-§6.4 wants `grid.map` to be the shape-preserving `Grid[T] -> Grid[U]`. That one
-is not written yet, so today a grid has no `map` at all.
+not an `Iterable` receiver: a generic `map` row would claim the name and answer
+a flat `Vec[U]`, throwing away the two dimensions that make a grid a grid. So a
+grid has no `map` at all.
 
 ```praxis
 var g = read grid(char)
@@ -200,9 +196,7 @@ A method call whose receiver is still a type variable cannot be looked up: a
 variable is not a shape the table can be keyed by. The call does not fail —
 inference records the requirement (this method, this arity, these arguments,
 this result) against the variable and **resolves it later**, when the program
-says what the receiver is
-([ADR-057](../../../decisions/057-a-capability-requirement-rides-on-the-scheme-that-quantified-it.md)
-decision 5).
+says what the receiver is.
 
 ```praxis
 fn top_three(rows) {
@@ -256,9 +250,8 @@ That rule is [Capabilities](capabilities.md).
 ## When it cannot resolve: `Y110`
 
 A call that cannot find a row is `Y110`, reported by inference at
-`praxis check` time — not at `run`, and not by lowering
-([ADR-093](../../../decisions/093-a-method-that-cannot-resolve-is-reported-at-check.md)).
-There is one emitter and it has two wordings.
+`praxis check` time — not at `run`, and not by lowering. There is one emitter
+and it has two wordings.
 
 **The receiver is known.** The message names the type and the arity, and offers
 the nearest row this receiver actually has:
@@ -326,8 +319,7 @@ construction, since any call — even one through a value, `var g = total` then
 
 The receiver does not have to *be* the unannotated parameter. A subscript
 result, a method result and a `for` item are receivers in their own right, and
-each resolves one step after the thing it came from
-([ADR-137](../../../decisions/137-a-deferred-receiver-resolves-in-rounds-and-the-channel-runs-to-a-fixpoint.md)):
+each resolves one discharge round after the thing it came from:
 `fn f(v) { v[0].len() }` is `(Vec[Vec[T]]) -> Int` once a call site says what
 the rows hold.
 
@@ -362,8 +354,7 @@ cannot be indexed with 1 index(es)", rather than a missing method nobody wrote.
 
 ## A call has parentheses; a bare dot is a field
 
-`v.len()` is a method call. `v.len` is a **field read**, and it is only that
-([ADR-077](../../../decisions/077-a-zero-argument-accessor-is-a-call-and-a-bare-dot-name-is-a-field.md)).
+`v.len()` is a method call. `v.len` is a **field read**, and it is only that.
 There is no property form, and none of the zero-argument accessors have one:
 `grid.width()`, `grid.height()`, `v.len()`, `text.is_empty()`.
 

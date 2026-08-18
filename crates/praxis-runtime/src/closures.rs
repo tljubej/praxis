@@ -25,8 +25,8 @@
 
 use std::fmt::Write as _;
 
-use crate::descriptor::{BuiltinTypeId, FormatSink, Tracer, TypeDescriptor};
 use crate::GcRef;
+use crate::descriptor::{BuiltinTypeId, FormatSink, Tracer, TypeDescriptor};
 
 /// The runtime payload of a closure value: the function pointer plus the
 /// captured environment values (one `GcRef` per captured variable, in capture

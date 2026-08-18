@@ -440,12 +440,12 @@ fn panic_fault_is_observable(wrapper: &str) -> bool {
 
 /// Wrap an `extern "C"` wrapper's body so a panic becomes a fault.
 ///
-/// Every `#[no_mangle] extern "C" fn` in this crate has its body inside one of
+/// Every `#[unsafe(no_mangle)] extern "C" fn` in this crate has its body inside
 /// these, and `every_no_mangle_wrapper_is_behind_the_panic_guard` is the test
 /// that keeps it that way — a new wrapper that forgets is a failing test rather
 /// than a latent abort.
 macro_rules! abi_guard {
-    ($wrapper:expr, $ctx:expr, $body:block) => {{
+    ($wrapper:expr_2021, $ctx:expr_2021, $body:block) => {{
         // `AssertUnwindSafe`: the body's captures are the wrapper's own
         // arguments, which are `Copy` C types, and the fault protocol is how
         // the runtime already communicates a half-finished operation.
@@ -634,11 +634,7 @@ unsafe fn gc_alloc_owned<P>(
 unsafe fn bool_ref(ctx: *mut RuntimeContext, value: bool) -> GcRef {
     // SAFETY: caller upholds ctx validity.
     let c = unsafe { &*ctx };
-    if value {
-        c.true_ref
-    } else {
-        c.false_ref
-    }
+    if value { c.true_ref } else { c.false_ref }
 }
 
 /// The `Int` for `value`: the interned immortal when it is small
@@ -978,7 +974,7 @@ unsafe fn checked_cell(
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext` whose `heap` is valid.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_alloc_int(ctx: *mut RuntimeContext, value: i64) -> GcRef {
     abi_guard!("praxis_alloc_int", ctx, {
         // `int_ref` paces first, rooted at the whole `RuntimeRoots`. The new object
@@ -995,18 +991,14 @@ pub unsafe extern "C" fn praxis_alloc_int(ctx: *mut RuntimeContext, value: i64) 
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_alloc_bool(ctx: *mut RuntimeContext, value: i64) -> GcRef {
     abi_guard!("praxis_alloc_bool", ctx, {
         // There are two `Bool` values, and the runtime allocated both at startup.
         // `value != 0` is true; `0` is false.
         // SAFETY: caller upholds ctx validity.
         let c = unsafe { &*ctx };
-        if value != 0 {
-            c.true_ref
-        } else {
-            c.false_ref
-        }
+        if value != 0 { c.true_ref } else { c.false_ref }
     })
 }
 
@@ -1014,7 +1006,7 @@ pub unsafe extern "C" fn praxis_alloc_bool(ctx: *mut RuntimeContext, value: i64)
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_alloc_unit(ctx: *mut RuntimeContext) -> GcRef {
     abi_guard!("praxis_alloc_unit", ctx, {
         // The one `Unit` value, cached on the context for the fault path.
@@ -1030,7 +1022,7 @@ pub unsafe extern "C" fn praxis_alloc_unit(ctx: *mut RuntimeContext) -> GcRef {
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_alloc_char(ctx: *mut RuntimeContext, value: i64) -> GcRef {
     abi_guard!("praxis_alloc_char", ctx, {
         // SAFETY: caller upholds ctx/heap validity.
@@ -1084,7 +1076,7 @@ unsafe fn checked_alloc_char(ctx: *mut RuntimeContext, value: i64) -> GcRef {
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`; `bytes` must point at
 /// `len` valid UTF-8 bytes that remain valid for the duration of the call.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_alloc_text(
     ctx: *mut RuntimeContext,
     bytes: *const u8,
@@ -1119,7 +1111,7 @@ pub unsafe extern "C" fn praxis_alloc_text(
 ///
 /// # Safety
 /// `r` must be a valid `Int` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_load(_ctx: *mut RuntimeContext, r: GcRef) -> i64 {
     abi_guard!("praxis_int_load", _ctx, {
         // SAFETY: caller guarantees `r` is an Int.
@@ -1131,7 +1123,7 @@ pub unsafe extern "C" fn praxis_int_load(_ctx: *mut RuntimeContext, r: GcRef) ->
 ///
 /// # Safety
 /// `r` must be a valid `Bool` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_bool_load(_ctx: *mut RuntimeContext, r: GcRef) -> i64 {
     abi_guard!("praxis_bool_load", _ctx, {
         // Read the byte, then decide — never `*r.payload::<bool>()`. A Rust
@@ -1150,7 +1142,7 @@ pub unsafe extern "C" fn praxis_bool_load(_ctx: *mut RuntimeContext, r: GcRef) -
 ///
 /// # Safety
 /// `r` must be a valid `Char` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_char_load(_ctx: *mut RuntimeContext, r: GcRef) -> i64 {
     abi_guard!("praxis_char_load", _ctx, {
         // SAFETY: `read_scalar` bounds the read against `r`'s own descriptor.
@@ -1167,7 +1159,7 @@ pub unsafe extern "C" fn praxis_char_load(_ctx: *mut RuntimeContext, r: GcRef) -
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_alloc_float(ctx: *mut RuntimeContext, value: i64) -> GcRef {
     abi_guard!("praxis_alloc_float", ctx, {
         let f = f64::from_bits(value as u64);
@@ -1183,7 +1175,7 @@ pub unsafe extern "C" fn praxis_alloc_float(ctx: *mut RuntimeContext, value: i64
 ///
 /// # Safety
 /// `r` must be a valid `Float` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_float_load(_ctx: *mut RuntimeContext, r: GcRef) -> i64 {
     abi_guard!("praxis_float_load", _ctx, {
         // Through `float_payload`, which goes through `read_scalar`: the read
@@ -1223,7 +1215,7 @@ unsafe fn float_payload(r: GcRef) -> f64 {
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Int` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_to_float(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_int_to_float", ctx, {
         let i = unsafe { int_payload(r) };
@@ -1241,7 +1233,7 @@ pub unsafe extern "C" fn praxis_int_to_float(ctx: *mut RuntimeContext, r: GcRef)
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Char` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_char_to_int(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_char_to_int", ctx, {
         // SAFETY: caller guarantees `r` is a valid `GcRef`; `read_scalar` proves
@@ -1264,7 +1256,7 @@ pub unsafe extern "C" fn praxis_char_to_int(ctx: *mut RuntimeContext, r: GcRef) 
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Int` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_to_char(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_int_to_char", ctx, {
         let value = unsafe { int_payload(r) };
@@ -1280,7 +1272,7 @@ pub unsafe extern "C" fn praxis_int_to_char(ctx: *mut RuntimeContext, r: GcRef) 
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_float_to_int(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_float_to_int", ctx, {
         let f = unsafe { float_payload(r) };
@@ -1311,7 +1303,7 @@ unsafe fn rebox_float(ctx: *mut RuntimeContext, out: f64) -> GcRef {
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_float_abs(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_float_abs", ctx, {
         let f = unsafe { float_payload(r) };
@@ -1324,7 +1316,7 @@ pub unsafe extern "C" fn praxis_float_abs(ctx: *mut RuntimeContext, r: GcRef) ->
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_float_sqrt(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_float_sqrt", ctx, {
         let f = unsafe { float_payload(r) };
@@ -1336,7 +1328,7 @@ pub unsafe extern "C" fn praxis_float_sqrt(ctx: *mut RuntimeContext, r: GcRef) -
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_float_floor(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_float_floor", ctx, {
         let f = unsafe { float_payload(r) };
@@ -1348,7 +1340,7 @@ pub unsafe extern "C" fn praxis_float_floor(ctx: *mut RuntimeContext, r: GcRef) 
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_float_ceil(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_float_ceil", ctx, {
         let f = unsafe { float_payload(r) };
@@ -1360,7 +1352,7 @@ pub unsafe extern "C" fn praxis_float_ceil(ctx: *mut RuntimeContext, r: GcRef) -
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_float_round(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_float_round", ctx, {
         let f = unsafe { float_payload(r) };
@@ -1376,7 +1368,7 @@ pub unsafe extern "C" fn praxis_float_round(ctx: *mut RuntimeContext, r: GcRef) 
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_float_sign(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_float_sign", ctx, {
         let f = unsafe { float_payload(r) };
@@ -1397,7 +1389,7 @@ pub unsafe extern "C" fn praxis_float_sign(ctx: *mut RuntimeContext, r: GcRef) -
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_float_is_nan(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_float_is_nan", ctx, {
         let result = unsafe { float_payload(r) }.is_nan();
@@ -1410,7 +1402,7 @@ pub unsafe extern "C" fn praxis_float_is_nan(ctx: *mut RuntimeContext, r: GcRef)
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_float_is_infinite(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_float_is_infinite", ctx, {
         let result = unsafe { float_payload(r) }.is_infinite();
@@ -1425,7 +1417,7 @@ pub unsafe extern "C" fn praxis_float_is_infinite(ctx: *mut RuntimeContext, r: G
 ///
 /// # Safety
 /// `ctx` must be live and wired; both operands must be valid `Float` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_float_min(
     ctx: *mut RuntimeContext,
     lhs: GcRef,
@@ -1443,7 +1435,7 @@ pub unsafe extern "C" fn praxis_float_min(
 ///
 /// # Safety
 /// `ctx` must be live and wired; both operands must be valid `Float` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_float_max(
     ctx: *mut RuntimeContext,
     lhs: GcRef,
@@ -1466,7 +1458,7 @@ pub unsafe extern "C" fn praxis_float_max(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Float` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_float_to_text(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_float_to_text", ctx, {
         let f = unsafe { float_payload(r) };
@@ -1489,7 +1481,7 @@ pub unsafe extern "C" fn praxis_float_to_text(ctx: *mut RuntimeContext, r: GcRef
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Int` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_to_text(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_int_to_text", ctx, {
         let v = unsafe { int_payload(r) };
@@ -1513,7 +1505,7 @@ pub unsafe extern "C" fn praxis_int_to_text(ctx: *mut RuntimeContext, r: GcRef) 
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Char` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_char_to_text(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_char_to_text", ctx, {
         // SAFETY: caller guarantees `r` is a valid `GcRef`; `read_scalar` proves
@@ -1532,7 +1524,7 @@ pub unsafe extern "C" fn praxis_char_to_text(ctx: *mut RuntimeContext, r: GcRef)
 ///
 /// # Safety
 /// `ctx` must be live and wired.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_float_pi(ctx: *mut RuntimeContext) -> GcRef {
     abi_guard!("praxis_float_pi", ctx, {
         // SAFETY: ctx/heap valid.
@@ -1544,7 +1536,7 @@ pub unsafe extern "C" fn praxis_float_pi(ctx: *mut RuntimeContext) -> GcRef {
 ///
 /// # Safety
 /// `ctx` must be live and wired.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_float_e(ctx: *mut RuntimeContext) -> GcRef {
     abi_guard!("praxis_float_e", ctx, {
         // SAFETY: ctx/heap valid.
@@ -1557,12 +1549,12 @@ pub unsafe extern "C" fn praxis_float_e(ctx: *mut RuntimeContext) -> GcRef {
 // ---------------------------------------------------------------------------
 
 macro_rules! checked_int_binop {
-    ($name:ident, $op:tt, $fault:expr) => {
+    ($name:ident, $op:tt, $fault:expr_2021) => {
         #[doc = concat!("Checked `Int ", stringify!($op), "` (§4.12). On fault sets `pending_fault` and returns Unit.")]
         ///
         /// # Safety
         /// `ctx` must be live and wired; both operands must be valid `Int` `GcRef`s.
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             ctx: *mut RuntimeContext,
             lhs: GcRef,
@@ -1592,7 +1584,7 @@ checked_int_binop!(praxis_int_mul, checked_mul, RaisedFault::INT_OVERFLOW);
 ///
 /// # Safety
 /// `ctx` must be live and wired; both operands must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_div(ctx: *mut RuntimeContext, lhs: GcRef, rhs: GcRef) -> GcRef {
     abi_guard!("praxis_int_div", ctx, {
         let a = unsafe { int_payload(lhs) };
@@ -1620,7 +1612,7 @@ pub unsafe extern "C" fn praxis_int_div(ctx: *mut RuntimeContext, lhs: GcRef, rh
 ///
 /// # Safety
 /// `ctx` must be live and wired; both operands must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_rem(ctx: *mut RuntimeContext, lhs: GcRef, rhs: GcRef) -> GcRef {
     abi_guard!("praxis_int_rem", ctx, {
         let a = unsafe { int_payload(lhs) };
@@ -1644,7 +1636,7 @@ pub unsafe extern "C" fn praxis_int_rem(ctx: *mut RuntimeContext, lhs: GcRef, rh
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Int` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_neg(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_int_neg", ctx, {
         let a = unsafe { int_payload(r) };
@@ -1677,7 +1669,7 @@ pub unsafe extern "C" fn praxis_int_neg(ctx: *mut RuntimeContext, r: GcRef) -> G
 ///
 /// # Safety
 /// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_wrapping_add(
     ctx: *mut RuntimeContext,
     a: GcRef,
@@ -1693,7 +1685,7 @@ pub unsafe extern "C" fn praxis_int_wrapping_add(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_saturating_add(
     ctx: *mut RuntimeContext,
     a: GcRef,
@@ -1713,7 +1705,7 @@ pub unsafe extern "C" fn praxis_int_saturating_add(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_checked_add(
     ctx: *mut RuntimeContext,
     a: GcRef,
@@ -1737,7 +1729,7 @@ pub unsafe extern "C" fn praxis_int_checked_add(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_wrapping_sub(
     ctx: *mut RuntimeContext,
     a: GcRef,
@@ -1753,7 +1745,7 @@ pub unsafe extern "C" fn praxis_int_wrapping_sub(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_saturating_sub(
     ctx: *mut RuntimeContext,
     a: GcRef,
@@ -1770,7 +1762,7 @@ pub unsafe extern "C" fn praxis_int_saturating_sub(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_checked_sub(
     ctx: *mut RuntimeContext,
     a: GcRef,
@@ -1798,7 +1790,7 @@ pub unsafe extern "C" fn praxis_int_checked_sub(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_wrapping_mul(
     ctx: *mut RuntimeContext,
     a: GcRef,
@@ -1814,7 +1806,7 @@ pub unsafe extern "C" fn praxis_int_wrapping_mul(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_saturating_mul(
     ctx: *mut RuntimeContext,
     a: GcRef,
@@ -1831,7 +1823,7 @@ pub unsafe extern "C" fn praxis_int_saturating_mul(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `a` and `b` must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_checked_mul(
     ctx: *mut RuntimeContext,
     a: GcRef,
@@ -1869,7 +1861,7 @@ pub unsafe extern "C" fn praxis_int_checked_mul(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Int` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_abs(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_int_abs", ctx, {
         let a = unsafe { int_payload(r) };
@@ -1888,7 +1880,7 @@ pub unsafe extern "C" fn praxis_int_abs(ctx: *mut RuntimeContext, r: GcRef) -> G
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Int` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_sign(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_int_sign", ctx, {
         let a = unsafe { int_payload(r) };
@@ -1901,7 +1893,7 @@ pub unsafe extern "C" fn praxis_int_sign(ctx: *mut RuntimeContext, r: GcRef) -> 
 ///
 /// # Safety
 /// `ctx` must be live and wired; both operands must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_min(
     _ctx: *mut RuntimeContext,
     lhs: GcRef,
@@ -1910,11 +1902,7 @@ pub unsafe extern "C" fn praxis_int_min(
     abi_guard!("praxis_int_min", _ctx, {
         let a = unsafe { int_payload(lhs) };
         let b = unsafe { int_payload(rhs) };
-        if b < a {
-            rhs
-        } else {
-            lhs
-        }
+        if b < a { rhs } else { lhs }
     })
 }
 
@@ -1923,7 +1911,7 @@ pub unsafe extern "C" fn praxis_int_min(
 ///
 /// # Safety
 /// `ctx` must be live and wired; both operands must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_max(
     _ctx: *mut RuntimeContext,
     lhs: GcRef,
@@ -1932,11 +1920,7 @@ pub unsafe extern "C" fn praxis_int_max(
     abi_guard!("praxis_int_max", _ctx, {
         let a = unsafe { int_payload(lhs) };
         let b = unsafe { int_payload(rhs) };
-        if b > a {
-            rhs
-        } else {
-            lhs
-        }
+        if b > a { rhs } else { lhs }
     })
 }
 
@@ -1953,7 +1937,7 @@ pub unsafe extern "C" fn praxis_int_max(
 /// # Safety
 /// `ctx` must be live and wired; all three operands must be valid `Int`
 /// `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_clamp(
     ctx: *mut RuntimeContext,
     value: GcRef,
@@ -2002,7 +1986,7 @@ fn checked_gcd(a: i64, b: i64) -> Option<i64> {
 ///
 /// # Safety
 /// `ctx` must be live and wired; both operands must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_gcd(ctx: *mut RuntimeContext, lhs: GcRef, rhs: GcRef) -> GcRef {
     abi_guard!("praxis_int_gcd", ctx, {
         let a = unsafe { int_payload(lhs) };
@@ -2024,7 +2008,7 @@ pub unsafe extern "C" fn praxis_int_gcd(ctx: *mut RuntimeContext, lhs: GcRef, rh
 ///
 /// # Safety
 /// `ctx` must be live and wired; both operands must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_int_lcm(ctx: *mut RuntimeContext, lhs: GcRef, rhs: GcRef) -> GcRef {
     abi_guard!("praxis_int_lcm", ctx, {
         let a = unsafe { int_payload(lhs) };
@@ -2060,7 +2044,7 @@ macro_rules! int_cmp {
         ///
         /// # Safety
         /// `ctx` must be live and wired; both operands must be valid `Int` `GcRef`s.
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             ctx: *mut RuntimeContext,
             lhs: GcRef,
@@ -2106,7 +2090,7 @@ int_cmp!(praxis_int_ge, >=);
 /// # Safety
 /// `ctx` must point at a live `RuntimeContext` (a null/unwired context reports
 /// no fault rather than panicking).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_check_fault(ctx: *mut RuntimeContext) -> i64 {
     abi_guard!("praxis_check_fault", ctx, {
         if ctx.is_null() {
@@ -2139,7 +2123,7 @@ pub unsafe extern "C" fn praxis_check_fault(ctx: *mut RuntimeContext) -> i64 {
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext` whose claimed debug frames
 /// satisfy `copy_stack`'s contract, which every generated prologue establishes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_breakpoint(
     ctx: *mut RuntimeContext,
     span_start: u32,
@@ -2163,7 +2147,7 @@ pub unsafe extern "C" fn praxis_breakpoint(
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_raise_stack_overflow(ctx: *mut RuntimeContext) {
     abi_guard!("praxis_raise_stack_overflow", ctx, {
         unsafe { set_fault(ctx, RaisedFault::STACK_OVERFLOW) };
@@ -2188,7 +2172,7 @@ pub unsafe extern "C" fn praxis_raise_stack_overflow(ctx: *mut RuntimeContext) {
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_raise_empty_collection(ctx: *mut RuntimeContext) -> GcRef {
     abi_guard!("praxis_raise_empty_collection", ctx, {
         unsafe { set_fault(ctx, RaisedFault::EMPTY_COLLECTION) };
@@ -2217,7 +2201,7 @@ pub unsafe extern "C" fn praxis_raise_empty_collection(ctx: *mut RuntimeContext)
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_raise_int_overflow_if(ctx: *mut RuntimeContext, condition: i64) {
     abi_guard!("praxis_raise_int_overflow_if", ctx, {
         if condition != 0 {
@@ -2231,7 +2215,7 @@ pub unsafe extern "C" fn praxis_raise_int_overflow_if(ctx: *mut RuntimeContext, 
 ///
 /// # Safety
 /// `ctx` must point at a live, wired `RuntimeContext`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_raise_div_by_zero_if(ctx: *mut RuntimeContext, condition: i64) {
     abi_guard!("praxis_raise_div_by_zero_if", ctx, {
         if condition != 0 {
@@ -2350,7 +2334,7 @@ unsafe fn vec_of(
 /// # Safety
 /// `ctx` must be live and wired. `element_descriptor` must be a valid pointer to
 /// a `'static TypeDescriptor`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_vec_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
@@ -2400,7 +2384,7 @@ pub unsafe extern "C" fn praxis_vec_new(
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
 /// a `'static TypeDescriptor` (or null); `count` must be a valid `Int` `GcRef`;
 /// `fill` must be a valid `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_vec_filled(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
@@ -2444,19 +2428,23 @@ pub unsafe extern "C" fn praxis_vec_filled(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `schema_ptr` must be a valid `'static` pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_alloc_record(
     ctx: *mut RuntimeContext,
     schema_ptr: *const crate::records::RecordSchema,
 ) -> GcRef {
     abi_guard!("praxis_alloc_record", ctx, {
         if schema_ptr.is_null() {
-            return unit_sentinel(ctx);
+            // SAFETY: `ctx` is the wrapper's own context argument, whose validity the
+            // caller already guarantees.
+            return unsafe { unit_sentinel(ctx) };
         }
         // SAFETY: caller guarantees schema_ptr is a valid 'static pointer.
         let schema = unsafe { &*schema_ptr };
         let arity = schema.fields.len();
-        let unit = unit_sentinel(ctx);
+        // SAFETY: `ctx` is the wrapper's own context argument, whose validity the
+        // caller already guarantees.
+        let unit = unsafe { unit_sentinel(ctx) };
         // SAFETY: RecordPayload is RECORD's payload type.
         // Every field slot starts as Unit (a valid GcRef), keeping the GC sound
         // before the caller fills them in via praxis_record_set_field.
@@ -2478,7 +2466,7 @@ pub unsafe extern "C" fn praxis_alloc_record(
 /// # Safety
 /// `ctx` must be live; `record` must be a valid record `GcRef`; `idx` must be
 /// in bounds.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_record_set_field(
     ctx: *mut RuntimeContext,
     record: GcRef,
@@ -2504,7 +2492,7 @@ pub unsafe extern "C" fn praxis_record_set_field(
 ///
 /// # Safety
 /// `ctx` must be live; `record` must be a valid record `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_record_field(
     ctx: *mut RuntimeContext,
     record: GcRef,
@@ -2514,7 +2502,7 @@ pub unsafe extern "C" fn praxis_record_field(
         // SAFETY: caller guarantees record is a valid record GcRef; the payload is
         // a RecordPayload for any RECORD-descriptor object.
         let payload = record.payload::<u8>() as *const crate::records::RecordPayload;
-        let rp = &*payload;
+        let rp = unsafe { &*payload };
         rp.items
             .get(idx as usize)
             .copied()
@@ -2536,7 +2524,7 @@ pub unsafe extern "C" fn praxis_record_field(
 /// # Safety
 /// `ctx` must be live and wired; `schema_ptr` must be null or a valid
 /// `'static` pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_alloc_enum(
     ctx: *mut RuntimeContext,
     schema_ptr: *const crate::enums::EnumSchema,
@@ -2609,7 +2597,7 @@ pub(crate) unsafe fn option_none(ctx: *mut RuntimeContext) -> GcRef {
 ///
 /// # Safety
 /// `ctx` must be live; `enum_value` must be a valid enum `GcRef`; `idx` in bounds.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_enum_set_payload(
     ctx: *mut RuntimeContext,
     enum_value: GcRef,
@@ -2634,7 +2622,7 @@ pub unsafe extern "C" fn praxis_enum_set_payload(
 ///
 /// # Safety
 /// `ctx` must be live; `enum_value` must be a valid enum `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_enum_tag(ctx: *mut RuntimeContext, enum_value: GcRef) -> GcRef {
     abi_guard!("praxis_enum_tag", ctx, {
         // SAFETY: caller guarantees enum_value is a valid enum GcRef.
@@ -2653,7 +2641,7 @@ pub unsafe extern "C" fn praxis_enum_tag(ctx: *mut RuntimeContext, enum_value: G
 ///
 /// # Safety
 /// `ctx` must be live; `enum_value` must be a valid enum `GcRef`; `idx` in bounds.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_enum_payload(
     ctx: *mut RuntimeContext,
     enum_value: GcRef,
@@ -2678,19 +2666,23 @@ pub unsafe extern "C" fn praxis_enum_payload(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `schema_ptr` must be a valid `'static` pointer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_alloc_tuple(
     ctx: *mut RuntimeContext,
     schema_ptr: *const crate::tuples::TupleSchema,
 ) -> GcRef {
     abi_guard!("praxis_alloc_tuple", ctx, {
         if schema_ptr.is_null() {
-            return unit_sentinel(ctx);
+            // SAFETY: `ctx` is the wrapper's own context argument, whose validity the
+            // caller already guarantees.
+            return unsafe { unit_sentinel(ctx) };
         }
         // SAFETY: caller guarantees schema_ptr is a valid 'static pointer.
         let schema = unsafe { &*schema_ptr };
         let arity = schema.descriptors.len();
-        let unit = unit_sentinel(ctx);
+        // SAFETY: `ctx` is the wrapper's own context argument, whose validity the
+        // caller already guarantees.
+        let unit = unsafe { unit_sentinel(ctx) };
         // SAFETY: TuplePayload is TUPLE's payload type.
         // Every element slot starts as Unit (a valid GcRef), keeping the GC sound
         // before the caller fills them in via praxis_tuple_set.
@@ -2709,7 +2701,7 @@ pub unsafe extern "C" fn praxis_alloc_tuple(
 ///
 /// # Safety
 /// `ctx` must be live; `tuple` must be a valid tuple `GcRef`; `idx` in bounds.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_tuple_set(
     ctx: *mut RuntimeContext,
     tuple: GcRef,
@@ -2735,7 +2727,7 @@ pub unsafe extern "C" fn praxis_tuple_set(
 ///
 /// # Safety
 /// `ctx` must be live; `tuple` must be a valid tuple `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_tuple_get(
     ctx: *mut RuntimeContext,
     tuple: GcRef,
@@ -2763,7 +2755,7 @@ pub unsafe extern "C" fn praxis_tuple_get(
 /// # Safety
 /// `ctx` must be live and wired; `a` and `b` must be valid `GcRef`s of the same
 /// type (the caller has already unified their types at compile time).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_struct_eq(ctx: *mut RuntimeContext, a: GcRef, b: GcRef) -> i64 {
     abi_guard!("praxis_struct_eq", ctx, {
         let _ = ctx;
@@ -2783,11 +2775,7 @@ pub unsafe extern "C" fn praxis_struct_eq(ctx: *mut RuntimeContext, a: GcRef, b:
             Some(eq) => {
                 let pa = a.payload::<u8>() as *const u8;
                 let pb = b.payload::<u8>() as *const u8;
-                if unsafe { eq(pa, pb) } {
-                    1
-                } else {
-                    0
-                }
+                if unsafe { eq(pa, pb) } { 1 } else { 0 }
             }
             // Not equatable: treat as not-equal. The type checker rejects this in
             // well-typed code; the defensive default keeps runtime sound.
@@ -2818,7 +2806,7 @@ pub unsafe extern "C" fn praxis_struct_eq(ctx: *mut RuntimeContext, a: GcRef, b:
 ///
 /// # Safety
 /// `ctx` must be live and wired; `a` and `b` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_value_cmp(ctx: *mut RuntimeContext, a: GcRef, b: GcRef) -> i64 {
     abi_guard!("praxis_value_cmp", ctx, {
         // SAFETY: caller guarantees both are valid GcRefs; every object carries a
@@ -2855,14 +2843,16 @@ pub unsafe extern "C" fn praxis_value_cmp(ctx: *mut RuntimeContext, a: GcRef, b:
 /// # Safety
 /// `ctx` must be live and wired; `fn_ptr` must be a valid JIT'd function pointer
 /// whose calling convention matches `fn(ctx, params..., env...) -> i64`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_alloc_closure(
     ctx: *mut RuntimeContext,
     fn_ptr: *const u8,
     n_captures: i64,
 ) -> GcRef {
     abi_guard!("praxis_alloc_closure", ctx, {
-        let unit = unit_sentinel(ctx);
+        // SAFETY: `ctx` is the wrapper's own context argument, whose validity the
+        // caller already guarantees.
+        let unit = unsafe { unit_sentinel(ctx) };
         let env = vec![unit; n_captures as usize];
         // SAFETY: ClosurePayload is CLOSURE's payload type.
         unsafe {
@@ -2878,7 +2868,7 @@ pub unsafe extern "C" fn praxis_alloc_closure(
 ///
 /// # Safety
 /// `ctx` must be live; `closure` must be a valid closure `GcRef`; `idx` in bounds.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_closure_set_capture(
     ctx: *mut RuntimeContext,
     closure: GcRef,
@@ -2907,7 +2897,7 @@ pub unsafe extern "C" fn praxis_closure_set_capture(
 ///
 /// # Safety
 /// `ctx` must be live; `closure` must be a valid closure `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_closure_fn_ptr(
     ctx: *mut RuntimeContext,
     closure: GcRef,
@@ -2925,7 +2915,7 @@ pub unsafe extern "C" fn praxis_closure_fn_ptr(
 ///
 /// # Safety
 /// `ctx` must be live; `closure` must be a valid closure `GcRef`; `idx` in bounds.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_closure_capture(
     ctx: *mut RuntimeContext,
     closure: GcRef,
@@ -2949,7 +2939,7 @@ pub unsafe extern "C" fn praxis_closure_capture(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `value` must be a valid `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_alloc_var_cell(ctx: *mut RuntimeContext, value: GcRef) -> GcRef {
     abi_guard!("praxis_alloc_var_cell", ctx, {
         // SAFETY: VarCellPayload is VAR_CELL's payload type.
@@ -2966,7 +2956,7 @@ pub unsafe extern "C" fn praxis_alloc_var_cell(ctx: *mut RuntimeContext, value: 
 ///
 /// # Safety
 /// `ctx` must be live; `cell` must be a valid `VarCell` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_var_cell_get(ctx: *mut RuntimeContext, cell: GcRef) -> GcRef {
     abi_guard!("praxis_var_cell_get", ctx, {
         let _ = ctx;
@@ -2981,7 +2971,7 @@ pub unsafe extern "C" fn praxis_var_cell_get(ctx: *mut RuntimeContext, cell: GcR
 ///
 /// # Safety
 /// `ctx` must be live; `cell` must be a valid `VarCell` `GcRef`; `value` valid.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_var_cell_set(
     ctx: *mut RuntimeContext,
     cell: GcRef,
@@ -3005,7 +2995,7 @@ pub unsafe extern "C" fn praxis_var_cell_set(
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`; `value`
 /// must be a valid `GcRef` whose type matches the vector's element descriptor.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_vec_push(
     ctx: *mut RuntimeContext,
     vec: GcRef,
@@ -3073,7 +3063,7 @@ unsafe fn adopt_or_reject(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_vec_len(ctx: *mut RuntimeContext, vec: GcRef) -> GcRef {
     abi_guard!("praxis_vec_len", ctx, {
         // SAFETY: caller guarantees `vec` is a valid Vec.
@@ -3090,7 +3080,7 @@ pub unsafe extern "C" fn praxis_vec_len(ctx: *mut RuntimeContext, vec: GcRef) ->
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`; `index`
 /// must be a valid `Int` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_vec_get(
     ctx: *mut RuntimeContext,
     vec: GcRef,
@@ -3126,7 +3116,7 @@ pub unsafe extern "C" fn praxis_vec_get(
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`; `index`
 /// must be a valid `Int` `GcRef`; `value` must be a valid `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_vec_set(
     ctx: *mut RuntimeContext,
     vec: GcRef,
@@ -3156,7 +3146,7 @@ pub unsafe extern "C" fn praxis_vec_set(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_vec_is_empty(ctx: *mut RuntimeContext, vec: GcRef) -> GcRef {
     abi_guard!("praxis_vec_is_empty", ctx, {
         // SAFETY: caller guarantees `vec` is a valid Vec.
@@ -3206,7 +3196,7 @@ pub unsafe extern "C" fn praxis_vec_is_empty(ctx: *mut RuntimeContext, vec: GcRe
 ///
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_vec_sorted(ctx: *mut RuntimeContext, vec: GcRef) -> GcRef {
     abi_guard!("praxis_vec_sorted", ctx, {
         // SAFETY: caller guarantees `vec` is a valid Vec.
@@ -3276,7 +3266,7 @@ pub unsafe extern "C" fn praxis_vec_sorted(ctx: *mut RuntimeContext, vec: GcRef)
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef` and `key`
 /// a valid closure `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_vec_sorted_by_key(
     ctx: *mut RuntimeContext,
     vec: GcRef,
@@ -3405,7 +3395,7 @@ unsafe fn call_unary_closure(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_vec_unique(ctx: *mut RuntimeContext, vec: GcRef) -> GcRef {
     abi_guard!("praxis_vec_unique", ctx, {
         // SAFETY: caller guarantees `vec` is a valid Vec.
@@ -3438,7 +3428,7 @@ pub unsafe extern "C" fn praxis_vec_unique(ctx: *mut RuntimeContext, vec: GcRef)
 ///
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_vec_reversed(ctx: *mut RuntimeContext, vec: GcRef) -> GcRef {
     abi_guard!("praxis_vec_reversed", ctx, {
         // SAFETY: caller guarantees `vec` is a valid Vec.
@@ -3537,7 +3527,7 @@ unsafe fn vec_of_groups(
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef` and `n` a
 /// valid `Int` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_vec_chunks(
     ctx: *mut RuntimeContext,
     vec: GcRef,
@@ -3580,7 +3570,7 @@ pub unsafe extern "C" fn praxis_vec_chunks(
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef` and `n` a
 /// valid `Int` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_vec_windows(
     ctx: *mut RuntimeContext,
     vec: GcRef,
@@ -3620,7 +3610,7 @@ pub unsafe extern "C" fn praxis_vec_windows(
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef` and `sep` a
 /// valid `Text` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_vec_join(
     ctx: *mut RuntimeContext,
     vec: GcRef,
@@ -3662,7 +3652,7 @@ pub unsafe extern "C" fn praxis_vec_join(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_vec_to_text(ctx: *mut RuntimeContext, vec: GcRef) -> GcRef {
     abi_guard!("praxis_vec_to_text", ctx, {
         // SAFETY: caller guarantees `vec` is a valid Vec.
@@ -3699,7 +3689,7 @@ pub unsafe extern "C" fn praxis_vec_to_text(ctx: *mut RuntimeContext, vec: GcRef
 ///
 /// # Safety
 /// `ctx` must be live and wired; `vec` must be a valid `Vec` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_vec_frequencies(ctx: *mut RuntimeContext, vec: GcRef) -> GcRef {
     abi_guard!("praxis_vec_frequencies", ctx, {
         let scope = unsafe { NativeScope::new(ctx) };
@@ -3778,7 +3768,7 @@ unsafe fn deque_payload_mut<'s>(r: Rooted<'s>) -> &'s mut DequePayload {
 /// # Safety
 /// `ctx` must be live and wired. `element_descriptor` must be a valid pointer to
 /// a `'static TypeDescriptor` (or null).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_deque_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
@@ -3799,7 +3789,7 @@ pub unsafe extern "C" fn praxis_deque_new(
 /// # Safety
 /// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`;
 /// `value` must be a valid `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_deque_push_front(
     ctx: *mut RuntimeContext,
     deque: GcRef,
@@ -3824,7 +3814,7 @@ pub unsafe extern "C" fn praxis_deque_push_front(
 /// # Safety
 /// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`;
 /// `value` must be a valid `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_deque_push_back(
     ctx: *mut RuntimeContext,
     deque: GcRef,
@@ -3848,7 +3838,7 @@ pub unsafe extern "C" fn praxis_deque_push_back(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_deque_pop_front(ctx: *mut RuntimeContext, deque: GcRef) -> GcRef {
     abi_guard!("praxis_deque_pop_front", ctx, {
         // No allocation in the common case, but `pop_front` on a VecDeque does not
@@ -3869,7 +3859,7 @@ pub unsafe extern "C" fn praxis_deque_pop_front(ctx: *mut RuntimeContext, deque:
 ///
 /// # Safety
 /// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_deque_pop_back(ctx: *mut RuntimeContext, deque: GcRef) -> GcRef {
     abi_guard!("praxis_deque_pop_back", ctx, {
         let scope = unsafe { NativeScope::new(ctx) };
@@ -3888,7 +3878,7 @@ pub unsafe extern "C" fn praxis_deque_pop_back(ctx: *mut RuntimeContext, deque: 
 ///
 /// # Safety
 /// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_deque_len(ctx: *mut RuntimeContext, deque: GcRef) -> GcRef {
     abi_guard!("praxis_deque_len", ctx, {
         let p = unsafe { deque_payload(deque) };
@@ -3902,7 +3892,7 @@ pub unsafe extern "C" fn praxis_deque_len(ctx: *mut RuntimeContext, deque: GcRef
 /// # Safety
 /// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`;
 /// `index` must be a valid `Int` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_deque_get(
     ctx: *mut RuntimeContext,
     deque: GcRef,
@@ -3927,7 +3917,7 @@ pub unsafe extern "C" fn praxis_deque_get(
 /// # Safety
 /// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`;
 /// `index` must be a valid `Int` `GcRef`; `value` must be a valid `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_deque_set(
     ctx: *mut RuntimeContext,
     deque: GcRef,
@@ -3953,7 +3943,7 @@ pub unsafe extern "C" fn praxis_deque_set(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `deque` must be a valid `Deque` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_deque_is_empty(ctx: *mut RuntimeContext, deque: GcRef) -> GcRef {
     abi_guard!("praxis_deque_is_empty", ctx, {
         let p = unsafe { deque_payload(deque) };
@@ -4007,7 +3997,7 @@ unsafe fn counter_payload_mut<'s>(r: Rooted<'s>) -> &'s mut CounterPayload {
 /// # Safety
 /// `ctx` must be live and wired. `key_descriptor` must be a valid pointer to a
 /// `'static TypeDescriptor` (or null).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_map_new(
     ctx: *mut RuntimeContext,
     key_descriptor: *const TypeDescriptor,
@@ -4034,7 +4024,7 @@ pub unsafe extern "C" fn praxis_map_new(
 /// # Safety
 /// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`; `key` and
 /// `value` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_map_insert(
     ctx: *mut RuntimeContext,
     map: GcRef,
@@ -4087,7 +4077,7 @@ pub unsafe extern "C" fn praxis_map_insert(
 /// # Safety
 /// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`; `key`
 /// must be a valid `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_map_get(ctx: *mut RuntimeContext, map: GcRef, key: GcRef) -> GcRef {
     abi_guard!("praxis_map_get", ctx, {
         let found = {
@@ -4117,7 +4107,7 @@ pub unsafe extern "C" fn praxis_map_get(ctx: *mut RuntimeContext, map: GcRef, ke
 /// # Safety
 /// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`; `key`
 /// must be a valid `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_map_index(
     ctx: *mut RuntimeContext,
     map: GcRef,
@@ -4139,7 +4129,7 @@ pub unsafe extern "C" fn praxis_map_index(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `map` and `key` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_map_contains(
     ctx: *mut RuntimeContext,
     map: GcRef,
@@ -4156,7 +4146,7 @@ pub unsafe extern "C" fn praxis_map_contains(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `map` and `key` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_map_remove(
     ctx: *mut RuntimeContext,
     map: GcRef,
@@ -4174,7 +4164,7 @@ pub unsafe extern "C" fn praxis_map_remove(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_map_len(ctx: *mut RuntimeContext, map: GcRef) -> GcRef {
     abi_guard!("praxis_map_len", ctx, {
         let p = unsafe { map_payload(map) };
@@ -4190,7 +4180,7 @@ pub unsafe extern "C" fn praxis_map_len(ctx: *mut RuntimeContext, map: GcRef) ->
 ///
 /// # Safety
 /// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_map_keys(ctx: *mut RuntimeContext, map: GcRef) -> GcRef {
     abi_guard!("praxis_map_keys", ctx, {
         let key_desc = unsafe { map_payload(map) }.key_descriptor;
@@ -4203,7 +4193,7 @@ pub unsafe extern "C" fn praxis_map_keys(ctx: *mut RuntimeContext, map: GcRef) -
 ///
 /// # Safety
 /// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_map_values(ctx: *mut RuntimeContext, map: GcRef) -> GcRef {
     abi_guard!("praxis_map_values", ctx, {
         let val_desc = unsafe { map_payload(map) }.value_descriptor;
@@ -4216,7 +4206,7 @@ pub unsafe extern "C" fn praxis_map_values(ctx: *mut RuntimeContext, map: GcRef)
 ///
 /// # Safety
 /// `ctx` must be live and wired; `map` must be a valid `Map` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_map_is_empty(ctx: *mut RuntimeContext, map: GcRef) -> GcRef {
     abi_guard!("praxis_map_is_empty", ctx, {
         let p = unsafe { map_payload(map) };
@@ -4231,7 +4221,7 @@ pub unsafe extern "C" fn praxis_map_is_empty(ctx: *mut RuntimeContext, map: GcRe
 /// # Safety
 /// `ctx` must be live and wired; `map`, `key`, `value` must be valid `GcRef`s
 /// and `value` must be an `Int`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_map_update_min(
     ctx: *mut RuntimeContext,
     map: GcRef,
@@ -4263,7 +4253,7 @@ pub unsafe extern "C" fn praxis_map_update_min(
 /// # Safety
 /// `ctx` must be live and wired; `map`, `key`, `value` must be valid `GcRef`s
 /// and `value` must be an `Int`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_map_update_max(
     ctx: *mut RuntimeContext,
     map: GcRef,
@@ -4298,7 +4288,7 @@ pub unsafe extern "C" fn praxis_map_update_max(
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
 /// a `'static TypeDescriptor` (or null).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_set_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
@@ -4318,7 +4308,7 @@ pub unsafe extern "C" fn praxis_set_new(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `set` and `value` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_set_insert(
     ctx: *mut RuntimeContext,
     set: GcRef,
@@ -4339,7 +4329,7 @@ pub unsafe extern "C" fn praxis_set_insert(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `set` and `value` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_set_remove(
     ctx: *mut RuntimeContext,
     set: GcRef,
@@ -4357,7 +4347,7 @@ pub unsafe extern "C" fn praxis_set_remove(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `set` and `value` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_set_contains(
     ctx: *mut RuntimeContext,
     set: GcRef,
@@ -4374,7 +4364,7 @@ pub unsafe extern "C" fn praxis_set_contains(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `set` must be a valid `Set` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_set_len(ctx: *mut RuntimeContext, set: GcRef) -> GcRef {
     abi_guard!("praxis_set_len", ctx, {
         let p = unsafe { set_payload(set) };
@@ -4386,7 +4376,7 @@ pub unsafe extern "C" fn praxis_set_len(ctx: *mut RuntimeContext, set: GcRef) ->
 ///
 /// # Safety
 /// `ctx` must be live and wired; `set` must be a valid `Set` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_set_is_empty(ctx: *mut RuntimeContext, set: GcRef) -> GcRef {
     abi_guard!("praxis_set_is_empty", ctx, {
         let p = unsafe { set_payload(set) };
@@ -4405,7 +4395,7 @@ pub unsafe extern "C" fn praxis_set_is_empty(ctx: *mut RuntimeContext, set: GcRe
 ///
 /// # Safety
 /// `ctx` must be live and wired; `set` must be a valid `Set` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_set_items(ctx: *mut RuntimeContext, set: GcRef) -> GcRef {
     abi_guard!("praxis_set_items", ctx, {
         let elem_desc = unsafe { set_payload(set) }.element_descriptor;
@@ -4422,7 +4412,7 @@ pub unsafe extern "C" fn praxis_set_items(ctx: *mut RuntimeContext, set: GcRef) 
 /// # Safety
 /// `ctx` must be live and wired; `key_descriptor` must be a valid pointer to a
 /// `'static TypeDescriptor` (or null).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_counter_new(
     ctx: *mut RuntimeContext,
     key_descriptor: *const TypeDescriptor,
@@ -4443,7 +4433,7 @@ pub unsafe extern "C" fn praxis_counter_new(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `counter` and `key` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_counter_get(
     ctx: *mut RuntimeContext,
     counter: GcRef,
@@ -4463,7 +4453,7 @@ pub unsafe extern "C" fn praxis_counter_get(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `counter` and `key` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_counter_inc(
     ctx: *mut RuntimeContext,
     counter: GcRef,
@@ -4509,7 +4499,7 @@ pub unsafe extern "C" fn praxis_counter_inc(
 /// # Safety
 /// `ctx` must be live and wired; `counter` and `key` must be valid `GcRef`s and
 /// `value` must be an `Int`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_counter_set(
     ctx: *mut RuntimeContext,
     counter: GcRef,
@@ -4537,7 +4527,7 @@ pub unsafe extern "C" fn praxis_counter_set(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `counter` must be a valid `Counter` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_counter_keys(ctx: *mut RuntimeContext, counter: GcRef) -> GcRef {
     abi_guard!("praxis_counter_keys", ctx, {
         let key_desc = unsafe { counter_payload(counter) }.key_descriptor;
@@ -4553,7 +4543,7 @@ pub unsafe extern "C" fn praxis_counter_keys(ctx: *mut RuntimeContext, counter: 
 ///
 /// # Safety
 /// `ctx` must be live and wired; `counter` must be a valid `Counter` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_counter_values(ctx: *mut RuntimeContext, counter: GcRef) -> GcRef {
     abi_guard!("praxis_counter_values", ctx, {
         let rows = unsafe { crate::maps::ordered_entries(&counter_payload(counter).entries) };
@@ -4565,7 +4555,7 @@ pub unsafe extern "C" fn praxis_counter_values(ctx: *mut RuntimeContext, counter
 ///
 /// # Safety
 /// `ctx` must be live and wired; `counter` must be a valid `Counter` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_counter_len(ctx: *mut RuntimeContext, counter: GcRef) -> GcRef {
     abi_guard!("praxis_counter_len", ctx, {
         let p = unsafe { counter_payload(counter) };
@@ -4577,7 +4567,7 @@ pub unsafe extern "C" fn praxis_counter_len(ctx: *mut RuntimeContext, counter: G
 ///
 /// # Safety
 /// `ctx` must be live and wired; `counter` must be a valid `Counter` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_counter_is_empty(
     ctx: *mut RuntimeContext,
     counter: GcRef,
@@ -4621,7 +4611,7 @@ unsafe fn min_heap_payload(r: GcRef) -> &'static MinHeapPayload {
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
 /// a `'static TypeDescriptor` (or null).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_max_heap_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
@@ -4641,7 +4631,7 @@ pub unsafe extern "C" fn praxis_max_heap_new(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `heap` and `value` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_max_heap_push(
     ctx: *mut RuntimeContext,
     heap_ref: GcRef,
@@ -4665,7 +4655,7 @@ pub unsafe extern "C" fn praxis_max_heap_push(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `heap_ref` must be a valid `MaxHeap` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_max_heap_pop(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     abi_guard!("praxis_max_heap_pop", ctx, {
         let scope = unsafe { NativeScope::new(ctx) };
@@ -4684,7 +4674,7 @@ pub unsafe extern "C" fn praxis_max_heap_pop(ctx: *mut RuntimeContext, heap_ref:
 ///
 /// # Safety
 /// `ctx` must be live and wired; `heap_ref` must be a valid `MaxHeap` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_max_heap_peek(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     abi_guard!("praxis_max_heap_peek", ctx, {
         let p = unsafe { max_heap_payload(heap_ref) };
@@ -4702,7 +4692,7 @@ pub unsafe extern "C" fn praxis_max_heap_peek(ctx: *mut RuntimeContext, heap_ref
 ///
 /// # Safety
 /// `ctx` must be live and wired; `heap_ref` must be a valid `MaxHeap` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_max_heap_len(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     abi_guard!("praxis_max_heap_len", ctx, {
         let p = unsafe { max_heap_payload(heap_ref) };
@@ -4719,7 +4709,7 @@ pub unsafe extern "C" fn praxis_max_heap_len(ctx: *mut RuntimeContext, heap_ref:
 ///
 /// # Safety
 /// `ctx` must be live and wired; `heap_ref` must be a valid `MaxHeap` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_max_heap_items(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     abi_guard!("praxis_max_heap_items", ctx, {
         let p = unsafe { max_heap_payload(heap_ref) };
@@ -4732,7 +4722,7 @@ pub unsafe extern "C" fn praxis_max_heap_items(ctx: *mut RuntimeContext, heap_re
 ///
 /// # Safety
 /// `ctx` must be live and wired; `heap_ref` must be a valid `MaxHeap` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_max_heap_is_empty(
     ctx: *mut RuntimeContext,
     heap_ref: GcRef,
@@ -4751,7 +4741,7 @@ pub unsafe extern "C" fn praxis_max_heap_is_empty(
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
 /// a `'static TypeDescriptor` (or null).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_min_heap_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
@@ -4771,7 +4761,7 @@ pub unsafe extern "C" fn praxis_min_heap_new(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `heap` and `value` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_min_heap_push(
     ctx: *mut RuntimeContext,
     heap_ref: GcRef,
@@ -4795,7 +4785,7 @@ pub unsafe extern "C" fn praxis_min_heap_push(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `heap_ref` must be a valid `MinHeap` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_min_heap_pop(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     abi_guard!("praxis_min_heap_pop", ctx, {
         let scope = unsafe { NativeScope::new(ctx) };
@@ -4814,7 +4804,7 @@ pub unsafe extern "C" fn praxis_min_heap_pop(ctx: *mut RuntimeContext, heap_ref:
 ///
 /// # Safety
 /// `ctx` must be live and wired; `heap_ref` must be a valid `MinHeap` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_min_heap_peek(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     abi_guard!("praxis_min_heap_peek", ctx, {
         let p = unsafe { min_heap_payload(heap_ref) };
@@ -4832,7 +4822,7 @@ pub unsafe extern "C" fn praxis_min_heap_peek(ctx: *mut RuntimeContext, heap_ref
 ///
 /// # Safety
 /// `ctx` must be live and wired; `heap_ref` must be a valid `MinHeap` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_min_heap_len(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     abi_guard!("praxis_min_heap_len", ctx, {
         let p = unsafe { min_heap_payload(heap_ref) };
@@ -4846,7 +4836,7 @@ pub unsafe extern "C" fn praxis_min_heap_len(ctx: *mut RuntimeContext, heap_ref:
 ///
 /// # Safety
 /// `ctx` must be live and wired; `heap_ref` must be a valid `MinHeap` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_min_heap_items(ctx: *mut RuntimeContext, heap_ref: GcRef) -> GcRef {
     abi_guard!("praxis_min_heap_items", ctx, {
         let p = unsafe { min_heap_payload(heap_ref) };
@@ -4859,7 +4849,7 @@ pub unsafe extern "C" fn praxis_min_heap_items(ctx: *mut RuntimeContext, heap_re
 ///
 /// # Safety
 /// `ctx` must be live and wired; `heap_ref` must be a valid `MinHeap` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_min_heap_is_empty(
     ctx: *mut RuntimeContext,
     heap_ref: GcRef,
@@ -4888,7 +4878,7 @@ unsafe fn bitset_payload_mut<'s>(r: Rooted<'s>) -> &'s mut BitSetPayload {
 ///
 /// # Safety
 /// `ctx` must be live and wired.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_bitset_new(ctx: *mut RuntimeContext) -> GcRef {
     abi_guard!("praxis_bitset_new", ctx, {
         // SAFETY: BitSetPayload is BITSET's payload type.
@@ -4906,7 +4896,7 @@ pub unsafe extern "C" fn praxis_bitset_new(ctx: *mut RuntimeContext) -> GcRef {
 /// # Safety
 /// `ctx` must be live and wired; `bs` must be a valid `BitSet` `GcRef`; `value`
 /// must be a valid `Int` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_bitset_insert(
     ctx: *mut RuntimeContext,
     bs: GcRef,
@@ -4938,7 +4928,7 @@ pub unsafe extern "C" fn praxis_bitset_insert(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `bs` and `value` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_bitset_remove(
     ctx: *mut RuntimeContext,
     bs: GcRef,
@@ -4972,7 +4962,7 @@ pub unsafe extern "C" fn praxis_bitset_remove(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `bs` and `value` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_bitset_contains(
     ctx: *mut RuntimeContext,
     bs: GcRef,
@@ -4990,7 +4980,7 @@ pub unsafe extern "C" fn praxis_bitset_contains(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `bs` must be a valid `BitSet` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_bitset_len(ctx: *mut RuntimeContext, bs: GcRef) -> GcRef {
     abi_guard!("praxis_bitset_len", ctx, {
         let p = unsafe { bitset_payload(bs) };
@@ -5006,7 +4996,7 @@ pub unsafe extern "C" fn praxis_bitset_len(ctx: *mut RuntimeContext, bs: GcRef) 
 ///
 /// # Safety
 /// `ctx` must be live and wired; `bs` must be a valid `BitSet` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_bitset_items(ctx: *mut RuntimeContext, bs: GcRef) -> GcRef {
     abi_guard!("praxis_bitset_items", ctx, {
         // The members are read out before the first allocation: `vec_of` allocates
@@ -5029,7 +5019,7 @@ pub unsafe extern "C" fn praxis_bitset_items(ctx: *mut RuntimeContext, bs: GcRef
 ///
 /// # Safety
 /// `ctx` must be live and wired; `bs` must be a valid `BitSet` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_bitset_is_empty(ctx: *mut RuntimeContext, bs: GcRef) -> GcRef {
     abi_guard!("praxis_bitset_is_empty", ctx, {
         let p = unsafe { bitset_payload(bs) };
@@ -5179,7 +5169,7 @@ unsafe fn default_cell(
 /// # Safety
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
 /// a `'static TypeDescriptor` (or null).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_new(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
@@ -5240,7 +5230,7 @@ pub unsafe extern "C" fn praxis_grid_new(
 /// `ctx` must be live and wired; `element_descriptor` must be a valid pointer to
 /// a `'static TypeDescriptor` (or null); `width` and `height` must be valid
 /// `Int` `GcRef`s; `fill` must be a valid `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_filled(
     ctx: *mut RuntimeContext,
     element_descriptor: *const TypeDescriptor,
@@ -5279,7 +5269,7 @@ pub unsafe extern "C" fn praxis_grid_filled(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_width(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
     abi_guard!("praxis_grid_width", ctx, {
         let p = unsafe { grid_payload(grid) };
@@ -5291,7 +5281,7 @@ pub unsafe extern "C" fn praxis_grid_width(ctx: *mut RuntimeContext, grid: GcRef
 ///
 /// # Safety
 /// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_height(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
     abi_guard!("praxis_grid_height", ctx, {
         let p = unsafe { grid_payload(grid) };
@@ -5306,7 +5296,7 @@ pub unsafe extern "C" fn praxis_grid_height(ctx: *mut RuntimeContext, grid: GcRe
 /// # Safety
 /// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`; `x`/`y`
 /// must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_get(
     ctx: *mut RuntimeContext,
     grid: GcRef,
@@ -5329,7 +5319,7 @@ pub unsafe extern "C" fn praxis_grid_get(
 /// # Safety
 /// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`; `x`/`y`
 /// must be valid `Int` `GcRef`s; `value` must be a valid `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_set(
     ctx: *mut RuntimeContext,
     grid: GcRef,
@@ -5358,7 +5348,7 @@ pub unsafe extern "C" fn praxis_grid_set(
 /// # Safety
 /// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`; `x`/`y`
 /// must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_contains(
     ctx: *mut RuntimeContext,
     grid: GcRef,
@@ -5382,7 +5372,7 @@ pub unsafe extern "C" fn praxis_grid_contains(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `grid` and `point` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_neighbors4(
     ctx: *mut RuntimeContext,
     grid: GcRef,
@@ -5413,7 +5403,7 @@ pub unsafe extern "C" fn praxis_grid_neighbors4(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `grid` and `point` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_neighbors8(
     ctx: *mut RuntimeContext,
     grid: GcRef,
@@ -5448,7 +5438,7 @@ pub unsafe extern "C" fn praxis_grid_neighbors8(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_positions(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
     abi_guard!("praxis_grid_positions", ctx, {
         unsafe { maybe_collect(ctx) };
@@ -5468,7 +5458,7 @@ pub unsafe extern "C" fn praxis_grid_positions(ctx: *mut RuntimeContext, grid: G
 ///
 /// # Safety
 /// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_cells(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
     abi_guard!("praxis_grid_cells", ctx, {
         let p = unsafe { grid_payload(grid) };
@@ -5487,7 +5477,7 @@ pub unsafe extern "C" fn praxis_grid_cells(ctx: *mut RuntimeContext, grid: GcRef
 /// # Safety
 /// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`; `y`
 /// must be a valid `Int` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_row(ctx: *mut RuntimeContext, grid: GcRef, y: GcRef) -> GcRef {
     abi_guard!("praxis_grid_row", ctx, {
         let p = unsafe { grid_payload(grid) };
@@ -5514,7 +5504,7 @@ pub unsafe extern "C" fn praxis_grid_row(ctx: *mut RuntimeContext, grid: GcRef, 
 /// # Safety
 /// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`; `x`
 /// must be a valid `Int` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_column(
     ctx: *mut RuntimeContext,
     grid: GcRef,
@@ -5549,7 +5539,7 @@ pub unsafe extern "C" fn praxis_grid_column(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `grid` and `value` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_find(
     ctx: *mut RuntimeContext,
     grid: GcRef,
@@ -5582,7 +5572,7 @@ pub unsafe extern "C" fn praxis_grid_find(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `grid` and `value` must be valid `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_find_all(
     ctx: *mut RuntimeContext,
     grid: GcRef,
@@ -5618,7 +5608,7 @@ pub unsafe extern "C" fn praxis_grid_find_all(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_transpose(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
     abi_guard!("praxis_grid_transpose", ctx, {
         let p = unsafe { grid_payload(grid) };
@@ -5648,7 +5638,7 @@ pub unsafe extern "C" fn praxis_grid_transpose(ctx: *mut RuntimeContext, grid: G
 ///
 /// # Safety
 /// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_rotate_left(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
     abi_guard!("praxis_grid_rotate_left", ctx, {
         let p = unsafe { grid_payload(grid) };
@@ -5682,7 +5672,7 @@ pub unsafe extern "C" fn praxis_grid_rotate_left(ctx: *mut RuntimeContext, grid:
 ///
 /// # Safety
 /// `ctx` must be live and wired; `grid` must be a valid `Grid` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_grid_rotate_right(ctx: *mut RuntimeContext, grid: GcRef) -> GcRef {
     abi_guard!("praxis_grid_rotate_right", ctx, {
         let p = unsafe { grid_payload(grid) };
@@ -5750,7 +5740,7 @@ unsafe fn text_payload(r: GcRef) -> *const crate::text::TextPayload {
 ///
 /// # Safety
 /// `ctx` must be live and wired; `text` must be a valid `Text` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_text_len(ctx: *mut RuntimeContext, text: GcRef) -> GcRef {
     abi_guard!("praxis_text_len", ctx, {
         // SAFETY: caller guarantees `text` is Text.
@@ -5802,7 +5792,7 @@ fn whole_trimmed(s: &str, run: fn(&[u8]) -> (&str, usize)) -> Option<&str> {
 ///
 /// # Safety
 /// `ctx` must be live and wired; `text` must be a valid `Text` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_text_int(ctx: *mut RuntimeContext, text: GcRef) -> GcRef {
     abi_guard!("praxis_text_int", ctx, {
         // SAFETY: caller guarantees `text` is Text.
@@ -5841,7 +5831,7 @@ pub unsafe extern "C" fn praxis_text_int(ctx: *mut RuntimeContext, text: GcRef) 
 ///
 /// # Safety
 /// `ctx` must be live and wired; `text` must be a valid `Text` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_text_float(ctx: *mut RuntimeContext, text: GcRef) -> GcRef {
     abi_guard!("praxis_text_float", ctx, {
         // SAFETY: caller guarantees `text` is Text.
@@ -5868,7 +5858,7 @@ pub unsafe extern "C" fn praxis_text_float(ctx: *mut RuntimeContext, text: GcRef
 ///
 /// # Safety
 /// `ctx` must be live and wired; `text` must be a valid `Text` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_text_is_empty(ctx: *mut RuntimeContext, text: GcRef) -> GcRef {
     abi_guard!("praxis_text_is_empty", ctx, {
         // SAFETY: caller guarantees `text` is Text.
@@ -5894,7 +5884,7 @@ pub unsafe extern "C" fn praxis_text_is_empty(ctx: *mut RuntimeContext, text: Gc
 ///
 /// # Safety
 /// `ctx` must be live and wired; `a` and `b` must be valid `Text` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_text_concat(ctx: *mut RuntimeContext, a: GcRef, b: GcRef) -> GcRef {
     abi_guard!("praxis_text_concat", ctx, {
         // SAFETY: caller guarantees both are Text.
@@ -5931,7 +5921,7 @@ pub unsafe extern "C" fn praxis_text_concat(ctx: *mut RuntimeContext, a: GcRef, 
 ///
 /// # Safety
 /// `ctx` must be live and wired; `value` must be a valid `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_value_to_text(ctx: *mut RuntimeContext, value: GcRef) -> GcRef {
     abi_guard!("praxis_value_to_text", ctx, {
         let mut s = String::new();
@@ -5947,7 +5937,7 @@ pub unsafe extern "C" fn praxis_value_to_text(ctx: *mut RuntimeContext, value: G
 /// # Safety
 /// `ctx` must be live and wired; `text` must be a valid `Text` `GcRef`; `index`
 /// must be a valid `Int` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_text_get(
     ctx: *mut RuntimeContext,
     text: GcRef,
@@ -6014,7 +6004,7 @@ pub unsafe extern "C" fn praxis_text_get(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `value` must be a valid `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_write_stdout(ctx: *mut RuntimeContext, value: GcRef) -> GcRef {
     abi_guard!("praxis_write_stdout", ctx, {
         use std::io::Write;
@@ -6040,7 +6030,7 @@ pub unsafe extern "C" fn praxis_write_stdout(ctx: *mut RuntimeContext, value: Gc
 ///
 /// # Safety
 /// `ctx` must be live and wired; `value` must be a valid `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_dbg(_ctx: *mut RuntimeContext, value: GcRef) -> GcRef {
     abi_guard!("praxis_dbg", _ctx, {
         use std::io::Write;
@@ -6065,7 +6055,7 @@ pub unsafe extern "C" fn praxis_dbg(_ctx: *mut RuntimeContext, value: GcRef) -> 
 ///
 /// # Safety
 /// `ctx` must be live and wired; `value` must be a valid `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_panic(ctx: *mut RuntimeContext, value: GcRef) -> GcRef {
     abi_guard!("praxis_panic", ctx, {
         let mut message = String::new();
@@ -6088,7 +6078,7 @@ pub unsafe extern "C" fn praxis_panic(ctx: *mut RuntimeContext, value: GcRef) ->
 ///
 /// # Safety
 /// `ctx` must be live and wired; `condition` must be a valid `Bool` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_assert(ctx: *mut RuntimeContext, condition: GcRef) -> GcRef {
     abi_guard!("praxis_assert", ctx, {
         // SAFETY: `assert`'s scheme is `(Bool) -> Unit`, so the argument is a Bool.
@@ -6115,7 +6105,7 @@ pub unsafe extern "C" fn praxis_assert(ctx: *mut RuntimeContext, condition: GcRe
 ///
 /// # Safety
 /// `ctx` must be live and wired; both bounds must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_range_new(
     ctx: *mut RuntimeContext,
     start: GcRef,
@@ -6138,7 +6128,7 @@ pub unsafe extern "C" fn praxis_range_new(
 ///
 /// # Safety
 /// `ctx` must be live and wired; both bounds must be valid `Int` `GcRef`s.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_range_new_inclusive(
     ctx: *mut RuntimeContext,
     start: GcRef,
@@ -6172,7 +6162,7 @@ pub unsafe extern "C" fn praxis_range_new_inclusive(
 ///
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Range` `GcRef`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_range_len(ctx: *mut RuntimeContext, r: GcRef) -> GcRef {
     abi_guard!("praxis_range_len", ctx, {
         // SAFETY: the compiler only emits this with a Range-typed operand.
@@ -6193,7 +6183,7 @@ pub unsafe extern "C" fn praxis_range_len(ctx: *mut RuntimeContext, r: GcRef) ->
 /// # Safety
 /// `ctx` must be live and wired; `r` must be a valid `Range` `GcRef` and
 /// `index` a valid `Int` one.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_range_get(
     ctx: *mut RuntimeContext,
     r: GcRef,
@@ -6268,7 +6258,7 @@ pub unsafe extern "C" fn praxis_range_get(
 ///
 /// # Safety
 /// `ctx` must be live and wired.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_get_input(ctx: *mut RuntimeContext) -> GcRef {
     abi_guard!("praxis_get_input", ctx, {
         if let Some(read) = crate::input::take_input_reader() {
@@ -6330,7 +6320,7 @@ pub unsafe extern "C" fn praxis_get_input(ctx: *mut RuntimeContext) -> GcRef {
 /// `ctx` must be live and wired; `plan_index_gc` must be a valid `Int`; `input`
 /// must be a valid `GcRef` (any descriptor — a non-Text descriptor faults cleanly
 /// rather than dereferencing garbage).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_run_parser(
     ctx: *mut RuntimeContext,
     plan_index_gc: GcRef,
@@ -6349,7 +6339,9 @@ pub unsafe extern "C" fn praxis_run_parser(
         // Delegate to the parser interpreter. It validates the id, reads the
         // plan from the process-wide arena, runs it against the input bytes, and
         // allocates the result.
-        match crate::parser::run_plan_by_id(ctx, idx, input) {
+        // SAFETY: `ctx` is the wrapper's own context argument, and `input` was
+        // checked to carry a Text payload above.
+        match unsafe { crate::parser::run_plan_by_id(ctx, idx, input) } {
             Some(result) => result,
             None => {
                 // A `None` return means the value named no registered plan (out of
@@ -6554,7 +6546,7 @@ unsafe fn states_as_vec(
 /// # Safety
 /// `ctx` must be live and wired; `start` must be a valid `GcRef` and
 /// `neighbours` a closure value of type `(T) -> Vec[T]`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_bfs(
     ctx: *mut RuntimeContext,
     start: GcRef,
@@ -6585,7 +6577,7 @@ pub unsafe extern "C" fn praxis_bfs(
 ///
 /// # Safety
 /// As [`praxis_bfs`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_dfs(
     ctx: *mut RuntimeContext,
     start: GcRef,
@@ -6615,7 +6607,7 @@ pub unsafe extern "C" fn praxis_dfs(
 ///
 /// # Safety
 /// As [`praxis_bfs`].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_flood_fill(
     ctx: *mut RuntimeContext,
     start: GcRef,
@@ -6654,7 +6646,7 @@ pub unsafe extern "C" fn praxis_flood_fill(
 /// # Safety
 /// `ctx` must be live and wired; `start` must be a valid `GcRef`, `neighbours` a
 /// `(T) -> Vec[T]` closure and `goal` a `(T) -> Bool` closure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_bfs_distance(
     ctx: *mut RuntimeContext,
     start: GcRef,
@@ -6687,7 +6679,7 @@ pub unsafe extern "C" fn praxis_bfs_distance(
 /// # Safety
 /// `ctx` must be live and wired; `start` must be a valid `GcRef`, `neighbours` a
 /// `(T) -> Vec[T]` closure and `weight` a `(T, T) -> Int` closure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_dijkstra(
     ctx: *mut RuntimeContext,
     start: GcRef,
@@ -6733,7 +6725,7 @@ pub unsafe extern "C" fn praxis_dijkstra(
 /// `ctx` must be live and wired; `start` must be a valid `GcRef` and each of
 /// `neighbours`, `weight`, `heuristic` and `goal` a closure value of the type
 /// the helper's signature declares.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_a_star(
     ctx: *mut RuntimeContext,
     start: GcRef,
@@ -6789,7 +6781,7 @@ mod tests {
     use super::*;
     use crate::context::{Fault, FaultKind, Runtime};
     use crate::parse_detail::ParseFail;
-    use crate::shadow_stack::{push_frame, SlotCount};
+    use crate::shadow_stack::{SlotCount, push_frame};
 
     /// A wired context backed by a real runtime.
     pub(super) fn wired_ctx(rt: &mut Runtime) -> *mut RuntimeContext {
@@ -6878,8 +6870,7 @@ mod tests {
         //    release build. That distinction is the point: with the check
         //    compiled out, a `praxis check`-clean program does an out-of-bounds
         //    read where a debug build aborts cleanly.
-        const SIGNATURE: &str =
-            "unsafe fn read_scalar<T: Copy>(r: GcRef, handle: crate::descriptor::Payload<T>) -> Option<T> {";
+        const SIGNATURE: &str = "unsafe fn read_scalar<T: Copy>(r: GcRef, handle: crate::descriptor::Payload<T>) -> Option<T> {";
         let at = source
             .find(SIGNATURE)
             .expect("`read_scalar`'s definition moved; this gate names it by signature");
@@ -10727,7 +10718,7 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
 
     // --- the panic backstop ------------------------------------------------
 
-    /// Every `#[no_mangle] extern "C"` function in this crate has its body
+    /// Every `#[unsafe(no_mangle)] extern "C"` function in this crate has its body
     /// inside `abi_guard!`.
     ///
     /// Per-wrapper totality is the contract: a wrapper validates its arguments
@@ -10745,7 +10736,7 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
     /// files would make the guarantee "every entry point in a file somebody
     /// remembered to list", and the `wrappers > 100` floor would still pass on
     /// the files that were listed. So the walk covers **every crate's `src/`**,
-    /// not only this one: nothing says a future `#[no_mangle]` has to live
+    /// not only this one: nothing says a future `#[unsafe(no_mangle)]` has to live
     /// here.
     #[test]
     fn every_no_mangle_wrapper_is_behind_the_panic_guard() {
@@ -10776,7 +10767,7 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
         let mut sources: Vec<(String, String)> = Vec::new();
         rust_sources(&crates_dir, &mut sources);
         // A guard against the walk silently covering nothing — a wrong root
-        // would otherwise pass by finding no `#[no_mangle]` at all.
+        // would otherwise pass by finding no wrapper attribute at all.
         assert!(
             sources.len() > 50,
             "the walk of {} found only {} Rust files, so it is not reading the workspace",
@@ -10789,7 +10780,11 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
         for (file, source) in &sources {
             let lines: Vec<&str> = source.lines().collect();
             for (n, line) in lines.iter().enumerate() {
-                if line.trim() != "#[no_mangle]" {
+                // Both spellings: `#[unsafe(no_mangle)]` is the edition-2024
+                // form and the only one this crate uses, but matching the bare
+                // attribute too keeps the scan from going blind if a wrapper is
+                // ever pasted in from older code.
+                if !matches!(line.trim(), "#[unsafe(no_mangle)]" | "#[no_mangle]") {
                     continue;
                 }
                 wrappers += 1;
@@ -10932,7 +10927,7 @@ pub unsafe extern "C" fn praxis_pretend_faulting(ctx: *mut RuntimeContext) -> Gc
              ({pure} non-faulting, {faulting} faulting)"
         );
 
-        // Every `#[no_mangle]` wrapper in this crate is manifested, so the only
+        // Every `#[unsafe(no_mangle)]` wrapper in this crate is manifested, so the
         // unobservable case left is a name that is not a wrapper at all.
         assert!(
             !panic_fault_is_observable("praxis_not_a_wrapper_at_all"),
@@ -11113,7 +11108,7 @@ mod growth_charging_tests {
     const PUSHES: i64 = 256;
 
     macro_rules! charges_its_spine {
-        ($name:ident, $make:expr, $push:expr) => {
+        ($name:ident, $make:expr_2021, $push:expr_2021) => {
             #[test]
             fn $name() {
                 let mut rt = Runtime::new();

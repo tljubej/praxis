@@ -6,7 +6,7 @@ members = [
     "crates/praxis-syntax",
     "crates/praxis-parser",
     "crates/praxis-ast",
-    "crates/praxis-types",
+    "crates/praxis-typeck",
     "crates/praxis-input-parser",
     "crates/praxis-hir",
     "crates/praxis-runtime",
@@ -21,15 +21,25 @@ members = [
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+authors = ["Tomislav Ljubej <tomislavl@tbtl.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/tljubej/praxis"
-# The floor the dependency graph actually imposes, not an aspiration: `ratatui`
-# (the crash debugger's TUI) declares 1.88, and nothing in the workspace builds
-# below what its dependencies require. CI installs the `rust-toolchain.toml`
-# pin (`stable`) and there is no separate MSRV job, so this number is a claim
-# about the graph rather than something a build verifies — keep it honest by
-# raising it whenever a dependency raises its own.
+homepage = "https://github.com/tljubej/praxis"
+# Inherited by every crate. `categories` and `keywords` are the registry's own
+# vocabulary — a category that is not one of its published slugs is rejected at
+# publish time, and a crate gets at most five keywords of at most twenty
+# characters each. The handful of crates whose subject is narrower than "the
+# compiler" override one or both in their own manifest.
+keywords = ["compiler", "jit", "language", "adventofcode", "programming-language"]
+categories = ["compilers", "development-tools"]
+# The floor the workspace actually needs, and no higher. Three things set it and
+# they agree on the same number: edition 2024 needs 1.85, `ratatui` (the crash
+# debugger's TUI) declares 1.88, and let-chains — which the lint policy below
+# expects idiomatic code to use — stabilized in 1.88. CI installs the
+# `rust-toolchain.toml` pin (`stable`) and there is no separate MSRV job, so this
+# is a claim about the graph rather than something a build verifies: raise it
+# when a dependency raises its own, and keep `clippy.toml` on the same number.
 rust-version = "1.88"
 
 [workspace.dependencies]
@@ -55,29 +65,34 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 unicode-ident = "1"
 
-# The rust-analyzer transport crates (ADR-095): a synchronous, crossbeam-channel
-# message loop and the protocol's types. No async runtime is pulled in by
-# either, which is half the reason they were chosen.
+# The rust-analyzer transport crates: a synchronous, crossbeam-channel message
+# loop and the protocol's types. No async runtime is pulled in by either, which
+# is half the reason they are the ones used here.
 lsp-server = "0.10"
 lsp-types = "0.97"
 
-# Internal crates — paths so every consumer resolves to the workspace copy.
-praxis-ast = { path = "crates/praxis-ast" }
-praxis-cli = { path = "crates/praxis-cli" }
-praxis-codegen-cranelift = { path = "crates/praxis-codegen-cranelift" }
-praxis-debugger = { path = "crates/praxis-debugger" }
-praxis-hir = { path = "crates/praxis-hir" }
-praxis-input-parser = { path = "crates/praxis-input-parser" }
-praxis-lsp = { path = "crates/praxis-lsp" }
-praxis-mir = { path = "crates/praxis-mir" }
-praxis-parser = { path = "crates/praxis-parser" }
-praxis-repr = { path = "crates/praxis-repr" }
-praxis-runtime = { path = "crates/praxis-runtime" }
-praxis-source = { path = "crates/praxis-source" }
-praxis-stdlib = { path = "crates/praxis-stdlib" }
-praxis-syntax = { path = "crates/praxis-syntax" }
+# Internal crates. The path is what every consumer resolves against; the version
+# is what the registry requires, and a published crate whose dependency carries
+# only a path is rejected. `praxis-test-support` is the exception: it is test
+# scaffolding, it is never a `[dependencies]` entry, and a dev-dependency with no
+# version is dropped from the manifest a package ships — which is what keeps it
+# off the registry without stranding the crates that test with it.
+praxis-ast = { path = "crates/praxis-ast", version = "0.1.0" }
+praxis-cli = { path = "crates/praxis-cli", version = "0.1.0" }
+praxis-codegen-cranelift = { path = "crates/praxis-codegen-cranelift", version = "0.1.0" }
+praxis-debugger = { path = "crates/praxis-debugger", version = "0.1.0" }
+praxis-hir = { path = "crates/praxis-hir", version = "0.1.0" }
+praxis-input-parser = { path = "crates/praxis-input-parser", version = "0.1.0" }
+praxis-lsp = { path = "crates/praxis-lsp", version = "0.1.0" }
+praxis-mir = { path = "crates/praxis-mir", version = "0.1.0" }
+praxis-parser = { path = "crates/praxis-parser", version = "0.1.0" }
+praxis-repr = { path = "crates/praxis-repr", version = "0.1.0" }
+praxis-runtime = { path = "crates/praxis-runtime", version = "0.1.0" }
+praxis-source = { path = "crates/praxis-source", version = "0.1.0" }
+praxis-stdlib = { path = "crates/praxis-stdlib", version = "0.1.0" }
+praxis-syntax = { path = "crates/praxis-syntax", version = "0.1.0" }
 praxis-test-support = { path = "crates/praxis-test-support" }
-praxis-types = { path = "crates/praxis-types" }
+praxis-typeck = { path = "crates/praxis-typeck", version = "0.1.0" }
 
 [profile.dev]
 # Faster from-scratch dev builds; link time matters more than codegen here.

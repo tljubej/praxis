@@ -14,13 +14,13 @@
 
 mod cursor;
 
+use crate::GcRef;
 use crate::context::RuntimeContext;
 use crate::parse_detail::ParseFail;
 use crate::roots::{NativeScope, RuntimeRoots};
 use crate::scalars;
 use crate::text::TextPayload;
-use crate::GcRef;
-use cursor::{split_lines, split_sections, trailing_blank_run, ByteRegion, Cursor, Input, Walked};
+use cursor::{ByteRegion, Cursor, Input, Walked, split_lines, split_sections, trailing_blank_run};
 use praxis_input_parser::synthesize::AtomicClass;
 use praxis_input_parser::{AtomicKind, ParserPlan, PlanNode, SectionItemNode, TemplateShape};
 
@@ -144,7 +144,8 @@ unsafe fn set_parse_fault(ctx: *mut RuntimeContext) {
 /// # Safety
 /// `ctx` must be live and wired with a non-null `parse_detail`.
 pub(crate) unsafe fn clear_parse_detail(ctx: *mut RuntimeContext) {
-    if (*ctx).parse_detail.is_null() {
+    // SAFETY: caller guarantees `ctx` is live.
+    if unsafe { (*ctx).parse_detail.is_null() } {
         return;
     }
     // SAFETY: caller guarantees parse_detail points at a live ParseDetail.
@@ -158,7 +159,8 @@ pub(crate) unsafe fn clear_parse_detail(ctx: *mut RuntimeContext) {
 /// `ctx` must be live and wired; `input` is the buffer the failure was against
 /// (used for the actual-preview).
 unsafe fn record_fail(ctx: *mut RuntimeContext, fail: ParseFail, input: &[u8]) {
-    if (*ctx).parse_detail.is_null() {
+    // SAFETY: caller guarantees `ctx` is live.
+    if unsafe { (*ctx).parse_detail.is_null() } {
         return;
     }
     // SAFETY: caller guarantees parse_detail points at a live ParseDetail.

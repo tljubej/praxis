@@ -14,9 +14,9 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fmt::Write as _;
 
+use crate::GcRef;
 use crate::collections::nullable;
 use crate::descriptor::{BuiltinTypeId, FormatSink, Tracer, TypeDescriptor};
-use crate::GcRef;
 
 /// A heap's elements in **pop order** — the order the program would see them if
 /// it drained the heap, without draining it.

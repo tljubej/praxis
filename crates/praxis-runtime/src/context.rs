@@ -9,19 +9,19 @@
 
 use crate::crash_snapshot::{CrashSnapshot, SnapshotSlot};
 use crate::debug::{
-    DebugFrameEntry, DebugFrameStack, DebugFrameStackHeader, DebugValueStack,
-    DebugValueStackHeader, DEBUG_FRAME_STACK_SLOTS, DEBUG_VALUE_STACK_SLOTS,
+    DEBUG_FRAME_STACK_SLOTS, DEBUG_VALUE_STACK_SLOTS, DebugFrameEntry, DebugFrameStack,
+    DebugFrameStackHeader, DebugValueStack, DebugValueStackHeader,
 };
 use crate::gc::GcRef;
 use crate::heap::Heap;
-use crate::immortal::{read_bool, Immortals};
+use crate::immortal::{Immortals, read_bool};
 use crate::parse_detail::ParseDetail;
 #[cfg(test)]
 use crate::roots::RootSet;
-use crate::shadow_stack::{ShadowStack, ShadowStackHeader, SHADOW_STACK_SLOTS};
+use crate::shadow_stack::{SHADOW_STACK_SLOTS, ShadowStack, ShadowStackHeader};
 use crate::{
     collections::VecPayload,
-    descriptor::{builtin_descriptor_addresses, BuiltinTypeId, TypeDescriptor},
+    descriptor::{BuiltinTypeId, TypeDescriptor, builtin_descriptor_addresses},
 };
 
 /// What *any* call spends, however narrow: the floor of [`frame_cost`], in
@@ -563,7 +563,7 @@ pub struct DebugLocal {
     /// The word itself is `Option<GcRef>`-shaped in the slot, and the zeroed
     /// slot a fresh frame starts with is the `None` niche (F18).
     pub value: Option<crate::debug::DebugValue>,
-    /// The full static `Type` id (a `praxis_types::Type(u32)` handle), so the
+    /// The full static `Type` id (a `praxis_typeck::Type(u32)` handle), so the
     /// crash debugger can reconstruct the local's *exact* type — including
     /// collection element types (`Vec[Int]`, `Map[Text, Int]`) and record field
     /// shapes — which the runtime `descriptor` alone loses. The debugger pairs
@@ -1387,7 +1387,7 @@ impl Runtime {
         width: usize,
     ) -> GcRef {
         debug_assert!(
-            width == 0 || items.len() % width == 0,
+            width == 0 || items.len().is_multiple_of(width),
             "grid items ({}) not a multiple of width ({})",
             items.len(),
             width

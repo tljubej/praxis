@@ -9,9 +9,8 @@ There is no interpreter behind them. `p EXPR` synthesizes a one-function module,
 `fn __p_expr(<the locals you named>) { EXPR }`, and runs it through the whole
 compiler: parse, resolve, type-check, monomorphize, MIR, Cranelift, call. The
 value you get back was computed by machine code generated for the question you
-just asked ([ADR-036](../../../decisions/036-synthetic-p-expr-function.md)).
-That is why `p` type-checks the way the rest of the language does, and why its
-errors are the compiler's errors.
+just asked. That is why `p` type-checks the way the rest of the language does,
+and why its errors are the compiler's errors.
 
 ## Asking about a value
 
@@ -176,9 +175,8 @@ index nudged by one — is the fastest way to be sure you have found it.
 
 And `p at` answers `6` for a function that has already returned in the native
 sense. There is no suspended stack. The frame chain you are walking is a crash
-snapshot, a copy the innermost fault epilogue took before any frame popped
-([ADR-033](../../../decisions/033-crash-snapshot-rooting.md)); its values are
-rooted for the collector, so they are still there and still valid.
+snapshot, a copy the innermost fault epilogue took before any frame popped; its
+values are rooted for the collector, so they are still there and still valid.
 
 ### Shadowed names
 
@@ -266,10 +264,8 @@ is a field name. Splitting the question into two `p`s is the fix.
 A faulted program cannot be resumed, so the debugger must not let you change
 what it computed. Every `p` and `heap` expression is walked before it is
 compiled, and anything that could mutate, consume input, diverge, or run code
-whose effects cannot be proved is rejected
-([ADR-034](../../../decisions/034-read-only-purity-gate.md)). The gate sits
-between type-checking and code generation, so a rejected expression never
-executes.
+whose effects cannot be proved is rejected. The gate sits between type-checking
+and code generation, so a rejected expression never executes.
 
 ```praxis
 // The purity gate has to have something to refuse, so this frame holds a
@@ -346,16 +342,13 @@ defined`. Every higher-order method is out of reach at the prompt.
 
 Note also that `p queue.sorted()` is allowed even though it builds a new `Vec`.
 Allocating is not mutating: a debugger expression allocates on the main GC heap
-like any other code
-([ADR-032](../../../decisions/032-debugger-expr-main-heap.md)), and what the
-gate protects is the state the snapshot holds.
+like any other code, and what the gate protects is the state the snapshot holds.
 
-`type` is not gated at all. ADR-034 says `type EXPR` applies the same gate "for
-consistency"; the implementation runs the walk only on the paths that execute,
-and the last two lines of that session are the proof — `type queue.push(4)`
-answers `Unit`, `type read int` answers `Int`. Nothing runs, so there is nothing
-to protect, and when `p` refuses an expression you can still ask what it would
-have produced.
+`type` is not gated at all. The walk runs only on the paths that execute, and
+the last two lines of that session are the proof — `type queue.push(4)` answers
+`Unit`, `type read int` answers `Int`. Nothing runs, so there is nothing to
+protect, and when `p` refuses an expression you can still ask what it would have
+produced.
 
 ## Rendering, and what it does not truncate
 
@@ -371,11 +364,9 @@ Praxis crash> p squares
 [0, 1, 4, 9, 16, 25, 36, 49, 64, 81, 100, 121, 144, 169, 196, 225, 256, 289, 324, 361, 400, 441, 484, 529, 576, 625, 676, 729, 784, 841, 900, 961, 1024, 1089, 1156, 1225, 1296, 1369, 1444, 1521]
 ```
 
-The design document (§16.3) says debugger output truncates large collections by
-default and that `heap` exists for deeper inspection. Neither is true of the
-implementation: nothing truncates a value, and `heap` differs from `p` only by
-the type prefix. If you want less, ask for less — `p xs.len()`, `p xs[0]`,
-`p xs.sorted()[0]`.
+There is no truncating mode to turn on and no deeper-inspection command to
+escalate to: `heap` differs from `p` only by the type prefix. If you want less,
+ask for less — `p xs.len()`, `p xs[0]`, `p xs.sorted()[0]`.
 
 The one cap that does exist counts **locals, not elements**, and it applies to
 the printed diagnostic rather than to the `locals` command. It is covered in

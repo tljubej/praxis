@@ -27,11 +27,11 @@ use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
+use crate::Tracer;
 use crate::descriptor::{Payload, TypeDescriptor};
 use crate::gc::{GcHeader, GcRef, HeapId};
-use crate::page::{self, PageHeader, SizeClass, NUM_CLASSES};
+use crate::page::{self, NUM_CLASSES, PageHeader, SizeClass};
 use crate::roots::{RootSet, RuntimeRoots, WeakSet};
-use crate::Tracer;
 
 /// Proof that the collector was given a chance to run at this point.
 ///
@@ -1316,10 +1316,10 @@ impl Heap {
         while !current.is_null() {
             // SAFETY: an immortal page is one of this heap's own.
             let page = unsafe { &*current };
-            if page.class() == Some(class) {
-                if let Some(base) = page.claim_free_block() {
-                    return base;
-                }
+            if page.class() == Some(class)
+                && let Some(base) = page.claim_free_block()
+            {
+                return base;
             }
             current = page.next_of_class();
         }
@@ -2115,15 +2115,15 @@ impl Default for Heap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collections::{VecPayload, VEC};
+    use crate::collections::{VEC, VecPayload};
     use crate::descriptor::TypeDescriptor;
     use crate::roots::RootScope;
     use crate::scalars::{INT, INT_PAYLOAD, UNIT_PAYLOAD};
     use crate::{GcRef, Tracer};
     use std::cell::Cell;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     #[repr(C)]
@@ -3103,7 +3103,7 @@ mod tests {
     /// (RT-04).
     #[test]
     fn pacing_charges_the_bytes_a_payload_owns() {
-        use crate::text::{TextPayload, TEXT};
+        use crate::text::{TEXT, TextPayload};
 
         let alloc_text = |heap: &Heap, len: usize| {
             let owned: Box<str> = "x".repeat(len).into_boxed_str();
@@ -3177,7 +3177,7 @@ mod tests {
     /// megabyte of input into a thousand fields would report a gigabyte.
     #[test]
     fn a_source_slice_text_is_charged_nothing_beyond_its_block() {
-        use crate::text::{TextPayload, TEXT};
+        use crate::text::{TEXT, TextPayload};
         let heap = Heap::new();
 
         let owner: Box<str> = "x".repeat(4096).into_boxed_str();
@@ -3237,7 +3237,7 @@ mod tests {
     /// is re-classed, so it does not.
     #[test]
     fn an_emptied_page_is_reused_for_another_size_class() {
-        use crate::text::{TextPayload, TEXT};
+        use crate::text::{TEXT, TextPayload};
         let heap = Heap::new();
         // Enough `Text`s to need many pages of their own class.
         for _ in 0..8_000 {

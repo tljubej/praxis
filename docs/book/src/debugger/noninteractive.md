@@ -193,10 +193,8 @@ Backtraces are not capped either, and one fault kind makes that visible. A
 runaway recursion faults when it has spent its native-stack budget. The budget
 is denominated in bytes and each call is charged for its own width, so an
 ordinary recursive function gets about eight thousand frames and a function with
-many live collections per frame gets fewer
-([ADR-105](../../../decisions/105-the-recursion-guard-spends-a-byte-budget.md)).
-Every one of those frames is in the backtrace. A function that recurses past its
-budget
+many live collections per frame gets fewer. Every one of those frames is in the
+backtrace. A function that recurses past its budget
 
 ```praxis
 fn depth(n: Int) -> Int {
@@ -252,9 +250,9 @@ because they are the mechanism a faulted session uses to become a working one.
 
 `restart` re-runs the same compiled machine code. `reload` re-reads the source
 file from disk, recompiles it, and then re-runs. Both keep the input bytes the
-first run was given and the path they came from, which is §9.7's guarantee.
-(§9.7 also lists the debugger's display preferences among what is retained;
-there are none — no command changes how a value prints.)
+first run was given and the path they came from, and that is the whole of what
+is retained — no command changes how a value prints, so there is no display
+state to carry across.
 
 Both clear the fault, the crash snapshot and the parse detail before the run, so
 a second fault captures a fresh frame chain and leaves you at the prompt with the

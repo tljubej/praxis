@@ -8,11 +8,13 @@
 .DS_Store
 .zcode/
 
-# Agent worktrees (git worktree checkouts live here; never part of a commit)
-.claude/worktrees/
+# Coding-agent local state: per-machine settings and the git worktree checkouts
+# agents run in. None of it is part of a commit.
+.claude/
 
 # The VS Code extension's own build output (editors/vscode). Not part of a
-# commit: `just ci` does not build it, and M14 packages it from source.
+# commit: `just ci` does not build it, and the extension is packaged from
+# source.
 editors/vscode/node_modules/
 editors/vscode/out/
 editors/vscode/*.vsix

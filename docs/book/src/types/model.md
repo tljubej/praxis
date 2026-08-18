@@ -12,12 +12,11 @@ deduced.
 The engine is Hindley–Milner inference extended with what the language actually
 has: mutable bindings, nominal records and enums, the structural records the
 input parser derives, collection constructors, closures, and a small closed set
-of internal requirements (§5.1). Types live in an interned arena — a type is a
-32-bit handle into a table, so every expression can carry one for free, and a
-type *variable* is a slot in that same table rather than a separate kind of
-thing ([ADR-007](../../../decisions/007-type-representation-interning.md)).
+of internal requirements. Types live in an interned arena — a type is a 32-bit
+handle into a table, so every expression can carry one for free, and a type
+*variable* is a slot in that same table rather than a separate kind of thing.
 
-Here is the design document's own promise, §5.2, as a program:
+Here is what all of that comes to, as a program:
 
 ```praxis
 fn total(values) {
@@ -143,8 +142,7 @@ generic in it. The two spellings are one distinction — a bound variable versus
 free one — and which one you get is the subject of the
 [generalization chapter](generalization.md). Only a scheme knows which of its
 variables it binds, which is why a type printed on its own shows every variable
-as `?`
-([ADR-047](../../../decisions/047-scheme-owned-binders-and-the-level-newtype.md)).
+as `?`.
 
 ## Unification
 
@@ -264,10 +262,9 @@ its type, which is [type derivation](../input/type-derivation.md).
 ## What inference will not do for you
 
 **A name has one signature.** Two functions cannot share a name, a call cannot
-select between arities, and no parameter has a default
-([ADR-089](../../../decisions/089-a-name-has-one-signature.md)). Where another
-language would overload, Praxis spells the second shape as a second name: `min`
-and `min_by`, `find` and `position`, `sorted` and `sorted_by_key`.
+select between arities, and no parameter has a default. Where another language
+would overload, Praxis spells the second shape as a second name: `min` and
+`min_by`, `find` and `position`, `sorted` and `sorted_by_key`.
 
 **Recursion is checked; mutual recursion generalizes early.** A directly
 recursive function needs no annotation — `fn fact(n) { if n <= 1 { 1 } else { n *
@@ -276,8 +273,7 @@ placeholder before its body is checked and the placeholder is unified with the
 derived type after. A call to a function declared *below* unifies against the
 very placeholder that later declaration will resolve, so a disagreement is
 reported rather than skipped — reported wherever the conflict surfaces, which
-for a forward call is usually inside the callee's body rather than at the call
-([ADR-047](../../../decisions/047-scheme-owned-binders-and-the-level-newtype.md)).
+for a forward call is usually inside the callee's body rather than at the call.
 A mutually recursive pair is checked in both directions, but the first of the
 two generalizes before the second has finished constraining it; annotate a
 mutually recursive pair if it misbehaves.
@@ -287,7 +283,7 @@ values.sum() }` is `(Vec[Int]) -> Int` once one call site says `Vec[Int]`, not
 "any sequence of numbers". That is deliberate, and it is explained in
 [Generalization](generalization.md).
 
-**Nothing is inferred across files.** A program is one file (§3.2).
+**Nothing is inferred across files.** A program is one file.
 
 ---
 

@@ -2,15 +2,20 @@
 name = "praxis-hir"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Name resolution and high-level intermediate representation for Praxis."
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 praxis-source.workspace = true
 praxis-syntax.workspace = true
 praxis-ast.workspace = true
-praxis-types.workspace = true
+praxis-typeck.workspace = true
 praxis-stdlib.workspace = true
 praxis-input-parser.workspace = true
 rowan.workspace = true
@@ -20,8 +25,8 @@ praxis-parser.workspace = true
 praxis-test-support.workspace = true
 insta.workspace = true
 
-# Doctests are not run (see the justfile and README): rustdoc has to analyze the
-# whole crate before it can find out there are none, and the result is never
-# cached, so `cargo test` paid ~6s per crate for it on every run.
+# Doctests are not run (the justfile says why): rustdoc has to analyze the whole
+# crate before it can find out there are none, and the result is never cached,
+# so `cargo test` pays ~6s per crate for it on every run.
 [lib]
 doctest = false

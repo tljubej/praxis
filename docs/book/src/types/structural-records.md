@@ -4,7 +4,7 @@ There are two kinds of record type in Praxis. A `struct` declaration makes a
 **nominal** one: `Point` is `Point` because it is that declaration, and a second
 declaration with identical fields is a different type. The other kind is
 **anonymous**: `{ x: Int, y: Int }` is that field set and nothing else, and any
-two of them with the same fields are the same type (§5.6).
+two of them with the same fields are the same type.
 
 Two things produce an anonymous record, and they produce the same one. You write
 a literal with no name in front of it — `{ x: 1, y: 2 }`, whose type is the
@@ -143,8 +143,7 @@ you would expect.
 Two anonymous records are the same type when their field-name sets match and
 their field types unify. Identity is established *by unification* rather than by
 a lookup at construction, which is what makes the field types get checked rather
-than assumed
-([ADR-025](../../../decisions/025-typedata-record-enum-defid.md)).
+than assumed.
 
 The practical effect is that a helper written for one parser's rows works for
 another's, with no declaration in between:
@@ -289,8 +288,7 @@ cannot be a property of the template or literal doing the building, because the
 whole point of the rule above is that those all produce one type — and a field
 read compiles to a slot index against that one type. A value laid out in its own
 producer's order would put `w` in `h`'s slot for whichever spelling was not
-canonical, and the read would answer the wrong field with nothing to report
-([ADR-152](../../../decisions/152-a-brace-a-block-cannot-explain-is-a-record-and-a-shape-has-one-field-order.md)).
+canonical, and the read would answer the wrong field with nothing to report.
 
 All this costs is that display order depends on where the *first* spelling
 appears in the file. A program with a single spelling of each shape — which is
@@ -299,10 +297,8 @@ nearly all of them — cannot tell.
 ## Nominal identity is a definition applied to arguments
 
 A `struct` or `enum` type is a **definition** plus its type arguments, and its
-identity is the definition — not its name and not its shape
-([ADR-048](../../../decisions/048-nominal-identity-is-a-definition-applied-to-arguments.md)).
-Two declarations with identical fields are two definitions and therefore two
-types:
+identity is the definition — not its name and not its shape. Two declarations
+with identical fields are two definitions and therefore two types:
 
 ```praxis
 struct Point { x: Int, y: Int }
@@ -383,8 +379,8 @@ literal cannot do for you. Two anonymous records with the same fields are the
 passed where one meant as a velocity is expected. Two `struct`s make that a
 compile error, as above.
 
-The third reason this list used to give — a record carrying a field the parser
-did not produce — is gone: write the literal.
+Carrying a field the parser did not produce is not a third reason: an anonymous
+record literal holds whatever fields you write into it.
 
 Converting to a declared one is a loop and a literal:
 

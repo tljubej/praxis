@@ -13,6 +13,7 @@ use std::collections::HashMap;
 
 use praxis_stdlib::type_pattern::ScalarType;
 
+use crate::CollectionCtor;
 use crate::constraint::Constraint;
 use crate::ctor::{CollectionArgs, FieldSet, TupleElems, VariantSet};
 use crate::data::{
@@ -21,7 +22,6 @@ use crate::data::{
 };
 use crate::error::TypeCtorError;
 use crate::type_id::{Type, VarId};
-use crate::CollectionCtor;
 
 /// One arena entry. A slot is either a concrete type shape ([`TypeData`]) or —
 /// because `Type` and `VarId` share an index space — a variable in one of its

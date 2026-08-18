@@ -66,8 +66,7 @@ The fault line is always `error: program faulted: ` followed by one of these.
 `invalid UTF-8 in Text` is the fifteenth and last kind. `praxis run` rejects
 input that is not UTF-8 with `error: failed to read input from stdin: stream did
 not contain valid UTF-8` and exit 2, so that fault is unreachable from the CLI;
-it exists for an embedder that hands the runtime bytes it did not check
-([ADR-111](../../../decisions/111-a-text-literals-bytes-are-the-compilers-promise.md)).
+it exists for an embedder that hands the runtime bytes it did not check.
 
 The rest of this chapter shows the ones you will actually hit.
 
@@ -169,15 +168,12 @@ Backtrace:
 ```
 
 The words do not say "key", which is the one place the fault line is less
-specific than it could be — earlier design notes promised a `map key was not
-present` of its own and the runtime never grew one. The `temps` block is what
-tells you which access it was: the faulting expression is named there, as
-`@ "ages["alan"]"`.
+specific than it could be. The `temps` block is what tells you which access it
+was: the faulting expression is named there, as `@ "ages["alan"]"`.
 
 Indexing a map is the *assertive* read. `Map.get` is the other one — it answers
-`Option[V]` and never faults
-([ADR-076](../../../decisions/076-absence-is-an-option-and-an-empty-min-is-a-fault.md)).
-Choosing between them is choosing whether absence is a bug or a case.
+`Option[V]` and never faults. Choosing between them is choosing whether absence
+is a bug or a case.
 
 ## An empty min, max, pop or peek
 
@@ -266,8 +262,7 @@ Backtrace:
 The argument does not have to be `Text`: `panic(xs)` on a `Vec[Int]` produces
 `error: program faulted: panic: [1, 2, 3]`.
 
-`unreachable` does **not** exist. Older design notes list "reached
-`unreachable`" as a fault kind; there is no such function in the prelude, and
+`unreachable` does **not** exist. There is no such function in the prelude, and
 `unreachable()` is an ordinary undefined-name error at check time. Write
 `panic("unreachable: ...")` instead.
 
@@ -318,8 +313,7 @@ detail without the arithmetic; see
 
 Recursion is bounded by a **byte budget**, not a call count. Every generated
 function's prologue charges its own frame against what is left and faults before
-the native stack can overflow and take the host process down with it
-([ADR-105](../../../decisions/105-the-recursion-guard-spends-a-byte-budget.md)).
+the native stack can overflow and take the host process down with it.
 
 ```praxis
 fn down(n) { if n == 0 { 0 } else { down(n - 1) + 1 } }
@@ -338,10 +332,11 @@ the report.
 
 ## Allocation size
 
-A size the runtime cannot serve is a fault rather than an abort. It used to be a
-`usize` cast on the way into a Rust allocation, where a negative width became
-`usize::MAX` and the process died with no diagnostic at all
-([ADR-041](../../../decisions/041-bounded-extents-fault-instead-of-aborting.md)).
+A size the runtime cannot serve is a fault rather than an abort. An `Int`
+reaches an allocation only through a validated extent, and the bound is a cap
+rather than "whatever a machine word holds" — so a request past it stops the
+program with a report you can read, instead of killing the process with no
+diagnostic at all.
 
 ```praxis
 var seen = BitSet()
@@ -368,8 +363,7 @@ Backtrace:
 A negative member raises it too. The same guard covers the sized collection
 constructors, and there it is the ordinary way to reach this fault: `Vec(n, fill)`
 and `Grid(w, h, fill)` take extents the program computes, so a negative one — or a
-`width * height` past the cap of 2^28 cells — stops the program the same way
-([ADR-146](../../../decisions/146-a-collection-constructors-arity-is-its-shape.md)).
+`width * height` past the cap of 2^28 cells — stops the program the same way.
 It cannot be a `check`-time refusal: a size is an `Int` like any other, and its
 value is not known until it runs. `Grid()` and a `read grid(…)` never raise it —
 the first asks for 0×0, and the second builds its payload from input it has
@@ -386,19 +380,13 @@ The two ways it can fail are worth knowing anyway, because they are why the
 debugger can say this at all. Checked `Int` arithmetic is inline machine code
 with an inline overflow test and a branch to a cold block, and that cold block
 goes straight to the fault epilogue — the operation is not a call whose result
-gets stored, so on the faulting path nothing is stored into the destination slot
-([ADR-102](../../../decisions/102-a-check-is-a-branch-not-a-call.md),
-[ADR-117](../../../decisions/117-a-raise-that-branches-is-its-own-observation.md)).
-Everything else — indexing, `min`, `insert`, `to_int` — is a call into a runtime
-wrapper, and a wrapper that raises still has to return *something* across the ABI
-boundary. The debugger's store for the destination comes after the fault check
-rather than before it, so the sentinel the wrapper returned is never written down
-([ADR-135](../../../decisions/135-a-debug-slot-is-written-on-the-path-the-value-was-produced-on.md)).
-
-It used to be written down, and the two shapes read differently: `xs[3]` showed
-`= Unit` in a slot the same line typed `Int`. That was the sentinel, not a value
-the program computed, and telling the two apart meant knowing which operations
-are calls. Now the frame says it directly.
+gets stored, so on the faulting path nothing is stored into the destination
+slot. Everything else — indexing, `min`, `insert`, `to_int` — is a call into a
+runtime wrapper, and a wrapper that raises still has to return *something*
+across the ABI boundary. The debugger's store for the destination comes after
+the fault check rather than before it, so the sentinel the wrapper returned is
+never written down. Both paths end in the same place: no value was produced, so
+no value was recorded, and the frame says `<uninit>`.
 
 A slot whose type genuinely *is* `Unit` and whose value is `Unit` — the temp for
 a `seen.insert(…)` statement that ran, say — is an ordinary value and tells you
@@ -414,9 +402,8 @@ nothing either way.
 - **An unreadable input file.** `praxis run` reports it and exits 2 before the
   program runs. A missing `--input` file is not a parse fault.
 - **A Rust panic inside the runtime.** Every runtime entry point is wrapped so a
-  panic cannot unwind into generated frames
-  ([ADR-080](../../../decisions/080-totality-is-the-contract-and-catch-unwind-is-the-proof.md)).
-  If one ever escaped it would arrive as a `panic` fault whose message begins
+  panic cannot unwind into generated frames. If one ever escaped it would
+  arrive as a `panic` fault whose message begins
   `internal error: a panic escaped the runtime wrapper` — or, where generated
   code would never look at the fault slot after that call, be printed and the
   process aborted. Seeing either is a bug in Praxis, not in your program.

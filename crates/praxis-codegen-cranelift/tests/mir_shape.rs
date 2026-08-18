@@ -13,7 +13,7 @@
 //! Cranelift lowering has to emit code for.
 
 use praxis_mir::ir::ScalarKind;
-use praxis_mir::test_support::{lower_src_to_mir, Census, InstKind};
+use praxis_mir::test_support::{Census, InstKind, lower_src_to_mir};
 
 /// The reachability proof. Also the smallest true statement about the
 /// backend's input: a float temporary reaches `lower_inst` as a

@@ -1,4 +1,0 @@
-fn main() {
-    var b = "sddzdd"
-    out(b[3])
-}

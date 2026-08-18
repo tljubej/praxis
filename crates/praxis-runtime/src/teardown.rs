@@ -86,7 +86,7 @@ mod tests {
     /// one-shot.
     #[test]
     fn retiring_parser_plans_empties_the_arena() {
-        use praxis_input_parser::{lower_to_plan, register_plan, ParserAst, SourceOrder};
+        use praxis_input_parser::{ParserAst, SourceOrder, lower_to_plan, register_plan};
         let ast = ParserAst::Atomic {
             kind: praxis_input_parser::AtomicKind::Int,
             span: praxis_source::Span::at(0),

@@ -192,7 +192,7 @@ impl SnapshotSlot {
 ///
 /// # Safety
 /// `ctx` must be live and wired.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn praxis_snapshot_debug_chain(ctx: *mut crate::RuntimeContext) {
     abi_guard!("praxis_snapshot_debug_chain", ctx, {
         if ctx.is_null() {
@@ -352,7 +352,7 @@ unsafe fn copy_stack(entries: &[DebugFrameEntry]) -> Vec<SnapshotFrame> {
 mod tests {
     use super::*;
     use crate::scalars::{INT, INT_PAYLOAD};
-    use crate::{Runtime, LOCAL_KIND_USER};
+    use crate::{LOCAL_KIND_USER, Runtime};
 
     #[test]
     fn empty_snapshot_roots_nothing() {

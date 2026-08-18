@@ -410,7 +410,7 @@ fn map_index_min() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapUpdateMin),
         doc: "`d[key] min= candidate` — keep the smaller value; an absent entry \
-              accepts the first value (§6.2).",
+              accepts the first value.",
     }
 }
 
@@ -423,7 +423,7 @@ fn map_index_max() -> MethodEntry {
         purity: Purity::Impure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::MapUpdateMax),
         doc: "`b[key] max= score` — keep the larger value; an absent entry accepts \
-              the first value (§6.2).",
+              the first value.",
     }
 }
 
@@ -435,7 +435,7 @@ fn counter_index() -> MethodEntry {
         result: TypePattern::Scalar(ScalarType::Int),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::CounterGet),
-        doc: "`c[key]` — the count for `key`, or zero if absent (§6.2); never faults.",
+        doc: "`c[key]` — the count for `key`, or zero if absent; never faults.",
     }
 }
 
@@ -462,7 +462,7 @@ fn grid_index() -> MethodEntry {
         result: TypePattern::var("T"),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::GridGet),
-        doc: "`grid[x, y]` — the cell at (x, y) (§6.4); faults if out of range.",
+        doc: "`grid[x, y]` — the cell at (x, y); faults if out of range.",
     }
 }
 
@@ -853,7 +853,7 @@ fn int_wrapping_add() -> MethodEntry {
         result: TypePattern::Scalar(ScalarType::Int),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntWrappingAdd),
-        doc: "Add with two's-complement wraparound instead of a fault (§4.12).",
+        doc: "Add with two's-complement wraparound instead of a fault.",
     }
 }
 
@@ -865,7 +865,7 @@ fn int_saturating_add() -> MethodEntry {
         result: TypePattern::Scalar(ScalarType::Int),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntSaturatingAdd),
-        doc: "Add, clamping to Int's ends instead of faulting (§4.12).",
+        doc: "Add, clamping to Int's ends instead of faulting.",
     }
 }
 
@@ -877,7 +877,7 @@ fn int_checked_add() -> MethodEntry {
         result: TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Int))),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntCheckedAdd),
-        doc: "Add, answering None where the checked `+` would fault (§4.12).",
+        doc: "Add, answering None where the checked `+` would fault.",
     }
 }
 
@@ -889,7 +889,7 @@ fn int_wrapping_sub() -> MethodEntry {
         result: TypePattern::Scalar(ScalarType::Int),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntWrappingSub),
-        doc: "Subtract with two's-complement wraparound instead of a fault (§4.12).",
+        doc: "Subtract with two's-complement wraparound instead of a fault.",
     }
 }
 
@@ -901,7 +901,7 @@ fn int_saturating_sub() -> MethodEntry {
         result: TypePattern::Scalar(ScalarType::Int),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntSaturatingSub),
-        doc: "Subtract, clamping to Int's ends instead of faulting (§4.12).",
+        doc: "Subtract, clamping to Int's ends instead of faulting.",
     }
 }
 
@@ -913,7 +913,7 @@ fn int_checked_sub() -> MethodEntry {
         result: TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Int))),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntCheckedSub),
-        doc: "Subtract, answering None where the checked `-` would fault (§4.12).",
+        doc: "Subtract, answering None where the checked `-` would fault.",
     }
 }
 
@@ -927,8 +927,7 @@ fn int_wrapping_mul() -> MethodEntry {
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntWrappingMul),
         doc: "Multiply with two's-complement wraparound instead of a fault. The \
               one row here a program could not write for itself: every arithmetic \
-              operator is checked and the language has no bitwise operators \
-              (§4.12).",
+              operator is checked and the language has no bitwise operators.",
     }
 }
 
@@ -940,7 +939,7 @@ fn int_saturating_mul() -> MethodEntry {
         result: TypePattern::Scalar(ScalarType::Int),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntSaturatingMul),
-        doc: "Multiply, clamping to Int's ends instead of faulting (§4.12).",
+        doc: "Multiply, clamping to Int's ends instead of faulting.",
     }
 }
 
@@ -952,7 +951,7 @@ fn int_checked_mul() -> MethodEntry {
         result: TypePattern::Option(Box::new(TypePattern::Scalar(ScalarType::Int))),
         purity: Purity::Pure,
         lowering: MethodLowering::RuntimeSymbol(abi::RuntimeSymbol::IntCheckedMul),
-        doc: "Multiply, answering None where the checked `*` would fault (§4.12).",
+        doc: "Multiply, answering None where the checked `*` would fault.",
     }
 }
 
@@ -3070,7 +3069,7 @@ mod tests {
             cat.by_receiver_and_name(&text_receiver(), crate::catalog::INDEX_STORE)
                 .count(),
             0,
-            "a `Text` is immutable (§4.3): it reads through a subscript and has \
+            "a `Text` is immutable: it reads through a subscript and has \
              no element store"
         );
 
@@ -3266,7 +3265,7 @@ mod tests {
                      {ret:?}. A wrapper answers either a value (`AbiRet::Gc`, \
                      non-`Unit` result) or nothing (`AbiRet::GcUnit`, `Unit` \
                      result); an answer that is sometimes absent is spelled \
-                     `Option[T]` (§4.7), never a Unit sentinel under a value type.",
+                     `Option[T]`, never a Unit sentinel under a value type.",
                     entry.receiver,
                     entry.name,
                     entry.result,

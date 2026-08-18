@@ -47,11 +47,11 @@
 //! is the case where the two come apart.
 //!
 //! A requirement about a type that is still a variable is not answered here. It
-//! is deferred, on `praxis_types::constraint`'s channel, and discharged when the
+//! is deferred, on `praxis_typeck::constraint`'s channel, and discharged when the
 //! variable resolves.
 
 use praxis_stdlib::{CapKind, MethodCatalog};
-use praxis_types::{data::TypeData, Capability, CollectionCtor, Type, TypeDb};
+use praxis_typeck::{Capability, CollectionCtor, Type, TypeDb, data::TypeData};
 
 /// **The** decision function: does `t` have `cap`?
 ///
@@ -68,7 +68,7 @@ use praxis_types::{data::TypeData, Capability, CollectionCtor, Type, TypeDb};
 /// An unresolved variable answers **yes** to everything. That is right here and
 /// wrong nowhere: this function is asked about a specific type, and a variable
 /// is not a type yet. Deferring the question is the constraint channel's job
-/// (`praxis_types::constraint`), not this function's.
+/// (`praxis_typeck::constraint`), not this function's.
 ///
 /// Takes `&mut TypeDb` because [`iter_item`] mints the `(K, V)` tuple a `Map`
 /// yields, and `catalog` because [`Capability::HasMethod`] is a question only
@@ -493,7 +493,7 @@ pub fn iter_item(db: &mut TypeDb, t: Type) -> Option<Type> {
 mod tests {
     use super::*;
     use praxis_stdlib::type_pattern::ScalarType;
-    use praxis_types::CollectionCtor;
+    use praxis_typeck::CollectionCtor;
 
     /// True iff `t` resolves to the scalar `Int` (test helper only).
     fn is_int(db: &TypeDb, t: Type) -> bool {
@@ -552,7 +552,7 @@ mod tests {
         let bitset = db
             .collection(
                 CollectionCtor::BitSet,
-                praxis_types::CollectionArgs::Nullary,
+                praxis_typeck::CollectionArgs::Nullary,
             )
             .expect("BitSet is nullary");
         let item = iter_item(&mut db, bitset).expect("BitSet is iterable");
@@ -678,7 +678,7 @@ mod tests {
         let bitset = db
             .collection(
                 CollectionCtor::BitSet,
-                praxis_types::CollectionArgs::Nullary,
+                praxis_typeck::CollectionArgs::Nullary,
             )
             .expect("BitSet is nullary");
         assert!(!supports_hash_stable(&db, bitset));
@@ -703,7 +703,7 @@ mod tests {
         );
 
         let (fx, fy) = (db.int(), db.int());
-        let fields = praxis_types::FieldSet::from_pairs(vec![("x".into(), fx), ("y".into(), fy)])
+        let fields = praxis_typeck::FieldSet::from_pairs(vec![("x".into(), fx), ("y".into(), fy)])
             .expect("distinct field names");
         let point = db.record(Some("P".into()), fields);
         assert!(
@@ -746,41 +746,51 @@ mod tests {
         }
         // A Vec is equatable and hashable, is not a key, is not ordered, is not
         // a number — five different answers about one type.
-        assert!(check(
-            &mut db,
-            &catalog,
-            vec_of_int,
-            &Capability::Kind(CapKind::Eq)
-        )
-        .is_ok());
-        assert!(check(
-            &mut db,
-            &catalog,
-            vec_of_int,
-            &Capability::Kind(CapKind::Hash)
-        )
-        .is_ok());
-        assert!(check(
-            &mut db,
-            &catalog,
-            vec_of_int,
-            &Capability::Kind(CapKind::HashStable)
-        )
-        .is_err());
-        assert!(check(
-            &mut db,
-            &catalog,
-            vec_of_int,
-            &Capability::Kind(CapKind::Ord)
-        )
-        .is_err());
-        assert!(check(
-            &mut db,
-            &catalog,
-            vec_of_int,
-            &Capability::Kind(CapKind::Numeric)
-        )
-        .is_err());
+        assert!(
+            check(
+                &mut db,
+                &catalog,
+                vec_of_int,
+                &Capability::Kind(CapKind::Eq)
+            )
+            .is_ok()
+        );
+        assert!(
+            check(
+                &mut db,
+                &catalog,
+                vec_of_int,
+                &Capability::Kind(CapKind::Hash)
+            )
+            .is_ok()
+        );
+        assert!(
+            check(
+                &mut db,
+                &catalog,
+                vec_of_int,
+                &Capability::Kind(CapKind::HashStable)
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                &mut db,
+                &catalog,
+                vec_of_int,
+                &Capability::Kind(CapKind::Ord)
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                &mut db,
+                &catalog,
+                vec_of_int,
+                &Capability::Kind(CapKind::Numeric)
+            )
+            .is_err()
+        );
         // A function has none of them.
         for kind in CapKind::ALL {
             assert!(
@@ -840,17 +850,19 @@ mod tests {
             assert!(check(&mut db, &catalog, v, &Capability::Kind(*kind)).is_ok());
         }
         assert!(check(&mut db, &catalog, v, &Capability::Iterable { item: v }).is_ok());
-        assert!(check(
-            &mut db,
-            &catalog,
-            v,
-            &Capability::HasMethod {
-                name: "len".into(),
-                params: vec![],
-                result: v,
-            }
-        )
-        .is_ok());
+        assert!(
+            check(
+                &mut db,
+                &catalog,
+                v,
+                &Capability::HasMethod {
+                    name: "len".into(),
+                    params: vec![],
+                    result: v,
+                }
+            )
+            .is_ok()
+        );
     }
 
     /// `HasMethod` is the catalog's question, asked through the same door.
@@ -888,13 +900,15 @@ mod tests {
         let int = db.int();
         let vec_of_int = db.vec(int);
         let item = db.fresh_var();
-        assert!(check(
-            &mut db,
-            &catalog,
-            vec_of_int,
-            &Capability::Iterable { item }
-        )
-        .is_ok());
+        assert!(
+            check(
+                &mut db,
+                &catalog,
+                vec_of_int,
+                &Capability::Iterable { item }
+            )
+            .is_ok()
+        );
         assert!(check(&mut db, &catalog, int, &Capability::Iterable { item }).is_err());
     }
 
@@ -931,7 +945,7 @@ mod tests {
         assert!(!supports_ord(&db, vec_of_int));
 
         let (fx, fy) = (db.int(), db.int());
-        let fields = praxis_types::FieldSet::from_pairs(vec![("x".into(), fx), ("y".into(), fy)])
+        let fields = praxis_typeck::FieldSet::from_pairs(vec![("x".into(), fx), ("y".into(), fy)])
             .expect("distinct field names");
         let rec = db.record(Some("P".into()), fields);
         assert!(!supports_ord(&db, rec));

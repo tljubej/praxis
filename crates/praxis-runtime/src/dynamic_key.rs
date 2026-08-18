@@ -21,8 +21,8 @@
 
 use std::hash::{Hash, Hasher};
 
-use crate::descriptor::{DynamicHasher, TypeDescriptor};
 use crate::GcRef;
+use crate::descriptor::{DynamicHasher, TypeDescriptor};
 
 /// A Praxis value used as a hash-collection key, paired with its descriptor so
 /// Rust's `HashMap`/`HashSet` can hash and compare it structurally (§11.3).
@@ -386,8 +386,8 @@ mod tests {
     /// of it.
     #[test]
     fn a_structural_key_hashes_by_contents_so_mutating_it_moves_its_bucket() {
-        use std::collections::hash_map::RandomState;
         use std::collections::HashSet;
+        use std::collections::hash_map::RandomState;
         use std::hash::BuildHasher;
 
         let rt = Runtime::new();

@@ -268,7 +268,7 @@ impl Jit {
     pub fn compile(
         &mut self,
         funcs: &[MirFunction],
-        db: &mut praxis_types::TypeDb,
+        db: &mut praxis_typeck::TypeDb,
     ) -> Result<HashMap<String, FuncId>, JitError> {
         // First pass: declare every function so they can reference each other
         // (and themselves, for recursion) before any is defined.
@@ -333,7 +333,7 @@ impl Jit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cranelift::codegen::ir::{types, Endianness};
+    use cranelift::codegen::ir::{Endianness, types};
 
     /// The host is the only target the lowering is written for, and it must
     /// pass its own check.

@@ -22,8 +22,8 @@
 
 use std::fmt::Write as _;
 
-use crate::descriptor::{BuiltinTypeId, DynamicHasher, FormatSink, Tracer, TypeDescriptor};
 use crate::GcRef;
+use crate::descriptor::{BuiltinTypeId, DynamicHasher, FormatSink, Tracer, TypeDescriptor};
 
 /// The static shape of a tuple: an ordered list of element descriptors (positional,
 /// no names). Leaked to `&'static` once per distinct shape by the codegen.
@@ -119,7 +119,9 @@ unsafe fn tuple_format(payload: *const u8, out: &mut FormatSink<'_>) {
             let _ = out.write_str(", ");
         }
         let elem_desc = schema.descriptor_at(i, *item);
-        (elem_desc.format)(item.payload::<u8>() as *const u8, out);
+        // SAFETY: the descriptor came from the schema for this slot, so the slot's
+        // payload is the type its `format` expects.
+        unsafe { (elem_desc.format)(item.payload::<u8>() as *const u8, out) };
     }
     let _ = out.write_str(")");
 }
@@ -159,7 +161,9 @@ unsafe fn tuple_equals(a: *const u8, b: *const u8) -> bool {
         };
         let xe = x.payload::<u8>() as *const u8;
         let ye = y.payload::<u8>() as *const u8;
-        if !eq(xe, ye) {
+        // SAFETY: both slots were just checked to carry the same descriptor, and it
+        // is the one whose `equals` this is.
+        if !unsafe { eq(xe, ye) } {
             return false;
         }
     }
@@ -184,7 +188,9 @@ unsafe fn tuple_hash(payload: *const u8, hasher: &mut dyn DynamicHasher) {
             return;
         };
         let elem_payload = item.payload::<u8>() as *const u8;
-        hash_elem(elem_payload, hasher);
+        // SAFETY: the descriptor came from the schema for this slot, so the slot's
+        // payload is the type its `hash` expects.
+        unsafe { hash_elem(elem_payload, hasher) };
     }
 }
 

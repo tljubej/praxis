@@ -1,4 +1,4 @@
-// A backtick template is a parser expression everywhere or nowhere (ADR-084).
+// A backtick template is a parser expression everywhere or nowhere.
 // Outside `read` and `parse` it has nothing to read from, so it is an error
 // rather than a `Text` that happens to contain braces.
 fn main() {

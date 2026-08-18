@@ -19,7 +19,7 @@ use lsp_types::{CompletionItem, CompletionItemKind, Documentation, InsertTextFor
 use praxis_hir::{ParserMode, SymbolKind};
 use praxis_input_parser::{AtomicKind, Constructor};
 use praxis_syntax::{SyntaxKind, SyntaxNode};
-use praxis_types::{data::TypeData, Type};
+use praxis_typeck::{Type, data::TypeData};
 
 use crate::query::{CompletionContext, Snapshot};
 
@@ -359,7 +359,7 @@ fn parser_items(enclosing: Option<Constructor>) -> Vec<CompletionItem> {
         .map(|a| CompletionItem {
             label: a.keyword().to_string(),
             kind: Some(CompletionItemKind::VALUE),
-            detail: Some("input parser atomic (§7.4)".to_string()),
+            detail: Some("input parser atomic".to_string()),
             documentation: Some(Documentation::String(a.doc().to_string())),
             ..CompletionItem::default()
         })
@@ -382,7 +382,7 @@ fn parser_items(enclosing: Option<Constructor>) -> Vec<CompletionItem> {
             out.push(CompletionItem {
                 label: format!("{kw}:"),
                 kind: Some(CompletionItemKind::PROPERTY),
-                detail: Some(format!("`{}`'s keyword argument (§7.5)", ctor.keyword())),
+                detail: Some(format!("`{}`'s keyword argument", ctor.keyword())),
                 ..CompletionItem::default()
             });
         }
@@ -393,7 +393,7 @@ fn parser_items(enclosing: Option<Constructor>) -> Vec<CompletionItem> {
             out.push(CompletionItem {
                 label: flag.to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
-                detail: Some("permit uneven rows, padded with `fill:` (§7.5)".to_string()),
+                detail: Some("permit uneven rows, padded with `fill:`".to_string()),
                 ..CompletionItem::default()
             });
         }

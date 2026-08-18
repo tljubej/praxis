@@ -78,7 +78,7 @@ impl AtomicKind {
         }
     }
 
-    /// One line of §7.4, for hover. Exhaustive, for the reason
+    /// One line per atomic, for hover. Exhaustive, for the reason
     /// [`Constructor::doc`] is.
     pub fn doc(self) -> &'static str {
         match self {
@@ -94,7 +94,7 @@ impl AtomicKind {
             AtomicKind::Word => {
                 "A non-empty run excluding whitespace and parser-delimiter punctuation."
             }
-            AtomicKind::Identifier => "An identifier, by §4.1's own identifier rule.",
+            AtomicKind::Identifier => "An identifier, by the language's own identifier rule.",
             AtomicKind::Text => {
                 "Consumes as little as possible until the literal run that \
                  follows can match."

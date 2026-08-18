@@ -32,8 +32,8 @@ use std::collections::HashMap;
 
 use praxis_ast::AstNode;
 use praxis_source::{DiagCode, Diagnostic, FileId, FileSpan, Severity};
-use praxis_syntax::{span_bridge::range_to_span, SyntaxKind};
-use praxis_types::Type;
+use praxis_syntax::{SyntaxKind, span_bridge::range_to_span};
+use praxis_typeck::Type;
 use rowan::TextRange;
 
 use crate::lower::{Lit, TypedPattern};
@@ -58,7 +58,7 @@ fn tok_span(tok: &praxis_syntax::SyntaxToken) -> (u32, u32) {
 /// resolution minted, and somewhere to report.
 pub(crate) struct PatternBuilder<'a> {
     pub file: FileId,
-    pub db: &'a mut praxis_types::TypeDb,
+    pub db: &'a mut praxis_typeck::TypeDb,
     /// Declaration-site ranges → `SymbolId` (from resolution; survives
     /// shadowing). A bare name in a pattern binds the symbol declared *at* its
     /// own range, which is the only lookup that tells two shadowed bindings
@@ -143,7 +143,7 @@ impl PatternBuilder<'_> {
                 // Disambiguate payload-less variant from variable bind by checking
                 // the scrutinee's enum type.
                 let resolved = self.db.follow(scrutinee_ty);
-                if let praxis_types::TypeData::Enum { def, .. } = self.db.data(resolved) {
+                if let praxis_typeck::TypeData::Enum { def, .. } = self.db.data(resolved) {
                     let def = *def;
                     let edef = self.db.enum_def(def);
                     if let Some(idx) = edef.variant(&name) {
@@ -184,15 +184,15 @@ impl PatternBuilder<'_> {
                     }
                 }
                 // Not a variant: a variable bind. Resolve the declared symbol.
-                if let Some(tok) = pat.name_token() {
-                    if let Some(symbol) = self.decls.get(&tok.text_range()).copied() {
-                        return TypedPattern::Bind {
-                            symbol,
-                            name: tok.text().to_string(),
-                            ty: scrutinee_ty,
-                            span: tok_span(&tok),
-                        };
-                    }
+                if let Some(tok) = pat.name_token()
+                    && let Some(symbol) = self.decls.get(&tok.text_range()).copied()
+                {
+                    return TypedPattern::Bind {
+                        symbol,
+                        name: tok.text().to_string(),
+                        ty: scrutinee_ty,
+                        span: tok_span(&tok),
+                    };
                 }
                 // Fallback: treat as wildcard if the symbol is unresolved.
                 TypedPattern::Wildcard
@@ -208,11 +208,11 @@ impl PatternBuilder<'_> {
                     .unwrap_or_else(|| pat.syntax().text_range());
                 let resolved = self.db.follow(scrutinee_ty);
                 let (enum_def_id, enum_args) = match self.db.data(resolved) {
-                    praxis_types::TypeData::Enum { def, args } => (*def, args.clone()),
+                    praxis_typeck::TypeData::Enum { def, args } => (*def, args.clone()),
                     // An unconstrained scrutinee is one inference could not
                     // pin, and it has already reported; anything else is a
                     // pattern whose shape the type cannot take.
-                    praxis_types::TypeData::Var(_) => return TypedPattern::Wildcard,
+                    praxis_typeck::TypeData::Var(_) => return TypedPattern::Wildcard,
                     _ => {
                         let rendered = self.db.render(resolved);
                         self.diag(
@@ -277,8 +277,8 @@ impl PatternBuilder<'_> {
             PatternKind::Tuple => {
                 let resolved = self.db.follow(scrutinee_ty);
                 let element_types = match self.db.data(resolved) {
-                    praxis_types::TypeData::Tuple(els) => els.clone(),
-                    praxis_types::TypeData::Var(_) => return TypedPattern::Wildcard,
+                    praxis_typeck::TypeData::Tuple(els) => els.clone(),
+                    praxis_typeck::TypeData::Var(_) => return TypedPattern::Wildcard,
                     _ => {
                         let rendered = self.db.render(resolved);
                         self.diag(
@@ -312,8 +312,8 @@ impl PatternBuilder<'_> {
             PatternKind::Record(rname) => {
                 let resolved = self.db.follow(scrutinee_ty);
                 let (record_def_id, record_args) = match self.db.data(resolved) {
-                    praxis_types::TypeData::Record { def, args } => (*def, args.clone()),
-                    praxis_types::TypeData::Var(_) => return TypedPattern::Wildcard,
+                    praxis_typeck::TypeData::Record { def, args } => (*def, args.clone()),
+                    praxis_typeck::TypeData::Var(_) => return TypedPattern::Wildcard,
                     _ => {
                         let rendered = self.db.render(resolved);
                         let head = match &rname {
@@ -441,7 +441,7 @@ pub(crate) fn merge_pattern_diagnostics(built: Vec<Diagnostic>, out: &mut Vec<Di
 pub(crate) fn check_binding_patterns(
     file: FileId,
     root: &praxis_ast::SourceFile,
-    db: &mut praxis_types::TypeDb,
+    db: &mut praxis_typeck::TypeDb,
     names: &crate::NameTable,
     decls: &HashMap<TextRange, SymbolId>,
     ref_types: &HashMap<TextRange, Type>,
@@ -514,7 +514,7 @@ pub(crate) fn check_binding_patterns(
 /// is the same at both, because it is the same rule.
 fn check_binding(
     file: FileId,
-    db: &mut praxis_types::TypeDb,
+    db: &mut praxis_typeck::TypeDb,
     decls: &HashMap<TextRange, SymbolId>,
     pat: &praxis_ast::Pattern,
     ty: Type,

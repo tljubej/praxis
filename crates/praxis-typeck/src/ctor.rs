@@ -9,10 +9,10 @@
 //! way to reach the corresponding constructor. Validation happens once, at
 //! `new`, and everything downstream reads a payload it cannot doubt.
 
+use crate::CollectionCtor;
 use crate::data::{EnumVariantDef, RecordFieldDef};
 use crate::error::TypeCtorError;
 use crate::type_id::Type;
-use crate::CollectionCtor;
 
 /// Two or more element types, in tuple order.
 ///

@@ -108,9 +108,11 @@ fn unresolved_name_emits_n001() {
         .filter(|d| d.code().category() == DiagnosticCategory::Name)
         .collect();
     assert_eq!(name_diags.len(), 1);
-    assert!(analysis.diagnostics[0]
-        .message()
-        .contains("`missing` is not defined"));
+    assert!(
+        analysis.diagnostics[0]
+            .message()
+            .contains("`missing` is not defined")
+    );
 }
 
 #[test]
@@ -168,10 +170,12 @@ fn local_in_block_does_not_leak_outward() {
     let src = "{ var inner = 1 }\nout(inner)";
     let analysis = analyze(src);
     // `inner` reference is unresolved.
-    assert!(analysis
-        .diagnostics
-        .iter()
-        .any(|d| d.message().contains("`inner` is not defined")));
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|d| d.message().contains("`inner` is not defined"))
+    );
 }
 
 #[test]
@@ -191,11 +195,13 @@ fn unknown_type_annotation_emits_n002() {
     // `Byte` is reserved but not yet constructible (§4.3) → N002.
     let src = "var x: Byte = 1";
     let analysis = analyze(src);
-    assert!(analysis
-        .diagnostics
-        .iter()
-        .any(|d| d.code().category() == DiagnosticCategory::Name
-            && d.message().contains("unknown type `Byte`")));
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|d| d.code().category() == DiagnosticCategory::Name
+                && d.message().contains("unknown type `Byte`"))
+    );
 }
 
 #[test]
@@ -306,11 +312,13 @@ fn a_breakpoint_marker_lowers_to_a_stop_after_its_statement() {
     let (_, module) = test_util::analyze_and_lower("var a = 1\nout(a)");
     let entry = test_util::entry_fn(&module);
     assert!(entry.body.tail_bp.is_none());
-    assert!(!entry
-        .body
-        .stmts
-        .iter()
-        .any(|s| matches!(s, TypedStmt::Breakpoint { .. })));
+    assert!(
+        !entry
+            .body
+            .stmts
+            .iter()
+            .any(|s| matches!(s, TypedStmt::Breakpoint { .. }))
+    );
 }
 
 /// A pending tail that turns out **not** to be the tail is demoted to a

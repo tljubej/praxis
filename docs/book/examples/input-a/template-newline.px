@@ -1,6 +1,6 @@
-// A template ends at the line it opens on (ADR-094), so `\n` is the only way
-// it matches a line ending — and the only way one reaches a second line. The
-// escape matches CRLF as well; a raw newline never did.
+// A template ends at the line it opens on, so `\n` is the only way it matches
+// a line ending — and the only way one reaches a second line. The escape
+// matches CRLF as well as LF.
 fn main() {
     out(parse("1\n2\n", `{a:int}\n{b:int}`))
     out(parse("1\r\n2\n", `{a:int}\n{b:int}`))

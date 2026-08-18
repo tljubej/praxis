@@ -45,8 +45,7 @@ var bits = BitSet()
 
 The element types come from what the program later puts in. When that is not
 enough — or when you would rather say it than derive it — write the type
-arguments in brackets before the parentheses
-([ADR-065](../../../decisions/065-a-type-constructors-brackets-are-type-arguments.md)):
+arguments in brackets before the parentheses:
 
 ```praxis
 var counts = Counter[(Int, Int)]()
@@ -115,13 +114,12 @@ rather say it: `Vec[Bool](3, false)`.
 
 **Only those two have a sized form.** The other seven take no arguments at all,
 and `Set(3, 0)` is an error saying so. Praxis has no arity overloading anywhere
-else — one name, one signature
-([ADR-089](../../../decisions/089-a-name-has-one-signature.md)) — and these two
-are a deliberate, closed exception, recorded with its reasoning in
-[ADR-146](../../../decisions/146-a-collection-constructors-arity-is-its-shape.md).
-`Vec` and `Grid` are the collections whose contents are addressed by position,
-which is what makes "n of them" mean something: a sized `Set` would be `n`
-copies of one element in a set, which is one element.
+else — one name, one signature — and these two are a deliberate, closed
+exception. `Vec` and `Grid` are the collections whose contents are addressed by
+position, which is what makes "n of them" mean something: a sized `Set` would be
+`n` copies of one element in a set, which is one element. The exception costs the
+general rule nothing: the shape is chosen by counting the arguments, a syntactic
+fact known before any argument is typed, and never by looking at what they are.
 
 **The fill is one value stored `n` times, not `n` copies of it.** For a scalar
 that is unobservable, but a collection fill gives you `n` names for the *same*
@@ -147,9 +145,8 @@ neither does this. If you want `n` distinct collections, build them:
 
 A negative size — or one so large the runtime cannot allocate it — is not
 something `praxis check` can refuse, because the size is an ordinary `Int`
-computed at run time. It is a fault instead
-([ADR-041](../../../decisions/041-bounded-extents-fault-instead-of-aborting.md)),
-and the expression that asked for it is named in the report:
+computed at run time. It is a fault instead, and the expression that asked for
+it is named in the report:
 
 ```praxis
 // A size is an ordinary `Int` computed at run time, so a negative one is not
@@ -182,10 +179,9 @@ rather than what a `usize` happens to hold.
 
 ### The list literal
 
-`Vec` is the one collection with a literal
-([ADR-099](../../../decisions/099-a-list-literal-is-a-vec-and-a-text-is-iterable.md)).
-`[a, b, c]` *is* `Vec()` followed by one `push` per element, in source order —
-same type, same methods, same mutability. There is no separate immutable array.
+`Vec` is the one collection with a literal. `[a, b, c]` *is* `Vec()` followed by
+one `push` per element, in source order — same type, same methods, same
+mutability. There is no separate immutable array.
 
 ```praxis
 // A list literal is a Vec: an allocation followed by one push per element.
@@ -228,10 +224,9 @@ nowhere, and nothing reports it.
 
 ## Subscripting
 
-A subscript is a method-catalog row dispatched on the receiver's shape *and*
-its arity, under names no program can spell
-([ADR-064](../../../decisions/064-a-subscript-is-a-catalog-row.md)). Six types
-read; five of those six also store.
+A subscript is a method-catalog row dispatched on the receiver's shape *and* its
+arity, under names no program can spell. Six types read; five of those six also
+store.
 
 | receiver | `x[i]` reads | `x[i] = v` stores | `min=` / `max=` |
 |---|---|---|---|
@@ -307,8 +302,7 @@ seen before.
 ### Stores replace, and compound stores evaluate the place once
 
 A `Vec` or `Deque` store replaces the element at that index and never appends.
-`v[v.len()] = x` is a fault, not a push
-([ADR-124](../../../decisions/124-a-field-and-a-sequence-element-are-places.md)):
+`v[v.len()] = x` is a fault, not a push:
 
 ```praxis
 fn store(v, i, x) {
@@ -331,8 +325,7 @@ index are lowered once into locals that both the read and the write use, so
 
 `Map` has two updating stores, and they exist because a read-modify-write cannot
 express them: an absent entry accepts the first value, where a plain subscript
-read of an absent key would fault
-([ADR-070](../../../decisions/070-an-updating-store-is-a-row-with-a-contextual-operator.md)).
+read of an absent key would fault.
 
 ```praxis
 var distance = Map[Text, Int]()
@@ -391,8 +384,7 @@ every row above.
 
 `to_text()` is the odd one out on this table, because it is the only row here
 that is not about a `Vec` of anything — a `Vec[Char]` becomes the line it
-spells, which is how a `Grid` row is drawn back
-([ADR-144](../../../decisions/144-a-sequence-of-text-joins-and-a-sequence-of-char-becomes-one.md)).
+spells, which is how a `Grid` row is drawn back.
 
 ## `Deque`
 
@@ -618,9 +610,8 @@ false
 ```
 
 **A heap's element type must be orderable, and no composite is.** Only `Int`,
-`UInt`, `Byte`, `Float`, `Char` and `Text` are ordered
-([ADR-045](../../../decisions/045-ordering-semantics-and-the-compare-callback.md)),
-so the Dijkstra habit of pushing a `(cost, node)` pair does not compile:
+`Float`, `Char` and `Text` are ordered, so the Dijkstra habit of pushing a
+`(cost, node)` pair does not compile:
 
 ```praxis
 var frontier = MinHeap()
@@ -696,8 +687,7 @@ A member outside `0..=4294967295` faults with `size or extent out of range`.
 
 `a..b` is the integers from `a` up to but not including `b`; `a..=b` includes
 `b`. Both build the same value — the inclusive form is normalized into its
-half-open equivalent, which is why `1..=4` prints as `1..5`
-([ADR-059](../../../decisions/059-a-range-is-a-value-and-a-descending-one-is-empty.md)).
+half-open equivalent, which is why `1..=4` prints as `1..5`.
 
 **A `Range` has no methods at all**, and no subscript:
 
@@ -745,8 +735,7 @@ first three
 A descending range is empty rather than reversed, matching Python and Rust.
 There is no step or stride form, and `5..0` earns no diagnostic — it is a legal
 empty collection, and the constructor clamps rather than the literal being
-refused
-([ADR-059](../../../decisions/059-a-range-is-a-value-and-a-descending-one-is-empty.md)).
+refused.
 
 The countdown is written `(0..5).reversed()`, which answers a `Vec[Int]` because
 a pipeline's currency is `Vec` — not a descending `Range`, since no such value
@@ -758,7 +747,7 @@ sequence.
 A tuple is an anonymous positional product: `(a, b)`, elements read as `.0`,
 `.1`, and so on. Its identity is structural — the element type sequence alone —
 so two `(Int, Int)`s built anywhere in the program compare and hash as the same
-shape ([ADR-026](../../../decisions/026-structural-equality-hashing.md)).
+shape.
 
 ```praxis
 var point = (3, 4)
@@ -819,12 +808,11 @@ per-process seed.
 | `Map[K, V]` | `(K, V)` | ascending by key | two aligned snapshots |
 | `Counter[T]` | `(T, Int)` | ascending by key | two aligned snapshots |
 
-"Ascending" is the **value's** order, not the printed text's: numeric for `Int`,
-`Byte` and `Float`, code-point for `Char` and `Text`, `false` before `true`, and
+"Ascending" is the **value's** order, not the printed text's: numeric for `Int`
+and `Float`, code-point for `Char` and `Text`, `false` before `true`, and
 element-wise left to right for a tuple, a record or an enum. It is the same
 order `sorted()` uses, so `out(s)` and `out(s.to_vec().sorted())` print the same
-sequence, and a `Map[(Int, Int), V]` over a grid comes out in reading order
-([ADR-138](../../../decisions/138-a-container-orders-by-the-value-and-not-by-its-printing.md)).
+sequence, and a `Map[(Int, Int), V]` over a grid comes out in reading order.
 
 Every key type has such an order, including the ones you cannot write `<` on: a
 tuple orders inside a container and `(1, 2) < (1, 3)` is still refused at check
@@ -889,18 +877,17 @@ ten
 {(0, 100): z, (1, 9): a, (1, 10): b}
 ```
 
-A keyed collection prints in the order it iterates. That used not to be true:
-printing sorted the whole rendered entry, so `a1: 2` came before `a: 1` (because
-`1` sorts before `:`), while `keys()`, `values()` and a `for` sorted the key
-alone and answered `a` before `a1`. One `Map` had two orders, and a program that
-printed it and walked it disagreed with itself. There is now one order, and the
-table's column is it.
+A keyed collection prints in the order it iterates. One `Map` has one order:
+`out(m)`, `keys()`, `values()` and a `for` all walk it by the key's own value,
+so `a` comes before `a1` in every one of them. A collection that sorted its
+printed entries instead would put `a1: 2` before `a: 1`, because `1` sorts before
+`:`, and a program that printed a map would disagree with a program that walked
+it.
 
 The last column of the table is not decoration. A collection walked *in place*
 re-reads its length each step, so a `push` from inside the loop body is visited;
 a snapshotted one is materialized once before the first step and cannot be
-affected by the body at all
-([ADR-066](../../../decisions/066-a-for-iterates-a-snapshot.md)).
+affected by the body at all.
 
 ```praxis
 // A Vec indexes itself, so a `for` over it re-reads the length each step and
@@ -934,9 +921,8 @@ out(s)
 
 ## What may be a `Map` key or a `Set` element
 
-A key must be **hashable and immutable**
-([ADR-057](../../../decisions/057-a-capability-requirement-rides-on-the-scheme-that-quantified-it.md)).
-The rule is mutability, not container-ness:
+A key must be **hashable and immutable**. The rule is mutability, not
+container-ness:
 
 - **In:** every scalar, `Text`, `Range`, and — structurally — tuples, records
   and enums, each a key exactly when all of its components are.
@@ -1061,8 +1047,7 @@ belong here:
 - Two conversions leave the collections entirely and answer a `Text`:
   `seq.join(sep)` on a sequence of `Text`, and `chars.to_text()` on a
   `Vec[Char]`. They are two rows rather than one because a generic `join` and a
-  `Char`-specific one cannot both exist under one name — the reasoning is in
-  [ADR-144](../../../decisions/144-a-sequence-of-text-joins-and-a-sequence-of-char-becomes-one.md).
+  `Char`-specific one cannot both exist under one name.
 
 Also absent, and a reader coming from Python or Rust will look for them:
 `Vec.contains` / `pop` / `insert` / `remove`, in-place `reverse` and `sort`

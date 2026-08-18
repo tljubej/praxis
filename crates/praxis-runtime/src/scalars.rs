@@ -21,7 +21,7 @@ use std::fmt::{self, Write as _};
 use std::hash::Hash;
 
 use crate::descriptor::{
-    hash_value, BuiltinTypeId, DynamicHasher, FormatSink, Payload, Tracer, TypeDescriptor,
+    BuiltinTypeId, DynamicHasher, FormatSink, Payload, Tracer, TypeDescriptor, hash_value,
 };
 use crate::heap::InlineClaimSite;
 

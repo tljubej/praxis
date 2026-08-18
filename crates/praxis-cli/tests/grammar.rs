@@ -140,7 +140,7 @@ fn every_keyword_is_in_the_grammars_keyword_pattern() {
     }
 }
 
-/// **Gate 2.** Every §7.4 atomic appears in the capture-type pattern.
+/// **Gate 2.** Every capture-type atomic appears in the capture-type pattern.
 #[test]
 fn every_atomic_is_in_the_grammars_capture_type_pattern() {
     let grammar = grammar();
@@ -148,13 +148,13 @@ fn every_atomic_is_in_the_grammars_capture_type_pattern() {
     for atomic in praxis_input_parser::AtomicKind::ALL {
         assert!(
             offers(&pattern, atomic.keyword()),
-            "`{}` is a §7.4 atomic and the capture-type pattern does not offer it\npattern: {pattern}",
+            "`{}` is a capture-type atomic and the capture-type pattern does not offer it\npattern: {pattern}",
             atomic.keyword()
         );
     }
 }
 
-/// **Gate 3.** Every §7.5 constructor appears in the constructor pattern.
+/// **Gate 3.** Every parser constructor appears in the constructor pattern.
 #[test]
 fn every_constructor_is_in_the_grammars_constructor_pattern() {
     let grammar = grammar();
@@ -162,13 +162,13 @@ fn every_constructor_is_in_the_grammars_constructor_pattern() {
     for ctor in praxis_input_parser::Constructor::ALL {
         assert!(
             offers(&pattern, ctor.keyword()),
-            "`{}` is a §7.5 constructor and the constructor pattern does not offer it\npattern: {pattern}",
+            "`{}` is a parser constructor and the constructor pattern does not offer it\npattern: {pattern}",
             ctor.keyword()
         );
     }
 }
 
-/// **Gate 4 — §6.2's agreement, enforced instead of documented.**
+/// **Gate 4 — the two highlighting layers agree, enforced instead of documented.**
 ///
 /// Every custom semantic token type in the server's legend has a
 /// `semanticTokenScopes` entry, **and** that entry's scope is one the grammar
@@ -196,7 +196,7 @@ fn every_custom_semantic_token_maps_to_a_scope_the_grammar_emits() {
             panic!(
                 "the server's legend has the custom token type `{token_type}` and the \
                  extension maps no scope onto it: a theme would colour it as nothing, \
-                 which is what §19.11 criterion 4 forbids"
+                 which the two layers must never do"
             )
         });
         let list = entry
@@ -218,8 +218,8 @@ fn every_custom_semantic_token_maps_to_a_scope_the_grammar_emits() {
     }
 }
 
-/// The legend's four custom types are the four §19.11 criterion 4 names, so
-/// gate 4 above is checking the right set rather than an empty one.
+/// The legend's four custom types are the four parser classes, so gate 4 above
+/// is checking the right set rather than an empty one.
 #[test]
 fn the_custom_token_types_are_the_four_parser_classes() {
     assert_eq!(
@@ -241,10 +241,10 @@ fn the_custom_token_types_are_the_four_parser_classes() {
 
 /// **The extension invokes subcommands the CLI actually has.**
 ///
-/// §19.11 criterion 5 is "VS Code run/check commands invoke the local Praxis
-/// binary", and the way that breaks silently is the CLI renaming a subcommand
-/// or a flag. `argv.ts` is read as text — no Node toolchain — and every literal
-/// it names is checked against `praxis --help`'s own surface.
+/// The extension's commands run the local Praxis binary, and the way that
+/// breaks silently is the CLI renaming a subcommand or a flag. `argv.ts` is
+/// read as text — no Node toolchain — and every literal it names is checked
+/// against `praxis --help`'s own surface.
 #[test]
 fn the_extensions_argv_names_only_subcommands_the_cli_has() {
     let argv_ts = read("src/argv.ts");
@@ -258,7 +258,7 @@ fn the_extensions_argv_names_only_subcommands_the_cli_has() {
     .expect("help is UTF-8");
 
     // The subcommands the extension's type declares.
-    for subcommand in ["run", "check", "watch", "lsp"] {
+    for subcommand in ["run", "check", "lsp"] {
         assert!(
             argv_ts.contains(&format!("\"{subcommand}\"")),
             "`argv.ts` should name the `{subcommand}` subcommand"
@@ -288,10 +288,10 @@ fn the_extensions_argv_names_only_subcommands_the_cli_has() {
     );
 }
 
-/// The extension declares the four §15.4 commands, and the language it
-/// contributes is the one the server's document selector answers for.
+/// The extension declares its three commands, and the language it contributes
+/// is the one the server's document selector answers for.
 #[test]
-fn the_extension_contributes_the_four_commands_and_the_px_language() {
+fn the_extension_contributes_its_commands_and_the_px_language() {
     let manifest = manifest();
     let commands: Vec<&str> = manifest["contributes"]["commands"]
         .as_array()
@@ -299,14 +299,11 @@ fn the_extension_contributes_the_four_commands_and_the_px_language() {
         .iter()
         .map(|c| c["command"].as_str().expect("a command id"))
         .collect();
-    for expected in [
-        "praxis.runFile",
-        "praxis.checkFile",
-        "praxis.watchFile",
-        "praxis.restartServer",
-    ] {
-        assert!(commands.contains(&expected), "missing `{expected}`");
-    }
+    assert_eq!(
+        commands,
+        vec!["praxis.runFile", "praxis.checkFile", "praxis.restartServer"],
+        "the extension contributes exactly the commands the CLI can serve"
+    );
 
     let languages = manifest["contributes"]["languages"]
         .as_array()
@@ -333,7 +330,7 @@ fn the_extension_contributes_the_four_commands_and_the_px_language() {
     );
 }
 
-/// **Gate 6.** The `:bp` breakpoint marker (§9.8) is coloured, and by a rule of
+/// **Gate 6.** The `:bp` breakpoint marker is coloured, and by a rule of
 /// its own.
 ///
 /// It is not in `SyntaxKind`'s keyword table — `bp` is an ordinary identifier

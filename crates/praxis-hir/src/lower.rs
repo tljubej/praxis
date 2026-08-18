@@ -1,5 +1,5 @@
 //! The typed tree: lower `Analysis` + the lossless AST into a tree that carries
-//! an inferred [`Type`](praxis_types::Type) on every node (ADR-014).
+//! an inferred [`Type`](praxis_typeck::Type) on every node (ADR-014).
 //!
 //! Why this exists: [`Analysis`](crate::Analysis) records its types in side
 //! tables keyed by range and node. The JIT backend needs the type of every node
@@ -14,7 +14,7 @@
 //! the type arena).
 
 #![allow(dead_code)] // The typed tree is consumed by praxis-mir; not every
-                     // variant is matched inside this crate.
+// variant is matched inside this crate.
 
 use std::collections::HashMap;
 
@@ -26,8 +26,8 @@ use praxis_ast::{
 };
 use praxis_source::{DiagCode, Diagnostic, FileSpan, Severity};
 use praxis_stdlib::TypePattern;
-use praxis_syntax::{span_bridge::range_to_span, SyntaxKind, SyntaxNode};
-use praxis_types::{Type, TypeDb};
+use praxis_syntax::{SyntaxKind, SyntaxNode, span_bridge::range_to_span};
+use praxis_typeck::{Type, TypeDb};
 use rowan::TextRange;
 
 use crate::{Analysis, ResolvedRef, ScopeTree, SymbolId};
@@ -474,7 +474,7 @@ pub enum TypedExpr {
     /// are the lowered initializers in declaration order, each paired with its
     /// field index.
     RecordLit {
-        record_def_id: praxis_types::RecordDefId,
+        record_def_id: praxis_typeck::RecordDefId,
         fields: Vec<(u32, TypedExpr)>,
         ty: Type,
         span: (u32, u32),
@@ -506,7 +506,7 @@ pub enum TypedExpr {
     /// `enum_def_id` identifies the enum, `variant_idx` the variant, and `args`
     /// are the payload values (empty for a payload-less variant).
     EnumVariant {
-        enum_def_id: praxis_types::EnumDefId,
+        enum_def_id: praxis_typeck::EnumDefId,
         variant_idx: u32,
         args: Vec<TypedExpr>,
         ty: Type,
@@ -562,7 +562,7 @@ pub enum TypedPattern {
     /// `enum_def_id`/`variant_idx` identify the variant; `subpatterns` is
     /// positional (one per payload type, possibly `Wildcard`).
     EnumVariant {
-        enum_def_id: praxis_types::EnumDefId,
+        enum_def_id: praxis_typeck::EnumDefId,
         variant_idx: u32,
         subpatterns: Vec<TypedPattern>,
         ty: Type,
@@ -580,7 +580,7 @@ pub enum TypedPattern {
     /// count, so a field the pattern does not name is a `Wildcard` and MIR reads
     /// slot *i* for sub-pattern *i*.
     Record {
-        record_def_id: praxis_types::RecordDefId,
+        record_def_id: praxis_typeck::RecordDefId,
         subpatterns: Vec<TypedPattern>,
         ty: Type,
     },
@@ -949,10 +949,10 @@ pub fn lower(
     // and the declarations have to stay where they are.
     let mut entry_stmts = Vec::new();
     for node in root.stmts() {
-        if let Some(fn_item) = FnItem::cast(node.clone()) {
-            if let Some(tfn) = l.lower_fn(&fn_item) {
-                items.push(TypedItem::Fn(tfn));
-            }
+        if let Some(fn_item) = FnItem::cast(node.clone())
+            && let Some(tfn) = l.lower_fn(&fn_item)
+        {
+            items.push(TypedItem::Fn(tfn));
         }
         // Struct declarations (§4.5) are type-only: they register a record
         // type during inference but produce no runtime item. Skip them here.
@@ -1230,7 +1230,7 @@ impl<'a> Lowerer<'a> {
     /// shape is not a `Func` (defensive — should not happen for well-typed fns).
     fn fn_result(&self, fn_type: &Type) -> Type {
         let resolved = self.db.follow(*fn_type);
-        if let praxis_types::TypeData::Func { result, .. } = self.db.data(resolved) {
+        if let praxis_typeck::TypeData::Func { result, .. } = self.db.data(resolved) {
             *result
         } else {
             self.unit
@@ -1304,16 +1304,16 @@ impl<'a> Lowerer<'a> {
             // are effect statements — only the *last* one is the tail. So when a
             // new ExprStmt appears, the previously-recorded tail becomes an
             // effect statement (it wasn't the tail after all).
-            if let Some(expr_stmt) = ExprStmt::cast(child.clone()) {
-                if let Some(e) = expr_stmt.expr() {
-                    if let Some(prev) = tail.take() {
-                        stmts.push(TypedStmt::Expr(prev));
-                        Self::push_breakpoint(&mut stmts, tail_bp.take());
-                    }
-                    tail = Some(self.lower_expr(&e));
-                    tail_bp = bp;
-                    continue;
+            if let Some(expr_stmt) = ExprStmt::cast(child.clone())
+                && let Some(e) = expr_stmt.expr()
+            {
+                if let Some(prev) = tail.take() {
+                    stmts.push(TypedStmt::Expr(prev));
+                    Self::push_breakpoint(&mut stmts, tail_bp.take());
                 }
+                tail = Some(self.lower_expr(&e));
+                tail_bp = bp;
+                continue;
             }
             // A non-ExprStmt (var/assign) after a pending tail demotes the
             // tail to an effect statement — the tail was not the block's value
@@ -1379,10 +1379,10 @@ impl<'a> Lowerer<'a> {
         if let Some(assign) = praxis_ast::PlaceAssignStmt::cast(node.clone()) {
             return self.lower_place_assign(&assign);
         }
-        if let Some(expr_stmt) = ExprStmt::cast(node.clone()) {
-            if let Some(e) = expr_stmt.expr() {
-                return Some(TypedStmt::Expr(self.lower_expr(&e)));
-            }
+        if let Some(expr_stmt) = ExprStmt::cast(node.clone())
+            && let Some(e) = expr_stmt.expr()
+        {
+            return Some(TypedStmt::Expr(self.lower_expr(&e)));
         }
         None
     }
@@ -1682,7 +1682,7 @@ impl<'a> Lowerer<'a> {
                         .names
                         .get(fv.symbol)
                         .and_then(|s| s.scheme.as_ref())
-                        .map(praxis_types::Scheme::body)
+                        .map(praxis_typeck::Scheme::body)
                         .unwrap_or(self.unit),
                 };
                 let ty = self.deep(recorded);
@@ -1960,20 +1960,19 @@ impl<'a> Lowerer<'a> {
         if let Some(symbol) = p
             .name()
             .and_then(|tok| self.resolve_symbol_at(tok.text_range()))
+            && let Some((enum_def_id, variant_idx)) = self.enum_variant_of(symbol)
         {
-            if let Some((enum_def_id, variant_idx)) = self.enum_variant_of(symbol) {
-                // Only treat as a variant if the payload is empty (a zero-payload
-                // variant). Payload variants are handled in lower_call.
-                let edef = self.db.enum_def(enum_def_id);
-                if !edef.variants[variant_idx].has_payload() {
-                    return TypedExpr::EnumVariant {
-                        enum_def_id,
-                        variant_idx: variant_idx as u32,
-                        args: Vec::new(),
-                        ty,
-                        span,
-                    };
-                }
+            // Only treat as a variant if the payload is empty (a zero-payload
+            // variant). Payload variants are handled in lower_call.
+            let edef = self.db.enum_def(enum_def_id);
+            if !edef.variants[variant_idx].has_payload() {
+                return TypedExpr::EnumVariant {
+                    enum_def_id,
+                    variant_idx: variant_idx as u32,
+                    args: Vec::new(),
+                    ty,
+                    span,
+                };
             }
         }
         let symbol = p
@@ -2326,7 +2325,7 @@ impl<'a> Lowerer<'a> {
     /// identity from here. It does not hand back the payload either — a generic
     /// def's payload is written in terms of its *parameters*, so reading it off
     /// the def would answer `T` rather than the element type.
-    fn enum_variant_of(&self, symbol: SymbolId) -> Option<(praxis_types::EnumDefId, usize)> {
+    fn enum_variant_of(&self, symbol: SymbolId) -> Option<(praxis_typeck::EnumDefId, usize)> {
         let sym = self.names.get(symbol)?;
         if sym.kind != crate::SymbolKind::EnumVariant {
             return None;
@@ -2335,12 +2334,12 @@ impl<'a> Lowerer<'a> {
         // A payload variant's scheme is a `Func` returning the enum; a
         // payload-less one's is the enum type itself.
         let result_ty = match self.db.data(self.db.follow(scheme.body())) {
-            praxis_types::TypeData::Func { result, .. } => *result,
-            praxis_types::TypeData::Enum { .. } => scheme.body(),
+            praxis_typeck::TypeData::Func { result, .. } => *result,
+            praxis_typeck::TypeData::Enum { .. } => scheme.body(),
             _ => return None,
         };
         let def_id = match self.db.data(self.db.follow(result_ty)) {
-            praxis_types::TypeData::Enum { def, .. } => *def,
+            praxis_typeck::TypeData::Enum { def, .. } => *def,
             _ => return None,
         };
         let idx = self.db.enum_def(def_id).variant(&sym.name)?;
@@ -2593,7 +2592,7 @@ impl<'a> Lowerer<'a> {
         let span = self.node_span(r.syntax());
         let struct_ty = self.node_ty(r.syntax());
         let record_def_id = match self.db.data(self.db.follow(struct_ty)) {
-            praxis_types::TypeData::Record { def, .. } => *def,
+            praxis_typeck::TypeData::Record { def, .. } => *def,
             _ => return self.error_expr(),
         };
         let rdef = self.db.record_def(record_def_id).clone();
@@ -2767,7 +2766,7 @@ impl<'a> Lowerer<'a> {
         let receiver_ty = expr_ty(&receiver);
         let resolved = self.db.follow(receiver_ty);
         let record = match self.db.data(resolved) {
-            praxis_types::TypeData::Record { def, args } => Some((*def, args.clone())),
+            praxis_typeck::TypeData::Record { def, args } => Some((*def, args.clone())),
             _ => None,
         };
         let Some((field_idx, _)) = record.and_then(|(def, args)| {
@@ -3083,7 +3082,7 @@ fn iterable_is_not_a_type() -> ! {
 /// from the init argument through the closure params to the result.
 fn pattern_to_type(db: &mut TypeDb, p: &TypePattern, names: &mut HashMap<String, Type>) -> Type {
     match p {
-        // `praxis_stdlib`'s pattern scalar *is* `praxis_types::ScalarType` (the
+        // `praxis_stdlib`'s pattern scalar *is* `praxis_typeck::ScalarType` (the
         // latter re-exports it), so there is nothing to map.
         TypePattern::Scalar(s) => db.scalar(*s),
         TypePattern::Unit => db.unit(),
@@ -3133,10 +3132,10 @@ fn pattern_to_type(db: &mut TypeDb, p: &TypePattern, names: &mut HashMap<String,
 /// interning a type nothing can unify with (ADR-046).
 fn collection_from_pattern(
     db: &mut TypeDb,
-    ctor: praxis_types::CollectionCtor,
+    ctor: praxis_typeck::CollectionCtor,
     args: Vec<Type>,
 ) -> Type {
-    let args = praxis_types::CollectionArgs::new(ctor, args)
+    let args = praxis_typeck::CollectionArgs::new(ctor, args)
         .unwrap_or_else(|e| panic!("method catalog row: {e}"));
     db.collection(ctor, args)
         .unwrap_or_else(|e| panic!("method catalog row: {e}"))
@@ -3149,7 +3148,7 @@ fn tuple_or_degenerate(db: &mut TypeDb, mut els: Vec<Type>) -> Type {
         0 => db.unit(),
         1 => els.remove(0),
         _ => {
-            let elems = praxis_types::TupleElems::new(els).expect("two or more elements");
+            let elems = praxis_typeck::TupleElems::new(els).expect("two or more elements");
             db.tuple(elems)
         }
     }

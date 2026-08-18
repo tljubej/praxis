@@ -526,7 +526,7 @@ mod tests {
     /// compares schema pointers, so two values of one type must share.
     #[test]
     fn one_def_id_in_one_generation_is_one_schema() {
-        let gen = Generation::new();
+        let generation = Generation::new();
         let mut built = 0;
         let mut build = || {
             built += 1;
@@ -535,10 +535,10 @@ mod tests {
                 descriptor: &praxis_runtime::scalars::INT,
             }])
         };
-        let first = gen
+        let first = generation
             .record_schema(7, SchemaIdentity::Anonymous, &mut build)
             .unwrap();
-        let second = gen
+        let second = generation
             .record_schema(7, SchemaIdentity::Anonymous, &mut build)
             .unwrap();
         assert!(std::ptr::eq(first, second));
@@ -549,35 +549,35 @@ mod tests {
     /// tries again rather than inheriting a half-built schema.
     #[test]
     fn a_failed_schema_build_caches_nothing() {
-        let gen = Generation::new();
+        let generation = Generation::new();
         let failed: Result<*const RecordSchema, &str> =
-            gen.record_schema(3, SchemaIdentity::Anonymous, || {
+            generation.record_schema(3, SchemaIdentity::Anonymous, || {
                 Err("no runtime object for `Range`")
             });
         assert_eq!(failed.unwrap_err(), "no runtime object for `Range`");
-        assert_eq!(gen.stats().record_schemas, 0);
+        assert_eq!(generation.stats().record_schemas, 0);
     }
 
     /// Tuple schemas are keyed by shape, so two same-shaped tuples share one —
     /// and different shapes never do.
     #[test]
     fn tuple_schemas_are_shared_by_shape() {
-        let gen = Generation::new();
+        let generation = Generation::new();
         let int: *const TypeDescriptor = &praxis_runtime::scalars::INT;
         let text: *const TypeDescriptor = &praxis_runtime::text::TEXT;
-        let a = gen.tuple_schema(&[int, int]);
-        let b = gen.tuple_schema(&[int, int]);
-        let c = gen.tuple_schema(&[int, text]);
+        let a = generation.tuple_schema(&[int, int]);
+        let b = generation.tuple_schema(&[int, int]);
+        let c = generation.tuple_schema(&[int, text]);
         assert!(std::ptr::eq(a, b));
         assert!(!std::ptr::eq(a, c));
-        assert_eq!(gen.stats().tuple_schemas, 2);
+        assert_eq!(generation.stats().tuple_schemas, 2);
     }
 
     /// Interning is what bounds a long debugger session: the same metadata
     /// requested a hundred times costs what it costs once.
     #[test]
     fn repeated_identical_metadata_stops_growing_the_arena() {
-        let gen = Generation::new();
+        let generation = Generation::new();
         let meta = |name: &'static str| DebugLocalMeta {
             callee_name: std::ptr::null(),
             callee_name_len: 0,
@@ -593,32 +593,34 @@ mod tests {
         };
         // Two rounds to prime every cache, then measure across a hundred more.
         for _ in 0..2 {
-            let name = gen.alloc_str("main");
-            gen.function_debug_meta(name, (0, 40), vec![meta(name)]);
-            gen.tuple_schema(&[&praxis_runtime::scalars::INT]);
-            gen.record_schema(0, SchemaIdentity::Anonymous, || {
-                Ok::<_, ()>(vec![RecordField {
-                    name: gen.alloc_str("value"),
-                    descriptor: &praxis_runtime::scalars::INT,
-                }])
-            })
-            .unwrap();
+            let name = generation.alloc_str("main");
+            generation.function_debug_meta(name, (0, 40), vec![meta(name)]);
+            generation.tuple_schema(&[&praxis_runtime::scalars::INT]);
+            generation
+                .record_schema(0, SchemaIdentity::Anonymous, || {
+                    Ok::<_, ()>(vec![RecordField {
+                        name: generation.alloc_str("value"),
+                        descriptor: &praxis_runtime::scalars::INT,
+                    }])
+                })
+                .unwrap();
         }
-        let primed = gen.stats();
+        let primed = generation.stats();
         for _ in 0..100 {
-            let name = gen.alloc_str("main");
-            gen.function_debug_meta(name, (0, 40), vec![meta(name)]);
-            gen.tuple_schema(&[&praxis_runtime::scalars::INT]);
-            gen.record_schema(0, SchemaIdentity::Anonymous, || {
-                Ok::<_, ()>(vec![RecordField {
-                    name: gen.alloc_str("value"),
-                    descriptor: &praxis_runtime::scalars::INT,
-                }])
-            })
-            .unwrap();
+            let name = generation.alloc_str("main");
+            generation.function_debug_meta(name, (0, 40), vec![meta(name)]);
+            generation.tuple_schema(&[&praxis_runtime::scalars::INT]);
+            generation
+                .record_schema(0, SchemaIdentity::Anonymous, || {
+                    Ok::<_, ()>(vec![RecordField {
+                        name: generation.alloc_str("value"),
+                        descriptor: &praxis_runtime::scalars::INT,
+                    }])
+                })
+                .unwrap();
         }
         assert_eq!(
-            gen.stats(),
+            generation.stats(),
             primed,
             "a hundred repetitions must allocate nothing new"
         );
@@ -635,7 +637,7 @@ mod tests {
     /// call that frame is not in.
     #[test]
     fn two_locals_that_differ_only_in_their_callee_are_not_one_local() {
-        let gen = Generation::new();
+        let generation = Generation::new();
         let meta = |callee: &'static str| DebugLocalMeta {
             callee_name: callee.as_ptr(),
             callee_name_len: callee.len() as u32,
@@ -649,11 +651,11 @@ mod tests {
             span_end: 0,
             slot_kind: DebugSlotKind::Reference,
         };
-        let double = gen.alloc_str("double");
-        let triple = gen.alloc_str("triple");
-        let (a, _) = gen.debug_local_metas(vec![meta(double)]);
-        let (b, _) = gen.debug_local_metas(vec![meta(triple)]);
-        let (a_again, _) = gen.debug_local_metas(vec![meta(double)]);
+        let double = generation.alloc_str("double");
+        let triple = generation.alloc_str("triple");
+        let (a, _) = generation.debug_local_metas(vec![meta(double)]);
+        let (b, _) = generation.debug_local_metas(vec![meta(triple)]);
+        let (a_again, _) = generation.debug_local_metas(vec![meta(double)]);
         assert!(!std::ptr::eq(a, b), "different callees, different metadata");
         assert!(std::ptr::eq(a, a_again), "the same callee still interns");
     }
@@ -662,11 +664,11 @@ mod tests {
     /// after heap teardown; without one, `retire` does not compile.
     #[test]
     fn a_retired_generation_releases_its_arena() {
-        let gen = Rc::new(Generation::new());
-        gen.alloc_str("a string that costs real bytes");
-        assert!(gen.stats().allocated_bytes > 0);
+        let generation = Rc::new(Generation::new());
+        generation.alloc_str("a string that costs real bytes");
+        assert!(generation.stats().allocated_bytes > 0);
         let proof = Runtime::new().teardown();
-        Generation::retire(gen, proof);
+        Generation::retire(generation, proof);
         // Nothing to assert on the freed arena — reading it would be the bug
         // this test exists to allow. That it compiles only with a `HeapDrained`
         // is the property.
@@ -676,11 +678,11 @@ mod tests {
     /// other handle's pointers stay valid.
     #[test]
     fn a_shared_generation_survives_a_partial_retire() {
-        let gen = Rc::new(Generation::new());
-        let other = Rc::clone(&gen);
+        let generation = Rc::new(Generation::new());
+        let other = Rc::clone(&generation);
         let text = other.alloc_str("still referenced");
         let proof = Runtime::new().teardown();
-        Generation::retire(gen, proof);
+        Generation::retire(generation, proof);
         assert_eq!(text, "still referenced");
         assert_eq!(Rc::strong_count(&other), 1);
     }

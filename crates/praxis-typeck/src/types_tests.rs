@@ -433,16 +433,18 @@ fn a_wrong_arity_collection_is_unconstructible() {
         })
     );
     // …and again by the constructor, for a shape built without `new`.
-    assert!(db
-        .collection(CollectionCtor::Vec, CollectionArgs::Binary(i, t))
-        .is_err());
+    assert!(
+        db.collection(CollectionCtor::Vec, CollectionArgs::Binary(i, t))
+            .is_err()
+    );
     // Both ends of the range, on the ctors that make them tempting.
     assert!(CollectionArgs::new(CollectionCtor::Map, vec![i]).is_err());
     assert!(CollectionArgs::new(CollectionCtor::BitSet, vec![i]).is_err());
     // The right shape still builds.
-    assert!(db
-        .collection(CollectionCtor::Map, CollectionArgs::Binary(t, i))
-        .is_ok());
+    assert!(
+        db.collection(CollectionCtor::Map, CollectionArgs::Binary(t, i))
+            .is_ok()
+    );
 }
 
 /// Two more shapes the constructors refuse: a degenerate tuple, and a def with

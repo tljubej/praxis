@@ -11,10 +11,10 @@
 //! ```
 //!
 //! Every node and token carries its `SyntaxKind` and its byte range; tokens also
-//! carry their (escaped) text. Trivia is included because the tree is lossless
-//! (§13.1) — that is exactly what the formatter and the LSP rely on, so the
-//! golden trees must show it. The format is deterministic and human-reviewable,
-//! which is what `insta` snapshots want.
+//! carry their (escaped) text. Trivia is included because the tree is lossless,
+//! and losslessness is exactly what the LSP relies on to rewrite a span without
+//! disturbing what surrounds it, so the golden trees must show it. The format is
+//! deterministic and human-reviewable, which is what `insta` snapshots want.
 
 use praxis_syntax::{SyntaxKind, SyntaxNode};
 use rowan::NodeOrToken;

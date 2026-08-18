@@ -123,8 +123,7 @@ help: name the payload, or `_` for each slot you do not need
 
 The parentheses are where you said what you were doing. A bare name says
 nothing about the value the variant holds, and reads exactly like the
-payload-less `Stay` beside it — which is the whole reason it is refused. See
-[ADR-134](../../../decisions/134-a-payload-carrying-variant-says-so-in-the-pattern.md).
+payload-less `Stay` beside it — which is the whole reason it is refused.
 
 An enum declaration is not generic — a variant's payload types are concrete —
 and a declaration that reaches itself through a payload type is the same `N006`
@@ -163,8 +162,7 @@ enum it belongs to and the shape of each variant, so two enums whose variants
 line up are still two types. That is what makes `Some(3)` print as `Some(3)`
 rather than as a bare tag, what keeps an `Option[Int]` the runtime built from an
 `Option[Int]` the compiler built, and what lets the debugger say what it is
-looking at. See
-[ADR-074](../../../decisions/074-an-enum-value-records-which-enum-type-it-is.md).
+looking at.
 
 Statically the type checker usually gets there first. Two enums may declare the
 same variant name; in **expression** position the name resolves like any other
@@ -320,10 +318,7 @@ praxis: 1 error(s)
 There are two spellings and you pick between them: `counts.get(k)` is explicit
 absence, and `counts[k]` is assertion-like access that faults on a miss. Where
 the key was just inserted three lines up, index. Where it might not be there,
-match. See
-[ADR-076](../../../decisions/076-absence-is-an-option-and-an-empty-min-is-a-fault.md)
-and
-[ADR-082](../../../decisions/082-find-answers-the-element-and-a-miss-is-none.md).
+match.
 
 ## Anonymous enums
 

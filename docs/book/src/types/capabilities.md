@@ -1,28 +1,26 @@
 # Capabilities
 
-Praxis has no `trait`, no `impl`, no `interface` and no `where` clause (§4.8).
-It also has values you can compare, values you can sort, values you can use as a
-`Map` key, and values you cannot — and something has to decide which is which.
-That something is a closed table inside the compiler: for equality, hashing,
+Praxis has no `trait`, no `impl`, no `interface` and no `where` clause. It also
+has values you can compare, values you can sort, values you can use as a `Map`
+key, and values you cannot — and something has to decide which is which. That
+something is a closed table inside the compiler: for equality, hashing,
 ordering, iteration and arithmetic, the language ships one answer per shape and
 no way for a program to add another.
 
 The compiler calls these *capabilities* internally. You will never see the word.
 A diagnostic says what the program did and why it cannot work — "values of type
 `Point` cannot be ordered" — and never mentions a trait, a bound, or the name of
-the requirement (§5.4). This chapter is what those requirements are and what
-they look like when one is not met.
+the requirement. This chapter is what those requirements are and what they look
+like when one is not met.
 
 ## Equality and hashing are structural
 
 Tuples, records, enums and collections get their `==` and their hash from the
 compiler. Nothing is derived and nothing is written down: a composite is
 comparable when every component is, recursively, and hashable on exactly the
-same terms (§5.5,
-[ADR-026](../../../decisions/026-structural-equality-hashing.md)). Scalars and
-`Unit` are both; functions and closures are neither. `[1, 2] == [1, 2]` is
-`true`, and so is the same comparison between two separately built `Map`s with
-the same entries.
+same terms. Scalars and `Unit` are both; functions and closures are neither.
+`[1, 2] == [1, 2]` is `true`, and so is the same comparison between two
+separately built `Map`s with the same entries.
 
 ```praxis
 struct Point { x: Int, y: Int }
@@ -89,9 +87,10 @@ That is a statement about the **source language** — `<`, `sorted()`, a heap
 element. A **container** is a different question, and there the answer recurses:
 a `Map`, `Set` or `Counter` has to walk and print its keys in one reproducible
 sequence, so every type that can be a key has a container order, tuples and
-records included, computed element-wise. Having one does not make a type
-comparable with `<`; the example below stays exactly as it is
-([ADR-138](../../../decisions/138-a-container-orders-by-the-value-and-not-by-its-printing.md)).
+records included, computed element-wise. That order is over the *value* and not
+over its printing — a `Set[Int]` walks `2` before `10` — and
+[Collections](../language/collections.md) gives it in full. Having one does not
+make a type comparable with `<`; the example below stays exactly as it is.
 
 ```praxis
 struct Point { x: Int, y: Int }
@@ -146,17 +145,14 @@ requirement for a `Map` key.
 A `Vec` hashes fine. What it cannot do is stay findable: `key.push(2)` after
 `table.insert(key, v)` moves the entry's bucket without moving the entry, and
 nothing will ever look there again. So the rule is **mutability, not
-container-ness**
-([ADR-057](../../../decisions/057-a-capability-requirement-rides-on-the-scheme-that-quantified-it.md)
-decision 3).
+container-ness**.
 
 - Out, as a `Map` key, a `Set` element or a `Counter` key: `Vec`, `Map`, `Set`,
   `Deque`, `Grid`, `Counter`, `MinHeap`, `MaxHeap`, `BitSet`.
 - In, structurally: scalars, `Text`, tuples, records and enums — a tuple or a
   record is a key exactly when every component is.
-- In, and the one collection that is: `Range`. It has no mutator at all
-  ([ADR-059](../../../decisions/059-a-range-is-a-value-and-a-descending-one-is-empty.md)),
-  so its two bounds are as fixed as a tuple's elements.
+- In, and the one collection that is: `Range`. It has no mutator at all, so its
+  two bounds are as fixed as a tuple's elements.
 
 That is Python's rule (`list`, `dict` and `set` set `__hash__ = None` for this
 reason). Rust's `HashMap<Vec<i32>, V>` is the counterexample that does not
@@ -230,9 +226,7 @@ said what they are, and an unresolved variable is optimistically anything.
 
 The requirement is not decided there and discarded. It is attached to the scheme
 that quantified the variable, and **re-emitted at every instantiation** against
-whatever that use site put in the variable's place
-([ADR-057](../../../decisions/057-a-capability-requirement-rides-on-the-scheme-that-quantified-it.md)
-decision 1).
+whatever that use site put in the variable's place.
 
 ```praxis
 fn same(a, b) {

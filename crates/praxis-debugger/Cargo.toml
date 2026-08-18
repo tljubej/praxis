@@ -2,15 +2,20 @@
 name = "praxis-debugger"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Crash snapshots and the interactive crash REPL for Praxis."
+keywords = ["debugger", "compiler", "jit", "language", "adventofcode"]
+categories = ["development-tools::debugging", "compilers"]
 
 [dependencies]
 praxis-source.workspace = true
 praxis-repr.workspace = true
 praxis-runtime.workspace = true
-praxis-types.workspace = true
+praxis-typeck.workspace = true
 praxis-stdlib.workspace = true
 praxis-ast.workspace = true
 praxis-syntax.workspace = true
@@ -21,8 +26,8 @@ praxis-codegen-cranelift.workspace = true
 anyhow.workspace = true
 ratatui.workspace = true
 
-# Doctests are not run (see the justfile and README): rustdoc has to analyze the
-# whole crate before it can find out there are none, and the result is never
-# cached, so `cargo test` paid ~6s per crate for it on every run.
+# Doctests are not run (the justfile says why): rustdoc has to analyze the whole
+# crate before it can find out there are none, and the result is never cached,
+# so `cargo test` pays ~6s per crate for it on every run.
 [lib]
 doctest = false

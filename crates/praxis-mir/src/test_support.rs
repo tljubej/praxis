@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use praxis_ast::AstNode;
-use praxis_hir::{analyze_root, lower, mono::monomorphize, Analysis};
+use praxis_hir::{Analysis, analyze_root, lower, mono::monomorphize};
 use praxis_parser::parse;
 use praxis_source::SourceMap;
 use praxis_stdlib::abi::RuntimeSymbol;

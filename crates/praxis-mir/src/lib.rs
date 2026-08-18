@@ -45,7 +45,7 @@ pub mod verify;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-pub use annot::{roots_of, slot_sets, DebugSlots, RootSlots};
+pub use annot::{DebugSlots, RootSlots, roots_of, slot_sets};
 pub use build::lower_module;
 pub use forward::forward_boxes;
 pub use ir::{
@@ -55,7 +55,7 @@ pub use ir::{
 pub use liveness::{annotate, defs};
 pub use promote::promote_scalars;
 pub use provable::{DescriptorClass, ProvableDescriptors};
-pub use verify::{defines, verify, VerifyError};
+pub use verify::{VerifyError, defines, verify};
 
 /// Marker documenting the milestone that filled this crate.
 pub const FILLED_AT_MILESTONE: u32 = 4;

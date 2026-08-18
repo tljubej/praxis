@@ -1,8 +1,8 @@
-error[I013]: unknown parser constructor `line` (§7.5)
+error[I013]: unknown parser constructor `line`
 
   quick-fix-constructor.px:1:17
   1 | var rows = read line(int)
-    |                 ^^^^ unknown parser constructor `line` (§7.5)
+    |                 ^^^^ unknown parser constructor `line`
 
 help: did you mean `lines`?
       lines

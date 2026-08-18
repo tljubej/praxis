@@ -40,11 +40,9 @@ the `Int` use and the `Text` use never meet.
 
 ## The rule: a binding something writes is not generalized
 
-Praxis has one binding form. `let` was removed, and with it the keyword that
-used to carry this distinction
-([ADR-125](../../../decisions/125-a-binding-is-a-binding-and-the-compiler-decides-its-storage.md)).
-What replaced it is a fact name resolution already knows: **is this binding ever
-the target of an assignment?**
+Praxis has one binding form, and no keyword marks a binding you may write apart
+from one you may not. What carries the distinction instead is a fact name
+resolution already knows: **is this binding ever the target of an assignment?**
 
 - A binding nothing writes is generalized, under the value restriction.
 - A binding something writes is not.
@@ -80,8 +78,8 @@ wrong-typed call reaching the backend, not a missing diagnostic.
 
 `fn` declarations generalize too, after their bodies are checked, and the gate
 does not reach them: it is a fact read off a `var` statement, and a `fn` is not
-one. Every binding in the language is assignable — `Y009`, the old "not a
-`var`", is retired — so writing to a `fn` name is accepted. It does nothing:
+one. Every binding in the language is assignable, so writing to a `fn` name is
+accepted. It does nothing:
 
 ```praxis
 fn ident(x) {
@@ -107,8 +105,7 @@ write is discarded rather than refused is a rough edge, not a rule to lean on.
 The textbook rule — "quantify every variable not free in the environment" — is
 wrong here, because inference is partial: a variable minted inside a function
 body may still be reachable from an outer binding that has not been inferred
-yet. Praxis uses Pottier and Rémy's **binding levels**
-([ADR-008](../../../decisions/008-let-generalization-levels.md)).
+yet. Praxis uses Pottier and Rémy's **binding levels**.
 
 Every type variable records the level at which it was created. Entering a
 binding's body raises a counter; leaving it restores it. Generalizing at a
@@ -126,8 +123,7 @@ constrain a variable, and a monotype where it does.
 
 A scheme carries its own binder list. Nothing in the arena records "this
 variable is quantified", because that is a fact about *a* scheme, and only the
-scheme that quantified it knows
-([ADR-047](../../../decisions/047-scheme-owned-binders-and-the-level-newtype.md)).
+scheme that quantified it knows.
 
 That is what decides how a variable prints. Inside a scheme that binds it, a
 variable is `T`; where no scheme binds it — a bare type, a half-solved call, an
@@ -136,9 +132,8 @@ element nothing pinned — it is `?T`. The question mark means "free here", not
 
 A parameter of a generic `fn` is on the first side of that line even though its
 own type is a monotype: `c` in `fn foo(c) { c() }` is `() -> T`, because `foo` is
-`forall T. (() -> T) -> T` and that is the variable
-([ADR-151](../../../decisions/151-a-bound-variable-is-not-free-and-a-frame-is-in-a-call.md)).
-Every surface that shows a binding's type — hover, an inlay hint, completion,
+`forall T. (() -> T) -> T` and `T` is what that scheme calls the variable. Every
+surface that shows a binding's type — hover, an inlay hint, completion,
 signature help — asks the same question, so a `?` in any of them means the same
 thing in all of them.
 
@@ -249,26 +244,21 @@ praxis: 1 error(s)
 ```
 
 `total`'s parameter is `Vec[Int]` — a monotype — because the first call said so.
-This is not an oversight; it is
-[ADR-057](../../../decisions/057-a-capability-requirement-rides-on-the-scheme-that-quantified-it.md)
-decision 5, and the reason is lowering rather than inference. There is **one
-lowered body per source function**, and monomorphization clones a body whose
-method calls have already been resolved. One call site therefore carries one
-catalog row and one receiver type; a quantified receiver would be N receiver
-types at one call site with nothing to lower. §5.2 states the same answer from
-the other end: `total` is `Vec[Int] -> Int`.
+This is not an oversight, and the reason is lowering rather than inference.
+There is **one lowered body per source function**, and monomorphization clones a
+body whose method calls have already been resolved. One call site therefore
+carries one catalog row and one receiver type; a quantified receiver would be N
+receiver types at one call site with nothing to lower.
 
 If you need both, write two functions, or give the second one a closure to do
 the arithmetic.
 
 ### An iterated parameter is generic in the *iterable* and not in its *element*
 
-A `for` loop is the exception, and it splits the other way
-([ADR-062](../../../decisions/062-an-iterated-parameter-is-generic-in-the-iterable-and-not-its-element.md)).
-The collection stays quantified — MIR picks the runtime accessors from the
-iterator's constructor, so one clone per iterable kind is the only way the
-symbols can be right — while the item is pinned, for the same reason a method
-receiver is.
+A `for` loop is the exception, and it splits the other way. The collection stays
+quantified — MIR picks the runtime accessors from the iterator's constructor, so
+one clone per iterable kind is the only way the symbols can be right — while the
+item is pinned, for the same reason a method receiver is.
 
 ```praxis
 fn total(items) {
@@ -373,7 +363,8 @@ second element type for exactly the reason `total` does above — calling it on 
 `Vec[Vec[Text]]` in the same program is a `Y001` at the second call, not a
 second clone.
 
-This is [ADR-137](../../../decisions/137-a-deferred-receiver-resolves-in-rounds-and-the-channel-runs-to-a-fixpoint.md).
-Resolving a deferred method *produces* the receiver's result type, and that
-result is what the next link waits on, so the constraint channel discharges in
-rounds until nothing is left to answer.
+Resolution runs in rounds to make that work. Resolving a deferred method
+*produces* the receiver's result type, and that result is what the next link
+waits on, so the constraint channel keeps discharging until nothing is left to
+answer: one round resolves `t[i]`, and the next resolves `t[i][j]` against the
+type the first one produced.

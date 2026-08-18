@@ -83,11 +83,11 @@ pub const PRELUDE: &[PreludeEntry] = &[
     ),
     PreludeEntry::new(
         "Map",
-        "Hash map from keys to values. A key must be a value that cannot change (§4.9). `Map()` is empty.",
+        "Hash map from keys to values. A key must be a value that cannot change. `Map()` is empty.",
     ),
     PreludeEntry::new(
         "Set",
-        "Hash set of distinct values. An element must be a value that cannot change (§4.9). `Set()` is empty.",
+        "Hash set of distinct values. An element must be a value that cannot change. `Set()` is empty.",
     ),
     PreludeEntry::new(
         "Counter",
@@ -265,7 +265,7 @@ pub const GRAPH_HELPERS: &[GraphHelper] = &[
 
 /// One parameter of a graph helper, as a shape rather than as a type.
 ///
-/// `praxis-stdlib` cannot name a `Type` — that is `praxis-types`, which depends
+/// `praxis-stdlib` cannot name a `Type` — that is `praxis-typeck`, which depends
 /// on this crate — so the signature is written as the shapes inference then
 /// builds the types from. The match on this in `seed_builtin_schemes` is
 /// exhaustive, so a new shape is a compile error there rather than a parameter

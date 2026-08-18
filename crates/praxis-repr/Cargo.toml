@@ -2,17 +2,22 @@
 name = "praxis-repr"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The total, bidirectional bridge between a static Praxis Type and its runtime TypeDescriptor"
+homepage.workspace = true
+description = "The bridge between a static Praxis type and its runtime type descriptor."
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-praxis-types.workspace = true
+praxis-typeck.workspace = true
 praxis-runtime.workspace = true
 praxis-stdlib.workspace = true
 
-# Doctests are not run (see the justfile and README): rustdoc has to analyze the
-# whole crate before it can find out there are none, and the result is never
-# cached, so `cargo test` paid ~6s per crate for it on every run.
+# Doctests are not run (the justfile says why): rustdoc has to analyze the whole
+# crate before it can find out there are none, and the result is never cached,
+# so `cargo test` pays ~6s per crate for it on every run.
 [lib]
 doctest = false

@@ -14,7 +14,7 @@
 
 use praxis_input_parser::{AtomicKind, BlockItem, ParserAst, SectionItem, TemplatePart};
 use praxis_source::Span;
-use praxis_types::Type;
+use praxis_typeck::Type;
 use rowan::TextRange;
 
 /// One `read`/`parse` body's retained analysis.

@@ -591,11 +591,7 @@ pub fn verify(f: &Function) -> Result<(), Vec<VerifyError>> {
         }
     }
 
-    if errs.is_empty() {
-        Ok(())
-    } else {
-        Err(errs)
-    }
+    if errs.is_empty() { Ok(()) } else { Err(errs) }
 }
 
 /// Render a verifier failure as one multi-line message, for a host that has no
@@ -628,15 +624,15 @@ fn check_fault_observed(
     let inst = &block.insts[i];
     let next = block.insts.get(i + 1);
 
-    if let Some(why) = inst.fault_reason() {
-        if !matches!(next, Some(Inst::CheckFault { .. })) {
-            errs.push(VerifyError::UnobservedFault {
-                func: f.name.clone(),
-                block: bid,
-                inst: i,
-                why,
-            });
-        }
+    if let Some(why) = inst.fault_reason()
+        && !matches!(next, Some(Inst::CheckFault { .. }))
+    {
+        errs.push(VerifyError::UnobservedFault {
+            func: f.name.clone(),
+            block: bid,
+            inst: i,
+            why,
+        });
     }
 
     // The converse. A `CheckFault` at index 0 has no predecessor at all: the

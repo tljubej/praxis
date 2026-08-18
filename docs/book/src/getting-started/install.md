@@ -72,15 +72,18 @@ The recipes are small, and `just` with no arguments lists them:
 | `just clippy` | `cargo clippy --workspace --all-targets -- -D warnings` |
 | `just fmt` | `cargo fmt` — **modifies files** |
 | `just fmt-check` | `cargo fmt --check` |
-| `just ci` | `fmt-check`, then `clippy`, then `test` |
+| `just book` | renders the book to `docs/book/book` |
+| `just book-verify` | re-runs every example in the book against this compiler |
+| `just ci` | `fmt-check`, `clippy`, `test`, then the book's examples |
 | `just asan` | the whole suite under AddressSanitizer, on a nightly toolchain |
 
 `just ci` is the gate, and the point of it is that it is the *only* gate: the
 hosted CI job checks out the tree, installs the toolchain, installs `just`, and
 runs `just ci`. It has no logic of its own, so what CI does and what you do
-before pushing cannot drift apart
-([ADR-002](../../../decisions/002-ci-via-just.md)). `fmt` is deliberately not a
-dependency of `ci` — CI verifies formatting, it never rewrites your files.
+before pushing cannot drift apart. `fmt` is deliberately not a dependency of
+`ci` — CI verifies formatting, it never rewrites your files. Neither is
+`book-bless`, which rewrites the book's expectations from whatever the compiler
+prints today and would paper over the regression `book-verify` exists to catch.
 
 Two things about `just ci` are worth knowing before you run it the first time.
 
@@ -106,11 +109,11 @@ unsafe behaviour in generated code.
 ## The VS Code extension
 
 The extension lives in `editors/vscode`. It is thin on purpose: it registers the
-`.px` extension, launches `praxis lsp`, contributes four commands and a TextMate
-grammar for highlighting before the server attaches. There is no parsing and no
-type logic in it. Everything the editor knows about your program arrives from
-the compiler over the protocol, so the two cannot disagree about what a file
-means.
+`.px` extension, launches `praxis lsp`, contributes three commands and a
+TextMate grammar for highlighting before the server attaches. There is no
+parsing and no type logic in it. Everything the editor knows about your program
+arrives from the compiler over the protocol, so the two cannot disagree about
+what a file means.
 
 Build it, then package it:
 
@@ -134,22 +137,19 @@ previous one.
 Then point the extension at your binary. The setting is `praxis.binaryPath`; it
 defaults to the bare name `praxis`, resolved on `PATH`. If you did not run
 `cargo install`, set it to an absolute path to `target/release/praxis`. That one
-path is used for the language server *and* for the run/check/watch commands, so
+path is used for the language server *and* for the run and check commands, so
 there is a single thing to get right; changing it restarts the server.
 
 If the server cannot start, you get an error message naming the command it tried
 and the setting to change, rather than a stack trace. It is nearly always a
 `praxis.binaryPath` that points at nothing.
 
-The four commands are `Praxis: Run File`, `Praxis: Check File`, `Praxis: Watch
-File` and `Praxis: Restart Language Server`. The first three save the buffer and
-then run the binary in an integrated terminal — a terminal rather than an output
-channel, because [the crash debugger](../debugger/entering.md) is interactive
-and a write-only pane cannot answer a prompt. `Run File` appends `--input
-input.txt` when a file by that name sits beside the source. `Watch File` runs
-`praxis watch`, which is not implemented — its palette title says so in as many
-words — and the command exists so that the binary's own message is what you see
-rather than nothing at all.
+The three commands are `Praxis: Run File`, `Praxis: Check File` and `Praxis:
+Restart Language Server`. The first two save the buffer and then run the binary
+in an integrated terminal — a terminal rather than an output channel, because
+[the crash debugger](../debugger/entering.md) is interactive and a write-only
+pane cannot answer a prompt. `Run File` appends `--input input.txt` when a file
+by that name sits beside the source.
 
 Everything else arrives without the extension contributing anything, because it
 is a server capability: diagnostics, hover, completion, signature help,
@@ -157,11 +157,10 @@ go-to-definition, document symbols, semantic tokens, find references, rename,
 workspace symbols, inlay hints and quick fixes. See [Editor
 support](../tooling/editors.md) for what each of them does.
 
-Two defaults to know about. **Inlay hints are on**, so an unannotated binding or
-parameter shows the type the compiler inferred, and `?T` where inference has not
-pinned one; accepting a hint writes the annotation into the file wherever that
-is legal. **Formatting is not implemented** and the server does not advertise
-it, so `Format Document` does whatever VS Code would do unaided.
+One default is worth knowing about. **Inlay hints are on**, so an unannotated
+binding or parameter shows the type the compiler inferred, and `?T` where
+inference has not pinned one; accepting a hint writes the annotation into the
+file wherever that is legal.
 
 ## Other editors
 

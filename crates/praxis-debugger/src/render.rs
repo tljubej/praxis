@@ -34,7 +34,7 @@ const NONINTERACTIVE_LOCAL_LIMIT: usize = 12;
 pub struct RenderCtx<'a> {
     /// The live `TypeDb` from the program's analysis (positional ids must pair
     /// with the same db the codegen used; never a fresh one).
-    pub db: Option<&'a praxis_types::TypeDb>,
+    pub db: Option<&'a praxis_typeck::TypeDb>,
     /// The program source text, for resolving temp spans to `@ "expr"`.
     pub source_text: Option<&'a str>,
 }
@@ -49,7 +49,7 @@ impl<'a> RenderCtx<'a> {
     }
 
     /// A context wired to the session's `TypeDb` and source text.
-    pub fn new(db: &'a praxis_types::TypeDb, source_text: &'a str) -> Self {
+    pub fn new(db: &'a praxis_typeck::TypeDb, source_text: &'a str) -> Self {
         RenderCtx {
             db: Some(db),
             source_text: Some(source_text),
@@ -87,18 +87,17 @@ pub fn render_noninteractive<W: Write>(
     }
 
     // ParseFailed appends the §7.11 detail (input span, expected, actual preview).
-    if kind == FaultKind::ParseFailed {
-        if let Some(detail) = parse_detail {
-            if let Some(fail) = &detail.fail {
-                writeln!(
-                    out,
-                    "       at input offset {}..{}: expected {}",
-                    fail.input_span.0, fail.input_span.1, fail.expected
-                )?;
-                if !detail.actual_preview.is_empty() {
-                    writeln!(out, "       actual: {}", detail.actual_preview)?;
-                }
-            }
+    if kind == FaultKind::ParseFailed
+        && let Some(detail) = parse_detail
+        && let Some(fail) = &detail.fail
+    {
+        writeln!(
+            out,
+            "       at input offset {}..{}: expected {}",
+            fail.input_span.0, fail.input_span.1, fail.expected
+        )?;
+        if !detail.actual_preview.is_empty() {
+            writeln!(out, "       actual: {}", detail.actual_preview)?;
         }
     }
 
@@ -334,7 +333,7 @@ fn render_local_line<W: Write>(
 ///
 /// Takes the `Option` rather than a [`RenderCtx`] so the TUI, which holds the
 /// db and source text as loose values, resolves types through this same route.
-pub fn type_str(local: &DebugLocal, db: Option<&praxis_types::TypeDb>) -> String {
+pub fn type_str(local: &DebugLocal, db: Option<&praxis_typeck::TypeDb>) -> String {
     let Some(db) = db else {
         return String::new();
     };
@@ -707,7 +706,7 @@ mod tests {
     /// one line.
     #[test]
     fn a_named_binding_renders_its_name_and_type() {
-        let mut db = praxis_types::TypeDb::new();
+        let mut db = praxis_typeck::TypeDb::new();
         let int_ty = db.int();
         let snap = snap_with_locals(
             "main",
@@ -735,7 +734,7 @@ mod tests {
     /// what it holds.
     #[test]
     fn a_nameless_binding_still_renders_its_type() {
-        let mut db = praxis_types::TypeDb::new();
+        let mut db = praxis_typeck::TypeDb::new();
         let int_ty = db.int();
         let snap = snap_with_locals(
             "main",
@@ -762,7 +761,7 @@ mod tests {
         // A TypeDb with Int at slot 1; a temp whose type_id points at it. The
         // temp carries a span so it is visible (dead temps with no value/span
         // are filtered).
-        let mut db = praxis_types::TypeDb::new();
+        let mut db = praxis_typeck::TypeDb::new();
         let int_ty = db.int();
         let snap = snap_with_locals(
             "main",
@@ -808,7 +807,7 @@ mod tests {
             "no db → bare temp tag without type: {text}"
         );
         // A db is present but the type_id is out of range → type omitted.
-        let db = praxis_types::TypeDb::new();
+        let db = praxis_typeck::TypeDb::new();
         let snap_oor = snap_with_locals(
             "main",
             vec![local(

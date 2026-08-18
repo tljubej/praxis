@@ -59,12 +59,11 @@ Praxis crash> quit
 ```
 
 `parser expression: <unknown parser>` is what that command prints for every
-parse failure. §9.4 describes `parser` as showing the active input parser near
-the fault, and the machinery to carry a parser expression's source span into the
-failure exists — but nothing in the input-parser interpreter fills it in, so the
-span is always absent. What `parser` actually gives you is the `expected`
-description, which is the same one the fault line printed. Treat it as a
-shorthand, not as a second source of information.
+parse failure. The input-parser interpreter does not carry a parser expression's
+source span into the failure, so there is no source text to name there. What
+`parser` actually gives you is the `expected` description, which is the same one
+the fault line printed. Treat it as a shorthand, not as a second source of
+information.
 
 ## Walking it back to the byte
 
@@ -237,10 +236,9 @@ debugger — `bt`, `locals`, [`p`](expressions.md) — is where you go next.
 
 Three limits, stated plainly so you do not go looking.
 
-There is no partial value. §7.11 reserves a slot for the deepest sub-value the
-parser assembled before failing, and the runtime has a field for it, but nothing
-in the interpreter ever fills it and no command prints it. You cannot ask for
-the two lines that did parse.
+There is no partial value. A parse either produces its whole result or produces
+nothing, so the binding is `<uninit>` and there is no half-built structure
+behind it. You cannot ask for the two lines that did parse.
 
 There is no caret. The compiler underlines a span in your source; `input`
 prints an offset and a preview, and you locate the column yourself.

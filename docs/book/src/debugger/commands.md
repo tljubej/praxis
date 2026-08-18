@@ -9,7 +9,7 @@ This is the list for a program that **faulted**. A program stopped at a
 has no `p`, `restart` or `reload`.
 
 ```text
-Crash debugger commands (§9.4):
+Crash debugger commands:
   bt              show the numbered backtrace
   frame N         select frame N
   up              move the selection toward the caller
@@ -138,12 +138,11 @@ Print the selected frame's slots, in two labeled sections.
 ```
 
 `locals:` is the bindings you wrote — a `var`, a parameter, a `for` variable and
-a name a pattern introduces, all of which are bindings in the same sense
-([ADR-125](../../../decisions/125-a-binding-is-a-binding-and-the-compiler-decides-its-storage.md)).
-`temps:` is the compiler's intermediates,
-each tagged with its per-frame id, its static type, and — this is the useful
-part — the source expression it materialized. A value is rendered through the
-same descriptor `out` uses. A slot nothing was written into is `<uninit>`.
+a name a pattern introduces, all of which are bindings in the same sense.
+`temps:` is the compiler's intermediates, each tagged with its per-frame id, its
+static type, and — this is the useful part — the source expression it
+materialized. A value is rendered through the same descriptor `out` uses. A slot
+nothing was written into is `<uninit>`.
 
 Either section is omitted when it is empty; a frame with no slots at all prints
 `  (no locals in this frame)`. Temps that hold nothing and explain nothing (no
@@ -394,11 +393,11 @@ parser expression: <unknown parser>
 Praxis crash> quit
 ```
 
-`parser expression: <unknown parser>` is what you get when the failing parser's
-source span was not threaded through to the runtime, which is the common case
-today; when it is, the line is replaced by `parser expression (source A..B):`
-and the parser's own source text. [Inspecting the input parser](parser.md) goes
-into the detail.
+`parser expression: <unknown parser>` is what you get for every parse failure:
+the failing parser's source span is not threaded through to the runtime, so
+there is no expression text to print in its place. What the command gives you is
+the `expected` description. [Inspecting the input parser](parser.md) goes into
+the detail.
 
 ## `restart`
 
@@ -475,7 +474,7 @@ The full set of error and usage lines, in one session:
 ```text
 Entered crash debugger. 3 frame(s). Type `help` for commands.
 Praxis crash> help
-Crash debugger commands (§9.4):
+Crash debugger commands:
   bt              show the numbered backtrace
   frame N         select frame N
   up              move the selection toward the caller

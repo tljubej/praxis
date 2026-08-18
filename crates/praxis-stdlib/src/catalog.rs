@@ -706,11 +706,13 @@ mod tests {
             },
             ..generic.clone()
         };
-        assert!(MethodCatalog::build()
-            .entry(on_a_set)
-            .entry(generic.clone())
-            .finish()
-            .is_err());
+        assert!(
+            MethodCatalog::build()
+                .entry(on_a_set)
+                .entry(generic.clone())
+                .finish()
+                .is_err()
+        );
 
         // **`Grid[T].map/1` is allowed**, and that is the point of scoping the
         // check to the ten: §6.4 asks for a shape-preserving `grid.map` by name,
@@ -726,11 +728,13 @@ mod tests {
             },
             ..generic.clone()
         };
-        assert!(MethodCatalog::build()
-            .entry(generic.clone())
-            .entry(on_a_grid)
-            .finish()
-            .is_ok());
+        assert!(
+            MethodCatalog::build()
+                .entry(generic.clone())
+                .entry(on_a_grid)
+                .finish()
+                .is_ok()
+        );
 
         // A different arity is a different question, as it is for a duplicate.
         let different_arity = MethodEntry {
@@ -741,11 +745,13 @@ mod tests {
             params: vec![],
             ..generic.clone()
         };
-        assert!(MethodCatalog::build()
-            .entry(generic)
-            .entry(different_arity)
-            .finish()
-            .is_ok());
+        assert!(
+            MethodCatalog::build()
+                .entry(generic)
+                .entry(different_arity)
+                .finish()
+                .is_ok()
+        );
     }
 
     /// **ADR-144.** Two generic rows at one `(name, arity)` are refused, even
@@ -790,11 +796,13 @@ mod tests {
             params: vec![],
             ..of_text.clone()
         };
-        assert!(MethodCatalog::build()
-            .entry(of_text)
-            .entry(nullary)
-            .finish()
-            .is_ok());
+        assert!(
+            MethodCatalog::build()
+                .entry(of_text)
+                .entry(nullary)
+                .finish()
+                .is_ok()
+        );
     }
 
     /// **ADR-127.** The receiver generalizes; a parameter and a result do not.

@@ -1,5 +1,5 @@
-//! §19.12's deliverables and acceptance criteria, as gates over the query
-//! layer.
+//! Find references, rename, workspace symbols, inlay hints and code actions,
+//! as gates over the query layer.
 //!
 //! Each assertion names the thing an implementation could get *plausibly* wrong
 //! and still pass a weaker test: references matching a word rather than a
@@ -66,7 +66,7 @@ fn hover_text(h: &Hover) -> String {
 
 fn scratch_dir(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("m12-{name}-{}", std::process::id()));
+        .join(format!("editor-actions-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create this process's scratch directory");
     dir
@@ -122,7 +122,7 @@ fn the_declaration_is_included_only_when_asked_for() {
 }
 
 // ---------------------------------------------------------------------------
-// Rename — §19.12 criterion 1
+// Rename
 // ---------------------------------------------------------------------------
 
 /// **"Rename updates all valid references."** Every range the symbol owns, and
@@ -449,7 +449,7 @@ fn label_of(hint: &lsp_types::InlayHint) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Code actions — §19.12 criterion 3
+// Code actions
 // ---------------------------------------------------------------------------
 
 /// **"Code actions can fix misspelled parser constructors."** §15.3's own

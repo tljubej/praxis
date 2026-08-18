@@ -12,7 +12,7 @@ use praxis_source::DiagnosticCategory;
 use crate::hir_tests::test_util::{
     analyze, analyze_and_lower, entry_fn, fn_named, parse_analyze_and_lower, parse_file,
 };
-use crate::{analyze_root, SymbolKind};
+use crate::{SymbolKind, analyze_root};
 
 /// The rendered scheme of the user binding named `name` (a Var/Fn/Param), or
 /// `None` if it has no scheme.
@@ -207,9 +207,11 @@ fn cross_type_var_reassignment_is_rejected() {
         "expected one Y001, got {:?}",
         analysis.diagnostics
     );
-    assert!(analysis.diagnostics[0]
-        .message()
-        .contains("expected Int, found Text"));
+    assert!(
+        analysis.diagnostics[0]
+            .message()
+            .contains("expected Int, found Text")
+    );
 }
 
 #[test]
@@ -6358,12 +6360,16 @@ fn a_fn_that_reads_a_binding_around_it_is_reported() {
     // is genuinely not in scope yet and there is no binding to have crossed a
     // boundary. Saying which code it is keeps the two from being confused later.
     let forward = analyze_and_lower_diags("fn f() -> Int { x }\nvar x = 1\n");
-    assert!(forward
-        .iter()
-        .any(|d| d.kind() == praxis_source::DiagCode::UnknownName));
-    assert!(!forward
-        .iter()
-        .any(|d| d.kind() == praxis_source::DiagCode::FunctionReadsOuterBinding));
+    assert!(
+        forward
+            .iter()
+            .any(|d| d.kind() == praxis_source::DiagCode::UnknownName)
+    );
+    assert!(
+        !forward
+            .iter()
+            .any(|d| d.kind() == praxis_source::DiagCode::FunctionReadsOuterBinding)
+    );
 }
 
 /// `N007` offers two ways out — a parameter or a closure — and for a

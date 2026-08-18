@@ -2,13 +2,18 @@
 name = "praxis-mir"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Mid-level IR: CFG, liveness, fault edges, and GC safepoint analysis."
+homepage.workspace = true
+description = "Praxis mid-level IR: CFG, liveness, fault edges, and GC safepoint analysis."
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 praxis-source.workspace = true
-praxis-types.workspace = true
+praxis-typeck.workspace = true
 praxis-runtime.workspace = true
 praxis-hir.workspace = true
 praxis-stdlib.workspace = true
@@ -35,12 +40,13 @@ praxis-test-support.workspace = true
 # in `[dev-dependencies]`, which `cargo build` does not resolve.
 test-support = ["dep:praxis-ast", "dep:praxis-parser"]
 
-# ADR-120 arm A. `forward::forward_boxes` returns 0 without looking at the
-# function, so the emitted MIR is what the builder wrote and every box/unbox
+# Box forwarding, arm A. `forward::forward_boxes` returns 0 without looking at
+# the function, so the emitted MIR is what the builder wrote and every box/unbox
 # pair survives to the backend. **It makes the compiler emit slower code on
 # purpose**; it exists so the A/B baseline is this branch with this package's
-# one toggle reverted rather than an older commit (handover 26 §6, and ADR-113
-# for what the wrong baseline cost).
+# one toggle reverted rather than an older commit, which is the only baseline
+# that prices this pass and nothing else. (Taking the baseline from an older
+# commit once claimed 14.4% where the truth was 0.8%.)
 #
 #     cargo build --release -p praxis-cli                          # arm B
 #     cargo build --release -p praxis-cli \
@@ -50,63 +56,64 @@ test-support = ["dep:praxis-ast", "dep:praxis-parser"]
 # shape assertions, which is the toggle working; do not enable it anywhere else.
 adr120-arm-a = []
 
-# ADR-120 **part 2** arm A. `forward::carry_debug_slot` records nothing, so an
-# elided box's `Gc` local never learns which `Scalar` local holds its word — and
-# the backend, whose only input for this is `Function::debug_scalar_source`,
-# emits no debug store for it and marks every slot `DebugSlotKind::Reference`.
-# The forwarding itself is untouched: arm A runs exactly the code arm B runs and
-# computes exactly what arm B computes, and the two differ in the debugger's
-# view and in the stores that produce it.
+# The debug-slot half of box forwarding, arm A. `forward::carry_debug_slot`
+# records nothing, so an elided box's `Gc` local never learns which `Scalar`
+# local holds its word — and the backend, whose only input for this is
+# `Function::debug_scalar_source`, emits no debug store for it and marks every
+# slot `DebugSlotKind::Reference`. The forwarding itself is untouched: arm A runs
+# exactly the code arm B runs and computes exactly what arm B computes, and the
+# two differ in the debugger's view and in the stores that produce it.
 #
 #     cargo build --release -p praxis-cli                          # arm B
 #     cargo build --release -p praxis-cli \
 #         --features praxis-mir/adr120b-arm-a                      # arm A
 #
-# Arm A is the tree with the part-1 regression left in place, so `cargo test`
-# with it on fails the two debugger-fidelity tests part 2 exists to turn green
-# — `run.rs`'s `a_forwarded_binop_temp_still_renders_the_value_it_materialized`
-# and `jit.rs`'s `a_temp_that_never_reached_a_shadow_slot_is_still_renderable`.
-# That is the toggle working, and it is also the sharpest available statement of
-# what this package is: those two tests *are* the difference between the arms.
+# Arm A is the tree with forwarding's debugger regression left in place, so
+# `cargo test` with it on fails the two debugger-fidelity tests that carrying the
+# slot exists to turn green — `run.rs`'s
+# `a_forwarded_binop_temp_still_renders_the_value_it_materialized` and `jit.rs`'s
+# `a_temp_that_never_reached_a_shadow_slot_is_still_renderable`. That is the
+# toggle working, and it is also the sharpest available statement of what the
+# carry is for: those two tests *are* the difference between the arms.
 adr120b-arm-a = []
-# ADR-122 arm A, and the whole of that toggle: `verify::check_proved_descriptor`
-# compiles to an empty body, so an `Inst::ExtractScalar` that names a payload
-# width contradicting what `provable` proves about its source is accepted. That
-# is byte-for-byte what this tree did before ADR-122 — REP-56's out-of-bounds
-# read compiles again — and nothing else in the crate reads the flag. The
-# analysis itself runs in both arms; only the rule differs.
+# Extract-scalar verification, arm A, and the whole of that toggle:
+# `verify::check_proved_descriptor` compiles to an empty body, so an
+# `Inst::ExtractScalar` that names a payload width contradicting what `provable`
+# proves about its source is accepted. That is byte-for-byte what this tree did
+# before the rule existed — the out-of-bounds read that motivated it compiles
+# again — and nothing else in the crate reads the flag. The analysis itself runs
+# in both arms; only the rule differs.
 #
 #     cargo build --release -p praxis-cli                                # arm B
 #     cargo build --release -p praxis-cli \
 #         --features praxis-mir/unproved-extract-scalar                  # arm A
 #
 # **It makes the compiler accept MIR it should refuse**, and the tests that pin
-# ADR-122 assert the refusal, so `cargo test --features
+# the rule assert the refusal, so `cargo test --features
 # praxis-mir/unproved-extract-scalar` is expected red. Do not enable it anywhere
 # except when staging that arm.
 unproved-extract-scalar = []
 
-# ADR-121 arm A. `promote::promote_scalars` returns 0 without looking at the
-# function, so every scalar-typed binding keeps its `Gc` slot and every
+# Scalar promotion, arm A. `promote::promote_scalars` returns 0 without looking
+# at the function, so every scalar-typed binding keeps its `Gc` slot and every
 # loop-carried assignment keeps the `Materialize` per iteration and the guarded
-# `ExtractScalar` per use that ADR-120's census left behind. `forward_boxes`
+# `ExtractScalar` per use that box forwarding leaves behind. `forward_boxes`
 # still runs, so the two arms differ in the whole-function transform alone —
-# which is what makes this an A/B of ADR-121 rather than of both passes.
+# which is what makes this an A/B of promotion rather than of both passes.
 #
 #     cargo build --release -p praxis-cli                          # arm B
 #     cargo build --release -p praxis-cli \
 #         --features praxis-mir/adr121-arm-a                        # arm A
 #
 # **It makes the compiler emit slower code on purpose**, on `adr120-arm-a`'s
-# precedent and for handover 26 §6's reason: the A/B baseline must be this branch
-# with this package's one toggle reverted, never an older commit — ADR-113
-# records what the wrong baseline cost (14.4% claimed where the truth was 0.8%).
-# `cargo test` with it on fails this crate's promotion tests and the backend's
-# shape assertions, which is the toggle working.
+# precedent and for its reason: the A/B baseline must be this branch with this
+# package's one toggle reverted, never an older commit. `cargo test` with it on
+# fails this crate's promotion tests and the backend's shape assertions, which is
+# the toggle working.
 adr121-arm-a = []
 
-# Doctests are not run (see the justfile and README): rustdoc has to analyze the
-# whole crate before it can find out there are none, and the result is never
-# cached, so `cargo test` paid ~6s per crate for it on every run.
+# Doctests are not run (the justfile says why): rustdoc has to analyze the whole
+# crate before it can find out there are none, and the result is never cached,
+# so `cargo test` pays ~6s per crate for it on every run.
 [lib]
 doctest = false

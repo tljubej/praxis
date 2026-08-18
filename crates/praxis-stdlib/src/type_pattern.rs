@@ -1,10 +1,10 @@
 //! Schema-level type patterns used to describe receivers, parameters, and
 //! results in the method catalog (§16.2).
 //!
-//! This is **not** the inference type system — that lives in `praxis-types`.
+//! This is **not** the inference type system — that lives in `praxis-typeck`.
 //! `TypePattern` is a small, self-describing shape language, enough to populate
 //! the catalog and to be unified with the real type representation. Keeping it
-//! separate is what keeps `praxis-stdlib` from depending on `praxis-types`.
+//! separate is what keeps `praxis-stdlib` from depending on `praxis-typeck`.
 
 use std::fmt;
 

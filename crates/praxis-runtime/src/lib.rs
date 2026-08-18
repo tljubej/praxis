@@ -13,7 +13,7 @@
 //! - A precise, non-moving mark-and-sweep collector reclaims unreachable
 //!   objects (§12.1, ADR-011).
 //!
-//! See `praxis_technical_design.md` §11, §12, and Appendix B.
+//! See `docs/technical-design.md` §11, §12, and Appendix B.
 
 pub mod abi;
 pub mod bitset;
@@ -57,49 +57,49 @@ pub mod text;
 pub mod tuples;
 pub mod var_cell;
 
-pub use abi::{assert_abi_version, RUNTIME_ABI_VERSION};
+pub use abi::{RUNTIME_ABI_VERSION, assert_abi_version};
 pub use breakpoint::{
-    breakpoints_detached, clear_breakpoint_handler, install_breakpoint_handler, BreakpointHandler,
-    BreakpointStop, Resume,
+    BreakpointHandler, BreakpointStop, Resume, breakpoints_detached, clear_breakpoint_handler,
+    install_breakpoint_handler,
 };
 pub use closures::ClosurePayload;
 pub use collections::{DequePayload, GridPayload, VecPayload};
 pub use context::{
-    current_fault_kind, frame_cost, DebugLocal, Fault, FaultKind, FaultMessage, Runtime,
-    RuntimeContext, StackBudget, FRAME_BYTES_BASE, FRAME_BYTES_PER_SLOT, MAX_RECURSION_DEPTH,
-    REFERENCE_FRAME_SLOTS, STACK_BUDGET_BYTES,
+    DebugLocal, FRAME_BYTES_BASE, FRAME_BYTES_PER_SLOT, Fault, FaultKind, FaultMessage,
+    MAX_RECURSION_DEPTH, REFERENCE_FRAME_SLOTS, Runtime, RuntimeContext, STACK_BUDGET_BYTES,
+    StackBudget, current_fault_kind, frame_cost,
 };
 pub use crash_snapshot::{CrashSnapshot, SnapshotFrame, SnapshotSlot};
 pub use debug::{
     DebugFrameEntry, DebugFrameStack, DebugFrameStackHeader, DebugLocalMeta, DebugSlotKind,
-    DebugValue, DebugValueStack, DebugValueStackHeader, FunctionDebugMeta, ScalarValue,
-    LOCAL_KIND_TEMP, LOCAL_KIND_USER,
+    DebugValue, DebugValueStack, DebugValueStackHeader, FunctionDebugMeta, LOCAL_KIND_TEMP,
+    LOCAL_KIND_USER, ScalarValue,
 };
 pub use descriptor::{
-    BuiltinTypeId, CompareFn, DropFn, DynamicHasher, EqualsFn, FormatFn, FormatSink, FormatStyle,
-    HashFn, StructHasher, TraceFn, Tracer, TypeDescriptor, TypeId, BUILTINS,
+    BUILTINS, BuiltinTypeId, CompareFn, DropFn, DynamicHasher, EqualsFn, FormatFn, FormatSink,
+    FormatStyle, HashFn, StructHasher, TraceFn, Tracer, TypeDescriptor, TypeId,
 };
 pub use gc::{GcHeader, GcRef, HeapId};
 pub use heap::{
-    Heap, HeapStats, InlineClaimSite, InlineInternSite, Pacer, INITIAL_COLLECT_THRESHOLD,
-    LIVE_HEADROOM, MAX_COLLECT_THRESHOLD,
+    Heap, HeapStats, INITIAL_COLLECT_THRESHOLD, InlineClaimSite, InlineInternSite, LIVE_HEADROOM,
+    MAX_COLLECT_THRESHOLD, Pacer,
 };
 pub use immortal::Immortals;
-pub use input::{clear_input_reader, install_input_reader, InputReader};
+pub use input::{InputReader, clear_input_reader, install_input_reader};
 pub use parse_detail::{ParseDetail, ParseFail};
 pub use records::{RecordField, RecordPayload, RecordSchema, SchemaIdentity};
-pub use repr::{instance_repr, InstanceArg, InstanceRepr};
+pub use repr::{InstanceArg, InstanceRepr, instance_repr};
 pub use repr_c_vec::{ReprCVec, VecMut};
 pub use roots::{
-    NativeRootStore, NativeScope, RootScope, RootSet, Rooted, RuntimeRoots, NATIVE_ROOT_RESERVATION,
+    NATIVE_ROOT_RESERVATION, NativeRootStore, NativeScope, RootScope, RootSet, Rooted, RuntimeRoots,
 };
 pub use shadow_stack::{
-    push_frame, DebugSlotCount, ShadowFrameGuard, ShadowStack, ShadowStackHeader, SlotCount,
-    SlotStack, SlotStackHeader, MAX_DEBUG_VALUE_SLOTS, MAX_SHADOW_SLOTS, SHADOW_STACK_SLOTS,
+    DebugSlotCount, MAX_DEBUG_VALUE_SLOTS, MAX_SHADOW_SLOTS, SHADOW_STACK_SLOTS, ShadowFrameGuard,
+    ShadowStack, ShadowStackHeader, SlotCount, SlotStack, SlotStackHeader, push_frame,
 };
 pub use small_int::{
-    index_of as small_int_index, SMALL_INT_COUNT, SMALL_INT_MAX, SMALL_INT_MIN, SMALL_INT_STRIDE,
+    SMALL_INT_COUNT, SMALL_INT_MAX, SMALL_INT_MIN, SMALL_INT_STRIDE, index_of as small_int_index,
 };
-pub use teardown::{retire_parser_plans, HeapDrained};
+pub use teardown::{HeapDrained, retire_parser_plans};
 pub use text::TextPayload;
 pub use tuples::{TuplePayload, TupleSchema};

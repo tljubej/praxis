@@ -19,12 +19,12 @@
 //! descriptor-producing site, and the JIT refusing to emit is how it becomes
 //! visible instead of becoming a wrong payload read at runtime (ADR-042).
 
-use praxis_runtime::descriptor::{BuiltinTypeId, TypeDescriptor};
-use praxis_runtime::repr::{instance_repr, InstanceArg, InstanceRepr};
 use praxis_runtime::GcRef;
+use praxis_runtime::descriptor::{BuiltinTypeId, TypeDescriptor};
+use praxis_runtime::repr::{InstanceArg, InstanceRepr, instance_repr};
 use praxis_stdlib::type_pattern::CollectionCtor;
-use praxis_types::data::TypeData;
-use praxis_types::{CollectionArgs, ScalarType, TupleElems, Type, TypeDb};
+use praxis_typeck::data::TypeData;
+use praxis_typeck::{CollectionArgs, ScalarType, TupleElems, Type, TypeDb};
 
 /// Why a type has no runtime descriptor. The two cases have different owners
 /// and different correct handling, so they are not one string.
@@ -336,7 +336,7 @@ fn compose(
         _ => {
             return Err(NoRuntimeRepr::value(
                 "descriptor takes no per-instance arguments",
-            ))
+            ));
         }
     };
     let args = CollectionArgs::new(ctor, args).map_err(|_| {

@@ -33,8 +33,7 @@ Five parts, in order:
 - **`error[Y001]`** — the severity and the code. The letter is the category: `T`
   lex, `P` parse, `N` name resolution, `Y` type, `I` input parser. (`R`, runtime,
   is a declared category with no members.) A code is a permanent identifier and
-  is never reissued, even when the report behind it is retired; the allocation is
-  [ADR-051](../../../decisions/051-the-diagnostic-code-allocation.md) and
+  is never reissued, even when the report behind it is retired;
   [Diagnostic codes](../tooling/diagnostics.md) is the list.
 - **The message.** It appears twice — in the header, and again as the label after
   the carets — so a diagnostic reads the same whether you are looking at the top
@@ -183,14 +182,12 @@ praxis: 1 error(s)
 A name in Praxis has exactly one signature. There is no arity-based overloading,
 no optional parameters and no default arguments, so a count mismatch is never a
 near miss for another version of the name — it is arithmetic, and `Y024` says so
-rather than showing two function types to compare by eye, which is what `Y001`
-did before this code existed.
+rather than showing two function types to compare by eye.
 
-The same decision settles the case above:
-[ADR-089](../../../decisions/089-a-name-has-one-signature.md) keeps `assert` at
-one argument, and the name that carries a sentence is `panic`. A failed `assert`
-already prints the condition's own source text, its evaluated value and every
-local in the frame, which is more than a hand-written message would have said.
+The same rule settles the case above. `assert` takes a condition and nothing
+else; the name that carries a sentence is `panic`. A failed `assert` already
+prints the condition's own source text, its evaluated value and every local in
+the frame, which is more than a hand-written message would have said.
 
 `Y024` is raised inside unification rather than at the call site, so calling a
 closure value with the wrong number of arguments reports it too, not just a call
@@ -257,11 +254,9 @@ The rule is narrow on purpose. It asks "does any row hold this name at this
 arity", not "does any row match this receiver", so
 `fn total(values) { values.sum() }` still checks with no call site: `sum` exists,
 the requirement is deferred, and a caller answers it later. Only a name that
-exists nowhere is refused early
-([ADR-093](../../../decisions/093-a-method-that-cannot-resolve-is-reported-at-check.md)).
-That ADR is also why you see this at `check` at all — `Y110` used to be reported
-only during lowering, which `praxis check` does not run, so a missing method was
-a clean `check` and a failed `run`.
+exists nowhere is refused early, and inference is what refuses it. `Y110` has
+one emitter, and it is not lowering's, so `praxis check` sees every missing
+method without compiling anything.
 
 [Method resolution](method-resolution.md) covers how a receiver picks a row.
 
@@ -409,7 +404,7 @@ two methods run the same scanner the `int` and `float`
 `"+5".int()` and `"inf".float()`, which surprise people until you know where the
 rule comes from.
 
-The other half is the [input parser](../input/reading.md), and it is the one to
+The other half is the [input parser](../input/read.md), and it is the one to
 reach for when the text came from input in the first place: `read lines(int)`
 never produces the value at all if the line is not a number, and reports where
 it broke.
@@ -466,8 +461,7 @@ prints exactly the same text before declining to run the program. Both exit 1.
 
 That is not discipline, it is construction. The set of diagnostics, their order,
 and the decision to analyze a file even when parsing has already complained are
-stated once — in the query layer that both commands call
-([ADR-097](../../../decisions/097-the-shared-query-layer-lives-in-praxis-lsp.md)).
-The editor calls the same query, so the squiggle under your cursor carries the
-same code, the same message and the same span the terminal would print. That is
-the subject of the [next chapter](editor.md).
+stated once, in the query layer that both commands call. The editor calls the
+same query, so the squiggle under your cursor carries the same code, the same
+message and the same span the terminal would print. That is the subject of the
+[next chapter](editor.md).

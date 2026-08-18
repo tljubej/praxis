@@ -3,7 +3,7 @@
 //!
 //! This is deliberately the *names* and nothing else. A capability that carries
 //! a type — `Iterable(T, Item)`, `HasMethod(name, params, result)` — lives in
-//! `praxis_types::constraint`, which can name a `Type`; this crate cannot, and
+//! `praxis_typeck::constraint`, which can name a `Type`; this crate cannot, and
 //! should not, because the method catalog's type *patterns* are written here and
 //! a pattern is not a type.
 //!

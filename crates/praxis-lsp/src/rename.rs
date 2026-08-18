@@ -34,10 +34,10 @@ use lsp_types::{TextEdit, Uri, WorkspaceEdit};
 use praxis_hir::SymbolId;
 use rowan::TextRange;
 
+use crate::Revision;
 use crate::navigation::{reference_ranges, symbol_at};
 use crate::position::Encoding;
 use crate::query::Snapshot;
-use crate::Revision;
 
 /// Why a rename was refused. Each variant is a message the editor shows, so the
 /// user learns which rename would have been safe rather than that "rename

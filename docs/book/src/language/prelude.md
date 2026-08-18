@@ -76,8 +76,7 @@ panic("x") }`.
 `assert` is the one name here that is monomorphic. It takes a `Bool` and nothing
 else, so `assert(1)` is a type error rather than a call that silently accepts
 anything, and it takes exactly one argument — a message parameter has no
-spelling, because a name in Praxis has exactly one signature
-([ADR-089](../../../decisions/089-a-name-has-one-signature.md)).
+spelling, because a name in Praxis has exactly one signature.
 
 ```praxis
 assert(1 + 1 == 3)
@@ -102,8 +101,8 @@ Both `panic` and `assert` raise ordinary faults, which is why the output above
 carries a backtrace and the locals. Under the default `--debug auto` — stdin and
 stdout both a terminal — they drop you into [the crash
 debugger](../debugger/entering.md) instead of printing. That is the reason they
-are faults rather than a write to stderr followed by an exit
-([ADR-056](../../../decisions/056-the-prelude-control-names-are-real-functions.md)).
+are faults rather than a write to stderr followed by an exit: a `panic` that
+bypassed the fault path is a `panic` you cannot debug.
 
 ## Numeric helpers
 
@@ -147,8 +146,7 @@ out(e())
 2.718281828459045
 ```
 
-**All seven are `Int` functions and none of them is generic**
-([ADR-058](../../../decisions/058-the-numeric-prelude-helpers-are-int-functions.md)).
+**All seven are `Int` functions and none of them is generic.**
 `Float` carries its own `abs`, `sign`, `min` and `max` as methods — `x.abs()`,
 `x.min(y)` — so the free function never has to choose a lowering per
 instantiation. `clamp`, `gcd` and `lcm` have no `Float` counterpart at all;
@@ -171,8 +169,7 @@ praxis: 1 error(s)
 Nine names. Called with no arguments, each builds an empty collection and the
 element type comes from what you then put in. Two of them — `Vec` and `Grid` —
 also take a **size and a fill**, and the argument count is what chooses between
-the two shapes
-([ADR-146](../../../decisions/146-a-collection-constructors-arity-is-its-shape.md)).
+the two shapes.
 
 | Name | Signature | Notes |
 |---|---|---|
@@ -191,11 +188,12 @@ the two shapes
 **Only those two are sized**, and the rest of the language has no arity
 overloading at all — `Set(3, 0)` is an error that says the function takes zero
 arguments. The two exceptions are the collections whose contents are addressed
-by position, which is what makes "n of them" mean something;
-[ADR-146](../../../decisions/146-a-collection-constructors-arity-is-its-shape.md)
-records why that is a deliberate narrowing of
-[ADR-089](../../../decisions/089-a-name-has-one-signature.md) rather than a hole
-in it.
+by position, which is what makes "n of them" mean something: a sized `Set` is
+`n` copies of one element in a set, which is one element, and a sized `Map` has
+no answer at all for what its keys would be. This narrows "a name has one
+signature" without reopening it — the shape is chosen by counting arguments, a
+syntactic fact available before any argument is typed, and never by looking at
+their types.
 
 ```praxis
 var v = Vec()
@@ -329,8 +327,7 @@ else about them is what [enums](enums.md) says about any variant.
 
 Six closure-driven walks. None of them takes a graph object — there is no graph
 type — so a program describes its graph by giving a start state and a function
-from a state to its neighbours
-([ADR-060](../../../decisions/060-the-graph-helpers-are-closure-driven-walks.md)).
+from a state to its neighbours.
 
 | Name | Signature | Answers |
 |---|---|---|
@@ -413,8 +410,7 @@ Most prelude names cannot fail. The ones that can:
 neither can any collection constructor called with **no arguments** — there is
 nothing you gave it for it to refuse. The two sized forms are the exception, and
 the size is the reason: it is an ordinary `Int` computed at run time, so a
-negative or absurd one cannot be caught at `praxis check` and is a fault instead
-([ADR-041](../../../decisions/041-bounded-extents-fault-instead-of-aborting.md)).
+negative or absurd one cannot be caught at `praxis check` and is a fault instead.
 See [the fault model](../debugger/faults.md) for what happens after a fault.
 
 ## They are ordinary bindings
@@ -438,11 +434,9 @@ once you have used the name for something else.
 ## What is not here
 
 The type names `Int`, `Text`, `Bool`, `Char`, `Float`, `Unit` and `Never` are
-also in scope, as annotations. `UInt` and `Byte` are named in the design
-document and are **not** implemented: `var x: UInt = 1` is `N002: unknown type
-'UInt'`.
+also in scope, as annotations, and they are the whole list: any other name in
+type position is `N002: unknown type`.
 
-The design document's prelude list is the four control names, the seven numeric
-helpers, the nine collection constructors and the six graph walks. The
-implementation adds `pi`, `e`, `Option`, `Some` and `None`, and takes nothing
-away.
+There is nothing else. No I/O beyond `out` and `dbg`, no clock, no randomness,
+no file access, and no import that would add one — a program's input arrives
+through [`read`](../input/read.md), and its answer leaves through `out`.

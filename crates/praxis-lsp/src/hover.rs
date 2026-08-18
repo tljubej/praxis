@@ -214,7 +214,7 @@ fn parser_name_at(snapshot: &Snapshot, offset: u32) -> Option<NamedParser> {
 /// The result type comes from the synthesizer's own table rather than a second
 /// list here — `synthesize` is what decides that `digit` is an `Int`.
 fn atomic_signature(kind: AtomicKind) -> String {
-    let mut db = praxis_types::TypeDb::new();
+    let mut db = praxis_typeck::TypeDb::new();
     let ty = praxis_input_parser::synthesize(
         &praxis_input_parser::ParserAst::Atomic {
             kind,

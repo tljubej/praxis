@@ -19,7 +19,7 @@ use praxis_source::{DiagCode, Diagnostic, FileId, FileSpan, Severity};
 use praxis_syntax::{PraxisLanguage, SyntaxKind, SyntaxNode, Token};
 use rowan::{GreenNodeBuilder, Language};
 
-use crate::lex::{lex, LexOutput};
+use crate::lex::{LexOutput, lex};
 
 /// The result of parsing one source file: the lossless tree, the lexed tokens,
 /// and any diagnostics (lex + parse merged).
@@ -908,9 +908,9 @@ impl<'t> Parser<'t> {
                     self.expect(SyntaxKind::R_PAREN, "`)` to close variant payload");
                 }
                 self.finish_node(); // ENUM_VARIANT
-                                    // A comma **or** a line break, as §4.6's
-                                    // own `enum Tile { Empty\n Wall\n … }`
-                                    // writes it.
+                // A comma **or** a line break, as §4.6's
+                // own `enum Tile { Empty\n Wall\n … }`
+                // writes it.
                 if !self.member_separator("enum variants") {
                     break;
                 }
@@ -1043,8 +1043,8 @@ impl<'t> Parser<'t> {
             // before lhs.
             self.start_node_at(cp, infix_node_kind(op));
             self.bump(); // operator
-                         // The operands of a suppressed expression are suppressed too:
-                         // `if a == p { … }` has the same ambiguity `if p { … }` has.
+            // The operands of a suppressed expression are suppressed too:
+            // `if a == p { … }` has the same ambiguity `if p { … }` has.
             self.parse_expr_bp(bp.right, lit);
             self.finish_node();
         }
@@ -1126,9 +1126,9 @@ impl<'t> Parser<'t> {
                 SyntaxKind::L_BRACK if self.at_subscript() => {
                     self.start_node_at(cp, SyntaxKind::INDEX_EXPR);
                     self.bump(); // `[`
-                                 // A subscript selects *something*, so unlike a call's
-                                 // argument list an empty one is a syntax error rather than an
-                                 // arity the catalog happens not to have a row for.
+                    // A subscript selects *something*, so unlike a call's
+                    // argument list an empty one is a syntax error rather than an
+                    // arity the catalog happens not to have a row for.
                     if self.at(SyntaxKind::R_BRACK) {
                         let span = self.current_span();
                         self.error(span, "expected an index expression");
@@ -1138,10 +1138,10 @@ impl<'t> Parser<'t> {
                 }
                 SyntaxKind::DOT => {
                     self.bump(); // `.`
-                                 // `p.0` — a tuple element, selected by position.
-                                 // The lexer guarantees the literal is an integer here: a
-                                 // digit run immediately after a `.` takes no fraction, so
-                                 // `t.0.1` is two indices and not an index and a float.
+                    // `p.0` — a tuple element, selected by position.
+                    // The lexer guarantees the literal is an integer here: a
+                    // digit run immediately after a `.` takes no fraction, so
+                    // `t.0.1` is two indices and not an index and a float.
                     if self.at(SyntaxKind::IntLit) {
                         self.start_node_at(cp, SyntaxKind::TUPLE_INDEX_EXPR);
                         self.bump(); // the index
@@ -1240,9 +1240,9 @@ impl<'t> Parser<'t> {
         }
         self.expect(SyntaxKind::R_BRACK, "`]`");
         self.finish_node(); // TYPE_ARG_LIST
-                            // The `(` is required and it is on **this** line,
-                            // so the report and what `parse_name_or_call` goes
-                            // on to build cannot disagree.
+        // The `(` is required and it is on **this** line,
+        // so the report and what `parse_name_or_call` goes
+        // on to build cannot disagree.
         if !self.at_argument_list() {
             let span = self.current_span();
             self.error(
@@ -1282,7 +1282,7 @@ impl<'t> Parser<'t> {
             return;
         }
         self.bump(); // `|`
-                     // Zero or more `pattern` or `pattern: Type` params separated by commas.
+        // Zero or more `pattern` or `pattern: Type` params separated by commas.
         if !self.at(SyntaxKind::PIPE) {
             loop {
                 let before = self.meaningful_index();
@@ -1526,8 +1526,8 @@ impl<'t> Parser<'t> {
     fn parse_list(&mut self) {
         self.start_node(SyntaxKind::LIST_EXPR);
         self.bump(); // `[`
-                     // Unlike a subscript, an empty one is legal: `[]` is the empty
-                     // `Vec`, whose element type inference takes from its use.
+        // Unlike a subscript, an empty one is legal: `[]` is the empty
+        // `Vec`, whose element type inference takes from its use.
         self.parse_arg_list_until(SyntaxKind::R_BRACK, "`]` to close list literal");
         self.finish_node(); // LIST_EXPR
     }
@@ -1535,9 +1535,9 @@ impl<'t> Parser<'t> {
     fn parse_if(&mut self) {
         self.start_node(SyntaxKind::IF_EXPR);
         self.bump(); // `if`
-                     // The condition is a parenthesized or bare expression; accept either.
-                     // Suppress record-literal parsing so `if x { … }` doesn't read
-                     // the then-block as `x { … }`.
+        // The condition is a parenthesized or bare expression; accept either.
+        // Suppress record-literal parsing so `if x { … }` doesn't read
+        // the then-block as `x { … }`.
         self.parse_expr_no_struct_lit();
         self.parse_block(); // then-branch
         if self.eat(SyntaxKind::KW_ELSE) {
@@ -1565,10 +1565,10 @@ impl<'t> Parser<'t> {
     fn parse_for(&mut self) {
         self.start_node(SyntaxKind::FOR_EXPR);
         self.bump(); // `for`
-                     // The binding is a **pattern**: `for (k, v) in m` takes the
-                     // pair apart, and a bare name is the pattern that binds the
-                     // whole item. Nothing here can be confused with the loop
-                     // body — the pattern is followed by `in`, never by `{`.
+        // The binding is a **pattern**: `for (k, v) in m` takes the
+        // pair apart, and a bare name is the pattern that binds the
+        // whole item. Nothing here can be confused with the loop
+        // body — the pattern is followed by `in`, never by `{`.
         self.parse_pattern();
         self.expect(SyntaxKind::KW_IN, "`in` after the for-loop binding");
         self.parse_expr_no_struct_lit(); // iterator
@@ -1590,7 +1590,7 @@ impl<'t> Parser<'t> {
     fn parse_break(&mut self) {
         self.start_node(SyntaxKind::BREAK_EXPR);
         self.bump(); // `break`
-                     // A value follows iff the next token starts an expression (not `;`/`}`/EOF).
+        // A value follows iff the next token starts an expression (not `;`/`}`/EOF).
         if self.starts_expr() {
             self.parse_expr();
         }
@@ -1618,8 +1618,8 @@ impl<'t> Parser<'t> {
     fn parse_match(&mut self) {
         self.start_node(SyntaxKind::MATCH_EXPR);
         self.bump(); // `match`
-                     // The scrutinee is an expression; suppress record literals so the `{`
-                     // opening the arm list isn't consumed as a record body.
+        // The scrutinee is an expression; suppress record literals so the `{`
+        // opening the arm list isn't consumed as a record body.
         self.parse_expr_no_struct_lit();
         self.expect(SyntaxKind::L_BRACE, "`{` to begin match arms");
         if !self.at(SyntaxKind::R_BRACE) {
@@ -1634,7 +1634,7 @@ impl<'t> Parser<'t> {
                 // a `Name { … }` to be mistaken for.
                 self.parse_expr();
                 self.finish_node(); // MATCH_ARM
-                                    // Arms are comma-OR-newline separated (§4.6).
+                // Arms are comma-OR-newline separated (§4.6).
                 let comma = self.eat(SyntaxKind::COMMA);
                 // Stop if we hit `}` or something that can't start a pattern.
                 if self.at(SyntaxKind::R_BRACE) || !is_pattern_start(self.peek()) {
@@ -1826,8 +1826,8 @@ impl<'t> Parser<'t> {
         // Function types bind right-associatively: `A -> B -> C` = `A -> (B -> C)`.
         if self.eat(SyntaxKind::THIN_ARROW) {
             self.parse_type(); // rhs (recurses, so right-assoc)
-                               // Wrap lhs + arrow + rhs retroactively. `parse_atom_type` already
-                               // emitted exactly one node; reopening at `cp` captures it.
+            // Wrap lhs + arrow + rhs retroactively. `parse_atom_type` already
+            // emitted exactly one node; reopening at `cp` captures it.
             self.start_node_at(cp, SyntaxKind::FN_TYPE);
             self.finish_node();
         }
@@ -3294,9 +3294,11 @@ mod tests {
             annotated.diagnostics
         );
         assert!(!construct_names(&annotated.tree).contains(&SyntaxKind::TUPLE_TYPE));
-        assert!(parse_text("var t: (Int, Text,) = (1, \"a\")\n")
-            .diagnostics
-            .is_empty());
+        assert!(
+            parse_text("var t: (Int, Text,) = (1, \"a\")\n")
+                .diagnostics
+                .is_empty()
+        );
     }
 
     #[test]

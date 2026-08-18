@@ -2,9 +2,14 @@
 name = "praxis-parser"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Lexer and parser for the Praxis language (Milestone 0: lexer stub)."
+homepage.workspace = true
+description = "Lexer and parser for the Praxis language."
+keywords = ["parser", "lexer", "compiler", "language", "syntax"]
+categories = ["parser-implementations", "compilers"]
 
 [dependencies]
 praxis-source.workspace = true
@@ -16,8 +21,8 @@ insta.workspace = true
 praxis-test-support.workspace = true
 proptest.workspace = true
 
-# Doctests are not run (see the justfile and README): rustdoc has to analyze the
-# whole crate before it can find out there are none, and the result is never
-# cached, so `cargo test` paid ~6s per crate for it on every run.
+# Doctests are not run (the justfile says why): rustdoc has to analyze the whole
+# crate before it can find out there are none, and the result is never cached,
+# so `cargo test` pays ~6s per crate for it on every run.
 [lib]
 doctest = false

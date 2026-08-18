@@ -1,10 +1,10 @@
-// Unit tests for the argv construction (§19.11 criterion 5).
+// Unit tests for the argv construction.
 //
-// Run with `npm test` after `npm run compile`. **Not part of `just ci`**: ADR-002
-// makes `just ci` the whole gate, and a second toolchain in it is a cost this
-// milestone does not need to pay. The drift that a Rust test *can* catch — a
-// subcommand the CLI no longer has — is caught in
-// `crates/praxis-cli/tests/grammar.rs`, which reads `argv.ts` as text.
+// Run with `npm test` after `npm run compile`. **Not part of `just ci`**:
+// `just ci` is the whole gate and a second toolchain in it is a cost the
+// project does not pay. The drift that a Rust test *can* catch — a subcommand
+// the CLI no longer has — is caught in `crates/praxis-cli/tests/grammar.rs`,
+// which reads `argv.ts` as text.
 
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
@@ -24,15 +24,11 @@ test("run passes --input when one is configured", () => {
   ]);
 });
 
-test("check and watch never take --input", () => {
-  // `--input` is `run`'s alone: the CLI rejects it on the others, so appending
-  // it would fail the command rather than be ignored.
+test("check never takes --input", () => {
+  // `--input` is `run`'s alone: the CLI rejects it on `check`, so appending it
+  // would fail the command rather than be ignored.
   assert.deepEqual(fileCommandArgv("check", "/w/day01.px", { inputPath: "/w/input.txt" }), [
     "check",
-    "/w/day01.px",
-  ]);
-  assert.deepEqual(fileCommandArgv("watch", "/w/day01.px", { inputPath: "/w/input.txt" }), [
-    "watch",
     "/w/day01.px",
   ]);
 });

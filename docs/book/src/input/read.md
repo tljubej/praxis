@@ -139,13 +139,11 @@ name.
 ## Empty input is input
 
 A reader that answers zero bytes has given **empty input**. There is no separate
-"no input" state a program can be in
-([ADR-087](../../../decisions/087-empty-input-is-input-and-no-input-is-a-host-state.md)):
-`--input /dev/null`, a closed pipe and a terminal all produce a zero-length
-buffer, and the parser runs against it.
+"no input" state a program can be in: `--input /dev/null`, a closed pipe and a
+terminal all produce a zero-length buffer, and the parser runs against it.
 
 ```praxis
-// Empty input is input (ADR-087). `read-empty.in` is a zero-byte file, and
+// Empty input is input. `read-empty.in` is a zero-byte file, and
 // `lines` over nothing is an empty Vec — an answer, not a fault.
 fn main() {
     out(read lines(int))
@@ -163,7 +161,7 @@ gives no lines. A parser that *requires* content still fails, and says so at
 offset zero — which is a sentence you can act on:
 
 ```praxis
-// The other half of ADR-087: a program that requires content still gets a
+// The other half of the rule: a program that requires content still gets a
 // fault over empty input, and the fault says where it looked and what for.
 fn main() {
     out(read int)

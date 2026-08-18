@@ -111,11 +111,10 @@ fn workspace_roots(params: &InitializeParams) -> Vec<std::path::PathBuf> {
 /// `prepareProvider`, so a position that cannot be renamed says so before the
 /// user types a new name.
 ///
-/// **`documentFormattingProvider` stays absent.** §19.12 lists a stable
-/// formatter and this server does not implement one. An editor that is told
-/// this server formats would stop offering its own behaviour and then do
-/// nothing on `Format Document`, which is a worse state than the one where the
-/// feature is simply missing.
+/// **`documentFormattingProvider` stays absent.** Praxis has no formatter. An
+/// editor that is told this server formats would stop offering its own
+/// behaviour and then do nothing on `Format Document`, which is a worse state
+/// than the one where the feature is simply missing.
 fn capabilities(encoding: Encoding) -> ServerCapabilities {
     ServerCapabilities {
         position_encoding: Some(encoding.kind()),
@@ -223,7 +222,7 @@ impl Server {
                     Ok(msg) => Some(msg),
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => None,
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                        return Ok(self.exit_code())
+                        return Ok(self.exit_code());
                     }
                 }
             };

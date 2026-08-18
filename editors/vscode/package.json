@@ -78,10 +78,6 @@
         "title": "Praxis: Check File"
       },
       {
-        "command": "praxis.watchFile",
-        "title": "Praxis: Watch File (not implemented yet \u2014 `praxis watch` reports which milestone owns it)"
-      },
-      {
         "command": "praxis.restartServer",
         "title": "Praxis: Restart Language Server"
       }
@@ -92,7 +88,7 @@
         "praxis.binaryPath": {
           "type": "string",
           "default": "praxis",
-          "description": "Path to the `praxis` binary. The language server is `praxis lsp`; the run/check/watch commands invoke the same binary. A bare name is resolved on PATH."
+          "description": "Path to the `praxis` binary. The language server is `praxis lsp`; the run and check commands invoke the same binary. A bare name is resolved on PATH."
         },
         "praxis.trace.server": {
           "type": "string",

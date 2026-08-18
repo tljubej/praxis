@@ -106,14 +106,10 @@ ownership, no lifetimes, no manual memory management. There are no user-visible
 traits, no operator overloading, no macros, and no exceptions. There is no
 concurrency. There is no package registry.
 
-These are deliberate, and the priority order used when two of the goals conflict
-is written down: correctness and diagnostics first, then input ergonomics, then
+These are deliberate, and when two of the goals conflict there is an order that
+settles it: correctness and diagnostics first, then input ergonomics, then
 edit-run-debug speed, then language simplicity, and only then runtime
 performance.
-
-Three things the design document describes that do not exist today: the
-formatter, `praxis watch`, and `praxis repl`. Where this book would otherwise
-leave you expecting one of them, it says so.
 
 ## How this book is arranged
 
@@ -125,7 +121,8 @@ leave you expecting one of them, it says so.
 - **[Reading input](input/read.md)** — the `read` expression and its DSL.
 - **[Type inference](types/model.md)** — what the compiler works out, and why it
   sometimes will not.
-- **[The crash debugger](debugger/faults.md)** — the fault model and the REPL.
+- **[The crash debugger](debugger/faults.md)** — the fault model, and the
+  prompt you get instead of an exit code.
 - **[Tooling](tooling/editors.md)** — the language server, the VS Code
   extension, and an index of every diagnostic code.
 - **[Under the hood](internals/pipeline.md)** — for the reader who wants to

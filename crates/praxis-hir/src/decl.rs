@@ -28,8 +28,8 @@ use std::collections::{HashMap, HashSet};
 
 use praxis_ast::{AstNode, EnumItem, FnItem, SourceFile, StructItem, TypeRef};
 use praxis_source::{Diagnostic, FileId, FileSpan};
-use praxis_syntax::{span_bridge::range_to_span, SyntaxKind, SyntaxNode, SyntaxToken};
-use praxis_types::{
+use praxis_syntax::{SyntaxKind, SyntaxNode, SyntaxToken, span_bridge::range_to_span};
+use praxis_typeck::{
     CollectionArgs, CollectionCtor, EnumVariantDef, FieldSet, ScalarType, Scheme, Type, TypeDb,
     VariantSet,
 };
@@ -260,7 +260,7 @@ impl Declare<'_> {
         }
         let fields = match FieldSet::from_pairs(fields) {
             Ok(fields) => fields,
-            Err(praxis_types::TypeCtorError::DuplicateField(dup)) => {
+            Err(praxis_typeck::TypeCtorError::DuplicateField(dup)) => {
                 self.diagnostics.push(crate::diagnostics::duplicate_member(
                     self.file_span(range),
                     "field",
@@ -302,7 +302,7 @@ impl Declare<'_> {
         }
         let variants = match VariantSet::new(variants) {
             Ok(variants) => variants,
-            Err(praxis_types::TypeCtorError::DuplicateVariant(dup)) => {
+            Err(praxis_typeck::TypeCtorError::DuplicateVariant(dup)) => {
                 self.diagnostics.push(crate::diagnostics::duplicate_member(
                     self.file_span(range),
                     "variant",
@@ -405,10 +405,10 @@ fn mentioned_types(decl: &TypeDecl, type_refs: &HashMap<TextRange, SymbolId>) ->
         if t.kind() != SyntaxKind::Ident {
             continue;
         }
-        if let Some(&symbol) = type_refs.get(&t.text_range()) {
-            if !seen.contains(&symbol) {
-                seen.push(symbol);
-            }
+        if let Some(&symbol) = type_refs.get(&t.text_range())
+            && !seen.contains(&symbol)
+        {
+            seen.push(symbol);
         }
     }
     seen
@@ -533,7 +533,7 @@ impl<'a> Annotations<'a> {
     ///   parser emits the name as its own `TYPE_REF`, then reopens at a
     ///   checkpoint to wrap the brackets).
     /// - `(T)` — a parenthesized group: exactly one type-node child and no name.
-    ///   `()` is the degenerate case and is [`Unit`](praxis_types::TypeData::Unit),
+    ///   `()` is the degenerate case and is [`Unit`](praxis_typeck::TypeData::Unit),
     ///   which is what makes `() -> Int` a nullary function type rather than one
     ///   taking an invented variable.
     fn resolve_named_or_grouped(&mut self, node: &SyntaxNode) -> Option<Type> {
@@ -575,8 +575,8 @@ impl<'a> Annotations<'a> {
     fn flatten_param_group(&mut self, ty: Type) -> Vec<Type> {
         let rep = self.db.follow(ty);
         match self.db.data(rep) {
-            praxis_types::TypeData::Tuple(els) => els.clone(),
-            praxis_types::TypeData::Unit => Vec::new(),
+            praxis_typeck::TypeData::Tuple(els) => els.clone(),
+            praxis_typeck::TypeData::Unit => Vec::new(),
             // A single param: the type itself, not a re-interned copy of its
             // shape — the representative handle is already in hand.
             _ => vec![rep],
@@ -697,7 +697,7 @@ pub(crate) fn tuple_or_degenerate(db: &mut TypeDb, mut els: Vec<Type>) -> Type {
         0 => db.unit(),
         1 => els.remove(0),
         _ => {
-            let elems = praxis_types::TupleElems::new(els).expect("two or more elements");
+            let elems = praxis_typeck::TupleElems::new(els).expect("two or more elements");
             db.tuple(elems)
         }
     }

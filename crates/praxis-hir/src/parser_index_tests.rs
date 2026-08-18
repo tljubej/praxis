@@ -10,8 +10,8 @@
 
 use praxis_source::Span;
 
-use crate::hir_tests::test_util::analyze;
 use crate::ParserMode;
+use crate::hir_tests::test_util::analyze;
 
 /// The byte offset of the first occurrence of `needle` in `src`.
 fn at(src: &str, needle: &str) -> u32 {

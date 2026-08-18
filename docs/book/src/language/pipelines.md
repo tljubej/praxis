@@ -52,8 +52,8 @@ works as well as one written in place.
 ## A pipeline's source is the `for` loop's
 
 The receiver of a pipeline is what a `for` loop walks, and it yields exactly
-what the loop's variable would bind ([ADR-127](../../../decisions/127-a-pipelines-source-is-the-for-loops-and-a-collection-converts-by-naming-what-it-becomes.md)).
-There are ten of them, one short of the `for` loop's own list:
+what the loop's variable would bind. There are ten of them, one short of the
+`for` loop's own list:
 
 | Receiver | Item |
 | --- | --- |
@@ -167,10 +167,10 @@ fn main() {
 [the]
 ```
 
-`Grid[T]` is the one iterable that is *not* a pipeline receiver: `grid.map(fn)`
-is reserved for the shape-preserving row that answers a `Grid`, and that row is
-not implemented yet. A grid enters a pipeline through `grid.cells()` or
-`grid.positions()`, which already answer `Vec`s — see
+`Grid[T]` is the one iterable that is *not* a pipeline receiver. A grid's shape
+is part of its value, so `grid.map(fn)` does not resolve at all rather than
+quietly answering a flat sequence. A grid enters a pipeline through
+`grid.cells()` or `grid.positions()`, which already answer `Vec`s — see
 [grids and graphs](grid-and-graphs.md).
 
 ## The catalog
@@ -239,8 +239,7 @@ result.
 `reversed` is the barrier with an empty requirement column, and that is its own
 claim rather than an omission: `sorted` reads the element's `compare` callback
 and `unique` reads its `hash` and `equals`, while reversal reads nothing at all
-— so a `Vec` of closures reverses where it cannot be sorted
-([ADR-145](../../../decisions/145-a-reversal-needs-the-whole-sequence-so-it-is-a-barrier.md)).
+— so a `Vec` of closures reverses where it cannot be sorted.
 It is also what a countdown is written with: `for i in (0..n).reversed()`, since
 `n..0` is an empty range rather than a descending one.
 
@@ -249,12 +248,10 @@ separator is a required argument, because the catalog has no optional ones —
 `join("")` is the no-separator spelling and says so where it is written — and it
 renders nothing: `[1, 2].join(",")` is `expected Text, found Int`, and the
 spelling is `[1, 2].map(|n| n.to_text()).join(",")`. A sequence of `Char` uses
-`to_text()` instead, which is a `Vec[Char]` row rather than a pipeline one
-([ADR-144](../../../decisions/144-a-sequence-of-text-joins-and-a-sequence-of-char-becomes-one.md)).
+`to_text()` instead, which is a `Vec[Char]` row rather than a pipeline one.
 
 `chunks` and `windows` are the two that answer a sequence *of sequences*, and
-what separates them is what happens to a group that does not fill
-([ADR-149](../../../decisions/149-a-chunking-partitions-and-a-window-slides.md)).
+what separates them is what happens to a group that does not fill.
 A chunking partitions: every element appears once, in order, and a length the
 size does not divide leaves a short last chunk. A window slides by one and keeps
 only the runs that fit, so a sequence shorter than the size answers `[]`.
@@ -346,8 +343,7 @@ element type.
 ## Each stage counts its own input
 
 A stage cannot see the source. It sees what the stage before it handed it, and
-that is what `take`, `skip`, `enumerate`, `zip` and `position` count
-([ADR-071](../../../decisions/071-a-pipeline-chain-is-nested-and-each-stage-counts-its-own-input.md)).
+that is what `take`, `skip`, `enumerate`, `zip` and `position` count.
 
 ```praxis
 // Every stage that asks "which element is this?" counts its own input, not
@@ -445,9 +441,7 @@ the first element starts it.
 ## Searching answers an `Option`
 
 `find` answers the matching element, `position` answers its index, and a miss is
-`None` in both cases
-([ADR-082](../../../decisions/082-find-answers-the-element-and-a-miss-is-none.md)).
-The result is the ordinary [`Option`](enums.md) enum, so a
+`None` in both cases. The result is the ordinary [`Option`](enums.md) enum, so a
 [`match`](pattern-matching.md) is how you read it.
 
 ```praxis
@@ -525,12 +519,11 @@ None
 
 Five do not: `min`, `max`, `min_by`, `max_by` and `reduce` all derive their
 answer from an element, and an empty sequence has none. They **fault**, and they
-deliberately do not answer `None`
-([ADR-076](../../../decisions/076-absence-is-an-option-and-an-empty-min-is-a-fault.md)):
-an empty `min` is a mistake in the program, where a `find` that matches nothing
-is ordinary domain absence. A `0` would be worse than either — it is below every
-element of `[3, 4]` and above every element of `[-3, -4]`, and nothing at the
-call site could tell it from a real minimum.
+deliberately do not answer `None`: an empty `min` is a mistake in the program,
+where a `find` that matches nothing is ordinary domain absence. A `0` would be
+worse than either — it is below every element of `[3, 4]` and above every
+element of `[-3, -4]`, and nothing at the call site could tell it from a real
+minimum.
 
 ```praxis
 // An empty `min` has no answer, and the fault says so.
@@ -621,9 +614,7 @@ true
 One rule instead of a rule per collection, and it is answerable without knowing
 which receiver you are on. The alternative was `filter` returning the receiver's
 own type where a row happened to exist and a `Vec` otherwise, which nobody can
-hold in their head — the reasoning is in
-[ADR-127](../../../decisions/127-a-pipelines-source-is-the-for-loops-and-a-collection-converts-by-naming-what-it-becomes.md)
-decision 6.
+hold in their head.
 
 `to_map` and `to_counter` say "a pair" in their receiver, so a mismatch is a
 type error at the method name rather than a fault later: `[1, 2].to_map()` is
@@ -682,10 +673,8 @@ a, b, c
 ```
 
 `sorted_by_key` exists because a keyed collection cannot order its own items. No
-composite type is orderable
-([ADR-045](../../../decisions/045-ordering-semantics-and-the-compare-callback.md)),
-so the moment a pipeline's item is a pair — the moment its source is a `Map` or
-a `Counter` — `sorted` is unavailable:
+composite type is orderable, so the moment a pipeline's item is a pair — the
+moment its source is a `Map` or a `Counter` — `sorted` is unavailable:
 
 ```praxis
 // A pipeline whose item is a pair has no `sorted`.
@@ -747,9 +736,8 @@ fn main() {
 ```
 
 **There is no `collect`.** A chain that ends on a streaming stage materializes
-anyway, so the word named a step the compiler was taking whether or not you
-wrote it ([ADR-126](../../../decisions/126-a-pipeline-materializes-and-collect-named-a-step-it-takes-anyway.md)).
-The method does not exist:
+anyway, so the word would name a step the compiler takes whether or not you
+write it. The method does not exist:
 
 ```praxis
 // `collect` is not a method. A chain materializes without being told to.
@@ -776,9 +764,8 @@ receivers it is a real conversion, because nothing a `Set` or a `Map` holds is a
 
 **The chain is still one loop.** Eager does not mean a `Vec` per stage:
 `v.map(f).filter(p).sum()` compiles to a single loop with no intermediate
-allocation ([ADR-029](../../../decisions/029-pipeline-fusion.md)). A stage or
-sink that stops the stream therefore stops the whole loop, which is observable
-when a stage has a side effect:
+allocation. A stage or sink that stops the stream therefore stops the whole
+loop, which is observable when a stage has a side effect:
 
 ```praxis
 // The whole chain is one loop over the source, so a stage or sink that stops
@@ -822,7 +809,6 @@ pass to a function or store in a record: `var xs: Seq[Int] = []` is reported as
 time, and the value at the end of a chain is an ordinary one — a `Vec`, the
 [collection](collections.md) a conversion named, or a scalar.
 
-**`Grid.map` is not the pipeline's `map`.** `Grid` is deliberately outside the
-ten receivers so the name stays free for the shape-preserving version that
-answers a `Grid`, and that version is not implemented: `g.map(|c| c)` is `Y110`
-today.
+**A `Grid` is not one of the ten.** `g.map(|c| c)` is a `Y110`, and `g.cells()`
+or `g.positions()` is the way into a chain: a grid's shape is part of its value,
+and a stage that flattened it would be answering about something else.

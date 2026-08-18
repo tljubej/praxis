@@ -11,7 +11,7 @@
 
 use crate::data::{Level, TypeData, VarState};
 use crate::db::TypeDb;
-use crate::fold::{fold, visit_only_composites, FoldMemo, TypeFolder};
+use crate::fold::{FoldMemo, TypeFolder, fold, visit_only_composites};
 use crate::type_id::{Type, VarId};
 
 /// Why two types could not be unified.

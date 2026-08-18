@@ -51,13 +51,13 @@ use std::rc::Rc;
 
 use praxis_ast::AstNode;
 use praxis_codegen_cranelift::{Generation, Jit};
-use praxis_hir::{analyze_root, lower, mono::monomorphize, TypedItem};
+use praxis_hir::{TypedItem, analyze_root, lower, mono::monomorphize};
 use praxis_mir::{annotate, lower_module};
 use praxis_runtime::{
-    crash_snapshot::SnapshotFrame, CrashSnapshot, GcRef, NativeScope, RootSet, Runtime,
-    RuntimeContext,
+    CrashSnapshot, GcRef, NativeScope, RootSet, Runtime, RuntimeContext,
+    crash_snapshot::SnapshotFrame,
 };
-use praxis_types::{Type, TypeDb};
+use praxis_typeck::{Type, TypeDb};
 
 use crate::purity::assert_read_only;
 use crate::value::UNREADABLE;
@@ -339,9 +339,9 @@ fn collect_bindings(
 /// One arm per [`praxis_runtime::ScalarValue`] variant and no fallback, so a
 /// sixth runtime scalar is a compile error here rather than a local that
 /// silently stops binding.
-fn scalar_type_of(v: praxis_runtime::ScalarValue) -> praxis_types::ScalarType {
+fn scalar_type_of(v: praxis_runtime::ScalarValue) -> praxis_typeck::ScalarType {
     use praxis_runtime::ScalarValue as S;
-    use praxis_types::ScalarType as T;
+    use praxis_typeck::ScalarType as T;
     match v {
         S::Int(_) => T::Int,
         S::Bool(_) => T::Bool,
@@ -743,12 +743,12 @@ mod tests {
         let text = db.text();
         let inner = db.record(
             Some("Poo".to_string()),
-            praxis_types::FieldSet::from_pairs(vec![("z".to_string(), text)]).expect("one field"),
+            praxis_typeck::FieldSet::from_pairs(vec![("z".to_string(), text)]).expect("one field"),
         );
         let int = db.int();
         let foo = db.record(
             Some("Foo".to_string()),
-            praxis_types::FieldSet::from_pairs(vec![
+            praxis_typeck::FieldSet::from_pairs(vec![
                 ("x".to_string(), inner),
                 ("y".to_string(), int),
             ])
@@ -791,7 +791,7 @@ mod tests {
         let var = db.fresh_var();
         let unwritable = db.record(
             Some("Foo".to_string()),
-            praxis_types::FieldSet::from_pairs(vec![("v".to_string(), var)]).expect("one field"),
+            praxis_typeck::FieldSet::from_pairs(vec![("v".to_string(), var)]).expect("one field"),
         );
         let locals = || {
             vec![
@@ -833,8 +833,8 @@ mod tests {
         let var = db.fresh_var();
         let vec_of_var = db
             .collection(
-                praxis_types::CollectionCtor::Vec,
-                praxis_types::CollectionArgs::new(praxis_types::CollectionCtor::Vec, vec![var])
+                praxis_typeck::CollectionCtor::Vec,
+                praxis_typeck::CollectionArgs::new(praxis_typeck::CollectionCtor::Vec, vec![var])
                     .expect("Vec takes one arg"),
             )
             .expect("Vec[?T]");

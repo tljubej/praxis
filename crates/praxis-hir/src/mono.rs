@@ -40,7 +40,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use praxis_types::{Scheme, Type, TypeDb, TypeKey, VarId};
+use praxis_typeck::{Scheme, Type, TypeDb, TypeKey, VarId};
 
 use crate::lower::stmt_exprs_mut;
 use crate::name_table::NameTable;
@@ -494,7 +494,7 @@ fn specialize_type(db: &mut TypeDb, binders: &[VarId], args: &[Type], t: Type) -
 /// The (param_types, result) of a Func type, or (empty, t) if not a Func.
 fn func_shape(db: &TypeDb, t: Type) -> (Vec<Type>, Type) {
     match db.data(db.follow(t)) {
-        praxis_types::TypeData::Func { params, result } => (params.clone(), *result),
+        praxis_typeck::TypeData::Func { params, result } => (params.clone(), *result),
         _ => (Vec::new(), t),
     }
 }

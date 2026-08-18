@@ -60,7 +60,7 @@ pub mod workspace;
 pub use document::{Document, DocumentStore, Revision};
 pub use position::{Encoding, PositionMap};
 pub use query::{Analyzer, CompletionContext, Snapshot};
-pub use server::{run, serve, Server};
+pub use server::{Server, run, serve};
 
 /// The milestone that filled this crate.
 pub const FILLED_AT_MILESTONE: u32 = 11;

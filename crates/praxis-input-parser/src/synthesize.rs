@@ -10,7 +10,7 @@
 
 use crate::ast::{AtomicKind, ParserAst, TemplatePart};
 use praxis_source::Span;
-use praxis_types::{
+use praxis_typeck::{
     CollectionCtor, EnumVariantDef, FieldSet, TupleElems, Type, TypeCtorError, TypeDb, VariantSet,
 };
 
@@ -202,8 +202,8 @@ fn synth_inner(
 /// sites to be *touched* but not to make the same grouping decision. There is
 /// one decision, and the two sides only choose how to spell its answer.
 ///
-/// Deliberately its own enum rather than a [`praxis_types::ScalarType`]:
-/// `praxis-runtime` does not depend on `praxis-types` (it already depends on
+/// Deliberately its own enum rather than a [`praxis_typeck::ScalarType`]:
+/// `praxis-runtime` does not depend on `praxis-typeck` (it already depends on
 /// this crate, so there is no cycle), and `UInt` — the one scalar neither side
 /// may answer — is not nameable here at all. See [`AtomicClass::of`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,7 +249,7 @@ fn atomic_type(kind: AtomicKind, db: &mut TypeDb) -> Type {
     match AtomicClass::of(kind) {
         AtomicClass::Int => db.int(),
         AtomicClass::Float => db.float(),
-        AtomicClass::Byte => db.scalar(praxis_types::ScalarType::Byte),
+        AtomicClass::Byte => db.scalar(praxis_typeck::ScalarType::Byte),
         AtomicClass::Char => db.char(),
         AtomicClass::Text => db.text(),
     }
@@ -356,7 +356,7 @@ mod tests {
     /// compile. §7.4's non-negativity is the parse rule instead.
     #[test]
     fn every_atomic_the_design_requires_has_a_type() {
-        use praxis_types::{ScalarType, TypeData};
+        use praxis_typeck::{ScalarType, TypeData};
         let mut db = TypeDb::new();
         for kind in AtomicKind::ALL {
             let t = synthesize(&atom(*kind), &mut db).expect("an atomic synthesizes");
@@ -388,7 +388,7 @@ mod tests {
         // TypeDb does not deduplicate handles; compare by data shape.
         assert!(matches!(
             db.data(t),
-            praxis_types::TypeData::Scalar(praxis_types::ScalarType::Int)
+            praxis_typeck::TypeData::Scalar(praxis_typeck::ScalarType::Int)
         ));
     }
 
@@ -401,13 +401,13 @@ mod tests {
         };
         let t = synthesize(&ast, &mut db).expect("a valid AST synthesizes");
         match db.data(t) {
-            praxis_types::TypeData::Collection { ctor, args } => {
+            praxis_typeck::TypeData::Collection { ctor, args } => {
                 assert_eq!(*ctor, CollectionCtor::Vec);
                 assert_eq!(args.len(), 1);
                 assert!(
                     matches!(
                         db.data(args[0]),
-                        praxis_types::TypeData::Scalar(praxis_types::ScalarType::Int)
+                        praxis_typeck::TypeData::Scalar(praxis_typeck::ScalarType::Int)
                     ),
                     "the Vec element must be Int, got {}",
                     db.render(args[0])
@@ -426,13 +426,13 @@ mod tests {
         };
         let t = synthesize(&ast, &mut db).expect("a valid AST synthesizes");
         match db.data(t) {
-            praxis_types::TypeData::Collection { ctor, args } => {
+            praxis_typeck::TypeData::Collection { ctor, args } => {
                 assert_eq!(*ctor, CollectionCtor::Grid);
                 assert_eq!(args.len(), 1);
                 assert!(
                     matches!(
                         db.data(args[0]),
-                        praxis_types::TypeData::Scalar(praxis_types::ScalarType::Char)
+                        praxis_typeck::TypeData::Scalar(praxis_typeck::ScalarType::Char)
                     ),
                     "the Grid element must be Char, got {}",
                     db.render(args[0])
@@ -460,7 +460,7 @@ mod tests {
         // Walk three Vec levels.
         let mut current = t;
         for level in 1..=3 {
-            let praxis_types::TypeData::Collection { ctor, args } = db.data(current) else {
+            let praxis_typeck::TypeData::Collection { ctor, args } = db.data(current) else {
                 panic!("level {level} should be Vec, got {}", db.render(current));
             };
             assert_eq!(*ctor, CollectionCtor::Vec, "wrong ctor at level {level}");
@@ -470,7 +470,7 @@ mod tests {
         assert!(
             matches!(
                 db.data(current),
-                praxis_types::TypeData::Scalar(praxis_types::ScalarType::Int)
+                praxis_typeck::TypeData::Scalar(praxis_typeck::ScalarType::Int)
             ),
             "nested leaf must be Int, got {}",
             db.render(current)
@@ -493,7 +493,7 @@ mod tests {
         // Single anonymous capture → scalar Int.
         assert!(matches!(
             db.data(t),
-            praxis_types::TypeData::Scalar(praxis_types::ScalarType::Int)
+            praxis_typeck::TypeData::Scalar(praxis_typeck::ScalarType::Int)
         ));
     }
 
@@ -518,7 +518,7 @@ mod tests {
             span: Span::at(0),
         };
         let t = synthesize(&ast, &mut db).expect("a valid AST synthesizes");
-        assert!(matches!(db.data(t), praxis_types::TypeData::Tuple(_)));
+        assert!(matches!(db.data(t), praxis_typeck::TypeData::Tuple(_)));
     }
 
     #[test]
@@ -543,7 +543,7 @@ mod tests {
             span: Span::at(0),
         };
         let t = synthesize(&ast, &mut db).expect("a valid AST synthesizes");
-        let praxis_types::TypeData::Record { def, .. } = db.data(t) else {
+        let praxis_typeck::TypeData::Record { def, .. } = db.data(t) else {
             panic!("expected Record, got {:?}", db.data(t));
         };
         let rdef = db.record_def(*def);
@@ -581,12 +581,12 @@ mod tests {
         };
         let t = synthesize(&ast, &mut db).expect("a valid AST synthesizes");
         match db.data(t) {
-            praxis_types::TypeData::Collection { ctor, args } => {
+            praxis_typeck::TypeData::Collection { ctor, args } => {
                 assert_eq!(*ctor, CollectionCtor::Vec);
                 assert_eq!(args.len(), 1);
                 assert!(matches!(
                     db.data(args[0]),
-                    praxis_types::TypeData::Record { .. }
+                    praxis_typeck::TypeData::Record { .. }
                 ));
             }
             other => panic!("expected Vec[Record], got {other:?}"),

@@ -159,10 +159,10 @@ Neither hint on that file can be accepted, for the second reason:
 syntax for. Showing a hint that cannot be applied is better than offering an edit
 that would not compile.
 
-There is a test in `crates/praxis-lsp/tests/m12.rs` —
-`applying_a_hints_edit_keeps_the_file_clean` — that applies every edit a file's
-hints carry and asserts the result still checks with no diagnostics. It is the
-only thing that would catch an annotation the grammar refuses.
+A language-server test — `applying_a_hints_edit_keeps_the_file_clean` — applies
+every edit a file's hints carry and asserts the result still checks with no
+diagnostics. It is the only thing that would catch an annotation the grammar
+refuses.
 
 ## Hover
 
@@ -194,10 +194,10 @@ That sentence is not written in the language server. It is the catalog entry's
 `doc` field, taken from the entry method resolution actually selected, so the row
 that runs and the sentence you read are the same row.
 
-A [prelude](../language/prelude.md) name keeps its scheme and gains §16.1's own
-sentence under it, and a name in **type position** — the `Int` in `var n: Int`,
-the `Vec` in `Vec[Text]` — answers with what the type is. Neither sentence is
-written in the language server either; both come from the same
+A [prelude](../language/prelude.md) name keeps its scheme and gains the
+prelude's own sentence under it, and a name in **type position** — the `Int` in
+`var n: Int`, the `Vec` in `Vec[Text]` — answers with what the type is. Neither
+sentence is written in the language server either; both come from the same
 `crates/praxis-stdlib/src/prelude.rs` table name resolution seeds the root scope
 from.
 
@@ -268,12 +268,11 @@ Vec[{ a: Int, b: Int }]
 ````
 
 This works because inference keeps the parser AST it built, along with the
-synthesized type of every node in it, keyed by span
-([ADR-098](../../../decisions/098-the-parser-ast-is-retained-by-inference.md)).
-The alternative was a second scanner over template interiors living in the
-language server, free to disagree with the compiler about where a capture ends.
-The index means "which parser node is the cursor in" is a lookup against spans
-the compiler computed, so it cannot disagree.
+synthesized type of every node in it, keyed by span. The alternative is a second
+scanner over template interiors living in the language server, free to disagree
+with the compiler about where a capture ends. The index means "which parser node
+is the cursor in" is a lookup against spans the compiler computed, so it cannot
+disagree.
 
 ## Two bindings with one name
 
@@ -320,14 +319,13 @@ message `expected Text, found Int`, severity error, source `praxis`, over the
 range that starts at line 8 column 13 and ends one character later. The same
 code, the same message, the same span.
 
-This is structural, not a coincidence that holds today.
-[ADR-097](../../../decisions/097-the-shared-query-layer-lives-in-praxis-lsp.md)
-put the front-end query layer in the `praxis-lsp` crate and made `praxis check`
-call it: the CLI builds a snapshot of the file and asks it for diagnostics, and
-the server's publish path does the same thing to the same snapshot type. Which
-diagnostics exist, what order they come in, and whether a file whose parse
-already failed still gets analyzed are decided in one place. A divergence is not
-unlikely; it is unrepresentable.
+This is structural, not a coincidence that holds today. The front-end query
+layer lives in the `praxis-lsp` crate and `praxis check` calls it: the CLI builds
+a snapshot of the file and asks it for diagnostics, and the server's publish path
+does the same thing to the same snapshot type. Which diagnostics exist, what
+order they come in, and whether a file whose parse already failed still gets
+analyzed are decided in one place. A divergence is not unlikely; it is
+unrepresentable.
 
 Two consequences worth knowing:
 

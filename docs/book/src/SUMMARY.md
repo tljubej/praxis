@@ -70,7 +70,6 @@
 
 - [The compiler pipeline](internals/pipeline.md)
 - [The object heap and the collector](internals/heap.md)
-- [Where the decisions are written down](internals/adrs.md)
 
 ---
 

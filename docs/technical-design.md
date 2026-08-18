@@ -2080,7 +2080,7 @@ praxis/
     praxis-parser/
     praxis-ast/
     praxis-hir/
-    praxis-types/
+    praxis-typeck/
     praxis-input-parser/
     praxis-mir/
     praxis-codegen-cranelift/
@@ -2110,7 +2110,7 @@ praxis/
 | `praxis-parser` | ordinary language parser and recovery |
 | `praxis-ast` | typed syntax wrappers |
 | `praxis-hir` | name resolution and HIR |
-| `praxis-types` | type interning, inference, capability resolution |
+| `praxis-typeck` | type interning, inference, capability resolution |
 | `praxis-input-parser` | parser-expression lexer, template parser, type synthesis, parser plans |
 | `praxis-mir` | lowering, CFG, liveness, fault and GC analysis |
 | `praxis-codegen-cranelift` | JIT module and ABI lowering |

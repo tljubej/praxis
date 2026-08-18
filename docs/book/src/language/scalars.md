@@ -45,9 +45,7 @@ initializer. See [Bindings and shadowing](bindings.md).
 
 One further name is legal in type position. `Never` is the type of an
 expression that produces no value (`panic(...)`, `return`, `break`); see
-[Control flow](control-flow.md). `UInt` and `Byte` appear in the design document
-as reserved scalars and are **not implemented**: either one in an annotation is
-`N002 unknown type`.
+[Control flow](control-flow.md).
 
 ## Literals
 
@@ -229,12 +227,9 @@ character read out of a text the program did not write down — a line it just
 parsed, a name it was given — and the literal is the spelling for one the
 program chose. `t[i] == '#'` is the common shape, with one of each.
 
-The literal is also a *load* rather than a call.
-[ADR-100](../../../decisions/100-a-small-int-is-one-object-and-a-literal-is-a-load.md)
-made an `Int` literal two loads out of an interned table, and
-[ADR-141](../../../decisions/141-a-character-is-one-token-and-a-literal-is-a-load.md)
-does the same for an ASCII `Char`, where `"#"[0]` was a runtime call that
-re-evaluated on every execution.
+The literal is also a *load* rather than a call. An `Int` literal is two loads
+out of an interned table, and an ASCII `Char` literal is the same; `"#"[0]` is a
+runtime call that re-evaluates every time it is reached.
 
 The literal is what makes a `Char` matchable, which is the part that is not
 cosmetic — see [pattern matching](pattern-matching.md).
@@ -255,9 +250,7 @@ its type, and that no generic function needs a boxing rule of its own.
 What it does not cost is an allocation per number. The runtime interns `Int`
 values from `-256` to `1024` and `Char` values from `0` to `127` into immortal
 tables, so the loop counters and ASCII characters a puzzle program actually
-handles are a table read rather than a heap block
-([ADR-100](../../../decisions/100-a-small-int-is-one-object-and-a-literal-is-a-load.md),
-[ADR-107](../../../decisions/107-a-small-char-is-one-object-and-there-is-no-char-literal.md)).
+handles are a table read rather than a heap block.
 
 ## Equality
 
@@ -334,11 +327,9 @@ praxis: 1 error(s)
 
 The same rule governs `sorted()` and heap elements: a `Vec[(Int, Int)]` cannot
 be sorted and a `MinHeap[(Int, Int)]` cannot be pushed to, because a tuple has
-no order. A
-lexicographic order over composites is a language decision nobody has taken; the
-reasoning, and the account of what the checker used to accept and then compare,
-is
-[ADR-045](../../../decisions/045-ordering-semantics-and-the-compare-callback.md).
+no order. A lexicographic order over composites is conventional elsewhere and is
+not defined here: ordering a composite means choosing a semantics for it, and
+rejecting the program is the honest answer until one is chosen.
 
 Ordering *inside a container* is a separate question, with one deliberate
 difference. A container needs a total order or it corrupts its own invariants,

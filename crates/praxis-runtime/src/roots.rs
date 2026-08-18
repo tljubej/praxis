@@ -35,8 +35,8 @@
 use std::cell::RefCell;
 use std::marker::PhantomData;
 
-use crate::context::RuntimeContext;
 use crate::GcRef;
+use crate::context::RuntimeContext;
 
 /// Anything that can enumerate the GC references it keeps alive (§12.3).
 ///

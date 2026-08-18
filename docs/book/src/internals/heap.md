@@ -19,7 +19,7 @@ function does not copy it, and mutating it through the parameter is visible to
 the caller. Rebinding the parameter is not — that changes one slot in one frame.
 
 ```praxis
-// A call copies the reference, never the object (§10.3). `xs` and `v` name
+// A call copies the reference, never the object. `xs` and `v` name
 // one Vec, so a push through either is visible through both.
 fn push_two(xs: Vec[Int]) {
     xs.push(1)
@@ -59,9 +59,7 @@ structurally, so two separately built vectors with the same elements are equal.
 That is what makes it safe for the runtime to hand out one shared object for
 every `true`, every `Unit`, every code point below 128 and every integer from
 −256 to 1024: an optimization that would be observable in a language with
-reference equality is unobservable here
-([ADR-100](../../../decisions/100-a-small-int-is-one-object-and-a-literal-is-a-load.md),
-[ADR-107](../../../decisions/107-a-small-char-is-one-object-and-there-is-no-char-literal.md)).
+reference equality is unobservable here.
 
 The fourth thing is memory. The collector cannot change what a program prints,
 but it decides how much memory the program holds while printing it — and its
@@ -123,19 +121,17 @@ Two fields that used to be there are not. The mark colour moved into the page,
 because a colour byte in the header costs a random-access store per surviving
 object per collection. The payload size was deleted outright because nothing read
 it, which took the header from 24 bytes to 16 and every block in the heap down by
-eight ([ADR-109](../../../decisions/109-pages-stay-segregated-by-size-class.md)).
-Adding a field back is not a local decision: it moves the size-class ladder and
-the immediate that generated code folds to reach a payload, so it owes an ABI
-version bump and an ADR.
+eight. Adding a field back is not a local decision: it moves the size-class
+ladder and the immediate that generated code folds to reach a payload, so it owes
+an ABI version bump.
 
 `payload_offset` is the single layout authority — written by the allocator from
 the same calculation that produced the address it initialized, and read by
-everything else
-([ADR-039](../../../decisions/039-gc-header-layout-authority-and-heap-provenance.md)).
-`heap_id` is allocation provenance, and it is the one field two rounds of
-shrinking refused to spend: the mark phase reads it *before* it dereferences
-anything the header points at, so a reference from another heap or into swept
-storage is rejected rather than followed.
+everything else. Nothing downstream re-derives it, so nothing downstream can
+derive it differently. `heap_id` is allocation provenance, and it is the one
+field two rounds of shrinking refused to spend: the mark phase reads it *before*
+it dereferences anything the header points at, so a reference from another heap
+or into swept storage is rejected rather than followed.
 
 Everything payload-aware is centralized in the descriptor rather than scattered
 across type switches: `trace`, `drop_value`, `format`, and optional `equals`,
@@ -147,9 +143,8 @@ generic `Record`, `Tuple`, `Enum`, `Closure` and `VarCell` shapes. They are
 `compare` is carried by exactly the eleven a `Map` key or `Set` member can be —
 the scalars, `Text`, `Range`, `Record`, `Tuple` and `Enum` — and is `None` on the
 nine collections, `Closure` and `VarCell`, none of which can ever be a key. That
-is what makes the order a container walks its keys in total
-([ADR-138](../../../decisions/138-a-container-orders-by-the-value-and-not-by-its-printing.md)),
-and it is a deliberately wider set than the source language's `<`.
+is what makes the order a container walks its keys in total, and it is a
+deliberately wider set than the source language's `<`.
 
 An `Int` is therefore 24 bytes: 16 of header and 8 of payload.
 
@@ -159,7 +154,7 @@ Every block lives on a **page**: one 32 KiB allocation, aligned to 32 KiB, whose
 first bytes are a `PageHeader` and whose remainder is an array of equal-sized
 blocks. Because the base is aligned to the page size, finding an address's page
 is a mask and finding its block index is a multiply-shift. No side table, no hash
-lookup ([ADR-103](../../../decisions/103-a-page-owns-the-storage-and-the-liveness.md)).
+lookup.
 
 The size-class ladder is 8-byte granular from 16 bytes (a bare header, which is
 what a `Unit` is) to 128 bytes: 15 rungs. Deliberately not powers of two — the
@@ -220,16 +215,15 @@ Five are strong — the collector keeps them alive:
 3. **A failed parse's partial value**, so the crash debugger can show it.
 4. **The crash snapshot**, once one has been taken.
 5. **Native scopes** — the run of entries a runtime helper claims while it builds
-   a value across an allocation. Holding a payload reference across a safepoint
-   without rooting its owner does not type-check
-   ([ADR-114](../../../decisions/114-the-native-roots-are-one-store-and-only-their-depth-is-bounded.md)).
+   a value across an allocation. They live in one growable store whose *depth*
+   is what is bounded rather than its size, and holding a payload reference
+   across a safepoint without rooting its owner does not type-check.
 
 The sixth is **weak**: the crash debugger's per-call value slots. The collector
 never traces them — that would merge the two slot sets the compiler deliberately
 keeps apart — but it scans them once per collection, immediately after the sweep,
 and turns every entry naming reclaimed storage into an absence. So a debug value
-is always a live object or nothing, never a dangling reference
-([ADR-106](../../../decisions/106-the-debug-values-are-the-collectors-one-weak-arm.md)).
+is always a live object or nothing, never a dangling reference.
 
 ### The shadow stack
 
@@ -240,16 +234,14 @@ A frame is not an object. The runtime owns one contiguous region of slots for th
 whole program; a function's frame is the run between the `top` it found on entry
 and the `top` it left behind. The prologue loads `top`, zeroes exactly the slots
 it claims, and stores the bumped `top`; the epilogue stores the saved base back.
-No call, no allocation, no `catch_unwind`
-([ADR-101](../../../decisions/101-the-shadow-stack-is-contiguous.md)). The
+No call, no allocation, no `catch_unwind`. The
 collector scans `[base, top)` in one linear pass, skipping nulls, which yields
 exactly what a walk of per-frame objects yielded and allocates nothing.
 
 A slot is a **live range**, not a name. Locals that are never live at the same
 safepoint share a slot, assigned by colouring the interference relation, so a
 frame's width is its peak simultaneous liveness rather than its count of locals.
-Over the AoC corpus that took the summed declared width from 1925 slots to 216
-([ADR-128](../../../decisions/128-a-shadow-slot-is-a-live-range-not-a-name.md)).
+Over the AoC corpus that took the summed declared width from 1925 slots to 216.
 
 Shadow-stack exhaustion is unrepresentable rather than handled, and the argument
 runs through the recursion guard. Every prologue refuses before it pushes
@@ -259,8 +251,7 @@ eleventh — the floor being the high-water mark across both targets the backend
 supports, so a program faults at the same depth on either. The budget is 8000
 reference-width frames' worth. The shadow-stack reservation is sized from that
 same arithmetic plus one frame of headroom, so there is no bounds check in the
-prologue, because there is nothing left to check
-([ADR-105](../../../decisions/105-the-recursion-guard-spends-a-byte-budget.md)).
+prologue, because there is nothing left to check.
 
 This is the one place the machinery becomes a fault you can hit:
 
@@ -282,8 +273,7 @@ On the runtime side, allocation is gated by a token. `Heap::alloc` takes a
 `Safepoint`, and the only way to obtain one is `Heap::pace`, which is where the
 collection test runs. Obtaining the token *is* the pacing, and the token is
 neither `Copy` nor `Clone` — one token, one allocation. So "allocate on the paced
-path without pacing" has no spelling
-([ADR-040](../../../decisions/040-safepoint-token-and-the-unpaced-back-door.md)).
+path without pacing" has no spelling.
 
 The test itself is two words: has this heap allocated more bytes since the last
 collection than its current threshold. After each collection the threshold is
@@ -299,25 +289,23 @@ speculative growth, because being wrong about the future costs only a collection
 that finds nothing. `live × 2` is not speculative: those bytes are provably
 reachable now, so a program legitimately holding more than the ceiling must be
 allowed to exceed it, or every collection would prove it can reclaim nothing and
-the next allocation would trigger another
-([ADR-112](../../../decisions/112-the-pacer-has-a-ceiling-and-the-live-set-may-exceed-it.md)).
+the next allocation would trigger another. The ceiling clamps the doubling term
+and never the whole expression, which is what keeps those two rules from
+fighting.
 
 The resident set a program holds is therefore `floor + live + that threshold`,
 where the floor is what the process costs before the program does anything, JIT
-included:
-[ADR-129](../../../decisions/129-the-ceiling-is-worth-what-a-collection-costs.md)
-measured 7.3 MiB, and a one-statement program costs 5.5 MiB on the machine the
-numbers above come from. It is a figure that moves with the host. The ceiling was
-64 MiB until two unrelated changes made a collection cheaper, at which point the
-knee moved and it became 4 MiB. That is a tuned constant, and it is the kind of
-thing that moves again.
+included: `out(1)` costs 5.5 MiB on the machine the numbers above come from, and
+that is a figure which moves with the host. The ceiling is a tuned constant of
+the same kind. It is a bet on what a collection costs — hold more garbage and
+you collect less often — so it moves whenever a collection gets cheaper.
 
 Generated code does not call the pacing function. It transcribes it: two loads
 and a compare, with the allocation's fast path on the not-due side and the
 out-of-line wrapper on the other. Which means the collector runs on a branch that
-generated code took, not on a call it made
-([ADR-113](../../../decisions/113-an-int-box-is-a-table-read-behind-a-pacing-branch.md),
-[ADR-119](../../../decisions/119-generated-code-claims-the-block-and-nothing-between-can-collect.md)).
+generated code took, not on a call it made. What makes that sound is that
+nothing between the pacing branch and the last store into the new object can
+collect, so there is no window in which a half-initialized block is reachable.
 
 ## Where it does show through
 
@@ -339,8 +327,7 @@ rather than the process dying on a native stack overflow.
 
 **Running out of memory is not modelled.** A size the host cannot serve — a
 `BitSet` insert of 10^18, say — is a fault checked before anything is allocated,
-and reads `program faulted: size or extent out of range`
-([ADR-041](../../../decisions/041-bounded-extents-fault-instead-of-aborting.md)).
+and reads `program faulted: size or extent out of range`.
 But a page the operating system refuses is not: the process aborts. Nothing in
 the language observes heap exhaustion.
 
@@ -352,26 +339,21 @@ Permanent, in the sense that the language is defined around it:
   assignment and argument passing.
 - There is no identity operator, and equality is structural.
 - There are no user-visible finalizers.
-- Object addresses are stable for an object's lifetime.
+- Object addresses are stable for an object's lifetime, and no interior pointer
+  is ever exposed as a long-lived value.
 
 A current implementation choice, and most of these have already changed once:
 
-- Mark-and-sweep, non-moving, single-threaded, no write barrier. §12.1 chose it
-  for stable addresses and a small surface; a generational collector is on §18.2's
-  list of later optimizations, and would take the stable addresses with it.
+- Mark-and-sweep, non-moving, single-threaded, no write barrier. It was chosen
+  for stable addresses and a small surface; a generational collector would take
+  the stable addresses with it, and everything above that leans on them.
 - Size-class pages of 32 KiB with a 15-rung ladder. This replaced a bump arena
   with a side registry, and the alternative of segregating by descriptor was
-  weighed and rejected on provenance grounds rather than on memory
-  ([ADR-109](../../../decisions/109-pages-stay-segregated-by-size-class.md)).
+  weighed and rejected on provenance grounds rather than on memory: it deletes
+  the header, and with no per-object word there is nothing left to read before
+  masking an unvalidated reference to a page.
 - Which values are interned, and the 4 MiB pacing ceiling.
-- The 16-byte header. Two fields have left it; §4.3 explicitly reserves the right
-  to intern, tag or eliminate small objects entirely, provided reference and
-  aliasing semantics survive — and for `Int` there are none to survive, which is
-  a fact about the language rather than an assumption about the program.
-
-The design document's §11 and §12 describe this accurately at the level of
-character, and inaccurately at the level of layout: §12.2's conceptual header
-lists a size and mark bits that the header no longer has, and §11.4's
-`TypeDescriptor` sketch is missing `compare` and `owned_bytes`. §12.5's "no
-user-visible finalizers" and §12.6's rule against exposing an interior pointer as
-a long-lived value are both exactly true.
+- The 16-byte header. Two fields have left it, and the language reserves the
+  right to intern, tag or eliminate small objects entirely, provided reference
+  and aliasing semantics survive — and for `Int` there are none to survive, which
+  is a fact about the language rather than an assumption about the program.

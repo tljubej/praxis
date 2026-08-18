@@ -25,15 +25,15 @@ pub use ast::{
     InvalidRepeatCount, ParserAst, RepeatCount, SectionItem, Separator, SkipPolicy, TemplatePart,
     WsPolicy,
 };
-pub use call::{build_call, build_repeated_tail, CallArg};
+pub use call::{CallArg, build_call, build_repeated_tail};
 pub use plan::{
-    get_plan, lower_to_plan, plan_count, register_plan, retire_all_plans, BlockItemNode,
-    CompiledPlan, FieldOrder, ParserPlan, PlanId, PlanNode, SectionItemNode, SourceOrder,
-    TemplatePartNode, TemplateShape, TooManyPlans, MAX_PLANS,
+    BlockItemNode, CompiledPlan, FieldOrder, MAX_PLANS, ParserPlan, PlanId, PlanNode,
+    SectionItemNode, SourceOrder, TemplatePartNode, TemplateShape, TooManyPlans, get_plan,
+    lower_to_plan, plan_count, register_plan, retire_all_plans,
 };
-pub use scan::{scan_template, ScanError, MAX_NESTING};
+pub use scan::{MAX_NESTING, ScanError, scan_template};
 pub use synthesize::{synthesize, synthesize_indexed};
-pub use validate::{check_call, validate, ArgKind, ValidationError};
+pub use validate::{ArgKind, ValidationError, check_call, validate};
 
 /// Marker documenting that this crate is filled at Milestone 6.
 pub const FILLED_AT_MILESTONE: u32 = 6;

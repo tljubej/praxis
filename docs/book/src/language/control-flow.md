@@ -200,9 +200,12 @@ The `Set` loop ran twice, over the two members the set had when it began, and
 both inserts landed anyway. The `Vec` loop ran four times. If that asymmetry
 matters to your program, iterate a copy.
 
-The reasoning — and why an nth-member accessor was the wrong protocol for a hash
-table and for a heap — is in
-[ADR-066](../../../decisions/066-a-for-iterates-a-snapshot.md).
+A snapshot is the only protocol a collection that cannot index itself can offer.
+A hash set and a hash map have no nth member, so answering one is a linear scan
+and every loop over a hashed collection would be quadratic; a heap's array is
+ordered at its root and nowhere else, so reading it by index answers in
+insertion order rather than in heap order. One call that hands back the members
+costs one `Vec` per loop and gets every collection right.
 
 ## `loop` is the value its `break`s carry
 
@@ -266,8 +269,9 @@ praxis: 1 error(s)
 ```
 
 Rewrite it as a `loop` with the test inside, or read the `var` the `while` left
-behind. The argument is in
-[ADR-053](../../../decisions/053-a-loop-is-the-value-its-breaks-carry.md).
+behind. Those two loops have an exit the compiler cannot fill: nothing in
+`while c { break 1 }` says what the loop produces when `c` is false, and there is
+no value to invent.
 
 `break` and `continue` apply to the innermost enclosing loop; there are no
 labels. Where there is no loop, both are `Y012` — `` `break` outside a loop ``,
@@ -367,12 +371,11 @@ reverse.
 that answers a `Vec[Int]`. It does not make a descending `Range` — there is no
 such value, and the clamp above is why. Writing `5..0` still earns no
 diagnostic: it is a legal empty collection, and the language has no warnings to
-give it
-([ADR-145](../../../decisions/145-a-reversal-needs-the-whole-sequence-so-it-is-a-barrier.md)
-decision 5).
+give it.
 
-[ADR-059](../../../decisions/059-a-range-is-a-value-and-a-descending-one-is-empty.md)
-has the rest, including why the bounds are `Int` only.
+The bounds are `Int` and nothing else. A `Float` range would need a step to
+yield anything at all — `0.0..1.0` has no elements without one — and a range
+that cannot say what it yields is not a collection.
 
 ## `return`
 

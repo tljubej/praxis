@@ -15,11 +15,11 @@
 #![allow(dead_code)] // Consumed by the Cranelift backend (Phase 4).
 
 use praxis_hir::{
-    capture::Capture, AssignOp, BinOp, Lit, TypedBlock, TypedExpr, TypedFn, TypedItem, TypedModule,
-    TypedParam, TypedStmt, UnaryOp,
+    AssignOp, BinOp, Lit, TypedBlock, TypedExpr, TypedFn, TypedItem, TypedModule, TypedParam,
+    TypedStmt, UnaryOp, capture::Capture,
 };
 use praxis_stdlib::abi::RuntimeSymbol;
-use praxis_types::{Type, TypeDb};
+use praxis_typeck::{Type, TypeDb};
 
 use crate::annot::{DebugSlots, RootSlots};
 use crate::ir::{
@@ -514,7 +514,7 @@ fn lower_fn_value_adapter(adapter: &FnValueAdapter, db: &mut TypeDb) -> Function
     // declared function type — but the fallback is a nullary adapter returning
     // `Unit`, which is a well-formed function rather than a malformed one.
     let (param_tys, result_ty) = match b.db.data(b.db.follow(adapter.fn_ty)) {
-        praxis_types::TypeData::Func { params, result } => (params.clone(), *result),
+        praxis_typeck::TypeData::Func { params, result } => (params.clone(), *result),
         _ => (Vec::new(), b.unit_ty),
     };
 
@@ -1355,7 +1355,7 @@ fn lower_expr_gc(b: &mut Builder<'_>, e: &TypedExpr) -> LocalId {
             // `AllocKind::Collection` so the codegen resolves the real element
             // descriptor. `out`/`panic` and other builtins fall through to the
             // generic call path below.
-            if let Some(ctor) = praxis_types::CollectionCtor::from_name(callee_name) {
+            if let Some(ctor) = praxis_typeck::CollectionCtor::from_name(callee_name) {
                 // The sized forms' operands are lowered **first** (ADR-146), so
                 // an argument that allocates runs before the destination local
                 // exists — the order `lower_list_lit` already keeps.
@@ -1778,7 +1778,7 @@ fn lower_interp(
     b: &mut Builder<'_>,
     parts: &[(String, TypedExpr)],
     trailing: &str,
-    ty: praxis_types::Type,
+    ty: praxis_typeck::Type,
     span: Option<(u32, u32)>,
 ) -> LocalId {
     // `acc` is `None` until the first piece exists, so nothing has to invent an
@@ -2079,9 +2079,9 @@ enum CompareVia {
 /// compare a `Text` by its `TextPayload` discriminant, under which *every* pair
 /// of owned strings is equal. Dispatching through the descriptor is wrong for no
 /// type: at worst it faults.
-fn compare_kind(b: &Builder<'_>, ty: praxis_types::Type) -> CompareVia {
-    use praxis_types::data::TypeData;
-    use praxis_types::ScalarType;
+fn compare_kind(b: &Builder<'_>, ty: praxis_typeck::Type) -> CompareVia {
+    use praxis_typeck::ScalarType;
+    use praxis_typeck::data::TypeData;
     match b.db.data(ty) {
         TypeData::Scalar(ScalarType::Float) => CompareVia::Float,
         TypeData::Scalar(ScalarType::Bool) => CompareVia::Scalar(ScalarKind::Bool),
@@ -2128,9 +2128,9 @@ enum ArithVia {
 /// the fallback the language's own typing rules make unreachable: inference
 /// requires a `Numeric` operand of every arithmetic site, so anything else has
 /// already been refused and no MIR is built for it.
-fn arith_kind(b: &Builder<'_>, ty: praxis_types::Type) -> ArithVia {
-    use praxis_types::data::TypeData;
-    use praxis_types::ScalarType;
+fn arith_kind(b: &Builder<'_>, ty: praxis_typeck::Type) -> ArithVia {
+    use praxis_typeck::ScalarType;
+    use praxis_typeck::data::TypeData;
     match b.db.data(b.db.follow(ty)) {
         TypeData::Scalar(ScalarType::Float) => ArithVia::Float,
         TypeData::Scalar(ScalarType::Text) => ArithVia::Text,
@@ -2159,7 +2159,7 @@ fn lower_compound_arith(
     op: AssignOp,
     cur: LocalId,
     rhs: LocalId,
-    operand_ty: praxis_types::Type,
+    operand_ty: praxis_typeck::Type,
     span: Option<(u32, u32)>,
 ) -> Option<LocalId> {
     match arith_kind(b, operand_ty) {
@@ -2719,7 +2719,7 @@ fn lower_loop(
     // has no representation at all (a `Never` local would fail the compile at
     // its descriptor site).
     let result = match b.db.data(b.db.follow(ty)) {
-        praxis_types::TypeData::Unit | praxis_types::TypeData::Never => None,
+        praxis_typeck::TypeData::Unit | praxis_typeck::TypeData::Never => None,
         _ => Some(b.alloc_gc(MirType::Known(ty), None, LocalDebugKind::Temp, None)),
     };
     b.jump(header);
@@ -2913,7 +2913,7 @@ enum Sink {
     /// that ends on one and a chain that ends on a stage build the identical
     /// plan — which is what ADR-126 established and what `to_vec` on a `Vec`
     /// degenerating to the identity depends on.
-    CollectInto(praxis_types::CollectionCtor),
+    CollectInto(praxis_typeck::CollectionCtor),
 }
 
 /// A recognized pipeline chain, source-first. `Then` is one element-wise stage
@@ -2967,7 +2967,7 @@ struct PipelinePlan {
 /// stages read: `enumerate`'s is `Vec[(Int, T)]` and `zip`'s is
 /// `Vec[(T, U)]`, so the pair type they allocate is one element-of away.
 fn classify_link(
-    db: &praxis_types::TypeDb,
+    db: &praxis_typeck::TypeDb,
     name: &str,
     args: &[TypedExpr],
     ty: Type,
@@ -3002,7 +3002,7 @@ fn classify_link(
 /// header. ADR-066 decision 5. It is also why the verifier's
 /// `OpaqueAtDescriptorSite` rule stays off: refusing to compile an unresolved
 /// element type would reject working programs.
-fn pair_ty_of(db: &praxis_types::TypeDb, ty: Type) -> MirType {
+fn pair_ty_of(db: &praxis_typeck::TypeDb, ty: Type) -> MirType {
     match b_db_element_of(db, ty) {
         Some(t) => MirType::Known(t),
         None => MirType::Opaque,
@@ -3017,7 +3017,7 @@ fn pair_ty_of(db: &praxis_types::TypeDb, ty: Type) -> MirType {
 /// catalog has no `collect` method, so a call carrying that name never reaches
 /// MIR (inference reports `Y110` first).
 fn classify_sink(name: &str, args: &[TypedExpr]) -> Option<Sink> {
-    use praxis_types::CollectionCtor as C;
+    use praxis_typeck::CollectionCtor as C;
     Some(match (name, args) {
         ("sum", []) => Sink::Sum,
         ("product", []) => Sink::Product,
@@ -3060,7 +3060,7 @@ fn classify_sink(name: &str, args: &[TypedExpr]) -> Option<Sink> {
 /// terminates the walk — that inner call lowers eagerly via the existing path,
 /// and *its* result becomes this chain's source (recursively fusing if it too is
 /// a pipeline).
-fn recognize_pipeline(db: &praxis_types::TypeDb, expr: &TypedExpr) -> Option<PipelinePlan> {
+fn recognize_pipeline(db: &praxis_typeck::TypeDb, expr: &TypedExpr) -> Option<PipelinePlan> {
     let TypedExpr::MethodCall {
         receiver,
         name,
@@ -3147,8 +3147,8 @@ fn recognize_pipeline(db: &praxis_types::TypeDb, expr: &TypedExpr) -> Option<Pip
 /// A collection type's single element type, or `None` for anything else (a
 /// `Map`/`Counter`, whose payload is a pair, or a type that is not a collection
 /// at all). Used only to type the source item of a fused pipeline.
-fn b_db_element_of(db: &praxis_types::TypeDb, t: Type) -> Option<Type> {
-    use praxis_types::data::TypeData;
+fn b_db_element_of(db: &praxis_typeck::TypeDb, t: Type) -> Option<Type> {
+    use praxis_typeck::data::TypeData;
     match db.data(db.follow(t)) {
         TypeData::Collection { args, .. } if args.len() == 1 => Some(args[0]),
         _ => None,
@@ -4451,7 +4451,7 @@ fn alloc_empty_vec(b: &mut Builder<'_>, result_ty: MirType) -> LocalId {
     b.alloc(
         result,
         AllocKind::Collection {
-            ctor: praxis_types::CollectionCtor::Vec,
+            ctor: praxis_typeck::CollectionCtor::Vec,
             args: vec![MirType::Opaque],
             init: CollectionInit::Empty,
         },
@@ -4471,10 +4471,10 @@ fn alloc_empty_vec(b: &mut Builder<'_>, result_ty: MirType) -> LocalId {
 /// an inference variable degrades to the same null descriptor either way.
 fn alloc_collect_target(
     b: &mut Builder<'_>,
-    ctor: praxis_types::CollectionCtor,
+    ctor: praxis_typeck::CollectionCtor,
     result_ty: Type,
 ) -> LocalId {
-    use praxis_types::data::TypeData;
+    use praxis_typeck::data::TypeData;
     let args: Vec<MirType> = match b.db.data(b.db.follow(result_ty)) {
         TypeData::Collection { args, .. } => args.iter().copied().map(MirType::Known).collect(),
         // The row's result *is* this collection, so anything else is a compiler
@@ -4501,8 +4501,8 @@ fn alloc_collect_target(
 /// here. `Grid` is the one collection with no row, because a grid needs a width
 /// and a flat item sequence does not carry one; `Range` and `Seq` are not
 /// constructible at all.
-fn collect_into_wrapper(ctor: praxis_types::CollectionCtor) -> (RuntimeSymbol, bool) {
-    use praxis_types::CollectionCtor as C;
+fn collect_into_wrapper(ctor: praxis_typeck::CollectionCtor) -> (RuntimeSymbol, bool) {
+    use praxis_typeck::CollectionCtor as C;
     match ctor {
         C::Vec => (RuntimeSymbol::VecPush, false),
         C::Set => (RuntimeSymbol::SetInsert, false),
@@ -4579,9 +4579,9 @@ impl IterPlan {
 /// `capability::iter_item` answers `None` for one and the `for` is a `Y005` — so
 /// the fallback is the `Vec` shape rather than a panic.
 fn iter_plan(db: &TypeDb, iter: &TypedExpr) -> IterPlan {
-    use praxis_types::data::TypeData;
-    use praxis_types::CollectionCtor as C;
-    use praxis_types::ScalarType;
+    use praxis_typeck::CollectionCtor as C;
+    use praxis_typeck::ScalarType;
+    use praxis_typeck::data::TypeData;
     let ty = expr_static_type(iter);
     let ctor = match db.data(db.follow(ty)) {
         TypeData::Collection { ctor, .. } => ctor,
@@ -4593,13 +4593,13 @@ fn iter_plan(db: &TypeDb, iter: &TypedExpr) -> IterPlan {
             return IterPlan::InPlace {
                 len: RuntimeSymbol::TextLen,
                 get: RuntimeSymbol::TextGet,
-            }
+            };
         }
         _ => {
             return IterPlan::InPlace {
                 len: RuntimeSymbol::VecLen,
                 get: RuntimeSymbol::VecGet,
-            }
+            };
         }
     };
     match ctor {
@@ -4747,8 +4747,8 @@ fn emit_iter_item(b: &mut Builder<'_>, src: IterSource, idx: LocalId, item_ty: M
 fn emit_iter_vec(b: &mut Builder<'_>, receiver: &TypedExpr, result_ty: MirType) -> LocalId {
     if matches!(
         b.db.data(b.db.follow(expr_static_type(receiver))),
-        praxis_types::data::TypeData::Collection {
-            ctor: praxis_types::CollectionCtor::Vec,
+        praxis_typeck::data::TypeData::Collection {
+            ctor: praxis_typeck::CollectionCtor::Vec,
             ..
         }
     ) {
@@ -4922,8 +4922,8 @@ fn control_builtin_symbol(callee_name: &str) -> Option<RuntimeSymbol> {
 /// runtime wrapper, no ABI change, and a `Vec` built either way is one kind of
 /// object.
 fn lower_list_lit(b: &mut Builder<'_>, elements: &[TypedExpr], ty: Type, e: &TypedExpr) -> LocalId {
-    use praxis_types::data::TypeData;
-    use praxis_types::CollectionCtor;
+    use praxis_typeck::CollectionCtor;
+    use praxis_typeck::data::TypeData;
     // The element type, from the literal's own `Vec[T]`. An element type that is
     // still an inference variable — `var v = []`, whose use decides it — reaches
     // the backend as a null descriptor, which is what `praxis_vec_new`'s
@@ -4972,11 +4972,11 @@ fn lower_list_lit(b: &mut Builder<'_>, elements: &[TypedExpr], ty: Type, e: &Typ
 /// constructed from source (§6.3).
 fn collection_alloc_kind(
     b: &Builder<'_>,
-    ctor: praxis_types::CollectionCtor,
+    ctor: praxis_typeck::CollectionCtor,
     result_ty: Type,
     init: CollectionInit,
 ) -> AllocKind {
-    use praxis_types::data::TypeData;
+    use praxis_typeck::data::TypeData;
     // Extract the type arguments from the result type. For a nullary collection
     // (BitSet/Range) there are none; for Vec/Deque/Set/Heap/Grid/Counter there is
     // one; for Map there are two. If the result type does not match the ctor's
@@ -4984,10 +4984,9 @@ fn collection_alloc_kind(
     // reads a missing argument as an unknown element type and passes a null
     // descriptor.
     let args: Vec<MirType> = match b.db.data(b.db.follow(result_ty)) {
-        TypeData::Collection {
-            ctor: c,
-            args: ref a,
-        } if *c == ctor => a.iter().copied().map(MirType::Known).collect(),
+        TypeData::Collection { ctor: c, args: a } if *c == ctor => {
+            a.iter().copied().map(MirType::Known).collect()
+        }
         _ => Vec::new(),
     };
     AllocKind::Collection { ctor, args, init }
@@ -5006,10 +5005,10 @@ fn collection_alloc_kind(
 /// local must not be live across it.
 fn lower_collection_init(
     b: &mut Builder<'_>,
-    ctor: praxis_types::CollectionCtor,
+    ctor: praxis_typeck::CollectionCtor,
     args: &[TypedExpr],
 ) -> CollectionInit {
-    use praxis_types::CollectionCtor;
+    use praxis_typeck::CollectionCtor;
     match (ctor, args) {
         (CollectionCtor::Vec, [count, fill]) => CollectionInit::Filled {
             count: lower_expr_gc(b, count),
@@ -5030,7 +5029,7 @@ fn lower_collection_init(
 /// and embeds its address as an immediate in the allocation call.
 fn lower_record_lit(
     b: &mut Builder<'_>,
-    record_def_id: praxis_types::RecordDefId,
+    record_def_id: praxis_typeck::RecordDefId,
     fields: &[(u32, TypedExpr)],
 ) -> LocalId {
     // Lower each field initializer in declaration order (already sorted by the
@@ -5064,9 +5063,9 @@ fn lower_field_get(b: &mut Builder<'_>, receiver: &TypedExpr, field_idx: u32) ->
 /// locals, then emits an `Alloc` with `AllocKind::Enum`.
 fn lower_enum_variant(
     b: &mut Builder<'_>,
-    enum_def_id: praxis_types::EnumDefId,
+    enum_def_id: praxis_typeck::EnumDefId,
     variant_idx: u32,
-    ty: praxis_types::Type,
+    ty: praxis_typeck::Type,
     args: &[TypedExpr],
 ) -> LocalId {
     let arg_locals: Vec<LocalId> = args.iter().map(|a| lower_expr_gc(b, a)).collect();
@@ -6224,7 +6223,7 @@ mod tests {
         assert!(
             matches!(
                 analysis.db.data(analysis.db.follow(slot_ty)),
-                praxis_types::TypeData::Unit
+                praxis_typeck::TypeData::Unit
             ),
             "the Unit value's slot must carry the Unit type"
         );
@@ -6470,7 +6469,7 @@ mod tests {
             assert!(
                 matches!(
                     analysis.db.data(analysis.db.follow(known)),
-                    praxis_types::TypeData::Scalar(praxis_types::ScalarType::Int)
+                    praxis_typeck::TypeData::Scalar(praxis_typeck::ScalarType::Int)
                 ),
                 "the {callee:?} result is statically Int but local {dst:?} carries {local_ty:?}"
             );
@@ -6497,7 +6496,7 @@ mod tests {
                     dst,
                     alloc:
                         AllocKind::Collection {
-                            ctor: praxis_types::CollectionCtor::Vec,
+                            ctor: praxis_typeck::CollectionCtor::Vec,
                             ..
                         },
                     ..
@@ -6517,7 +6516,7 @@ mod tests {
             if what == "praxis_vec_push" {
                 saw_push = true;
                 assert!(
-                    matches!(data, praxis_types::TypeData::Unit),
+                    matches!(data, praxis_typeck::TypeData::Unit),
                     "praxis_vec_push must define a Unit-typed local, got {local_ty:?}"
                 );
             } else {
@@ -6525,8 +6524,8 @@ mod tests {
                 assert!(
                     matches!(
                         data,
-                        praxis_types::TypeData::Collection {
-                            ctor: praxis_types::CollectionCtor::Vec,
+                        praxis_typeck::TypeData::Collection {
+                            ctor: praxis_typeck::CollectionCtor::Vec,
                             ..
                         }
                     ),
@@ -6568,7 +6567,7 @@ mod tests {
                     dst,
                     alloc:
                         AllocKind::Collection {
-                            ctor: praxis_types::CollectionCtor::Vec,
+                            ctor: praxis_typeck::CollectionCtor::Vec,
                             ..
                         },
                     ..
@@ -6602,7 +6601,7 @@ mod tests {
             assert!(
                 matches!(
                     unit_ty.map(|t| analysis.db.data(analysis.db.follow(t))),
-                    Some(praxis_types::TypeData::Unit)
+                    Some(praxis_typeck::TypeData::Unit)
                 ),
                 "praxis_vec_push defines a Unit-typed local, got {unit_ty:?}"
             );
@@ -6614,8 +6613,8 @@ mod tests {
         assert!(
             matches!(
                 analysis.db.data(analysis.db.follow(vec_ty)),
-                praxis_types::TypeData::Collection {
-                    ctor: praxis_types::CollectionCtor::Vec,
+                praxis_typeck::TypeData::Collection {
+                    ctor: praxis_typeck::CollectionCtor::Vec,
                     ..
                 }
             ),
@@ -6757,7 +6756,7 @@ mod tests {
         assert!(
             matches!(
                 analysis.db.data(analysis.db.follow(known)),
-                praxis_types::TypeData::Tuple(elements) if elements.len() == 2
+                praxis_typeck::TypeData::Tuple(elements) if elements.len() == 2
             ),
             "enumerate must carry a two-element tuple type into codegen, got {tuple_ty:?}"
         );
@@ -6789,7 +6788,7 @@ mod tests {
         assert!(
             matches!(
                 analysis.db.data(analysis.db.follow(known)),
-                praxis_types::TypeData::Tuple(elements) if elements.len() == 2
+                praxis_typeck::TypeData::Tuple(elements) if elements.len() == 2
             ),
             "zip must carry a two-element tuple type into codegen, got {tuple_ty:?}"
         );
@@ -7861,10 +7860,10 @@ mod tests {
     fn preheaders(f: &Function) -> Vec<BlockId> {
         let mut backedge_targets: Vec<BlockId> = Vec::new();
         for b in &f.blocks {
-            if let Terminator::Jump { target } = b.term {
-                if target <= b.id {
-                    backedge_targets.push(target);
-                }
+            if let Terminator::Jump { target } = b.term
+                && target <= b.id
+            {
+                backedge_targets.push(target);
             }
         }
         f.blocks
@@ -8206,7 +8205,7 @@ fn f(n: Int, x0: Float) -> Float {
     /// the *loop body* because that is where the cost was.
     #[test]
     fn a_bitset_membership_test_is_its_own_instruction_and_never_a_call() {
-        use crate::test_support::{lower_src_to_mir, InstKind};
+        use crate::test_support::{InstKind, lower_src_to_mir};
 
         let lowered = lower_src_to_mir(
             "var b = BitSet()\n\

@@ -1,4 +1,4 @@
-//! §19.11 criterion 1, structurally: **the language server cannot reach the
+//! Structurally: **the language server cannot reach the
 //! JIT.**
 //!
 //! "Editing a typical puzzle file updates diagnostics without running JIT code"
@@ -32,7 +32,7 @@ fn the_language_server_does_not_depend_on_the_jit() {
     for crate_name in JIT_CRATES {
         assert!(
             !deps.contains(crate_name),
-            "`praxis-lsp` must not depend on `{crate_name}`: §19.11 criterion 1 \
+            "`praxis-lsp` must not depend on `{crate_name}`: editing a file \
              requires diagnostics without running JIT code, and this manifest is \
              what makes that true by construction rather than by observation"
         );

@@ -26,10 +26,10 @@
 
 use std::fmt::Write as _;
 
-use crate::descriptor::{BuiltinTypeId, FormatSink, Tracer, TypeDescriptor};
-use crate::repr_c_vec::ReprCVec;
 use crate::DynamicHasher;
 use crate::GcRef;
+use crate::descriptor::{BuiltinTypeId, FormatSink, Tracer, TypeDescriptor};
+use crate::repr_c_vec::ReprCVec;
 
 /// The `Vec[T]` payload: the element descriptor plus the growable items.
 ///
@@ -224,7 +224,9 @@ unsafe fn seq_format<S: ElementSeq>(payload: *const u8, out: &mut FormatSink<'_>
         }
         // Route element formatting through the element descriptor (§11.4).
         let elem_payload = item.payload::<u8>() as *const u8;
-        (elem_desc.format)(elem_payload, out);
+        // SAFETY: the descriptor came from the schema for this slot, so the slot's
+        // payload is the type its `format` expects.
+        unsafe { (elem_desc.format)(elem_payload, out) };
     }
     let _ = out.write_str("]");
 }
@@ -260,7 +262,9 @@ unsafe fn seq_equals<S: ElementSeq>(a: *const u8, b: *const u8) -> bool {
     for (x, y) in pa.items().zip(pb.items()) {
         let xe = x.payload::<u8>() as *const u8;
         let ye = y.payload::<u8>() as *const u8;
-        if !eq(xe, ye) {
+        // SAFETY: both slots were just checked to carry the same descriptor, and it
+        // is the one whose `equals` this is.
+        if !unsafe { eq(xe, ye) } {
             return false;
         }
     }
@@ -282,7 +286,9 @@ unsafe fn seq_hash<S: ElementSeq>(payload: *const u8, hasher: &mut dyn DynamicHa
     }
     for item in p.items() {
         let elem_payload = item.payload::<u8>() as *const u8;
-        hash_elem(elem_payload, hasher);
+        // SAFETY: the descriptor came from the schema for this slot, so the slot's
+        // payload is the type its `hash` expects.
+        unsafe { hash_elem(elem_payload, hasher) };
     }
 }
 

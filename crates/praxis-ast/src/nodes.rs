@@ -11,7 +11,7 @@
 
 use praxis_syntax::{SyntaxKind as K, SyntaxNode, SyntaxToken};
 
-use crate::{ast_node, child, children, name_token, token_matching, AstNode};
+use crate::{AstNode, ast_node, child, children, name_token, token_matching};
 
 // ---------------------------------------------------------------------------
 // Root + items
@@ -153,11 +153,7 @@ impl EnumVariantNode {
     /// payload type is a `TypeRef` child appearing after the name.
     pub fn payload_types(&self) -> Option<Vec<TypeRef>> {
         let types: Vec<TypeRef> = self.syntax.children().filter_map(TypeRef::cast).collect();
-        if types.is_empty() {
-            None
-        } else {
-            Some(types)
-        }
+        if types.is_empty() { None } else { Some(types) }
     }
 }
 
@@ -1335,10 +1331,10 @@ impl ParserExpr {
         use rowan::NodeOrToken;
         // Descend to the first token in the subtree (handles PARSER_ATOM nesting).
         for descendant in self.syntax.descendants_with_tokens() {
-            if let NodeOrToken::Token(t) = descendant {
-                if t.kind() == K::Ident {
-                    return Some(t.text().to_string());
-                }
+            if let NodeOrToken::Token(t) = descendant
+                && t.kind() == K::Ident
+            {
+                return Some(t.text().to_string());
             }
         }
         None

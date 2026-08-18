@@ -12,7 +12,7 @@ Backtrace:
     <tmp#3: Int> @ "b - a" = 0
     <tmp#4: Int> @ "a / (b - a)" = <uninit>
 Entered crash debugger. 3 frame(s). Type `help` for commands.
-Praxis crash> Crash debugger commands (§9.4):
+Praxis crash> Crash debugger commands:
   bt              show the numbered backtrace
   frame N         select frame N
   up              move the selection toward the caller

@@ -20,9 +20,9 @@ use std::rc::Rc;
 
 use praxis_hir::{Analysis, ParserIndex, ResolvedRef};
 use praxis_parser::ParseOutput;
-use praxis_source::{diagnostic::sort_by_position, Diagnostic, FileId, LineMap, SourceMap};
+use praxis_source::{Diagnostic, FileId, LineMap, SourceMap, diagnostic::sort_by_position};
 use praxis_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
-use praxis_types::Type;
+use praxis_typeck::Type;
 use rowan::{NodeOrToken, TextRange, TextSize};
 
 use crate::document::{Document, Revision};
@@ -335,10 +335,10 @@ impl Analyzer {
     /// `Analysis` together — which is what keeps a server that has been open
     /// for an hour from holding an hour of keystrokes.
     pub fn snapshot(&mut self, key: &str, doc: &Document) -> Rc<Snapshot> {
-        if let Some(existing) = self.cache.get(key) {
-            if existing.revision() == doc.revision() {
-                return Rc::clone(existing);
-            }
+        if let Some(existing) = self.cache.get(key)
+            && existing.revision() == doc.revision()
+        {
+            return Rc::clone(existing);
         }
         let fresh = Rc::new(Snapshot::for_document(key, doc));
         self.cache.insert(key.to_string(), Rc::clone(&fresh));

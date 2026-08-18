@@ -2,22 +2,34 @@
 name = "praxis-codegen-cranelift"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Cranelift JIT module and ABI lowering for Praxis."
+keywords.workspace = true
+categories.workspace = true
 
-# The ADR-116 measurement toggle, and the only cargo feature this crate has.
+# The measurement toggles. None of them is a feature in the ordinary sense: each
+# reverts one change in this crate so the change can be priced. An A/B's baseline
+# arm must be *this tree with the package's single toggle point reverted*, never
+# the previous commit — everything else that moved in between is otherwise priced
+# into the result, and one measurement taken that way reported 14.4% where the
+# truth was 0.8%.
 #
-# Default (feature off) is arm B: ADR-102's inline type proof loads the
-# descriptor it compares against out of `RuntimeContext.descriptors`. With the
-# feature on, that one `let want = …` in `emit_scalar_load` goes back to an
-# `iconst` of the descriptor's address — `movz`+`movk`+`movk` on aarch64 — and
-# *nothing else in the tree differs*: the context still carries the table, the
-# ABI version is still 20, and every other file is byte-for-byte identical.
-# That is what makes the A/B a measurement of the proof's shape and of nothing
-# else (handover 26 §6: the baseline arm is this tree with this package's single
-# toggle point reverted, never the previous commit — ADR-113 records that
-# mistake reporting 14.4% where the truth was 0.8%).
+# Nothing in the workspace enables any of them, and `just ci` builds none, so the
+# crate is compiled exactly once with every arm-A path compiled out.
+[features]
+# The inline type proof's descriptor, arm A.
+#
+# Default (feature off) is arm B: the inline type proof loads the descriptor it
+# compares against out of `RuntimeContext.descriptors`. With the feature on, that
+# one `let want = …` in `emit_scalar_load` goes back to an `iconst` of the
+# descriptor's address — `movz`+`movk`+`movk` on aarch64 — and *nothing else in
+# the tree differs*: the context still carries the table, the ABI version is
+# still 20, and every other file is byte-for-byte identical. That is what makes
+# the A/B a measurement of the proof's shape and of nothing else.
 #
 #     cargo build --release -p praxis-cli                                # arm B
 #     cargo build --release -p praxis-cli \
@@ -27,28 +39,24 @@ description = "Cranelift JIT module and ABI lowering for Praxis."
 # `a_scalar_proof_loads_its_descriptor_from_the_context`, which is arm-B-only
 # because under the feature the emitted code holds the address it asserts is
 # absent.
-[features]
 adr116-arm-a = []
-# ADR-117 arm A, and the whole of that toggle: `lower::steps` never fuses, so a
-# checked `IntBinOp` and the `Inst::CheckFault` that observes it lower as two
-# steps and the backend emits ADR-102's converging diamond followed by the
-# load-load-branch. That is byte-for-byte the code this tree emitted before
-# ADR-117; nothing else in the crate reads the flag.
+# Check-fault fusion, arm A, and the whole of that toggle: `lower::steps` never
+# fuses, so a checked `IntBinOp` and the `Inst::CheckFault` that observes it
+# lower as two steps and the backend emits the converging diamond followed by the
+# load-load-branch. That is byte-for-byte the code this tree emitted before the
+# two were fused; nothing else in the crate reads the flag.
 #
 #     cargo build --release -p praxis-cli \
 #         --features praxis-codegen-cranelift/unfolded-check-fault       # arm A
 #
 # **It makes the compiler emit worse code on purpose**, and the tests that pin
-# ADR-117 assert the folded shape, so `cargo test --features
+# the fused shape assert that shape, so `cargo test --features
 # unfolded-check-fault` fails by design. Enable it only when staging that arm.
-#
-# The two toggles are independent and neither is on by default, so `just ci`
-# builds the crate exactly once, with both arms' code paths compiled out.
 unfolded-check-fault = []
-# ADR-118 part 2 arm A: `praxis_bitset_contains`, `praxis_vec_get` and
-# `praxis_vec_len` go back to being out-of-line calls. The whole toggle is the
-# `INLINE_COLLECTION_PRIMITIVES` pair in `lower.rs`; the two emitters read it and
-# nothing else in the crate does.
+# Collection-primitive inlining, arm A: `praxis_bitset_contains`,
+# `praxis_vec_get` and `praxis_vec_len` go back to being out-of-line calls. The
+# whole toggle is the `INLINE_COLLECTION_PRIMITIVES` pair in `lower.rs`; the two
+# emitters read it and nothing else in the crate does.
 #
 #     cargo build --release -p praxis-cli \
 #         --features praxis-codegen-cranelift/adr118-arm-a                # arm A
@@ -57,16 +65,17 @@ unfolded-check-fault = []
 # `Inst::BitsetContains` with a `Scalar(Bool)` dst and still not a safepoint in
 # both arms, because that decision is MIR's and a backend feature cannot
 # express it. What this measures is the inlining, which is the half a clock can
-# see; the shape change's evidence is the instruction census in the ADR.
+# see; the shape change's evidence is an instruction census rather than a time.
 #
-# The tests that pin the inline shapes are arm-B-only for ADR-116's reason:
-# under the feature the emitted code holds the call they assert is absent.
+# The tests that pin the inline shapes are arm-B-only for `adr116-arm-a`'s
+# reason: under the feature the emitted code holds the call they assert is
+# absent.
 adr118-arm-a = []
-# ADR-119 arm A: no generated code claims a block. `emit_inline_intern`'s
-# out-of-range edge goes straight to `praxis_alloc_int` (the tree exactly as
-# ADR-113 left it) and `Float` goes back to an unconditional `call_symbol` with
-# no pacing test in front of it. The whole toggle is the `INLINE_SCALAR_CLAIM`
-# pair in `lower.rs`; three arms read it and nothing else in the workspace does.
+# The inline allocation claim, arm A: no generated code claims a block.
+# `emit_inline_intern`'s out-of-range edge goes straight to `praxis_alloc_int`
+# and `Float` goes back to an unconditional `call_symbol` with no pacing test in
+# front of it. The whole toggle is the `INLINE_SCALAR_CLAIM` pair in `lower.rs`;
+# three arms read it and nothing else in the workspace does.
 #
 #     cargo build --release -p praxis-cli \
 #         --features praxis-codegen-cranelift/adr119-arm-a                # arm A
@@ -75,69 +84,67 @@ adr118-arm-a = []
 # and `GcHeader` displacements, `InlineClaimSite` and the two `*_CLAIM_SITE`
 # constants are compiled in either way and simply have no reader under the
 # feature — which is what makes this an A/B of the *emitted code* and of nothing
-# else, including the export surface ADR-119 argues the cost of.
+# else, including the export surface the claim is charged for.
 #
 # The tests that pin the claim's shape, its dominance and its heap state are
-# arm-B-only for ADR-116's reason: under the feature the emitted code holds the
-# call they assert is absent.
+# arm-B-only for `adr116-arm-a`'s reason: under the feature the emitted code
+# holds the call they assert is absent.
 adr119-arm-a = []
-# ADR-128 decision 1 arm A: the prologue's slot zeroing goes back to a run of
-# stores up to 32 slots and a `%Memset` call above it — the tree exactly as
-# ADR-101 left it. The whole toggle is `emit_zero_slots` in `lower.rs`.
+# Prologue slot zeroing, arm A: the prologue's slot zeroing goes back to a run of
+# stores up to 32 slots and a `%Memset` call above it. The whole toggle is
+# `emit_zero_slots` in `lower.rs`.
 #
 #     cargo build --release -p praxis-cli \
 #         --features praxis-codegen-cranelift/adr128-d1-arm-a             # arm A
 #
 # **It must be measured with `adr128-d2-arm-a` on in BOTH arms**, and that is the
-# one thing about this sweep a reader will get wrong. ADR-128 orders decision 1
-# first precisely because decisions 1 and 2 remove the same two calls from the
-# same prologue — but decision 2 removes them by making the *shadow* claim one
-# slot wide. Against a coloured tree `is_prime` claims 1 shadow slot and 33 debug
-# slots, so this feature no longer toggles what it was written to toggle: the
-# shadow claim is one store in both arms, and only the debug claim still crosses
-# the 32 threshold. The sweep would then price *one* memset against 33 stores and
-# report it as decision 1's effect, when decision 1 is about two memsets against
-# 66 stores. Half the change, attributed whole. Pair the features:
+# one thing about this sweep a reader will get wrong. The two toggles remove the
+# same two calls from the same prologue — but `adr128-d2-arm-a` removes them by
+# making the *shadow* claim one slot wide. Against a coloured tree `is_prime`
+# claims 1 shadow slot and 33 debug slots, so on its own this feature no longer
+# toggles what it was written to toggle: the shadow claim is one store in both
+# arms, and only the debug claim still crosses the 32 threshold. The sweep would
+# then price *one* memset against 33 stores and report it as this toggle's
+# effect, when the zeroing change is two memsets against 66 stores. Half the
+# change, attributed whole. Pair the features:
 #
-#     --features praxis-codegen-cranelift/adr128-d1-arm-a,praxis-codegen-cranelift/adr128-d2-arm-a   # D1 arm A
-#     --features praxis-codegen-cranelift/adr128-d2-arm-a                                            # D1 arm B
+#     --features praxis-codegen-cranelift/adr128-d1-arm-a,praxis-codegen-cranelift/adr128-d2-arm-a   # zeroing arm A
+#     --features praxis-codegen-cranelift/adr128-d2-arm-a                                            # zeroing arm B
 #
-# which makes D1's arm B the same binary as D2's arm A, so the two sweeps chain
-# and each decision is attributable to exactly one of them. (Why they must chain
-# rather than be run independently: under `adr128-d1-arm-a` alone, against a
-# coloured tree, `is_prime`'s *shadow* claim is one slot and its *debug* claim is
-# 33 — so the arms differ only in how the debug claim is zeroed, and the sweep
-# measures a third thing neither decision is about.)
+# which makes this toggle's arm B the same binary as `adr128-d2-arm-a`'s arm A,
+# so the two sweeps chain and each change is attributable to exactly one of them.
 #
-# **`cargo test --features adr128-d1-arm-a` fails by design**, for ADR-116's
-# reason: the five zeroing tests assert the shape this arm exists to undo —
-# `no_width_of_slot_zeroing_emits_a_call` and its siblings pin "no call at any
-# width" and "a straight run below the ceiling", and under the feature the
-# ceiling is 32 and the call is back. Enable it only when staging that arm.
+# **`cargo test --features adr128-d1-arm-a` fails by design**, for
+# `adr116-arm-a`'s reason: the five zeroing tests assert the shape this arm
+# exists to undo — `no_width_of_slot_zeroing_emits_a_call` and its siblings pin
+# "no call at any width" and "a straight run below the ceiling", and under the
+# feature the ceiling is 32 and the call is back. Enable it only when staging
+# that arm.
 adr128-d1-arm-a = []
-# ADR-128 decision 2 arm A: a shadow slot index is the local's *position* among
-# `Gc` locals again, not a colour, so the shadow claim is as wide as the debug
-# claim. The whole toggle is `RootSlotMap::color` in `lower.rs`, which under the
-# feature numbers `mir.locals` in order instead of colouring the interference
-# relation; the two-map split of decision 3, the dense budget charge of decision
-# 4 and `DEBUG_VALUE_STACK_SLOTS`' own sizing are all unaffected, because those
-# are what the arm holds constant.
+# Shadow-slot colouring, arm A: a shadow slot index is the local's *position*
+# among `Gc` locals again, not a colour, so the shadow claim is as wide as the
+# debug claim. The whole toggle is `RootSlotMap::color` in `lower.rs`, which
+# under the feature numbers `mir.locals` in order instead of colouring the
+# interference relation; the two-map split, the dense budget charge and
+# `DEBUG_VALUE_STACK_SLOTS`' own sizing are all unaffected, because those are
+# what the arm holds constant.
 #
 #     cargo build --release -p praxis-cli \
 #         --features praxis-codegen-cranelift/adr128-d2-arm-a             # arm A
 #
 # **It makes wide functions fail to compile**, exactly as this tree did before
-# ADR-128: with positional assignment a function of more than `MAX_SHADOW_SLOTS`
-# `Gc` locals is rejected again. That is the arm being faithful, not a bug — but
-# it means `cargo test --features adr128-d2-arm-a` fails by design, and the
-# corpus program ADR-128 re-merges into one function does not compile under it.
+# the colouring: with positional assignment a function of more than
+# `MAX_SHADOW_SLOTS` `Gc` locals is rejected again. That is the arm being
+# faithful, not a bug — but it means `cargo test --features adr128-d2-arm-a`
+# fails by design, and the corpus program that colouring lets be written as a
+# single function does not compile under it.
 adr128-d2-arm-a = []
 
 [dependencies]
 praxis-mir.workspace = true
 praxis-repr.workspace = true
 praxis-runtime.workspace = true
-praxis-types.workspace = true
+praxis-typeck.workspace = true
 praxis-stdlib.workspace = true
 bumpalo.workspace = true
 cranelift.workspace = true
@@ -155,8 +162,8 @@ praxis-parser.workspace = true
 praxis-source.workspace = true
 praxis-test-support.workspace = true
 
-# Doctests are not run (see the justfile and README): rustdoc has to analyze the
-# whole crate before it can find out there are none, and the result is never
-# cached, so `cargo test` paid ~6s per crate for it on every run.
+# Doctests are not run (the justfile says why): rustdoc has to analyze the whole
+# crate before it can find out there are none, and the result is never cached,
+# so `cargo test` pays ~6s per crate for it on every run.
 [lib]
 doctest = false

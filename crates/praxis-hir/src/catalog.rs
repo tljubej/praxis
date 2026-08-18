@@ -9,7 +9,7 @@
 
 use praxis_stdlib::type_pattern::ScalarType as PatternScalar;
 use praxis_stdlib::{MethodCatalog, MethodEntry, TypePattern};
-use praxis_types::{data::TypeData, Type, TypeDb};
+use praxis_typeck::{Type, TypeDb, data::TypeData};
 
 /// Convert an inferred [`Type`] into the catalog's [`TypePattern`] shape language.
 /// Returns `None` for shapes the catalog models no receiver for: type
@@ -83,15 +83,15 @@ pub fn lookup<'a>(
         .collect()
 }
 
-fn map_scalar(s: praxis_types::ScalarType) -> PatternScalar {
+fn map_scalar(s: praxis_typeck::ScalarType) -> PatternScalar {
     match s {
-        praxis_types::ScalarType::Bool => PatternScalar::Bool,
-        praxis_types::ScalarType::Int => PatternScalar::Int,
-        praxis_types::ScalarType::UInt => PatternScalar::UInt,
-        praxis_types::ScalarType::Float => PatternScalar::Float,
-        praxis_types::ScalarType::Byte => PatternScalar::Byte,
-        praxis_types::ScalarType::Char => PatternScalar::Char,
-        praxis_types::ScalarType::Text => PatternScalar::Text,
+        praxis_typeck::ScalarType::Bool => PatternScalar::Bool,
+        praxis_typeck::ScalarType::Int => PatternScalar::Int,
+        praxis_typeck::ScalarType::UInt => PatternScalar::UInt,
+        praxis_typeck::ScalarType::Float => PatternScalar::Float,
+        praxis_typeck::ScalarType::Byte => PatternScalar::Byte,
+        praxis_typeck::ScalarType::Char => PatternScalar::Char,
+        praxis_typeck::ScalarType::Text => PatternScalar::Text,
     }
 }
 

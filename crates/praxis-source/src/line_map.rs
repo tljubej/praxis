@@ -320,9 +320,10 @@ mod tests {
     #[test]
     fn linecol_past_last_line_is_none() {
         let map = LineMap::new("ab\ncd");
-        assert!(map
-            .linecol_to_offset(LineCol { line: 99, col: 0 })
-            .is_none());
+        assert!(
+            map.linecol_to_offset(LineCol { line: 99, col: 0 })
+                .is_none()
+        );
     }
 
     #[test]

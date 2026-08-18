@@ -327,7 +327,10 @@ fn a_type_with_no_runtime_object_has_no_descriptor() {
 fn a_range_has_a_descriptor_now() {
     let mut db = TypeDb::new();
     let range = db
-        .collection(CollectionCtor::Range, praxis_types::CollectionArgs::Nullary)
+        .collection(
+            CollectionCtor::Range,
+            praxis_typeck::CollectionArgs::Nullary,
+        )
         .expect("Range is nullary");
     let desc = descriptor_for_type(&db, range).expect("Range has a runtime object");
     assert!(std::ptr::eq(desc, &praxis_runtime::range::RANGE));
@@ -338,7 +341,7 @@ fn a_range_has_a_descriptor_now() {
     let recovered = type_for_descriptor(desc, &mut db).expect("Range names its type");
     assert!(matches!(
         db.data(recovered),
-        praxis_types::TypeData::Collection {
+        praxis_typeck::TypeData::Collection {
             ctor: CollectionCtor::Range,
             args,
         } if args.is_empty()
@@ -372,7 +375,7 @@ fn element_descriptors_follow_the_collection_arity() {
     let bitset = db
         .collection(
             CollectionCtor::BitSet,
-            praxis_types::CollectionArgs::Nullary,
+            praxis_typeck::CollectionArgs::Nullary,
         )
         .expect("BitSet is nullary");
     assert!(element_descriptors_for(&db, bitset).unwrap().is_empty());

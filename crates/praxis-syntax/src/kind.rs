@@ -634,7 +634,8 @@ impl SyntaxKind {
     }
 
     /// The source spelling of a keyword, or `None` for non-keywords. The
-    /// inverse of [`from_keyword`]; handy for the formatter and diagnostics.
+    /// inverse of [`from_keyword`]; handy for diagnostics and completion, which
+    /// have to spell a keyword back out.
     #[must_use]
     pub fn keyword_text(self) -> Option<&'static str> {
         Some(match self {

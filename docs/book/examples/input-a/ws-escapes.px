@@ -1,4 +1,4 @@
-// The escapes §7.2 gives a template: `\s*` zero or more, `\s+` one or more,
+// A template's whitespace escapes: `\s*` zero or more, `\s+` one or more,
 // `\x20` exactly one space, `\t` exactly one tab, `\n` one line ending.
 fn main() {
     out(parse("1  ,2", `{a:int}\s*,{b:int}`))

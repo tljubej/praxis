@@ -20,9 +20,8 @@ and what it printed.
 ## A call is a shape, checked before anything is built
 
 Each constructor has a fixed argument shape, and the shape is checked before a
-single parser node is constructed
-([ADR-073](../../../decisions/073-a-constructor-call-is-a-shape-checked-before-it-is-built.md)).
-A wrong argument is a compile error, never an argument that is quietly dropped.
+single parser node is constructed. A wrong argument is a compile error, never an
+argument that is quietly dropped.
 
 | Call | Shape |
 |---|---|
@@ -365,11 +364,11 @@ Result type: `Vec[result(P)]`, derived from the child — so
 
 ## `grid(P)`
 
-Parse rectangular lines into a `Grid`. **A cell is what its cell parser reads**
-([ADR-079](../../../decisions/079-a-grid-cell-is-what-its-cell-parser-reads.md)):
+Parse rectangular lines into a `Grid`. **A cell is what its cell parser reads**:
 `char` reads one Unicode scalar, `digit` reads one digit, `int` reads a whole
-integer token. A row's width is the number of cells it produced, and every row
-must have the same count.
+integer token. That is a rule and not a granularity — if `grid(int)` meant one
+digit per cell, `digit` would name nothing. A row's width is the number of cells
+it produced, and every row must have the same count.
 
 ```praxis
 // `grid(P)` parses rectangular lines into a Grid. A cell is whatever the cell
@@ -557,13 +556,12 @@ Monkey 1:
 6
 ```
 
-**A block item is offered its own lines**
-([ADR-090](../../../decisions/090-a-block-item-is-offered-its-own-lines.md)): a
-*template* item gets the line it starts on plus one more for each `\n` the
-template itself writes, and every other item gets the rest of the region,
-because `lines`, `sections`, `grid` and `matrix` compute their own extent.
-Without that rule the `{items:csv(int)}` above — a capture that is its
-template's last part — would swallow the rest of the section.
+**A block item is offered its own lines**: a *template* item gets the line it
+starts on plus one more for each `\n` the template itself writes, and every
+other item gets the rest of the region, because `lines`, `sections`, `grid` and
+`matrix` compute their own extent. Without that rule the `{items:csv(int)}`
+above — a capture that is its template's last part — would swallow the rest of
+the section.
 
 The window is a narrowing and not a requirement: an item may stop short of it,
 and `block` carries the cursor on to the next item. That is what lets two items
@@ -735,8 +733,7 @@ xmul(2,3)%&mul(4,5)!don't()_do()?mul(6,7)
 ```
 
 `scan` steps by Unicode scalar on a miss, so it never attempts a match at a
-continuation byte. `scan_exact`, the stricter variant the design document
-mentions, does not exist.
+continuation byte.
 
 ## The one rule they all inherit
 
@@ -745,9 +742,10 @@ whitespace the parser offered it does not read is not data and not a mismatch**.
 `int` cannot read the space in `1 `, so it is padding; `char` can, so it is a
 cell. That single rule decides trailing spaces, trailing blank lines and the
 file's own terminator for all of them, and it is why no constructor here carries
-a newline special case. It is set out in [whitespace, lines and
-positions](whitespace.md), and its reasoning is
-[ADR-078](../../../decisions/078-a-parser-position-is-absolute-and-a-region-only-narrows.md).
+a newline special case. It follows from one more rule: a position is absolute,
+and a construct that narrows hands its child a narrower window on the same
+buffer, never a fresh one starting at zero. Both are set out in [whitespace,
+lines and positions](whitespace.md).
 
 For the types these constructors produce, see [how a parser gets its
 type](type-derivation.md); for what happens when the input does not match, [when

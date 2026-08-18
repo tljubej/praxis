@@ -1379,7 +1379,7 @@ dependencies = [
  "praxis-stdlib",
  "praxis-syntax",
  "praxis-test-support",
- "praxis-types",
+ "praxis-typeck",
  "serde_json",
 ]
 
@@ -1402,7 +1402,7 @@ dependencies = [
  "praxis-source",
  "praxis-stdlib",
  "praxis-test-support",
- "praxis-types",
+ "praxis-typeck",
  "thiserror 2.0.19",
 ]
 
@@ -1421,7 +1421,7 @@ dependencies = [
  "praxis-source",
  "praxis-stdlib",
  "praxis-syntax",
- "praxis-types",
+ "praxis-typeck",
  "ratatui",
 ]
 
@@ -1437,7 +1437,7 @@ dependencies = [
  "praxis-stdlib",
  "praxis-syntax",
  "praxis-test-support",
- "praxis-types",
+ "praxis-typeck",
  "rowan",
 ]
 
@@ -1448,7 +1448,7 @@ dependencies = [
  "bumpalo",
  "praxis-source",
  "praxis-syntax",
- "praxis-types",
+ "praxis-typeck",
 ]
 
 [[package]]
@@ -1466,7 +1466,7 @@ dependencies = [
  "praxis-source",
  "praxis-stdlib",
  "praxis-syntax",
- "praxis-types",
+ "praxis-typeck",
  "proptest",
  "rowan",
  "serde",
@@ -1484,7 +1484,7 @@ dependencies = [
  "praxis-source",
  "praxis-stdlib",
  "praxis-test-support",
- "praxis-types",
+ "praxis-typeck",
 ]
 
 [[package]]
@@ -1505,7 +1505,7 @@ version = "0.1.0"
 dependencies = [
  "praxis-runtime",
  "praxis-stdlib",
- "praxis-types",
+ "praxis-typeck",
 ]
 
 [[package]]
@@ -1552,7 +1552,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "praxis-types"
+name = "praxis-typeck"
 version = "0.1.0"
 dependencies = [
  "insta",

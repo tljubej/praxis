@@ -9,10 +9,10 @@
 
 use std::collections::HashMap;
 
-use anyhow::{anyhow, Context, Result};
-use cranelift::codegen::ir::condcodes::IntCC;
+use anyhow::{Context, Result, anyhow};
 use cranelift::codegen::ir::FuncRef;
 use cranelift::codegen::ir::MemFlagsData as MemFlags;
+use cranelift::codegen::ir::condcodes::IntCC;
 use cranelift::codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift::prelude::*;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -22,9 +22,9 @@ use praxis_mir::{
     IntBinOp, LocalId, LocalKind, MirType, Overflow, RootSlots, ScalarKind, Terminator,
 };
 use praxis_runtime::{
-    descriptor::BuiltinTypeId, DebugFrameEntry, DebugLocalMeta, DebugSlotCount, DebugSlotKind,
-    FunctionDebugMeta, RuntimeContext, ShadowStackHeader, SlotCount, MAX_DEBUG_VALUE_SLOTS,
-    MAX_SHADOW_SLOTS,
+    DebugFrameEntry, DebugLocalMeta, DebugSlotCount, DebugSlotKind, FunctionDebugMeta,
+    MAX_DEBUG_VALUE_SLOTS, MAX_SHADOW_SLOTS, RuntimeContext, ShadowStackHeader, SlotCount,
+    descriptor::BuiltinTypeId,
 };
 use praxis_stdlib::abi::{AbiKind, AbiRet, RuntimeSymbol};
 
@@ -287,7 +287,7 @@ pub(crate) fn lower_function<M: Module>(
     fn_ctx: &mut FunctionBuilderContext,
     mir: &MirFunction,
     user_funcs: &HashMap<String, FuncId>,
-    db: &mut praxis_types::TypeDb,
+    db: &mut praxis_typeck::TypeDb,
     generation: &Generation,
 ) -> Result<()> {
     lower_function_capturing(module, fn_ctx, mir, user_funcs, db, generation, None)
@@ -309,7 +309,7 @@ fn lower_function_capturing<M: Module>(
     fn_ctx: &mut FunctionBuilderContext,
     mir: &MirFunction,
     user_funcs: &HashMap<String, FuncId>,
-    db: &mut praxis_types::TypeDb,
+    db: &mut praxis_typeck::TypeDb,
     generation: &Generation,
     captured: Option<&mut codegen::ir::Function>,
 ) -> Result<()> {
@@ -1798,7 +1798,7 @@ fn lower_inst<M: Module>(
     imports: &mut HashMap<RuntimeSymbol, FuncRef>,
     user_funcs: &HashMap<String, FuncId>,
     user_cache: &mut HashMap<String, FuncRef>,
-    db: &mut praxis_types::TypeDb,
+    db: &mut praxis_typeck::TypeDb,
     generation: &Generation,
 ) -> Result<()> {
     match inst {
@@ -2079,7 +2079,7 @@ fn lower_inst<M: Module>(
                     // descriptor recursively is what makes a nested collection
                     // (e.g. `Vec[Vec[Int]]`) dispatch eq/hash correctly.
                     use praxis_mir::ir::CollectionInit;
-                    use praxis_types::CollectionCtor;
+                    use praxis_typeck::CollectionCtor;
                     let call_args: Vec<Value> = match (ctor, init) {
                         // BitSet is nullary (no element descriptor); elements
                         // are always Int. praxis_bitset_new takes only ctx.
@@ -4575,12 +4575,12 @@ fn user_funcref<M: Module>(
 /// field mislabelled `Int` reads an `f64` or a `Text` header as an `i64`. A
 /// field whose type has no runtime object fails the compile.
 fn record_schema_for(
-    db: &praxis_types::TypeDb,
+    db: &praxis_typeck::TypeDb,
     id: u32,
     generation: &Generation,
 ) -> Result<*const praxis_runtime::records::RecordSchema> {
     use praxis_runtime::records::{RecordField, SchemaIdentity};
-    use praxis_types::data::RecordDefId;
+    use praxis_typeck::data::RecordDefId;
     let def = db.record_def(RecordDefId(id));
     // A schema is built from the def's *field* types, so a def with parameters
     // would resolve descriptors for its parameters rather than for whatever an
@@ -4637,13 +4637,13 @@ fn record_schema_for(
 /// sites resolve their slots through too. The value's own descriptor answers for
 /// it, and it is read off the object's header, so it is never the wrong one.
 fn enum_schema_for(
-    db: &mut praxis_types::TypeDb,
+    db: &mut praxis_typeck::TypeDb,
     id: u32,
     ty: MirType,
     generation: &Generation,
 ) -> Result<*const praxis_runtime::enums::EnumSchema> {
     use praxis_runtime::records::SchemaIdentity;
-    use praxis_types::data::{EnumDefId, TypeData};
+    use praxis_typeck::data::{EnumDefId, TypeData};
     let def_id = EnumDefId(id);
     let def = db.enum_def(def_id).clone();
     // A declared enum is its name; the input parser's `choice` (§7.5) produces
@@ -4657,7 +4657,7 @@ fn enum_schema_for(
     // value. `MirType::Opaque` and a non-enum type both mean "no arguments to
     // substitute"; the def's own payload types are then resolved directly, and
     // a generic def's parameters resolve to null slots.
-    let args: Vec<praxis_types::Type> = match ty.known().map(|t| db.data(db.follow(t))) {
+    let args: Vec<praxis_typeck::Type> = match ty.known().map(|t| db.data(db.follow(t))) {
         Some(TypeData::Enum { def: d, args }) if *d == def_id => args.to_vec(),
         _ => Vec::new(),
     };
@@ -4666,7 +4666,7 @@ fn enum_schema_for(
         Vec<*const praxis_runtime::descriptor::TypeDescriptor>,
     )> = Vec::with_capacity(def.variants.len());
     for (idx, variant) in def.variants.iter().enumerate() {
-        let payload_types: Vec<praxis_types::Type> = if args.is_empty() {
+        let payload_types: Vec<praxis_typeck::Type> = if args.is_empty() {
             variant.payload.clone()
         } else {
             db.variant_payload_of(def_id, &args, idx)
@@ -4698,12 +4698,12 @@ fn enum_schema_for(
 /// pointers gives true structural de-duplication, so two same-shaped tuples
 /// share one schema and compare structurally equal at runtime.
 fn tuple_schema_for(
-    db: &praxis_types::TypeDb,
+    db: &praxis_typeck::TypeDb,
     ty: MirType,
     arity: usize,
     generation: &Generation,
 ) -> Result<*const praxis_runtime::tuples::TupleSchema> {
-    use praxis_types::data::TypeData;
+    use praxis_typeck::data::TypeData;
     // Resolve the element types. `Opaque` means the lowering had no tuple type;
     // a non-tuple type is a misuse (the HIR only lowers `TypedExpr::Tuple`
     // here). Both degrade to a schema of `arity` **unknown** slots rather than
@@ -4715,7 +4715,7 @@ fn tuple_schema_for(
     // schema for a two-element tuple would make `praxis_tuple_set` drop both
     // values and `[10, 20].enumerate()` answer `[(), ()]`. The values' own
     // descriptors answer for the slots (ADR-066 decision 5).
-    let element_types: Vec<Option<praxis_types::Type>> =
+    let element_types: Vec<Option<praxis_typeck::Type>> =
         match ty.known().map(|t| db.data(db.follow(t))) {
             Some(TypeData::Tuple(els)) => els.iter().copied().map(Some).collect(),
             _ => vec![None; arity],
@@ -4783,7 +4783,7 @@ fn tuple_schema_for(
 /// `<tmp#N: Type> @ "expr"` using the symbol id and span threaded here.
 fn build_function_debug_meta(
     mir: &MirFunction,
-    db: &mut praxis_types::TypeDb,
+    db: &mut praxis_typeck::TypeDb,
     generation: &Generation,
 ) -> *const FunctionDebugMeta {
     use praxis_mir::ir::LocalDebugKind;
@@ -4899,8 +4899,8 @@ const fn debug_slot_kind_of(kind: ScalarKind) -> DebugSlotKind {
 /// upstream compiler bug; refusing to emit is how it stays visible instead of
 /// becoming a wrong payload read.
 fn descriptor_for_type(
-    db: &praxis_types::TypeDb,
-    ty: praxis_types::Type,
+    db: &praxis_typeck::TypeDb,
+    ty: praxis_typeck::Type,
 ) -> Result<*const praxis_runtime::descriptor::TypeDescriptor> {
     praxis_repr::descriptor_for_type(db, ty)
         .map(|d| d as *const _)
@@ -4926,8 +4926,8 @@ fn descriptor_for_type(
 /// This is *not* a fallback for a dispatch-producing site. There, absence has no
 /// honest encoding and [`descriptor_for_type`] fails the compile.
 fn debug_descriptor_for_type(
-    db: &praxis_types::TypeDb,
-    ty: praxis_types::Type,
+    db: &praxis_typeck::TypeDb,
+    ty: praxis_typeck::Type,
 ) -> *const praxis_runtime::descriptor::TypeDescriptor {
     praxis_repr::descriptor_for_type(db, ty).map_or(std::ptr::null(), |d| d as *const _)
 }
@@ -4957,8 +4957,8 @@ fn debug_descriptor_for_type(
 /// [`descriptor_for_type`] gives (D9). That distinction is exactly what
 /// [`praxis_repr::NoReprCause`] records.
 fn nullable_descriptor_for_type(
-    db: &praxis_types::TypeDb,
-    ty: praxis_types::Type,
+    db: &praxis_typeck::TypeDb,
+    ty: praxis_typeck::Type,
     at: impl std::fmt::Display,
 ) -> Result<*const praxis_runtime::descriptor::TypeDescriptor> {
     match praxis_repr::descriptor_for_type(db, ty) {
@@ -4999,7 +4999,7 @@ fn nullable_descriptor_for_type(
 /// its own runtime object (ADR-059), which
 /// `a_range_element_has_the_range_descriptor` pins.
 fn collection_element_descriptor_for(
-    db: &praxis_types::TypeDb,
+    db: &praxis_typeck::TypeDb,
     args: &[MirType],
     index: usize,
 ) -> Result<*const praxis_runtime::descriptor::TypeDescriptor> {
@@ -5102,12 +5102,16 @@ mod tests {
     #[test]
     fn void_wrappers_declare_no_result() {
         let module = test_module();
-        assert!(signature_for(RuntimeSymbol::SnapshotDebugChain, &module)
-            .returns
-            .is_empty());
-        assert!(signature_for(RuntimeSymbol::RaiseStackOverflow, &module)
-            .returns
-            .is_empty());
+        assert!(
+            signature_for(RuntimeSymbol::SnapshotDebugChain, &module)
+                .returns
+                .is_empty()
+        );
+        assert!(
+            signature_for(RuntimeSymbol::RaiseStackOverflow, &module)
+                .returns
+                .is_empty()
+        );
     }
 
     /// Call convention and pointer width are the ISA's, not literals. Reading
@@ -5144,8 +5148,8 @@ mod tests {
     /// intern first — usually `Int`.
     #[test]
     fn an_opaque_local_carries_neither_a_descriptor_nor_a_type_id() {
-        use praxis_mir::{ir::LocalDebugKind, Function as MirFn};
-        let mut db = praxis_types::TypeDb::new();
+        use praxis_mir::{Function as MirFn, ir::LocalDebugKind};
+        let mut db = praxis_typeck::TypeDb::new();
         let int = db.int();
         let mut f = MirFn {
             name: "f".into(),
@@ -5210,16 +5214,18 @@ mod tests {
     /// path instead of panicking.
     #[test]
     fn an_opaque_element_type_resolves_to_no_descriptor() {
-        let mut db = praxis_types::TypeDb::new();
+        let mut db = praxis_typeck::TypeDb::new();
         let int = db.int();
         assert!(
             collection_element_descriptor_for(&db, &[MirType::Opaque], 0)
                 .unwrap()
                 .is_null()
         );
-        assert!(collection_element_descriptor_for(&db, &[], 0)
-            .unwrap()
-            .is_null());
+        assert!(
+            collection_element_descriptor_for(&db, &[], 0)
+                .unwrap()
+                .is_null()
+        );
         assert!(core::ptr::eq(
             collection_element_descriptor_for(&db, &[MirType::Known(int)], 0).unwrap(),
             &praxis_runtime::scalars::INT
@@ -5236,9 +5242,9 @@ mod tests {
     /// ctor with no runtime object, which is what makes it the right witness.
     #[test]
     fn a_known_element_type_with_no_descriptor_fails_the_compile() {
-        let mut db = praxis_types::TypeDb::new();
+        let mut db = praxis_typeck::TypeDb::new();
         let int = db.int();
-        let seq = db.unary_collection(praxis_types::CollectionCtor::Seq, int);
+        let seq = db.unary_collection(praxis_typeck::CollectionCtor::Seq, int);
         let err = collection_element_descriptor_for(&db, &[MirType::Known(seq)], 0)
             .expect_err("Seq has no runtime object");
         assert!(
@@ -5251,11 +5257,11 @@ mod tests {
     /// compiles, and its element descriptor is the one `Range` object.
     #[test]
     fn a_range_element_has_the_range_descriptor() {
-        let mut db = praxis_types::TypeDb::new();
+        let mut db = praxis_typeck::TypeDb::new();
         let range = db
             .collection(
-                praxis_types::CollectionCtor::Range,
-                praxis_types::CollectionArgs::Nullary,
+                praxis_typeck::CollectionCtor::Range,
+                praxis_typeck::CollectionArgs::Nullary,
             )
             .expect("Range is nullary");
         let desc = collection_element_descriptor_for(&db, &[MirType::Known(range)], 0)
@@ -5273,7 +5279,7 @@ mod tests {
     /// header, not a slot that does not exist.
     #[test]
     fn an_opaque_tuple_type_keeps_its_arity_with_unknown_slots() {
-        let db = praxis_types::TypeDb::new();
+        let db = praxis_typeck::TypeDb::new();
         let generation = Generation::new();
         let schema =
             tuple_schema_for(&db, MirType::Opaque, 2, &generation).expect("no elements to resolve");
@@ -6826,7 +6832,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// The MIR of `src`, annotated and verified.
-    fn mir_for(src: &str) -> (Vec<MirFunction>, praxis_types::TypeDb) {
+    fn mir_for(src: &str) -> (Vec<MirFunction>, praxis_typeck::TypeDb) {
         use praxis_ast::AstNode;
 
         let map = praxis_source::SourceMap::new();
@@ -7381,7 +7387,7 @@ mod tests {
     /// `ctx.pending_fault` zero times.
     #[test]
     fn every_fault_check_in_the_sample_loop_is_folded_into_its_raise() {
-        use praxis_mir::test_support::{lower_src_to_mir, Census, InstKind};
+        use praxis_mir::test_support::{Census, InstKind, lower_src_to_mir};
 
         let lowered = lower_src_to_mir(SAMPLE_LOOP);
         let entry = lowered.entry();
@@ -7414,7 +7420,7 @@ mod tests {
     /// carries the same count from outside this crate.
     #[test]
     fn the_sample_loop_proves_no_descriptors_per_iteration_where_nine_were_written() {
-        use praxis_mir::test_support::{lower_src_to_mir, Census, InstKind};
+        use praxis_mir::test_support::{Census, InstKind, lower_src_to_mir};
 
         let lowered = lower_src_to_mir(SAMPLE_LOOP);
         let entry = lowered.entry();

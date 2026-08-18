@@ -2,9 +2,17 @@
 name = "praxis-test-support"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Shared test helpers for the Praxis compiler: insta snapshot harness and source fixtures."
+description = "Shared test helpers for the Praxis compiler: insta snapshots and fixtures."
+# Scaffolding for this workspace's own tests, and nothing else's. It is only ever
+# a `[dev-dependencies]` entry, its workspace entry deliberately carries no
+# version, and cargo drops a versionless dev-dependency from the manifest a
+# package ships — so the crates that test with it publish without it, and it
+# needs no registry vocabulary of its own.
+publish = false
 
 [dependencies]
 praxis-source.workspace = true
@@ -12,8 +20,8 @@ praxis-syntax.workspace = true
 insta.workspace = true
 rowan.workspace = true
 
-# Doctests are not run (see the justfile and README): rustdoc has to analyze the
-# whole crate before it can find out there are none, and the result is never
-# cached, so `cargo test` paid ~6s per crate for it on every run.
+# Doctests are not run (the justfile says why): rustdoc has to analyze the whole
+# crate before it can find out there are none, and the result is never cached,
+# so `cargo test` pays ~6s per crate for it on every run.
 [lib]
 doctest = false

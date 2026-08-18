@@ -39,6 +39,7 @@
 
 use std::io::Write;
 
+use ratatui::Frame;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers,
@@ -48,7 +49,6 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
-use ratatui::Frame;
 
 use praxis_runtime::{DebugLocal, FaultKind};
 
@@ -803,13 +803,13 @@ fn draw_backtrace(frame: &mut Frame, area: Rect, tui: &Tui) {
         ];
         // The frame's line number, when it resolves — a backtrace without
         // locations makes you open the source to place any frame but the top.
-        if let (Some(src), Some(f)) = (source.as_deref(), snap.frames.get(i)) {
-            if let Some(line_no) = span_line(src, f, marked_span(&tui.repl, i)) {
-                spans.push(Span::styled(
-                    format!(" :{line_no}"),
-                    Style::default().fg(theme::MUTED),
-                ));
-            }
+        if let (Some(src), Some(f)) = (source.as_deref(), snap.frames.get(i))
+            && let Some(line_no) = span_line(src, f, marked_span(&tui.repl, i))
+        {
+            spans.push(Span::styled(
+                format!(" :{line_no}"),
+                Style::default().fg(theme::MUTED),
+            ));
         }
         lines.push(Line::from(spans));
     }
@@ -955,7 +955,7 @@ impl ColumnWidths {
 /// One locals row: `name  Type  = value`, colored by role.
 fn local_line<'a>(
     local: &DebugLocal,
-    db: Option<&praxis_types::TypeDb>,
+    db: Option<&praxis_typeck::TypeDb>,
     source: Option<&str>,
     widths: &ColumnWidths,
     is_temp: bool,
@@ -1390,10 +1390,10 @@ fn line_index(src: &str, offset: usize) -> usize {
 /// of a *fault*, which is in no call at all, and a caller whose call the
 /// compiler could not name — an indirect one through a closure value.
 fn marked_span(repl: &Repl, index: usize) -> Option<(u32, u32)> {
-    if index == 0 {
-        if let Some(span) = repl.stop_span().filter(|s| *s != (0, 0)) {
-            return Some(span);
-        }
+    if index == 0
+        && let Some(span) = repl.stop_span().filter(|s| *s != (0, 0))
+    {
+        return Some(span);
     }
     let snap = repl.snapshot();
     let frame = snap.frames.get(index)?;
@@ -1550,17 +1550,13 @@ fn span_cols(src: &str, line: usize, text: &str, span: (u32, u32)) -> Option<(us
 
 /// Digits in `n`, for right-aligning the line-number gutter.
 fn digits(n: u32) -> usize {
-    if n == 0 {
-        1
-    } else {
-        (n.ilog10() + 1) as usize
-    }
+    if n == 0 { 1 } else { (n.ilog10() + 1) as usize }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use praxis_runtime::{crash_snapshot::SnapshotFrame, CrashSnapshot, FaultKind};
+    use praxis_runtime::{CrashSnapshot, FaultKind, crash_snapshot::SnapshotFrame};
 
     fn two_frame_snapshot() -> CrashSnapshot {
         let boom: &'static str = Box::leak("boom".to_string().into_boxed_str());
@@ -1740,7 +1736,7 @@ mod tests {
         let repl = Repl::new_stopped(
             two_frame_snapshot(),
             crate::repl::StoppedHost {
-                db: praxis_types::TypeDb::new(),
+                db: praxis_typeck::TypeDb::new(),
                 source_text: "var a = 1 :bp\n".to_string(),
                 source_name: "stop.px".to_string(),
                 hits: 1,
@@ -2138,7 +2134,7 @@ mod tests {
         let repl = Repl::new_stopped(
             snap,
             crate::repl::StoppedHost {
-                db: praxis_types::TypeDb::new(),
+                db: praxis_typeck::TypeDb::new(),
                 source_text: String::new(),
                 source_name: "stop.px".to_string(),
                 hits: 1,

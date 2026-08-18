@@ -4,17 +4,13 @@ The concrete grammar, derived from the code that implements it:
 `crates/praxis-parser/src/lex.rs` for the token set,
 `crates/praxis-parser/src/parse.rs` for the productions and the precedence
 table, `crates/praxis-syntax/src/kind.rs` for the node kinds, and
-`crates/praxis-input-parser/` for the `read` DSL. Where the design document's
-Appendix A disagrees, the last section says so.
+`crates/praxis-input-parser/` for the `read` DSL.
 
 This is a reference, not a specification. The parser is recursive descent with
-a Pratt loop for infix operators
-([ADR-004](../../../decisions/004-parser-technique.md)), it produces a lossless
-tree that retains every byte including trivia
-([ADR-003](../../../decisions/003-lossless-tree-uses-rowan.md)), and it recovers
-from an error rather than stopping — so a production below describes what is
-*accepted*, and every rejection carries a `P0xx` or `T0xx` diagnostic rather
-than a silent reinterpretation.
+a Pratt loop for infix operators, it produces a lossless tree that retains every
+byte including trivia, and it recovers from an error rather than stopping — so a
+production below describes what is *accepted*, and every rejection carries a
+`P0xx` or `T0xx` diagnostic rather than a silent reinterpretation.
 
 ## Notation
 
@@ -54,8 +50,7 @@ by `XID_Continue` scalars. `λ`, `_x`, `snake_case` and `x_` are all names.
 A **lone** `_` is not an identifier. It is its own token and it is legal only in
 binding positions — `var _ = f()`, `fn g(_)`, `|_| 0`, and a wildcard pattern —
 where it introduces no name. Reading `_` as a value is `P001: expected an
-expression`
-([ADR-049](../../../decisions/049-the-wildcard-binds-nothing-and-a-newline-ends-a-statement.md)).
+expression`.
 
 ### Keywords
 
@@ -90,15 +85,14 @@ InterpMiddle := "}" (char | escape)* "{"
 InterpClose  := "}" (char | escape)* '"'
 ```
 
-A `{` in a text literal opens an **interpolation hole** (§8.1), so a literal
-holding one is not a `TextLit` at all: it lexes as the fragment run above, with
-the hole's ordinary expression tokens between the fragments. Each fragment
-carries a delimiter at both ends, so the token stream still tiles the source.
+A `{` in a text literal opens an **interpolation hole**, so a literal holding
+one is not a `TextLit` at all: it lexes as the fragment run above, with the
+hole's ordinary expression tokens between the fragments. Each fragment carries a
+delimiter at both ends, so the token stream still tiles the source.
 A `\{` is a literal brace and opens nothing; a `}` outside a hole closes nothing
 and needs no escape. A literal that does not close on its line is one `TextLit`
 plus `T004`, holes or not — the lexer splits only a literal it has already
-proved closes
-([ADR-147](../../../decisions/147-a-hole-renders-anything-because-the-program-wrote-the-hole.md)).
+proved closes.
 
 A `_` between digits belongs to the literal: `1_000`, `3.141_592` and `1e1_0`
 are each one token. A trailing `_` is not — `1_` is `1` followed by the
@@ -118,21 +112,24 @@ A text literal's escapes are `\"`, `\\`, `` \` ``, `\n`, `\r`, `\t`, `\0`. Any
 other backslash is `T005`. A raw newline inside a text literal is not allowed.
 
 A character literal holds **exactly one** Unicode scalar value, and takes a text
-literal's escapes plus `\'` — there are no `\x` or `\u{…}` forms, because there
-are none there
-([ADR-141](../../../decisions/141-a-character-is-one-token-and-a-literal-is-a-load.md)).
-`'é'` is one character, not two bytes. A body that names no character (`''`) or
-more than one (`'ab'`) is `T007`, and an unterminated literal is `T006` naming
-its own line — the same rule a template follows. Those two codes are where
-`"##"[0]`'s silent truncation and `""[0]`'s run-time index fault went.
+literal's escapes plus `\'` — there are no `\x` or `\u{…}` forms, because a text
+literal has none either. One escape table serves both spellings, so `\n` cannot
+mean one thing inside `'…'` and another inside `"…"`. `'é'` is one character,
+not two bytes. A body that names no character (`''`) or more than one (`'ab'`)
+is `T007`, and an unterminated literal is `T006` naming its own line — the same
+rule a template follows. Between them those two codes are why `"##"[0]` is a
+diagnostic rather than a silent truncation, and `""[0]` a diagnostic rather than
+an index fault at run time.
 
 A backtick template is **one token**, interior and all. It ends at the first
 backtick at brace depth zero — so a capture may hold a nested template
 (`` `{g:choice(A: `{x:int}`)}` ``) and a brace inside a string
 (`` `{c:one_of("{")}` ``) does not extend it. A template ends at the line it
 opens on; a raw newline may not appear inside one, and an unterminated template
-is `T002` naming its own line
-([ADR-094](../../../decisions/094-a-template-ends-at-the-line-it-opens-on.md)).
+is `T002` naming its own line. A raw newline has no whitespace policy of its
+own, so one inside a template would fall through to literal text and match an LF
+but not a CRLF. `\n` matches either, and it is how a template spells a line
+ending.
 
 ### Operators and punctuation
 
@@ -157,13 +154,12 @@ change how ordinary code parses.
 ### A newline ends a statement, and never an expression
 
 Statements are separated by `;`, a line break, or the closing `}`/end of file —
-and by nothing else. Two statements run together on one line is `P002`
-([ADR-049](../../../decisions/049-the-wildcard-binds-nothing-and-a-newline-ends-a-statement.md)).
+and by nothing else. Two statements run together on one line is `P002`.
 
 ```praxis
-// ADR-049 in one line: a newline ends a statement, and nothing else does
-// except `;` and the closing brace. Two statements run together on one line
-// have no separator, and the parser says so rather than guessing.
+// A newline ends a statement, and nothing else does except `;` and the closing
+// brace. Two statements run together on one line have no separator, and the
+// parser says so rather than guessing.
 var a = 1 var b = 2
 out(a + b)
 ```
@@ -260,15 +256,13 @@ and `while`, `for`'s iterator, `match`'s scrutinee — and all four resolve it b
 
 Every bracket re-admits it. Inside `(…)`, `[…]`, an argument list, a block or a
 match arm body, the grammar already knows what closes the enclosing construct,
-so no `{` there can be the block a keyword is waiting for
-([ADR-050](../../../decisions/050-record-literals-are-legal-wherever-a-brace-cannot-be-a-block.md)).
+so no `{` there can be the block a keyword is waiting for.
 
 A closure body inherits the ambient suppression rather than resetting it: `|` is
 not a bracket the grammar closes over.
 
 ```praxis
-// ADR-050 in one program: a record literal is legal wherever the `{` cannot be
-// a block.
+// A record literal is legal wherever the `{` cannot be a block.
 //
 // The four keyword heads — `if` and `while` conditions, `for`'s iterator,
 // `match`'s scrutinee — claim the next `{` as their body, so a bare
@@ -379,7 +373,7 @@ postfix      := "(" arg_list? ")"           -- same line as what it follows
 arg_list     := expr ("," expr)* ","?
 
 atom         := literal
-              | interp                      -- "a{expr}b" (§8.1)
+              | interp                      -- "a{expr}b"
               | "(" ")"                     -- Unit
               | "(" expr ")"                -- grouping
               | "(" expr ("," expr)* ","? ")"  -- tuple: the first "," makes it one
@@ -408,7 +402,7 @@ record_field     := Ident (":" expr)?        -- `{ x }` puns, `{ x: e }` is expl
 -- The anonymous form has no head, so nothing separates it from a block but what
 -- follows the `{`: a name then a `:` (that is not the `:bp` marker), or a name
 -- then a `,`. Neither can begin a statement, so neither can begin a block; every
--- other `{` here is the block it already was, `{ x }` included (§5.6, ADR-152).
+-- other `{` here is the block it already was, `{ x }` included.
 anon_record_lit  := "{" Ident ":" expr ("," record_field)* ","? "}"
                   | "{" Ident "," record_field ("," record_field)* ","? "}"
 
@@ -437,12 +431,14 @@ is refused at the comma — `P001: a tuple has two elements or more, so this com
 names nothing` — and the node recovers as the grouping `(1)`. The same rule
 holds in type position: `(Int,)` is refused where `(Int, Text,)` is fine.
 
-It used to parse as a tuple node holding one element, which put two passes in
-disagreement about the same node: inference collapsed the arity-one tuple back
-to `Int` while lowering, reading the node kind, built a tuple object. MIR
-verification caught it, as an abort with no source span, three passes past the
-comma. An empty `()` parses and evaluates to `Unit`. A `[` always builds a list, at every
-arity including the empty `[]`, whose element type comes from its use.
+Refusing it at the comma is what keeps the tree and the type agreeing about one
+node. There is no arity-one tuple *type* for such a node to have: inference
+collapses it back to the element type, while lowering, reading the node kind,
+builds a tuple object — and two passes that disagree about one node do not say
+so until several passes later, nowhere near the comma.
+
+An empty `()` parses and evaluates to `Unit`. A `[` always builds a list, at
+every arity including the empty `[]`, whose element type comes from its use.
 
 `type_arg_list` is legal after exactly eleven names — `Vec`, `Deque`, `Map`,
 `Set`, `Counter`, `MinHeap`, `MaxHeap`, `BitSet`, `Grid`, `Range`, `Option` —
@@ -472,16 +468,14 @@ Consequences worth knowing:
 
 - `a || b && c` is `a || (b && c)`, and `a == b && c == d` is
   `(a == b) && (c == d)`.
-- `0..n - 1` is `0..(n - 1)`. A range bound is an arithmetic expression, which
-  is how every range in the corpus is written
-  ([ADR-059](../../../decisions/059-a-range-is-a-value-and-a-descending-one-is-empty.md)).
+- `0..n - 1` is `0..(n - 1)`. A range bound is an arithmetic expression, and
+  this is the precedence that lets one be written without parentheses.
 - Comparison binds **tighter** than `..`, so `0..3 == 0..3` parses as
   `(0..(3 == 0))..3` and is a type error rather than a range comparison.
 - `-a * b` is `(-a) * b`, and `!p && q` is `(!p) && q`.
 
-Where `&&` sits relative to `..` is arbitrary — a range of `Bool`s and a range
-bound that is a `&&` are both nonsense — and it was placed where it moves the
-fewest numbers.
+Where `&&` sits relative to `..` is arbitrary: a range of `Bool`s and a range
+bound that is a `&&` are both nonsense, so no program can tell the difference.
 
 Assignment is **not** an infix operator. `=` and `+=` are statement-level, so
 `a = b = c` does not parse as an expression.
@@ -505,8 +499,7 @@ A pattern's `{` is never ambiguous the way a record *literal*'s is: a pattern is
 followed by `=>`, by `in`, or by the `|` that closes a closure's parameters —
 never by a block. That is also what makes the head optional — a leading `{` in
 pattern position can only open fields, so `for {x, y} in points` and
-`|{x, y}: Point| x + y` need no new token
-([ADR-091](../../../decisions/091-a-variant-patterns-enum-is-the-scrutinees.md)).
+`|{x, y}: Point| x + y` need no new token.
 A headless record pattern still has to learn *which* record it matches from
 somewhere: the `for` gets it from the iterator, and the closure needs the
 annotation shown, or it is `Y123: { … } cannot tell which record it matches
@@ -518,6 +511,11 @@ one-element tuple pattern — which is `Y123: a tuple pattern names two elements
 or more`, whatever the scrutinee is. `()` and a headless `{}` are rejected at
 the parser: they bind nothing and test nothing, and the pattern that matches
 anything is spelled `_`.
+
+An interpolated text literal is not a pattern either. A pattern tests a
+constant and a hole is an expression evaluated where it stands, so
+`match s { "{x}" => … }` is refused at the literal rather than read as an arm
+that binds `x` and matches everything.
 
 Patterns appear in three binding positions and they are one grammar in all
 three: match arms, the `for` binding, and closure parameters.
@@ -658,41 +656,8 @@ may be followed. `N` is a whole-number literal of at least 1 — the parser plan
 built when the program is compiled, so a count read from a value cannot exist.
 
 A constructor's argument-list *shape* is checked before anything is built, so a
-wrong argument is reported rather than dropped.
-
-## Where the design document's Appendix A drifted
-
-Appendix A of `praxis_technical_design.md` sketches this grammar. It is
-labelled "illustrative EBNF, not the final parser source", and four things in
-it are no longer true of the implementation:
-
-- **`argument := parser_expr | IDENT ":" parser_expr`** misses three forms. A
-  string literal is a positional argument in its own right (`sep(",", int)`,
-  `one_of("LR")`); a positional whole number is one too (`repeated(lines(int), 6)`);
-  and a named argument's value may be a **literal** rather than a parser
-  expression (`fill: 0`, `fill: "-"`). All three are productions the sketch has
-  no rule for.
-- **`template_part := template_literal | capture`** misses the whitespace-policy
-  escapes. `\s*`, `\s+`, `\n`, `\t` and `\x20` each scan into a part of their
-  own, which is what makes a leading or trailing space run in a literal mean
-  "flexible whitespace" rather than "these exact bytes". Section 7.2 of the same
-  document lists them; Appendix A's grammar does not.
-- **`parser_root := parser_expr EOF`** has no counterpart in the compiler. There
-  is no standalone parser-expression entry point; `read` and `parse` are the two
-  and only ways in.
-- **`atom := IDENT`** is where a bare flag (`ragged`) and a keyword value
-  (`whitespace`, `newlines`, `none`) end up syntactically, but they are not
-  atomic parsers. Which of the three an identifier is depends on the
-  constructor it appears in, and that is decided after parsing, by the shape
-  table above.
-
-The sketch is otherwise accurate, including the part that reads most like an
-aspiration: a capture body really is a full `parser_expr`.
-
-Appendix A's expression grammar has one drift of its own, in the other
-direction: it has no production for an interpolated text literal, because §8.1's
-interpolation was specified in prose and unimplemented when the sketch was
-written. It is implemented now, and the `interp` production above is the shape
-of it. Note that an interpolated literal is deliberately **not** a `pattern`:
-a pattern tests a constant, and `match s { "{x}" => … }` is reported rather
-than read as a binding.
+wrong argument is reported rather than dropped. That table is also what decides
+which of three things a bare identifier is: an atomic parser, a flag (`ragged`),
+or a keyword value (`whitespace`, `newlines`, `none`). The grammar cannot tell
+them apart and does not try — `ragged` is a flag in `grid` and a name `lines`
+will reject — so the constructor it was written in settles it, after parsing.

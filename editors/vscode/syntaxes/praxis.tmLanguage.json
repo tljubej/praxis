@@ -66,12 +66,12 @@
       "end": "\"|(?=\\n)",
       "patterns": [
         {
-          "comment": "Exactly `is_valid_escape` in crates/praxis-parser/src/lex.rs, which since ADR-147 asks `praxis_syntax::literal::decode_escape` and adds the backtick. `\\{` and `\\}` are ADR-147's two: a literal brace needs a spelling now that `{` opens a hole. It used to paint `\\x41` and `\\u{41}` as valid escapes; the lexer has never accepted either (T005), so a program that took the colouring at its word did not compile (ADR-141 Decision 1: one language, one escape table).",
+          "comment": "Exactly `is_valid_escape` in crates/praxis-parser/src/lex.rs, which asks `praxis_syntax::literal::decode_escape` and adds the backtick. `\\{` and `\\}` are here because a literal brace needs a spelling once `{` opens a hole. `\\x41` and `\\u{41}` are deliberately absent: the lexer accepts neither (T005), so painting them valid would tell a reader a program compiles when it does not. One language, one escape table.",
           "name": "constant.character.escape.praxis",
           "match": "\\\\[nrt0\\\\\"`{}]"
         },
         {
-          "comment": "An interpolation hole (§8.1, ADR-147): a `{` in a text literal opens a full expression, so its contents are painted as code and not as string — which is what the server does too, because there really is an expression subtree there. This rule ends at the first `}`, so a hole holding a block (`\"{if c { 1 } else { 2 }}\"`) is under-coloured by the fallback. That is deliberate: tracking brace depth here would be a second implementation of the lexer's rule, which is the drift `praxis_syntax::interp` exists to prevent.",
+          "comment": "An interpolation hole: a `{` in a text literal opens a full expression, so its contents are painted as code and not as string — which is what the server does too, because there really is an expression subtree there. This rule ends at the first `}`, so a hole holding a block (`\"{if c { 1 } else { 2 }}\"`) is under-coloured by the fallback. That is deliberate: tracking brace depth here would be a second implementation of the lexer's rule, which is the drift `praxis_syntax::interp` exists to prevent.",
           "name": "meta.embedded.line.praxis",
           "begin": "\\{",
           "beginCaptures": {
@@ -99,7 +99,7 @@
     },
 
     "numbers": {
-      "comment": "§4.12 allows `.5` and `2.`, and `..`/`..=` is a range and never part of a float. The negative lookahead after a trailing dot, and the negative lookbehind before a leading one, are what keep `1..2` from painting as two floats.",
+      "comment": "The language allows `.5` and `2.`, and `..`/`..=` is a range and never part of a float. The negative lookahead after a trailing dot, and the negative lookbehind before a leading one, are what keep `1..2` from painting as two floats.",
       "patterns": [
         {
           "name": "constant.numeric.float.praxis",
@@ -144,7 +144,7 @@
     },
 
     "types": {
-      "comment": "A capitalized identifier is a type name: §4.1's convention, and the only thing a regex can tell. The semantic layer knows the difference between `Grid[T]` and a local called `Grid`; this is the approximation it refines.",
+      "comment": "A capitalized identifier is a type name: the language's convention, and the only thing a regex can tell. The semantic layer knows the difference between `Grid[T]` and a local called `Grid`; this is the approximation it refines.",
       "name": "entity.name.type.praxis",
       "match": "\\b[\\p{Lu}][\\p{L}\\p{N}_]*\\b"
     },
@@ -169,7 +169,7 @@
     },
 
     "read-region": {
-      "comment": "§7.1 enters the parser-expression sublanguage at `read` (and at `parse`'s second argument, which a regex grammar cannot find without counting commas — inside a `parse` call the semantic layer supplies the parser classes on its own). The region ends at the end of the line or at a delimiter it did not open; a constructor's own parenthesis opens a sub-rule, so a parser expression broken across lines stays inside it. Constructors are contextual (`lines` is an ordinary identifier outside a parser expression) and this is the approximation §6.3 allows: the semantic layer corrects it, and the disagreement resolves toward the compiler.",
+      "comment": "The parser-expression sublanguage is entered at `read` (and at `parse`'s second argument, which a regex grammar cannot find without counting commas — inside a `parse` call the semantic layer supplies the parser classes on its own). The region ends at the end of the line or at a delimiter it did not open; a constructor's own parenthesis opens a sub-rule, so a parser expression broken across lines stays inside it. Constructors are contextual (`lines` is an ordinary identifier outside a parser expression) and this is the approximation the fallback layer is allowed: the semantic layer corrects it, and the disagreement resolves toward the compiler.",
       "begin": "\\b(read)\\b",
       "beginCaptures": {
         "1": { "name": "keyword.control.praxis" }
@@ -192,7 +192,7 @@
     },
 
     "parser-call": {
-      "comment": "Every §7.5 constructor. Checked against Constructor::ALL by a Rust test.",
+      "comment": "Every parser constructor. Checked against Constructor::ALL by a Rust test.",
       "begin": "\\b(lines|sections|csv|ws|sep|grid|matrix|chars|one_of|block|choice|optional|scan|repeated)\\s*(\\()",
       "beginCaptures": {
         "1": { "name": "entity.name.function.parser.praxis" },
@@ -206,7 +206,7 @@
     },
 
     "parser-named-argument": {
-      "comment": "`rules: lines(int)`, `skip: whitespace`, `fill: 0` — §7.5's named arguments. Which names are *keyword* arguments is the constructor's question and not a regex's; both get the same scope, and the semantic layer distinguishes them.",
+      "comment": "`rules: lines(int)`, `skip: whitespace`, `fill: 0` — the constructors' named arguments. Which names are *keyword* arguments is the constructor's question and not a regex's; both get the same scope, and the semantic layer distinguishes them.",
       "match": "\\b([\\p{L}_][\\p{L}\\p{N}_]*)\\s*(:)",
       "captures": {
         "1": { "name": "variable.parameter.parser.praxis" },
@@ -215,19 +215,19 @@
     },
 
     "parser-flags": {
-      "comment": "`ragged` is §7.5's one bare-keyword argument; the other three are `skip:`'s policy values (SkipPolicy::ALL).",
+      "comment": "`ragged` is the one bare-keyword argument; the other three are `skip:`'s policy values (SkipPolicy::ALL).",
       "name": "variable.parameter.parser.praxis",
       "match": "\\b(ragged|none|whitespace|newlines)\\b"
     },
 
     "capture-type": {
-      "comment": "Every §7.4 atomic. Checked against AtomicKind::ALL by a Rust test.",
+      "comment": "Every atomic parser. Checked against AtomicKind::ALL by a Rust test.",
       "name": "support.type.capture.praxis",
       "match": "\\b(int|uint|float|byte|char|digit|word|identifier|text|rest)\\b"
     },
 
     "parser-template": {
-      "comment": "ADR-094: a template ends at the line it opens on. The `(?=\\n)` alternative is what keeps an unterminated backtick from painting the rest of the file as a string — the lexer draws the same bound, with two distinct token kinds so the state is unrepresentable rather than re-derived.",
+      "comment": "A template ends at the line it opens on. The `(?=\\n)` alternative is what keeps an unterminated backtick from painting the rest of the file as a string — the lexer draws the same bound, with two distinct token kinds so the state is unrepresentable rather than re-derived.",
       "name": "string.quoted.other.template.praxis",
       "begin": "`",
       "beginCaptures": {
@@ -244,13 +244,13 @@
     },
 
     "template-escape": {
-      "comment": "§7.2's whitespace policies and the two character escapes.",
+      "comment": "The whitespace policies and the two character escapes.",
       "name": "constant.character.escape.praxis",
       "match": "\\\\(s[*+]|x[0-9A-Fa-f]{2}|[nt`\\\\])"
     },
 
     "template-capture": {
-      "comment": "`{name:type}`, `{type}` and `{name:constructor(...)}` scope their parts separately — which is what makes §19.11 criterion 4 visible before the server attaches.",
+      "comment": "`{name:type}`, `{type}` and `{name:constructor(...)}` scope their parts separately — which is what makes a capture's structure visible before the server attaches.",
       "begin": "\\{",
       "end": "\\}",
       "beginCaptures": {

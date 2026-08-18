@@ -30,10 +30,9 @@ The conversions are explicit and are a matched pair: `Int.to_float()` always
 succeeds, and `Float.to_int()` truncates toward zero and faults on anything it
 cannot represent. Both types also render: `Int.to_text()` and `Float.to_text()`
 each answer exactly the characters `out` writes, because the method and the
-printer share one renderer
-([ADR-143](../../../decisions/143-the-to-text-family-is-int-float-and-char.md)). The rule that decides an operation's type is the operands':
-one `Float` operand makes the operation `Float`, otherwise it is `Int`. (A
-`Text` operand makes it `Text` — see [Text and Char](text.md).)
+printer share one renderer. The rule that decides an operation's type is the
+operands': one `Float` operand makes the operation `Float`, otherwise it is
+`Int`. (A `Text` operand makes it `Text` — see [Text and Char](text.md).)
 
 ## Overflow is a fault
 
@@ -250,13 +249,11 @@ NaN
 There is no exponent notation on output: `1e10` prints its ten zeros and then
 takes a `.0` like any other whole number. The three non-finite values print as
 `inf`, `-inf` and `NaN` and take no suffix, because they are not decimal
-literals. The reasoning, and the defect where `out(1.0)` used to print `1`, is
-[ADR-083](../../../decisions/083-a-float-prints-as-a-float.md).
+literals.
 
-The rendered form is an answer and nothing more. `Map`, `Set` and `Counter` used
-to order their entries by it, which put `10.25` between `1.5` and `2.0`; they now
-order by the number, so a `Set[Float]` prints `{1.5, 2.0, 10.25}`
-([ADR-138](../../../decisions/138-a-container-orders-by-the-value-and-not-by-its-printing.md)).
+The rendered form is an answer and nothing more. `Map`, `Set` and `Counter` order
+their entries by the number rather than by its printing, so a `Set[Float]` prints
+`{1.5, 2.0, 10.25}` and never puts `10.25` between `1.5` and `2.0`.
 
 ### NaN
 
@@ -295,9 +292,7 @@ false
 Inside a container the answer differs, deliberately. A heap or a sort needs a
 *total* order or it breaks its own invariants, so the ordering a container
 imposes places `NaN` after every number and ties it with itself, and treats
-`-0.0` and `0.0` as one key. Source-level `<` is untouched. Both halves, and why
-`f64::total_cmp` was rejected, are in
-[ADR-045](../../../decisions/045-ordering-semantics-and-the-compare-callback.md).
+`-0.0` and `0.0` as one key. Source-level `<` is untouched.
 
 ## The operators, and what binds tighter
 

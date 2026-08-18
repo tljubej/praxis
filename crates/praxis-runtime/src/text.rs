@@ -30,12 +30,12 @@
 use std::cell::Cell;
 use std::fmt::Write as _;
 
+use crate::GcRef;
 #[cfg(test)]
 use crate::descriptor::hash_value;
 use crate::descriptor::{
     BuiltinTypeId, DynamicHasher, FormatSink, FormatStyle, Tracer, TypeDescriptor,
 };
-use crate::GcRef;
 
 /// **The ADR-115 measurement toggle**: the only difference between the A/B arms
 /// the caching decision is measured with.

@@ -81,7 +81,7 @@ use crate::verify::defines;
 /// The kind of object a descriptor describes — one class per shape the
 /// runtime's descriptor table distinguishes at the granularity MIR can name.
 ///
-/// This is deliberately **not** [`praxis_types::Type`]: two `Record`s with
+/// This is deliberately **not** [`praxis_typeck::Type`]: two `Record`s with
 /// different fields are one class here, because the question this answers is
 /// "would an [`Inst::ExtractScalar`] of width `K` be reading the wrong object",
 /// and every record is the wrong object for every scalar width. Refining it
@@ -723,7 +723,7 @@ mod census {
     // reason): every figure below is measured over MIR with box forwarding
     // already applied, which is the MIR the backend sees.
     use crate::test_support::lower_src_to_mir_forwarded as lower_src_to_mir;
-    use crate::test_support::{benchmark_source, Lowered, BENCHMARK_SUITE};
+    use crate::test_support::{BENCHMARK_SUITE, Lowered, benchmark_source};
 
     /// How many `ExtractScalar` sites in a region are provable, in both columns.
     #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]

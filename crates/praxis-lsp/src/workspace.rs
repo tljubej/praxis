@@ -27,11 +27,11 @@ use std::path::{Path, PathBuf};
 
 use lsp_types::{Location, OneOf, SymbolKind, Uri, WorkspaceSymbol};
 
+use crate::Revision;
 use crate::document::DocumentStore;
 use crate::navigation::document_symbols;
 use crate::position::Encoding;
 use crate::query::Snapshot;
-use crate::Revision;
 
 /// How many `.px` files one query will read. Chosen to be far above any real
 /// puzzle workspace and far below "the user opened their home directory".
@@ -244,12 +244,13 @@ fn percent_decode(s: &str) -> String {
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(byte);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;

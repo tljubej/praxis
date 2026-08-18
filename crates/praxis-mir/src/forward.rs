@@ -471,10 +471,10 @@ fn rewrite_scalar_operand(inst: &mut Inst, from: LocalId, to: LocalId) {
 /// nothing in the single most common shape in the language, pass every test, and
 /// report a smaller win.
 fn rewrite_branch_condition(term: &mut Terminator, from: LocalId, to: LocalId) {
-    if let Terminator::Branch { cond, .. } = term {
-        if *cond == from {
-            *cond = to;
-        }
+    if let Terminator::Branch { cond, .. } = term
+        && *cond == from
+    {
+        *cond = to;
     }
 }
 
@@ -562,7 +562,7 @@ mod tests {
     // more, so these tests would assert its output while claiming to measure
     // ADR-120's.
     use crate::test_support::lower_src_to_mir_forwarded as lower_src_to_mir;
-    use crate::test_support::{benchmark_source, Census, InstKind, Lowered, BENCHMARK_SUITE};
+    use crate::test_support::{BENCHMARK_SUITE, Census, InstKind, Lowered, benchmark_source};
     use crate::verify::verify;
 
     const INT_BOX: InstKind = InstKind::Materialize(ScalarKind::Int);

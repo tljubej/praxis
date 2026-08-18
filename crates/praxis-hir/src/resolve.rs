@@ -28,7 +28,7 @@ use praxis_ast::{
     WhileExpr,
 };
 use praxis_source::{Diagnostic, FileId, FileSpan, Span};
-use praxis_syntax::{span_bridge::range_to_span, SyntaxKind};
+use praxis_syntax::{SyntaxKind, span_bridge::range_to_span};
 use rowan::{NodeOrToken, TextRange};
 
 use crate::diagnostics::{
@@ -384,39 +384,39 @@ impl Resolver {
     /// resolve in the *preceding* environment (§5.3), which pre-registering
     /// would break.
     fn register_top_level(&mut self, scope: ScopeId, node: &praxis_syntax::SyntaxNode) {
-        if let Some(fn_) = FnItem::cast(node.clone()) {
-            if let Some(name_tok) = fn_.name() {
-                // A second `fn` of the same name is a redeclaration, not a
-                // shadow: both would reach the backend and be emitted under one
-                // JIT symbol. Report it and keep the first, so the rest of the
-                // file still resolves against something.
-                if self.out.scopes.is_bound_here(scope, name_tok.text()) {
-                    let span = range_to_span(name_tok.text_range());
-                    let at = self.file_span(span);
-                    self.out
-                        .diagnostics
-                        .push(duplicate_declaration(at, name_tok.text()));
-                } else {
-                    self.bind(
-                        scope,
-                        SymbolKind::Fn,
-                        name_tok.text().to_string(),
-                        name_tok.text_range(),
-                    );
-                }
-            }
-        }
-        // Struct type names, so they are visible as type annotations before any
-        // body resolves.
-        if let Some(struct_) = StructItem::cast(node.clone()) {
-            if let Some(name_tok) = struct_.name() {
+        if let Some(fn_) = FnItem::cast(node.clone())
+            && let Some(name_tok) = fn_.name()
+        {
+            // A second `fn` of the same name is a redeclaration, not a
+            // shadow: both would reach the backend and be emitted under one
+            // JIT symbol. Report it and keep the first, so the rest of the
+            // file still resolves against something.
+            if self.out.scopes.is_bound_here(scope, name_tok.text()) {
+                let span = range_to_span(name_tok.text_range());
+                let at = self.file_span(span);
+                self.out
+                    .diagnostics
+                    .push(duplicate_declaration(at, name_tok.text()));
+            } else {
                 self.bind(
                     scope,
-                    SymbolKind::Struct,
+                    SymbolKind::Fn,
                     name_tok.text().to_string(),
                     name_tok.text_range(),
                 );
             }
+        }
+        // Struct type names, so they are visible as type annotations before any
+        // body resolves.
+        if let Some(struct_) = StructItem::cast(node.clone())
+            && let Some(name_tok) = struct_.name()
+        {
+            self.bind(
+                scope,
+                SymbolKind::Struct,
+                name_tok.text().to_string(),
+                name_tok.text_range(),
+            );
         }
         // Enum type names, plus each variant's constructor name.
         if let Some(enum_) = EnumItem::cast(node.clone()) {
@@ -463,10 +463,10 @@ impl Resolver {
             for e in [assign.target(), assign.value()].into_iter().flatten() {
                 self.resolve_expr(scope, &e);
             }
-        } else if let Some(expr) = ExprStmt::cast(node.clone()) {
-            if let Some(e) = expr.expr() {
-                self.resolve_expr(scope, &e);
-            }
+        } else if let Some(expr) = ExprStmt::cast(node.clone())
+            && let Some(e) = expr.expr()
+        {
+            self.resolve_expr(scope, &e);
         }
     }
 
@@ -553,14 +553,14 @@ impl Resolver {
         // parsed but never declared, and inference cannot proceed without a
         // declaration. Report it here — where the nesting is visible — and carry
         // on resolving the body, so the rest of the file still reports.
-        if !self.is_top_level(item) {
-            if let Some(name_tok) = item.name() {
-                let span = range_to_span(name_tok.text_range());
-                let at = self.file_span(span);
-                self.out
-                    .diagnostics
-                    .push(nested_function(at, name_tok.text()));
-            }
+        if !self.is_top_level(item)
+            && let Some(name_tok) = item.name()
+        {
+            let span = range_to_span(name_tok.text_range());
+            let at = self.file_span(span);
+            self.out
+                .diagnostics
+                .push(nested_function(at, name_tok.text()));
         }
         // A function's name was registered in pass 1 (`register_top_level`) so
         // it is visible for forward references and mutual recursion. Reuse that
@@ -668,12 +668,11 @@ impl Resolver {
     /// `var a = 1; a = 2; var a = "s"` writes the *first* `a`, and only the
     /// walk that has the scope at that point can say so.
     fn resolve_assign(&mut self, scope: ScopeId, stmt: &AssignStmt) {
-        if let Some(name_tok) = stmt.name() {
-            if let Some(symbol) = self.resolve_name_ref(scope, &name_tok) {
-                if let Some(sym) = self.out.names.get_mut(symbol) {
-                    sym.reassigned = true;
-                }
-            }
+        if let Some(name_tok) = stmt.name()
+            && let Some(symbol) = self.resolve_name_ref(scope, &name_tok)
+            && let Some(sym) = self.out.names.get_mut(symbol)
+        {
+            sym.reassigned = true;
         }
         if let Some(value) = stmt.value() {
             self.resolve_expr(scope, &value);
@@ -883,10 +882,10 @@ impl Resolver {
                 // that resolves to nothing is left alone here: naming a variant
                 // the scrutinee's type does not have is a type error (`Y122`),
                 // not an unresolved name.
-                if let Some(tok) = pat.name_token() {
-                    if let Some(symbol) = self.lookup(scope, &name) {
-                        self.record_ref(scope, symbol, tok.text_range());
-                    }
+                if let Some(tok) = pat.name_token()
+                    && let Some(symbol) = self.lookup(scope, &name)
+                {
+                    self.record_ref(scope, symbol, tok.text_range());
                 }
                 for sub in pat.sub_patterns() {
                     self.resolve_pattern_bindings(scope, &sub);
@@ -899,10 +898,10 @@ impl Resolver {
     fn resolve_record_lit(&mut self, scope: ScopeId, r: &RecordLitExpr) {
         // The struct name is a type reference — look it up so inference knows
         // which struct. It resolves like any other name.
-        if let Some(name) = r.name() {
-            if let Some(tok) = name.name() {
-                self.resolve_name_ref(scope, &tok);
-            }
+        if let Some(name) = r.name()
+            && let Some(tok) = name.name()
+        {
+            self.resolve_name_ref(scope, &tok);
         }
         if let Some(fields) = r.field_list() {
             for f in fields.fields() {

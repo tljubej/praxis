@@ -678,8 +678,8 @@ unsafe impl<T: Sync> Sync for ReprCVec<T> {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn a_repr_c_vec_is_the_same_three_words_a_std_vec_is() {

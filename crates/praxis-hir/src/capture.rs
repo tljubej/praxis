@@ -63,7 +63,7 @@ pub enum CaptureKind {
 pub struct Capture {
     pub symbol: SymbolId,
     pub name: String,
-    pub ty: praxis_types::Type,
+    pub ty: praxis_typeck::Type,
     pub kind: CaptureKind,
 }
 

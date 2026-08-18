@@ -95,9 +95,11 @@ fn hover_over_out_shows_polymorphic_scheme() {
 #[test]
 fn hover_at_empty_range_returns_none() {
     let analysis = analyze("var x = 1");
-    assert!(analysis
-        .hover(TextRange::new(100u32.into(), 101u32.into()))
-        .is_none());
+    assert!(
+        analysis
+            .hover(TextRange::new(100u32.into(), 101u32.into()))
+            .is_none()
+    );
 }
 
 /// Hover over a method name reports what the method call produces — the

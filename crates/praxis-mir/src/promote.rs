@@ -238,13 +238,12 @@ fn legal_candidates(func: &Function) -> BTreeMap<LocalId, ScalarKind> {
 
     for block in &func.blocks {
         for inst in &block.insts {
-            if let Some(dst) = defines(inst) {
-                if out
+            if let Some(dst) = defines(inst)
+                && out
                     .get(&dst)
                     .is_some_and(|&kind| !def_is_rewritable(inst, kind))
-                {
-                    out.remove(&dst);
-                }
+            {
+                out.remove(&dst);
             }
             match inst {
                 // `StoreScalar` writes a payload *into* the object named by
@@ -478,28 +477,28 @@ fn score(
     for (bi, block) in func.blocks.iter().enumerate() {
         let w = weights[bi];
         for inst in &block.insts {
-            if let Some(dst) = defines(inst) {
-                if set.contains_key(&dst) {
-                    add(
-                        dst,
-                        w * match inst {
-                            // The box this pass exists to delete.
-                            Inst::Materialize { .. } | Inst::Alloc { .. } => MATERIALIZE_COST,
-                            Inst::ConstGc { .. } => CONST_GC_COST,
-                            // A copy stays a copy between two promoted slots,
-                            // and becomes a guarded reload when the source
-                            // stayed a reference.
-                            Inst::MoveGc { src, .. } => {
-                                if set.contains_key(src) {
-                                    0
-                                } else {
-                                    -EXTRACT_COST
-                                }
+            if let Some(dst) = defines(inst)
+                && set.contains_key(&dst)
+            {
+                add(
+                    dst,
+                    w * match inst {
+                        // The box this pass exists to delete.
+                        Inst::Materialize { .. } | Inst::Alloc { .. } => MATERIALIZE_COST,
+                        Inst::ConstGc { .. } => CONST_GC_COST,
+                        // A copy stays a copy between two promoted slots,
+                        // and becomes a guarded reload when the source
+                        // stayed a reference.
+                        Inst::MoveGc { src, .. } => {
+                            if set.contains_key(src) {
+                                0
+                            } else {
+                                -EXTRACT_COST
                             }
-                            _ => 0,
-                        },
-                    );
-                }
+                        }
+                        _ => 0,
+                    },
+                );
             }
             for u in uses(inst) {
                 if !set.contains_key(&u) {
@@ -578,18 +577,18 @@ fn rewrite(func: &mut Function, set: &BTreeMap<LocalId, ScalarKind>) {
 
         // `Terminator::Return` yields a `GcRef` by ABI, so a promoted value
         // returned here is boxed at the exit — once per call, never in a loop.
-        if let Terminator::Return { value } = func.blocks[bi].term {
-            if let Some(&kind) = set.get(&value) {
-                let boxed = rebox_slot(func, &mut reboxed, value);
-                out.push(Inst::Materialize {
-                    dst: boxed,
-                    src: twin[&value],
-                    scalar: kind,
-                    roots: RootSlots::unannotated(),
-                    debug: DebugSlots::unannotated(),
-                });
-                func.blocks[bi].term = Terminator::Return { value: boxed };
-            }
+        if let Terminator::Return { value } = func.blocks[bi].term
+            && let Some(&kind) = set.get(&value)
+        {
+            let boxed = rebox_slot(func, &mut reboxed, value);
+            out.push(Inst::Materialize {
+                dst: boxed,
+                src: twin[&value],
+                scalar: kind,
+                roots: RootSlots::unannotated(),
+                debug: DebugSlots::unannotated(),
+            });
+            func.blocks[bi].term = Terminator::Return { value: boxed };
         }
 
         func.blocks[bi].insts = out;
@@ -626,70 +625,68 @@ fn rewrite_inst(
     // --- definitions of a promoted slot: the box is not written at all --------
     //
     // Every arm here mirrors one that answered `true` in `def_is_rewritable`.
-    if let Some(dst) = defines(&inst) {
-        if let Some(&kind) = set.get(&dst) {
-            let scalar = twin[&dst];
-            match &inst {
-                Inst::Materialize { src, .. } => {
-                    out.push(Inst::MoveScalar {
+    if let Some(dst) = defines(&inst)
+        && let Some(&kind) = set.get(&dst)
+    {
+        let scalar = twin[&dst];
+        match &inst {
+            Inst::Materialize { src, .. } => {
+                out.push(Inst::MoveScalar {
+                    dst: scalar,
+                    src: *src,
+                    kind,
+                });
+                return;
+            }
+            Inst::Alloc {
+                alloc:
+                    AllocKind::Int { value } | AllocKind::Bool { value } | AllocKind::Float { value },
+                ..
+            } => {
+                out.push(Inst::MoveScalar {
+                    dst: scalar,
+                    src: *value,
+                    kind,
+                });
+                return;
+            }
+            Inst::ConstGc { konst, .. } => {
+                // `ConstInt` is the scalar channel's immediate loader for
+                // every width, not only `Int` — `crate::forward`'s
+                // `How::Immediate` already replaces a `Bool` and a `Char`
+                // reload with one. `GcConst` has no `Float` variant, so the
+                // two arms below are exhaustive over what
+                // `def_is_rewritable` admits.
+                let value = match konst {
+                    GcConst::SmallInt(n) => *n,
+                    GcConst::Bool(b) => i64::from(*b),
+                    GcConst::Unit | GcConst::Char(_) => {
+                        unreachable!("def_is_rewritable admits only SmallInt and Bool constants")
+                    }
+                };
+                out.push(Inst::ConstInt { dst: scalar, value });
+                return;
+            }
+            Inst::MoveGc { src, .. } => {
+                match twin.get(src) {
+                    // Both sides promoted: a word moves between two slots.
+                    Some(&src_scalar) => out.push(Inst::MoveScalar {
+                        dst: scalar,
+                        src: src_scalar,
+                        kind,
+                    }),
+                    // The source stayed a reference, so this is the reload it
+                    // always needed. Sound by the meet: `src`'s class is
+                    // `kind`, or `dst`'s could not have been.
+                    None => out.push(Inst::ExtractScalar {
                         dst: scalar,
                         src: *src,
-                        kind,
-                    });
-                    return;
+                        scalar: kind,
+                    }),
                 }
-                Inst::Alloc {
-                    alloc:
-                        AllocKind::Int { value }
-                        | AllocKind::Bool { value }
-                        | AllocKind::Float { value },
-                    ..
-                } => {
-                    out.push(Inst::MoveScalar {
-                        dst: scalar,
-                        src: *value,
-                        kind,
-                    });
-                    return;
-                }
-                Inst::ConstGc { konst, .. } => {
-                    // `ConstInt` is the scalar channel's immediate loader for
-                    // every width, not only `Int` — `crate::forward`'s
-                    // `How::Immediate` already replaces a `Bool` and a `Char`
-                    // reload with one. `GcConst` has no `Float` variant, so the
-                    // two arms below are exhaustive over what
-                    // `def_is_rewritable` admits.
-                    let value = match konst {
-                        GcConst::SmallInt(n) => *n,
-                        GcConst::Bool(b) => i64::from(*b),
-                        GcConst::Unit | GcConst::Char(_) => unreachable!(
-                            "def_is_rewritable admits only SmallInt and Bool constants"
-                        ),
-                    };
-                    out.push(Inst::ConstInt { dst: scalar, value });
-                    return;
-                }
-                Inst::MoveGc { src, .. } => {
-                    match twin.get(src) {
-                        // Both sides promoted: a word moves between two slots.
-                        Some(&src_scalar) => out.push(Inst::MoveScalar {
-                            dst: scalar,
-                            src: src_scalar,
-                            kind,
-                        }),
-                        // The source stayed a reference, so this is the reload it
-                        // always needed. Sound by the meet: `src`'s class is
-                        // `kind`, or `dst`'s could not have been.
-                        None => out.push(Inst::ExtractScalar {
-                            dst: scalar,
-                            src: *src,
-                            scalar: kind,
-                        }),
-                    }
-                    return;
-                }
-                _ => unreachable!("def_is_rewritable admits no other definition shape"),
+                return;
             }
+            _ => unreachable!("def_is_rewritable admits no other definition shape"),
         }
     }
 
@@ -763,7 +760,7 @@ mod tests {
     //! about the compiler's.
 
     use super::*;
-    use crate::test_support::{lower_src_to_mir, Census, InstKind};
+    use crate::test_support::{Census, InstKind, lower_src_to_mir};
 
     /// Every instruction in a function, as a census.
     fn census(func: &Function) -> Census {

@@ -307,9 +307,6 @@ binding. If a `match` you expect to be exhaustive compiles without the arm you
 thought you needed, look for a misspelt payload-less variant. Writing `Wal(_)`
 instead would have been `Y122`.
 
-See
-[ADR-091](../../../decisions/091-a-variant-patterns-enum-is-the-scrutinees.md).
-
 ## A record pattern needs no head
 
 The head of a record pattern is optional. A headless `{ a, b }` pins its record
@@ -549,8 +546,7 @@ shape — `` missing `Point { x: _, y: _ }` ``.
 
 An unreachable arm still *covers* what it names, whether or not it can run, so
 `{ _ => 1, A => 2 }` does not then report a missing `B` on account of the arm it
-has just rejected. The reasoning for the whole check is in
-[ADR-055](../../../decisions/055-exhaustiveness-and-reachability-are-one-usefulness-question.md).
+has just rejected.
 
 ## Where the check runs
 
@@ -562,12 +558,9 @@ The check runs *after* inference rather than inside it, because a scrutinee's
 type is not final while inference is still on the stack: a `match` on an
 unannotated parameter can be pinned by a call further down the file, and a
 coverage answer given against a type variable would be a `Y120` demanding a `_`
-the program does not need. See
-[ADR-130](../../../decisions/130-a-matchs-coverage-is-analysis-answer-and-the-pattern-is-built-once.md).
+the program does not need.
 
-So does every other pattern mistake, including the two that used to be
-lowering's alone and invisible to `praxis check`: a payload the pattern does not
-fit (`Y124`), and a pattern that can fail in a `for` header or a closure
-parameter (`Y125`). Both are analysis's now, so the editor underlines them as
-you type. See
-[ADR-133](../../../decisions/133-every-diagnostic-a-well-formed-program-can-earn-is-analysiss.md).
+So does every other pattern mistake: a payload the pattern does not fit
+(`Y124`), and a pattern that can fail in a `for` header or a closure parameter
+(`Y125`). Every diagnostic a well-formed program can earn is analysis's, so the
+editor underlines all of them as you type.

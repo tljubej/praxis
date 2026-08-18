@@ -41,8 +41,8 @@ use std::io::{BufRead, Write};
 use praxis_runtime::CrashSnapshot;
 
 use crate::render::{
-    render_backtrace, render_frame_locals, render_input_context, render_parser_context,
-    render_source_span, RenderCtx,
+    RenderCtx, render_backtrace, render_frame_locals, render_input_context, render_parser_context,
+    render_source_span,
 };
 use crate::session::DebugSession;
 
@@ -105,7 +105,7 @@ enum Attached {
 pub struct StoppedHost {
     /// The program's type database, for rendering each local's static type and
     /// for answering `type EXPR`.
-    pub db: praxis_types::TypeDb,
+    pub db: praxis_typeck::TypeDb,
     /// The program's source text, for `source` and for each temp's `@ "expr"`
     /// provenance.
     pub source_text: String,
@@ -361,7 +361,7 @@ impl Repl {
             }
             Attached::Fault(session) => session,
             Attached::Nothing => {
-                return Err("no live session — cannot evaluate expressions".to_string())
+                return Err("no live session — cannot evaluate expressions".to_string());
             }
         };
         // Clone the `Rc` before the `&mut` borrows below: the evaluation
@@ -707,7 +707,7 @@ fn split_cmd(line: &str) -> (&str, &str) {
 
 /// The `help` text (§9.4 command list).
 const HELP_TEXT: &str = "\
-Crash debugger commands (§9.4):
+Crash debugger commands:
   bt              show the numbered backtrace
   frame N         select frame N
   up              move the selection toward the caller
@@ -732,7 +732,7 @@ Crash debugger commands (§9.4):
 /// Listing a command the surface will refuse is how a user learns to distrust
 /// the help.
 const STOPPED_HELP_TEXT: &str = "\
-Breakpoint commands (§9.8):
+Breakpoint commands:
   continue        let the program run on (stops again at the next `:bp`)
   bt              show the numbered backtrace
   frame N         select frame N
@@ -750,7 +750,7 @@ still in the middle of its own. Continue, and the crash debugger has both.";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use praxis_runtime::{crash_snapshot::SnapshotFrame, FaultKind};
+    use praxis_runtime::{FaultKind, crash_snapshot::SnapshotFrame};
 
     /// Build a snapshot with two named frames (innermost `boom`, outer `main`)
     /// and no locals, for navigation tests.
@@ -908,7 +908,7 @@ mod tests {
         Repl::new_stopped(
             two_frame_snapshot(),
             StoppedHost {
-                db: praxis_types::TypeDb::new(),
+                db: praxis_typeck::TypeDb::new(),
                 source_text: "var a = 1 :bp\n".to_string(),
                 source_name: "stop.px".to_string(),
                 hits: 1,
@@ -1056,7 +1056,7 @@ mod tests {
         let mut repl = Repl::new_stopped(
             two_frame_snapshot(),
             StoppedHost {
-                db: praxis_types::TypeDb::new(),
+                db: praxis_typeck::TypeDb::new(),
                 source_text: String::new(),
                 source_name: String::new(),
                 hits: 7,

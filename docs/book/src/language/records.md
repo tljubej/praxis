@@ -191,8 +191,7 @@ expression, an argument list, a block, a record body and a match arm all re-ente
 with literals allowed. Writing `if p == Point { x: 1, y: 2 } { … }` without the
 parentheses is not a tidy error — the `{` becomes the `if`'s block, the field
 list becomes statements, and one line yields a dozen diagnostics. The fix is the
-parentheses. See
-[ADR-050](../../../decisions/050-record-literals-are-legal-wherever-a-brace-cannot-be-a-block.md).
+parentheses.
 
 The **anonymous** literal has no such ambiguity to suppress, and none of this
 applies to it. `p { … }` is ambiguous because the name could be the whole head;
@@ -271,10 +270,8 @@ praxis: 1 error(s)
 
 To cross the line, build the `struct` from the fields: `Point { x: rows[0].x,
 y: rows[0].y }`. Most programs never need to — the anonymous record already has
-the fields, and a function that takes one need not name its type. The reasoning
-is in [ADR-024](../../../decisions/024-provisional-structural-records.md) and
-[ADR-025](../../../decisions/025-typedata-record-enum-defid.md); the type system's
-side of it is [Records without names](../types/structural-records.md).
+the fields, and a function that takes one need not name its type. The type
+system's side of it is [Records without names](../types/structural-records.md).
 
 ## A bare `.name` is a field; a zero-argument accessor is a call
 
@@ -310,8 +307,7 @@ parentheses, and a bare one of those is `Y112` naming the type it was asked of.
 The rule exists because a receiver whose type inference has not pinned yet cannot
 tell a field read from a nullary call, and picking by "whichever the receiver
 happens to have" would mean adding a field could silently change what an existing
-expression does. See
-[ADR-077](../../../decisions/077-a-zero-argument-accessor-is-a-call-and-a-bare-dot-name-is-a-field.md).
+expression does.
 
 ## What the compiler reports
 
@@ -406,8 +402,6 @@ instead: a `Map[Int, Vec[Int]]` of children.
 One report is emitted per cycle member, and a declaration that merely sits
 *behind* a cycle is not the mistake and is not reported — in `struct C { a: A }`
 above `struct A { b: B }` and `struct B { a: A }`, only `A` and `B` are named.
-See
-[ADR-063](../../../decisions/063-a-self-referring-type-declaration-is-reported.md).
 
 ## What is not here
 

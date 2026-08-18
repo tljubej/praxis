@@ -34,9 +34,9 @@ pub mod scope;
 pub mod symbol;
 
 pub use lower::{
-    entry_point, expr_span, expr_ty, lower, stmt_exprs, stmt_span, AssignOp, BinOp, Lit,
-    TypedBlock, TypedExpr, TypedFn, TypedItem, TypedMatchArm, TypedModule, TypedParam,
-    TypedPattern, TypedStmt, UnaryOp, ENTRY_NAME,
+    AssignOp, BinOp, ENTRY_NAME, Lit, TypedBlock, TypedExpr, TypedFn, TypedItem, TypedMatchArm,
+    TypedModule, TypedParam, TypedPattern, TypedStmt, UnaryOp, entry_point, expr_span, expr_ty,
+    lower, stmt_exprs, stmt_span,
 };
 pub use name_table::NameTable;
 pub use parser_index::{CaptureAt, ParserIndex, ParserMode};
@@ -50,7 +50,7 @@ pub use symbol::{Symbol, SymbolId, SymbolKind};
 
 use praxis_ast::{AstNode, SourceFile};
 use praxis_source::{Diagnostic, FileId};
-use praxis_types::{Type, TypeDb};
+use praxis_typeck::{Type, TypeDb};
 
 /// The identity of one syntax **node**.
 ///

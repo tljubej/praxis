@@ -33,9 +33,9 @@
 
 use std::cmp::Ordering;
 
+use crate::GcRef;
 use crate::descriptor::{FormatSink, TypeDescriptor};
 use crate::maps::render_into;
-use crate::GcRef;
 
 /// Order two values by the type each one says it is.
 ///
@@ -118,9 +118,9 @@ unsafe fn rendered_cmp(a: GcRef, da: &TypeDescriptor, b: GcRef, db: &TypeDescrip
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Runtime;
     use crate::records::{RecordField, RecordSchema, SchemaIdentity};
     use crate::tuples::TupleSchema;
-    use crate::Runtime;
 
     /// One value of each type a `Map` key or `Set` member can be, plus a `Vec`
     /// — which can never be a key, and is here because it is the one descriptor

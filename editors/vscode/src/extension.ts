@@ -1,10 +1,10 @@
-// The Praxis VS Code extension (§15.4, WS9).
+// The Praxis VS Code extension.
 //
-// **Intentionally thin.** It registers `.px`, launches `praxis lsp`, exposes the
-// four commands, and restarts the server. There is **no parsing and no type
-// logic in TypeScript** (§15.4, §20 rule 3): everything the editor knows about
-// a Praxis program comes from the compiler over the protocol, so the extension
-// and the compiler cannot disagree about what a file means.
+// **Intentionally thin.** It registers `.px`, launches `praxis lsp`, exposes
+// the three commands, and restarts the server. There is **no parsing and no
+// type logic in TypeScript**: everything the editor knows about a Praxis
+// program comes from the compiler over the protocol, so the extension and the
+// compiler cannot disagree about what a file means.
 //
 // The argv construction lives in `argv.ts`, which imports nothing from `vscode`
 // so it can be tested without a host.
@@ -24,9 +24,9 @@ import { fileCommandArgv, serverArgv, terminalCommand } from "./argv";
 /** The one language id, matching `package.json`'s `contributes.languages`. */
 const LANGUAGE_ID = "praxis";
 
-/** The terminal the run/check/watch commands share. §15.4 asks for an
- *  integrated terminal rather than an output channel because the crash REPL is
- *  interactive — an output channel cannot answer a prompt. */
+/** The terminal the run and check commands share. An integrated terminal
+ *  rather than an output channel, because the crash debugger is interactive and
+ *  an output channel cannot answer a prompt. */
 const TERMINAL_NAME = "Praxis";
 
 let client: LanguageClient | undefined;
@@ -35,7 +35,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.commands.registerCommand("praxis.runFile", () => runFileCommand("run")),
     vscode.commands.registerCommand("praxis.checkFile", () => runFileCommand("check")),
-    vscode.commands.registerCommand("praxis.watchFile", () => runFileCommand("watch")),
     vscode.commands.registerCommand("praxis.restartServer", () => restartServer(context)),
   );
 

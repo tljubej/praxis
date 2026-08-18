@@ -20,7 +20,7 @@
 use crate::constraint::Constraint;
 use crate::data::VarState;
 use crate::db::TypeDb;
-use crate::fold::{fold, visit_only_composites, FoldMemo, TypeFolder};
+use crate::fold::{FoldMemo, TypeFolder, fold, visit_only_composites};
 use crate::type_id::{Type, VarId};
 
 /// A type scheme: `forall <binders>. body`. A bare monomorphic type is a scheme
@@ -256,10 +256,11 @@ impl TypeFolder for Generalizer<'_, '_> {
         &mut self.memo
     }
     fn fold_var(&mut self, t: Type, var: VarId, state: &VarState) -> Type {
-        if let VarState::Unbound { level } = *state {
-            if level.is_deeper_than(self.site) && !self.binders.contains(&var) {
-                self.binders.push(var);
-            }
+        if let VarState::Unbound { level } = *state
+            && level.is_deeper_than(self.site)
+            && !self.binders.contains(&var)
+        {
+            self.binders.push(var);
         }
         t
     }

@@ -1,233 +1,164 @@
 # Praxis
 
-A small, statically typed, garbage-collected programming language designed for
-Advent of Code-style puzzle solving. It favors rapid iteration, concise data
-manipulation, practical parsing, and strong diagnostics over systems-programming
-concerns.
+Praxis is a small, statically typed, garbage-collected programming language for
+solving puzzles — Advent of Code and everything shaped like it. The evening it
+is built for goes: read a file in a format nobody would have chosen, push the
+data around until an answer falls out, find out fast when it does not. So the
+parser is part of the language, the types are inferred rather than written, and
+a program that falls over hands you its state instead of a stack trace. One
+`.px` file is a program: no `main`, no imports, no build step.
 
-> **Status:** everything through Milestone 12 of the roadmap in
-> [`praxis_technical_design.md`](./praxis_technical_design.md) §19 is
-> implemented **except the formatter**, which M12 lists as a deliverable and
-> which is out of scope by decision (below). `praxis run` compiles and executes
-> end to end, `praxis check` reports diagnostics without generating code,
-> `praxis lsp` is a full language server, and a runtime fault drops into a crash
-> debugger with a full-screen TUI. `var` is the one binding form; a pipeline
-> materializes eagerly, so a chain that ends on a stage already answers a `Vec`.
->
-> Milestone 13 — corpus validation and performance hardening — is in progress.
-> The [benchmark suite](./benchmarks/) (8 programs, each written in Praxis, Rust
-> and Python, with byte-identical output enforced) measures Praxis at 7× Rust,
-> 0.2× CPython 3.14 and 1.09× CPython's peak resident set; see
-> [`benchmarks/REPORT.md`](./benchmarks/REPORT.md). The AoC corpus under
-> [`tests/aoc-corpus`](./tests/aoc-corpus) and
-> [`tests/input-parsers`](./tests/input-parsers) is a `cargo test` gate: every
-> `.px` file in the `tests/` tree must run clean and match its `.out`
-> (`crates/praxis-cli/tests/corpus.rs`). What M13 still owes is a corpus drawn
-> from more than one puzzle year, and the watch-mode criterion, which cannot be
-> met before `praxis watch` exists.
->
-> **Not implemented:** a stable formatter (§19.12) — there is no `praxis fmt`
-> and the server does not advertise `documentFormattingProvider`, deliberately
-> ([`docs/handovers/29-milestone-12-handover.md`](./docs/handovers/29-milestone-12-handover.md)
-> §4). The M1 skeleton in `crates/praxis-parser/src/fmt.rs` is still there and
-> is kept working as the syntax grows — its own unit tests hold it to
-> idempotency, and one covers interpolation — but nothing outside the crate
-> calls it, so it is a library function rather than a capability.
->
-> `praxis watch` is scheduled for a later milestone and `praxis repl` is
-> scheduled nowhere; both are dispatchable subcommands that print an explicit
-> not-implemented message and exit 2.
->
-> Design decisions are recorded in [`docs/decisions/`](./docs/decisions) and
-> milestone handovers in [`docs/handovers/`](./docs/handovers).
+```praxis
+// One `read` describes the whole file: two sections, each with its own shape.
+var input = read sections(
+    rules: lines(`{before:int}|{after:int}`),
+    updates: lines(csv(int)),
+)
 
-## Command surface
+var order = Set()
+for rule in input.rules {
+    order.insert((rule.before, rule.after))
+}
+
+var good = input.updates.filter(|pages| {
+    (0..pages.len()).all(|i| {
+        (0..i).all(|j| !order.contains((pages[i], pages[j])))
+    })
+})
+
+out("in order: {good.len()}")
+out("middle sum: {good.map(|pages| pages[pages.len() / 2]).sum()}")
+```
+
+The file it reads is a block of ordering rules, a blank line, then the page
+lists to check against them:
+
+```console
+$ cat pages.in
+47|53
+97|13
+75|29
+29|13
+
+75,47,61,53,29
+97,61,53,29,13
+75,29,13
+61,13,29
+$ praxis run pages.px --input pages.in
+in order: 3
+middle sum: 143
+```
+
+Nothing there is annotated and no record was declared: `input` has the type
+`{ rules: Vec[{ before: Int, after: Int }], updates: Vec[Vec[Int]] }` because
+that is what the parser produces.
+
+## What you get
+
+- **`read`, an input parser in the language.** `read` is an expression, and what
+  follows it is a small declarative language for the shape of a file: `lines`,
+  `sections`, `csv`, `ws`, `grid`, `matrix`, `chars`, and backtick templates
+  whose `{name:int}` captures become record fields. Structure goes outside the
+  backticks, where whitespace does not matter; the input's literal text goes
+  inside, where it does. Parsers nest, and the type comes from the parser.
+- **Type inference over everything.** A parameter, a collection's elements, a
+  closure's argument and a parser's product are all worked out for you — so a
+  mistake about the shape of the input is a compile error, not a line-400
+  surprise.
+- **Collections chosen for this work.** `Vec`, `Deque`, `Map`, `Set`, `Counter`,
+  `MinHeap`, `MaxHeap`, `BitSet`, `Grid` and `Range` are built in and already in
+  scope. Pipelines are eager — `map`, `filter`, `zip`, `windows` and the rest
+  each answer a value, so a chain already *is* a `Vec`, with no `.collect()`.
+- **Records, enums, matching, closures.** Named records and anonymous ones,
+  enums with payloads, `Option` in the prelude, and a `match` that does not
+  compile until every case is covered.
+- **Diagnostics written to be read.** Every error carries a stable code, the
+  exact span underlined in your source, and — where the compiler is sure of the
+  fix — a suggestion your editor applies as a quick fix. Analysis does not stop
+  at the first error.
+- **A language server in the same binary.** `praxis lsp` serves hover types,
+  completion over the method catalog, signature help, go-to-definition,
+  references, rename, symbols, code actions and semantic tokens. Inlay hints
+  show the types you did not write, so `fn foo(a, b)` reads as
+  `fn foo(a: Int, b: Int)`.
+- **JIT-compiled through Cranelift.** Nothing lands on disk: `praxis run` lexes,
+  infers, lowers, compiles and executes in one step. Startup is milliseconds and
+  the generated code is fast enough to stop thinking about.
+
+## When it falls over
+
+There are no exceptions and no error handling. An index out of bounds, a
+missing key, an overflow, a mismatched `read` or a failed assertion stops the
+program and hands you the wreckage:
 
 ```text
-praxis run day05.px < input.txt        # JIT-compile and run, reading stdin
-praxis run day05.px --input in.txt     # same, but read input from a file
-praxis run day05.px --debug=never      # never enter the crash debugger
-praxis check day05.px                  # front-end only (lex + parse + infer)
-praxis lsp --stdio                     # the language server, JSON-RPC on stdio
-praxis --color=always check day05.px   # force ANSI diagnostics
+error: program faulted: index out of bounds
+
+Backtrace:
+#0   window_sum
+#1   <entry>
+
+  locals:
+    values: Vec[Int] = [12, 7, 41]
+    start: Int = 1
+  temps:
+    <tmp#6: Int> @ "values[start + 1]" = 41
+    <tmp#9: Int> @ "start + 2" = 3
+    <tmp#10: Int> @ "values[start + 2]" = <uninit>
 ```
 
-`run` works end-to-end: lex → parse → infer → lower → monomorphize → MIR →
-Cranelift JIT → execute. It prints a result line only when the entry point
-returns a non-`Unit` value; a file of top-level statements compiles to a
-`Unit`-returning entry whose only output is what `out(...)` wrote.
+Those are not only the locals: they are the intermediate values of the faulting
+expression, each labelled with the source text it came from, and `<uninit>`
+marks the one the fault stopped from being assigned. On a terminal you get a
+full-screen debugger instead of an exit code — backtrace, source, locals and
+transcript at once — where you walk the frames, evaluate expressions against the
+captured state, then fix the file and `reload` without re-entering your input.
 
-`check` runs the front end and routes through the same query layer the language
-server uses (ADR-097), so what the CLI prints and what the editor underlines
-cannot diverge.
+## Getting started
 
-`lsp` speaks the Language Server Protocol on stdin/stdout and is not meant to be
-run by hand — the VS Code extension in `editors/vscode/` launches it. `--stdio`
-is accepted and ignored: stdio is the only transport this server has, and
-several clients append the flag to the server's argv.
+You need a stable Rust toolchain and nothing else — code generation is
+Cranelift, so there is no LLVM to install. From a checkout:
 
-`--debug <auto|always|never>` (on `run`) decides what a runtime fault does.
-`auto`, the default, enters the crash debugger iff both stdin and stdout are a
-terminal; `always` forces it; `never` prints the noninteractive fault report and
-exits nonzero. When the debugger is entered, a real terminal gets the
-full-screen TUI — backtrace, source, locals and transcript at once — and
-everything else gets the line REPL.
-
-`--color <auto|always|never>` is global and valid on every subcommand. `auto`
-styles output iff stderr is a terminal; `always` forces ANSI even when piped;
-`never` emits plain text. Both the diagnostic renderer and the crash debugger's
-fault report honor it.
-
-`watch <file>` and `repl` are declared subcommands that print a not-implemented
-message and exit 2.
-
-Exit codes are a closed set of three: `0` — no errors; `1` — a language error or
-a runtime fault (an internal compiler error included); `2` — the CLI could not
-start the job (an unreadable source or `--input` file, an unimplemented
-command). `lsp` returns the LSP protocol's own `0`/`1` instead.
-
-## The language server
-
-`praxis lsp` is a JSON-RPC process over stdio — one synchronous loop on the main
-thread, no async runtime (ADR-095). It serves document synchronization with
-incremental revisions, diagnostics, hover with documentation, completion
-including receiver methods, signature help, go-to-definition, find references,
-rename, workspace symbols, document symbols, inlay hints, code actions, and
-semantic tokens.
-
-Inlay hints show what the compiler inferred: `fn foo(a, b)` reads as
-`fn foo(a: Int, b: Int)`, and a type inference has not pinned shows as `?T`
-rather than as nothing. Accepting a hint writes the annotation into the file
-where the annotation is both legal and spellable — a `?T` or an anonymous-record
-hint is shown but cannot be accepted.
-
-A quick fix *is* a diagnostic's machine-applicable suggestion (ADR-132), so
-every fix the editor offers is one `praxis check` also prints; each is gated by
-applying it and re-analyzing. Rename applies the edit to a copy and accepts it
-only if name resolution comes out unchanged (ADR-131), which catches capture in
-both directions.
-
-Inference retains the parser AST (ADR-098), so hover on an inner constructor,
-capture-type completion and the four parser token classes read spans the
-compiler computed.
-
-`editors/vscode/` is the thin extension: a launcher, four commands, and a
-TextMate grammar that highlights a `.px` file before the server attaches and
-while it is down. Both layers emit the **same** TextMate scopes. Four gates in
-`crates/praxis-cli/tests/grammar.rs` read the grammar at test time — three
-sweeping the compiler's own closed tables (`SyntaxKind`'s keywords,
-`AtomicKind::ALL`, `Constructor::ALL`) and one requiring every server token
-scope to be a scope the grammar emits — so `just ci` stays the whole gate and
-needs no Node toolchain (ADR-002).
-
-## The book
-
-[`docs/book/`](./docs/book/) is an mdBook: 46 chapters in seven parts, plus two
-appendices. It covers getting started and the CLI, the language itself
-(bindings, scalars, text, control flow, functions, records, enums, pattern
-matching, collections, pipelines, grids and graphs), the input-parser DSL, type
-inference, the crash debugger, editor support and the diagnostic index, and the
-compiler internals — the pipeline, the object heap and collector, and a map of
-the ADRs. The prelude and method catalog are reference tables; the appendices
-are complete programs and the grammar.
-
-```sh
-just book         # render to docs/book/book
-just book-serve   # live reload on localhost:3000
-just book-binary  # build the praxis binary book-verify runs the examples with
-just book-verify  # re-run every example and diff it against the chapters
-just book-bless   # rewrite expectations from what the compiler prints
+```console
+$ cargo install --path crates/praxis-cli
 ```
 
-Its examples are checked, not illustrative. Every code block that shows a
-program *and* its output is one of 402 real files under `docs/book/examples/`,
-each with exactly one expectation file, and `book-verify` runs all of them —
-including the ones that are supposed to fail, whose diagnostics, fault reports
-and debugger transcripts are captured the same way. A `.px` with no expectation
-fails the check rather than being skipped.
-
-`book-verify` needs a built `praxis` binary — `just book-binary`, or set
-`PRAXIS` to one you have — and it **is** part of `just ci`, which builds that
-binary first. `book-bless` is the one book recipe deliberately outside `ci`:
-review its diff, because it is how a real regression gets papered over.
-
-## Development
-
-Requires a stable Rust toolchain and the [`just`](https://github.com/casey/just)
-command runner:
-
-```sh
-cargo install just
-```
-
-Run the full quality gate — this is exactly what CI runs:
-
-```sh
-just ci
-```
-
-`ci` is `fmt-check`, `clippy`, `test`, then `book-binary` and `book-verify`: it
-builds the `praxis` binary and verifies every book example against it.
-
-Individual checks (useful during iteration):
+That builds in release mode and puts the `praxis` binary in `~/.cargo/bin`;
+`cargo build --release -p praxis-cli` leaves it at `target/release/praxis`
+instead. There are three commands:
 
 ```text
-just fmt       # reformat the code (modifies files)
-just fmt-check # verify formatting without touching files
-just clippy    # lint the whole workspace
-just test      # run the whole test suite
-just build     # build every crate
-just asan      # the whole suite under AddressSanitizer
+praxis run day05.px < input.txt        # compile and run, input on stdin
+praxis run day05.px --input in.txt     # read the input from a file instead
+praxis run day05.px --debug never      # print the fault report, never prompt
+praxis check day05.px                  # diagnostics only; nothing is generated
+praxis lsp                             # the language server, for your editor
 ```
 
-`asan` is deliberately not part of `ci` — the instrumented build is a second
-full compile of a gate that is already slow, so it runs nightly instead via
-`.github/workflows/asan.yml`, calling the same recipe. It needs a nightly
-toolchain (`rustup toolchain install nightly`; `rust-toolchain.toml` pins stable
-and `scripts/asan.sh` overrides it). It does **not** cover Cranelift-generated
-code, so a green run is necessary and not sufficient for any change that puts
-new unsafe behaviour in generated code.
+`--debug <auto|always|never>` decides what a runtime fault does; the default,
+`auto`, opens the debugger when stdin and stdout are both a terminal.
+`--color <auto|always|never>` is global and valid on every subcommand.
 
-**Doctests are disabled and CI does not run them** (`doctest = false` in every
-library crate; `praxis-cli` is binary-only and has no lib target). A doctest in
-a `///` comment will still be *compiled* by `cargo doc`, but it is never
-executed — so do not rely on one to check anything. Put the assertion in a unit
-test instead. The reason is cost, not principle: `cargo test` runs
-`rustdoc --test` per crate, rustdoc must analyze the whole crate before it can
-find out how many doctests are in it, and the result is never cached, so
-finding zero costs as much as finding some.
+## Documentation
 
-## Layout
+- [**The Praxis Book**](docs/book/) is the manual: getting started, the whole
+  language, the `read` DSL and a cookbook of input shapes, type inference, the
+  crash debugger, editor support and an index of every diagnostic code. Every
+  code block showing a program and its output is a real file under
+  `docs/book/examples/`, re-run against this compiler — so the book breaks
+  loudly when the language changes. `just book` renders it.
+- [`editors/vscode/`](editors/vscode/) is the VS Code extension: a launcher for
+  the language server, and a grammar that highlights a `.px` file before the
+  server attaches.
+- [`benchmarks/`](benchmarks/) writes eight programs three times each — Praxis,
+  Rust, Python — and refuses to time a set whose implementations do not print
+  byte-identical output; [`REPORT.md`](benchmarks/REPORT.md) has the numbers and
+  the method.
+- To work on the compiler itself: `just ci` is the whole quality gate, and
+  [`docs/technical-design.md`](docs/technical-design.md) is the design
+  document.
 
-See `praxis_technical_design.md` §14 for the crate responsibilities. The
-short version:
+## License
 
-- `crates/praxis-source` — files, spans, line maps, diagnostics.
-- `crates/praxis-syntax` — the `SyntaxKind` vocabulary, the rowan language tag,
-  and the one rule each for identifiers, literals, interpolation and template
-  ends.
-- `crates/praxis-parser` — lexer + lossless rowan syntax tree.
-- `crates/praxis-ast` — typed AST wrappers over the rowan tree.
-- `crates/praxis-types` — interned type arena, unification, generalization.
-- `crates/praxis-hir` — name resolution, type inference, match coverage,
-  typed-HIR lowering and monomorphization.
-- `crates/praxis-mir` — slot-based IR with GC liveness analysis.
-- `crates/praxis-runtime` — GC heap, type descriptors, ABI wrappers, input
-  parser.
-- `crates/praxis-repr` — the total, bidirectional `Type` ↔ `TypeDescriptor`
-  bridge; a type with no runtime representation is an error, never a wrong
-  descriptor.
-- `crates/praxis-codegen-cranelift` — MIR → Cranelift JIT backend.
-- `crates/praxis-debugger` — crash snapshots, the noninteractive fault report,
-  and the interactive crash REPL and its full-screen TUI.
-- `crates/praxis-input-parser` — the input-parser DSL (ParserAst, plans, synthesis).
-- `crates/praxis-stdlib` — method catalog schema and the prelude.
-- `crates/praxis-cli` — the `praxis` command (`run`, `check`, `lsp`; `watch` and
-  `repl` are honest stubs).
-- `crates/praxis-lsp` — the shared front-end query layer (§14.2) **and** the LSP
-  transport. `praxis check` calls the first half; the server is the second.
-- `crates/praxis-test-support` — one-file source-map fixtures and stable golden
-  syntax-tree dumps for §17.2's snapshot tests.
-- `editors/vscode` — the thin VS Code extension and the TextMate grammar. Its
-  drift gates are Rust tests in `crates/praxis-cli/tests/grammar.rs`, so `just
-  ci` stays the whole gate and CI needs no Node toolchain.
+Dual-licensed under [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your
+option.

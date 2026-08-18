@@ -53,8 +53,8 @@
 // in a capture with one byte changed, and both scanners step over a multi-byte
 // scalar the same way. This module keeps no copy of either, for the reason that
 // module's doc gives.
-use crate::template::{quoted_run, skip_scalar, template_end};
 use crate::MAX_INTERPOLATION_NESTING;
+use crate::template::{quoted_run, skip_scalar, template_end};
 
 /// Where a `"…"` literal ends, and whether it has any holes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
