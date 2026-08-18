@@ -10,6 +10,7 @@ homepage.workspace = true
 description = "Cranelift JIT module and ABI lowering for Praxis."
 keywords.workspace = true
 categories.workspace = true
+readme = "README.md"
 
 # The measurement toggles. None of them is a feature in the ordinary sense: each
 # reverts one change in this crate so the change can be priced. An A/B's baseline

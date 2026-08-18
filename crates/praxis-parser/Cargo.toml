@@ -10,6 +10,7 @@ homepage.workspace = true
 description = "Lexer and parser for the Praxis language."
 keywords = ["parser", "lexer", "compiler", "language", "syntax"]
 categories = ["parser-implementations", "compilers"]
+readme = "README.md"
 
 [dependencies]
 praxis-source.workspace = true

@@ -10,6 +10,7 @@ homepage.workspace = true
 description = "Typed syntax wrappers over Praxis syntax nodes."
 keywords.workspace = true
 categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 praxis-source.workspace = true

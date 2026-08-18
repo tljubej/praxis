@@ -10,6 +10,7 @@ homepage.workspace = true
 description = "The Praxis `read` DSL: template parsing, type synthesis, and parser plans."
 keywords = ["parser", "parsing", "compiler", "adventofcode", "language"]
 categories = ["parser-implementations", "parsing"]
+readme = "README.md"
 
 [dependencies]
 bumpalo.workspace = true

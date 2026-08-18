@@ -10,6 +10,7 @@ homepage.workspace = true
 description = "Praxis mid-level IR: CFG, liveness, fault edges, and GC safepoint analysis."
 keywords.workspace = true
 categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 praxis-source.workspace = true

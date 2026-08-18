@@ -407,7 +407,7 @@ pub fn numeric_helper(name: &str) -> Option<NumericHelper> {
 /// beside the nullary `Vec()` and `Grid()` (ADR-146).
 ///
 /// This is the whole of the carve-out ADR-146 makes to
-/// [ADR-089](../../../docs/decisions/089-a-name-has-one-signature.md) decision
+/// [ADR-089](https://github.com/tljubej/praxis/blob/main/docs/decisions/089-a-name-has-one-signature.md) decision
 /// 1's "a name has exactly one signature", and it is a `const` table rather
 /// than a rule anywhere so that the narrowness is a fact a reader can count.
 /// The other seven constructors are absent on purpose: a sized `Set` is `n`

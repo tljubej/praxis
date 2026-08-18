@@ -10,6 +10,7 @@ homepage.workspace = true
 description = "The bridge between a static Praxis type and its runtime type descriptor."
 keywords.workspace = true
 categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 praxis-typeck.workspace = true

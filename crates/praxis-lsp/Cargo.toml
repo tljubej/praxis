@@ -10,6 +10,7 @@ homepage.workspace = true
 description = "Language Server Protocol implementation for Praxis."
 keywords = ["lsp", "language-server", "ide", "compiler", "language"]
 categories = ["development-tools", "compilers"]
+readme = "README.md"
 
 # ---------------------------------------------------------------------------
 # **This dependency list is a gate, not just a build input.**

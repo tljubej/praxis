@@ -10,6 +10,7 @@ homepage.workspace = true
 description = "Crash snapshots and the interactive crash REPL for Praxis."
 keywords = ["debugger", "compiler", "jit", "language", "adventofcode"]
 categories = ["development-tools::debugging", "compilers"]
+readme = "README.md"
 
 [dependencies]
 praxis-source.workspace = true

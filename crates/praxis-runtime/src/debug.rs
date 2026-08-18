@@ -127,7 +127,7 @@ pub const NO_STATIC_TYPE: u32 = u32::MAX;
 /// [`DebugValue::Scalar`] that *contains no reference*, is a condition no scan
 /// can fail to test: there is no path from a scalar slot to a `GcRef`.
 ///
-/// Every [`praxis_mir::ir::ScalarKind`](../../praxis_mir/ir/enum.ScalarKind.html)
+/// Every [`praxis_mir::ir::ScalarKind`](https://docs.rs/praxis-mir/latest/praxis_mir/ir/enum.ScalarKind.html)
 /// has a variant here, including `Byte`, which is unwired and which ADR-120's
 /// forwarding therefore cannot reach. The map is total on purpose: a partial map
 /// would have to answer *something* for a kind it did not cover, and the only

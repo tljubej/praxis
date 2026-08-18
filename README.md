@@ -158,6 +158,22 @@ praxis lsp                             # the language server, for your editor
   [`docs/technical-design.md`](docs/technical-design.md) is the design
   document.
 
+## Authorship
+
+Praxis was written with large language models. The design is human — the
+language itself, the decision records under `docs/decisions/`, the technical
+design document, the shape of the workspace and what each crate is allowed to
+know — and nearly all of the Rust implementing it was generated against that
+design, then reviewed and kept or thrown away.
+
+That is stated plainly because it bears on the license. In the EU, copyright
+attaches to a human author's own intellectual creation, so how much of any
+given file here is protected at all is genuinely unclear. The dual license
+below is offered on its ordinary terms regardless: where there are rights to
+grant, it grants them; where there are none, the code is free anyway. The
+warranty disclaimer stands either way, and a contribution you send keeps its
+own author's copyright under the same terms.
+
 ## License
 
 Dual-licensed under [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your

@@ -10,6 +10,7 @@ homepage.workspace = true
 description = "Name resolution and high-level intermediate representation for Praxis."
 keywords.workspace = true
 categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 praxis-source.workspace = true

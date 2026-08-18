@@ -10,6 +10,7 @@ homepage.workspace = true
 description = "GC ABI types, type descriptors, and runtime context for Praxis."
 keywords.workspace = true
 categories.workspace = true
+readme = "README.md"
 
 # The measurement toggles. Neither is a feature in the ordinary sense: an A/B
 # measurement's baseline arm must be *this tree with the package's single toggle

@@ -10,6 +10,7 @@ homepage.workspace = true
 description = "Type interning, inference, and capability resolution for Praxis."
 keywords.workspace = true
 categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 praxis-source.workspace = true

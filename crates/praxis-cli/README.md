@@ -66,4 +66,7 @@ the file and `reload` without losing your input.
   covers the language, the input DSL, type inference and the crash debugger.
 - [The repository](https://github.com/tljubej/praxis).
 
+Praxis was written with large language models against a human design. The
+repository's README says what that means for the license.
+
 Licensed under either of Apache License 2.0 or the MIT license, at your option.

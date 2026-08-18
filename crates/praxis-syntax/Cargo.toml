@@ -10,6 +10,7 @@ homepage.workspace = true
 description = "Token and syntax-node definitions for the Praxis language."
 keywords = ["parser", "lexer", "syntax", "compiler", "language"]
 categories = ["parser-implementations", "compilers"]
+readme = "README.md"
 
 [dependencies]
 praxis-source.workspace = true

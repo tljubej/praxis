@@ -10,6 +10,7 @@ homepage.workspace = true
 description = "Source files, spans, line maps, and diagnostics for the Praxis compiler."
 keywords.workspace = true
 categories.workspace = true
+readme = "README.md"
 
 [dev-dependencies]
 insta.workspace = true
