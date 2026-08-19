@@ -1,0 +1,74 @@
+# Publish the website and the book to GitHub Pages.
+#
+# The site is `www/index.html` with the rendered book underneath it at `book/`.
+# The workflow does no logic of its own: it runs the same `just site` a
+# developer runs at the keyboard and uploads what that produced (ADR-002,
+# ADR-156), so what is published is what `just site-serve` shows locally.
+#
+# Needs Pages enabled on the repository with **GitHub Actions** as the source
+# (Settings → Pages → Build and deployment → Source). Until that is set, this
+# workflow builds fine and the deploy step fails.
+
+name: pages
+
+on:
+  push:
+    branches: [main]
+    # A docs deploy costs a `cargo install`, so it runs when there is something
+    # to deploy. `workflow_dispatch` is the escape hatch when this list is
+    # wrong.
+    paths:
+      - "www/**"
+      - "docs/book/**"
+      - "justfile"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# The deploy writes a Pages deployment and mints the OIDC token that authorizes
+# it. Nothing here writes to the repository.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time. A queued run is *not* cancelled: cancelling the
+# in-flight one is how the site ends up as whichever half-finished run last won.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+      # mdBook is pinned to a major: the book's `book.toml` uses the 0.5 option
+      # names, and a silently newer renderer is not something a docs deploy
+      # should discover in production.
+      # Two commands, not one: `--version` applies to every crate named in the
+      # call, and `just` is 1.x.
+      - name: Install just and mdBook
+        run: |
+          cargo install just
+          cargo install mdbook --version "^0.5"
+      - name: Assemble the site
+        run: just site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

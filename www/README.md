@@ -1,6 +1,6 @@
 # The website
 
-`index.html` is the whole site: one self-contained file with no build step, no
+`index.html` is the whole page: one self-contained file with no build step, no
 dependencies and no network requests. Open it directly, or serve the directory:
 
 ```sh
@@ -11,6 +11,22 @@ That last property is why the mark in the header is inlined SVG in the markup an
 the favicon is inlined as a `data:` URI rather than either one being a `<link>`
 to a file. The source of truth for both is [`brand/`](../brand), which the page
 does not load; changing the geometry there means changing it here by hand.
+
+## What gets published
+
+The **site** is that one file with the rendered book underneath it at `book/`.
+`just site` assembles the two into `target/site` and `just site-serve` puts it
+on `localhost:8000`; `.github/workflows/pages.yml` runs the same recipe and
+uploads what it produced, so what is deployed is what you previewed.
+
+Nothing else under `www/` is published — the rest is the machinery that produces
+`index.html`.
+
+**No hostname appears in the page.** The book is linked as `href="book/"`, which
+is what makes a custom domain a DNS change rather than an edit. The cost is that
+the book links are the one thing that does not resolve when `index.html` is
+opened straight off disk; use `just site-serve` when that matters. See
+[ADR-156](../docs/decisions/156-the-site-is-the-page-with-the-book-under-it.md).
 
 ## Nothing on it is transcribed
 
@@ -70,7 +86,7 @@ adjusted, and no frame is edited.
 ## Layout
 
 ```text
-index.html              the site
+index.html              the page (the site is this plus the book at book/)
 tools/capture.py        re-records, re-runs, re-counts, and inlines (start here)
 tools/record.py         pty driver
 tools/vt.py             VT emulator: raw stream -> row diffs

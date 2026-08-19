@@ -153,11 +153,6 @@ header.top {
   fill: currentColor; overflow: visible;
 }
 .mark .caret .strut { fill: var(--mark); }
-.ver {
-  font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em;
-  color: var(--ink-3); border: 1px solid var(--rule); border-radius: 999px;
-  padding: .1rem .45rem; align-self: center;
-}
 nav.top-nav { margin-left: auto; display: flex; gap: 1.15rem; align-items: center; }
 nav.top-nav a {
   font-family: var(--mono); font-size: 12px; letter-spacing: .02em;
@@ -451,12 +446,12 @@ footer a { color: var(--ink-2); }
 <header class="top">
   <div class="wrap top-in">
     <a class="mark" href="#top"><svg class="caret" viewBox="0 0 128 128" aria-hidden="true" focusable="false"><rect x="14" y="14" width="106" height="19"/><path d="M25.5 33 V112.5 H37.5 V33" fill="none" stroke="currentColor" stroke-width="7"/><polygon class="strut" points="87,33 106,33 120,116 101,116"/></svg>praxis</a>
-    <span class="ver">v0.1.0</span>
     <nav class="top-nav">
       <a href="#read">read</a>
       <a href="#crash">crash</a>
       <a href="#language" class="hide-sm">language</a>
       <a href="#speed" class="hide-sm">speed</a>
+      <a href="#book" class="hide-sm">book</a>
       <a href="#start">start</a>
       <button class="theme-btn" id="theme" type="button" aria-label="Switch theme">◐</button>
     </nav>
@@ -740,6 +735,56 @@ you read    fn foo(a: Int, b: Int)</pre>
   measured run.</p>
 </section>
 
+<!-- ═══ book ═══════════════════════════════════════════════════════════════ -->
+<section class="wrap" id="book">
+  <div class="rule"><span class="rule-label">book</span><i class="rule-line"></i><span class="rule-note">the manual, and none of it is transcribed</span></div>
+
+  <h2>The book is checked against the compiler.</h2>
+  <p class="lead" style="max-width:74ch">Every code block that shows a program and its output is a real
+  file on disk, re-run against this compiler and diffed against the page. A sample that drifts is not a
+  documentation bug waiting to be reported — it fails the build.</p>
+
+  <div class="stats">
+    <div class="stat"><span class="n" data-stat="chapters">46</span><span class="l">chapters, plus two appendices</span></div>
+    <div class="stat"><span class="n" data-stat="examples">408</span><span class="l">executable examples, every one diffed</span></div>
+    <div class="stat"><span class="n" data-stat="parts">7</span><span class="l">parts, from installing to the heap</span></div>
+  </div>
+
+  <div class="two">
+    <div>
+      <h3 style="margin-bottom:.6rem">An example is a file, not a quote</h3>
+      <p style="font-size:.95rem">Each one carries the expectation that says how it is meant to be run, so
+      what gets checked is the whole behaviour rather than the happy path.</p>
+      <ul class="plain">
+        <li><b>.out</b> what the program prints</li>
+        <li><b>.fault</b> the crash report of a program that compiles and then faults</li>
+        <li><b>.err</b> the type error of a program that never gets as far as running</li>
+        <li><b>.session</b> a debugger session, driven by the commands beside it</li>
+        <li><b>.trace</b> what a <code>:bp</code> marker prints on the way past</li>
+      </ul>
+      <p style="font-size:.95rem;margin-top:.9rem">A program with none of them is an error rather than a
+      skip — a skipped example is the thing the check exists to prevent.</p>
+    </div>
+    <div>
+      <h3 style="margin-bottom:.6rem">What is in it</h3>
+      <ul class="plain">
+        <li><b>Getting started</b> installing, a first program, the command line</li>
+        <li><b>The language</b> bindings through pipelines, grids and graphs, the prelude, the method catalog</li>
+        <li><b>Reading input</b> the <code>read</code> expression, templates and captures, a cookbook of input shapes</li>
+        <li><b>Type inference</b> generalization, method resolution, capabilities, and how to read a type error</li>
+        <li><b>The crash debugger</b> the fault model, breakpoints, the full-screen UI, a walkthrough</li>
+        <li><b>Tooling</b> editor support, and every diagnostic code the compiler can emit</li>
+        <li><b>Under the hood</b> the compiler pipeline and the object heap</li>
+      </ul>
+      <div class="cta">
+        <a class="btn primary" href="book/">Read the book</a>
+        <a class="btn" href="book/getting-started/install.html">Installing Praxis</a>
+        <a class="btn" href="book/input/cookbook.html">Input cookbook</a>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- ═══ start ══════════════════════════════════════════════════════════════ -->
 <section class="wrap" id="start">
   <div class="rule"><span class="rule-label">start</span><i class="rule-line"></i><span class="rule-note">a stable Rust toolchain, and nothing else</span></div>
@@ -749,12 +794,11 @@ you read    fn foo(a: Int, b: Int)</pre>
   <div class="steps" style="margin-top:1.6rem">
     <div>
       <h3>Install</h3>
-      <p style="font-size:.93rem">Code generation is Cranelift, so there is no LLVM to install.</p>
+      <p style="font-size:.93rem">From crates.io, with a stable Rust toolchain and nothing else. Code
+      generation is Cranelift, so there is no LLVM to install.</p>
       <pre class="sh"><span class="p">$</span> cargo install praxis-cli
-<span class="c"># from a checkout instead — `just` is the
-# command runner the quality gate uses</span>
-<span class="p">$</span> cargo install just
-<span class="p">$</span> just ci</pre>
+<span class="c"># the crate is `praxis-cli`; the binary
+# it puts in ~/.cargo/bin is `praxis`</span></pre>
     </div>
     <div>
       <h3>Run</h3>
@@ -767,10 +811,9 @@ you read    fn foo(a: Int, b: Int)</pre>
     <div>
       <h3>Read</h3>
       <p style="font-size:.93rem">The book is <span data-stat="chapters">46</span> chapters, and every one
-      of its <span data-stat="examples">408</span> examples is re-run and diffed by <code>just ci</code>
-      rather than being illustrative.</p>
-      <pre class="sh"><span class="p">$</span> just book-serve
-<span class="c"># localhost:3000</span></pre>
+      of its <span data-stat="examples">408</span> examples is re-run against the compiler and diffed on
+      every change rather than being illustrative.</p>
+      <p class="cta" style="margin-top:1rem"><a class="btn" href="book/">Read the book →</a></p>
     </div>
   </div>
 
@@ -803,9 +846,10 @@ you read    fn foo(a: Int, b: Int)</pre>
 
 <footer>
   <div class="wrap fin">
-    <span>Praxis 0.1.0</span>
-    <span>the book in <code>docs/book/</code></span>
-    <span style="margin-left:auto">every terminal on this page is real output, recorded from the binary in this tree</span>
+    <span><a href="book/">the book</a></span>
+    <span><a href="https://github.com/tljubej/praxis">source</a></span>
+    <span><a href="https://crates.io/crates/praxis-cli">crates.io</a></span>
+    <span style="margin-left:auto">every terminal on this page is real output, recorded from the compiler rather than transcribed</span>
   </div>
 </footer>
 

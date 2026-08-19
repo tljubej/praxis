@@ -25,7 +25,10 @@ edition = "2024"
 authors = ["Tomislav Ljubej <tomislav.ljubej@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/tljubej/praxis"
-homepage = "https://github.com/tljubej/praxis"
+# The website, not the repository: `repository` already says where the source
+# is. crates.io reads this at publish time, so the crates already on the
+# registry keep the old value until the next release (ADR-156).
+homepage = "https://tljubej.github.io/praxis/"
 # Inherited by every crate. `categories` and `keywords` are the registry's own
 # vocabulary — a category that is not one of its published slugs is rejected at
 # publish time, and a crate gets at most five keywords of at most twenty

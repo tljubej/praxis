@@ -142,12 +142,16 @@ praxis lsp                             # the language server, for your editor
 
 ## Documentation
 
-- [**The Praxis Book**](docs/book/) is the manual: getting started, the whole
-  language, the `read` DSL and a cookbook of input shapes, type inference, the
-  crash debugger, editor support and an index of every diagnostic code. Every
-  code block showing a program and its output is a real file under
-  `docs/book/examples/`, re-run against this compiler — so the book breaks
-  loudly when the language changes. `just book` renders it.
+- [**The Praxis Book**](https://tljubej.github.io/praxis/book/) is the manual:
+  getting started, the whole language, the `read` DSL and a cookbook of input
+  shapes, type inference, the crash debugger, editor support and an index of
+  every diagnostic code. Every code block showing a program and its output is a
+  real file under [`docs/book/examples/`](docs/book/examples/), re-run against
+  this compiler — so the book breaks loudly when the language changes. The
+  source is [`docs/book/`](docs/book/) and `just book` renders it.
+- [**The website**](https://tljubej.github.io/praxis/) is the tour. Every
+  terminal on it is real recorded output rather than a transcription; the source
+  is [`www/`](www/) and `just site` assembles the published tree.
 - [`editors/vscode/`](editors/vscode/) is the VS Code extension: a launcher for
   the language server, and a grammar that highlights a `.px` file before the
   server attaches.

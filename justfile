@@ -166,3 +166,30 @@ book-verify:
 # Review the diff: this is how a real regression gets papered over.
 book-bless:
     ./docs/book/examples/verify.sh --bless
+
+# --- The published site -------------------------------------------------------
+#
+# What is published is `www/index.html` with the rendered book underneath it at
+# `book/`. That layout is the reason the page links the book as `href="book/"`
+# and not as a URL: no hostname appears anywhere in the page or the book, so
+# moving to a custom domain is a DNS change rather than an edit.
+#
+# `site` is what the pages workflow runs — it does no logic of its own, per
+# ADR-002 — so what CI publishes is what `just site-serve` shows you.
+#
+# Only `index.html` is published. The rest of `www/` is the machinery that
+# produces it (`www/tools/`), and it is not part of the site.
+
+# Assemble the published site into target/site.
+site:
+    rm -rf target/site
+    mkdir -p target/site
+    cp www/index.html target/site/
+    # Belt and braces: deploying from Actions does not run Jekyll at all, but a
+    # branch-based deploy would, and it would drop mdBook's `_` directories.
+    touch target/site/.nojekyll
+    cd docs/book && mdbook build --dest-dir ../../target/site/book
+
+# Serve the assembled site on http://localhost:8000 — the book link works here.
+site-serve: site
+    python3 -m http.server -d target/site 8000

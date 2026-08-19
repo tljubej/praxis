@@ -134,17 +134,23 @@ def book_stats(html):
     """Count the book rather than quoting a number that was true once."""
     book = ROOT / "docs" / "book"
     examples = list((book / "examples").rglob("*.px"))
-    summary = (book / "src" / "SUMMARY.md").read_text()
+    lines = (book / "src" / "SUMMARY.md").read_text().splitlines()
+    # SUMMARY.md opens with its own `# Summary` title, so the part headings are
+    # the `# ` lines after that one.
     stats = {
         "examples": str(len(examples)),
-        "chapters": str(sum(1 for line in summary.splitlines() if line.startswith("- ["))),
+        "chapters": str(sum(1 for line in lines if line.startswith("- ["))),
+        "parts": str(len([line for line in lines if line.startswith("# ")]) - 1),
     }
     for name, value in stats.items():
-        tag = f'<span data-stat="{name}">'
-        i = html.index(tag) + len(tag)
-        j = html.index("</span>", i)
-        html = html[:i] + value + html[j:]
-        print(f"  stat     {name:12} {value}")
+        # Every span that carries the stat, not the first one: a number the page
+        # shows in two places is two chances to go stale, and the second is the
+        # one nobody looks at.
+        pat = re.compile(rf'(<span[^>]*\bdata-stat="{name}"[^>]*>)[^<]*(</span>)')
+        html, hits = pat.subn(rf"\g<1>{value}\g<2>", html)
+        if not hits:
+            sys.exit(f'no <span data-stat="{name}"> on the page')
+        print(f"  stat     {name:12} {value:>5}  in {hits}")
     return html
 
 
