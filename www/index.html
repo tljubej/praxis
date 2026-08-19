@@ -737,51 +737,33 @@ you read    fn foo(a: Int, b: Int)</pre>
 
 <!-- ═══ book ═══════════════════════════════════════════════════════════════ -->
 <section class="wrap" id="book">
-  <div class="rule"><span class="rule-label">book</span><i class="rule-line"></i><span class="rule-note">the manual, and none of it is transcribed</span></div>
+  <div class="rule"><span class="rule-label">book</span><i class="rule-line"></i><span class="rule-note">the manual</span></div>
 
-  <h2>The book is checked against the compiler.</h2>
-  <p class="lead" style="max-width:74ch">Every code block that shows a program and its output is a real
-  file on disk, re-run against this compiler and diffed against the page. A sample that drifts is not a
-  documentation bug waiting to be reported — it fails the build.</p>
+  <h2>Everything the language does, in one place.</h2>
+  <p class="lead" style="max-width:74ch">A manual rather than a tour: every construct has a chapter, every
+  chapter has programs you can paste and run, and the appendices carry the complete grammar and a set of
+  worked solutions.</p>
 
   <div class="stats">
     <div class="stat"><span class="n" data-stat="chapters">46</span><span class="l">chapters, plus two appendices</span></div>
-    <div class="stat"><span class="n" data-stat="examples">408</span><span class="l">executable examples, every one diffed</span></div>
+    <div class="stat"><span class="n" data-stat="examples">408</span><span class="l">runnable examples</span></div>
     <div class="stat"><span class="n" data-stat="parts">7</span><span class="l">parts, from installing to the heap</span></div>
   </div>
 
-  <div class="two">
-    <div>
-      <h3 style="margin-bottom:.6rem">An example is a file, not a quote</h3>
-      <p style="font-size:.95rem">Each one carries the expectation that says how it is meant to be run, so
-      what gets checked is the whole behaviour rather than the happy path.</p>
-      <ul class="plain">
-        <li><b>.out</b> what the program prints</li>
-        <li><b>.fault</b> the crash report of a program that compiles and then faults</li>
-        <li><b>.err</b> the type error of a program that never gets as far as running</li>
-        <li><b>.session</b> a debugger session, driven by the commands beside it</li>
-        <li><b>.trace</b> what a <code>:bp</code> marker prints on the way past</li>
-      </ul>
-      <p style="font-size:.95rem;margin-top:.9rem">A program with none of them is an error rather than a
-      skip — a skipped example is the thing the check exists to prevent.</p>
-    </div>
-    <div>
-      <h3 style="margin-bottom:.6rem">What is in it</h3>
-      <ul class="plain">
-        <li><b>Getting started</b> installing, a first program, the command line</li>
-        <li><b>The language</b> bindings through pipelines, grids and graphs, the prelude, the method catalog</li>
-        <li><b>Reading input</b> the <code>read</code> expression, templates and captures, a cookbook of input shapes</li>
-        <li><b>Type inference</b> generalization, method resolution, capabilities, and how to read a type error</li>
-        <li><b>The crash debugger</b> the fault model, breakpoints, the full-screen UI, a walkthrough</li>
-        <li><b>Tooling</b> editor support, and every diagnostic code the compiler can emit</li>
-        <li><b>Under the hood</b> the compiler pipeline and the object heap</li>
-      </ul>
-      <div class="cta">
-        <a class="btn primary" href="book/">Read the book</a>
-        <a class="btn" href="book/getting-started/install.html">Installing Praxis</a>
-        <a class="btn" href="book/input/cookbook.html">Input cookbook</a>
-      </div>
-    </div>
+  <ul class="plain">
+    <li><b>Getting started</b> installing, a first program, the command line</li>
+    <li><b>The language</b> bindings through pipelines, grids and graphs, the prelude, the method catalog</li>
+    <li><b>Reading input</b> the <code>read</code> expression, templates and captures, a cookbook of input shapes</li>
+    <li><b>Type inference</b> generalization, method resolution, capabilities, and how to read a type error</li>
+    <li><b>The crash debugger</b> the fault model, breakpoints, the full-screen UI, a walkthrough</li>
+    <li><b>Tooling</b> editor support, and every diagnostic code the compiler can emit</li>
+    <li><b>Under the hood</b> the compiler pipeline and the object heap</li>
+  </ul>
+
+  <div class="cta">
+    <a class="btn primary" href="book/">Read the book</a>
+    <a class="btn" href="book/getting-started/install.html">Installing Praxis</a>
+    <a class="btn" href="book/input/cookbook.html">Input cookbook</a>
   </div>
 </section>
 
